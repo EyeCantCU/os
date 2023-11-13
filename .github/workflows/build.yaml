@@ -1,0 +1,202 @@
+name: Build Wolfi Extras
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "**.md"
+      - "**.txt"
+
+  workflow_dispatch:
+
+# Only run one build at a time to prevent out of sync signatures.
+concurrency: build
+
+jobs:
+  build:
+    name: Build packages
+    if: github.repository == 'chainguard-dev/extra-packages'
+
+    strategy:
+      matrix:
+        arch: ["x86_64", "aarch64"]
+      fail-fast: false
+
+    runs-on:
+      group: cgi-builder-${{ matrix.arch }}
+
+    # Ensure this is deprivileged, isolated job
+    # permissions:
+
+    container:
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:fe85df7dc646f29552dab0ebd7e6e6e1cc6f4a5ce83e724693cf0fece5b8f8ac
+      # TODO: Deprivilege
+      options: |
+        --cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/fuse --security-opt seccomp=unconfined --security-opt apparmor:unconfined
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: "Trust the github workspace"
+        run: |
+          # This is to avoid fatal errors about "dubious ownership" because we are
+          # running inside of a container action with the workspace mounted in.
+          git config --global --add safe.directory "$(pwd)"
+
+      # Build with a local key, we'll resign this with the real key later
+      - name: "Generate local signing key"
+        run: |
+          make local-melange.rsa
+
+          # Touch it with the epoch date to convince `make` that we don't need to
+          # rebuild the targets that depend on this (all)
+          touch -d @0 local-melange.rsa
+
+      - name: "Prepare package repository"
+        run: |
+          # yay wolfi!
+          apk add gcsfuse
+
+          # Set up a gcsfuse RO mount to the public bucket. This is a cheap and
+          # cheerful way to recreate the make targets (class A HEADs) locally
+          # without syncing the whole bucket (class A+B).
+          mkdir -p /gcsfuse/extras-registry
+          gcsfuse -o ro --implicit-dirs --only-dir extras chainguard-extras-apk-registry /gcsfuse/extras-registry
+
+          mkdir -p ./packages/${{ matrix.arch }}
+          # Symlink the gcsfuse mount to ./packages/ to workaround the Makefile CWD assumptions
+          ln -s /gcsfuse/extras-registry/${{ matrix.arch }}/*.apk ./packages/${{ matrix.arch }}/
+
+          # Make a copy of the APKINDEX.* since we'll need to write to it on package builds
+          cp /gcsfuse/extras-registry/${{ matrix.arch }}/APKINDEX.* ./packages/${{ matrix.arch }}/
+
+      # TODO: Replace this with wolfictl build, since the current make build
+      # method doesn't trigger new builds for dependent updates.
+      - name: "Build Extras"
+        run: |
+          make \
+            ARCH=${{ matrix.arch }} \
+            MELANGE_EXTRA_OPTS="--keyring-append=/gcsfuse/extras-registry/chainguard-extras.rsa.pub" \
+            all -j1
+
+      - run: |
+          # Clean up the symlinks and create an archive for uploading
+          find ./packages/${{ matrix.arch }} -type l -exec rm -f {} \;
+          tar -cvzf /tmp/packages-${{ matrix.arch }}.tar.gz ./packages/${{ matrix.arch }}
+
+      - name: "Upload built packages archive to Github Artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          name: packages-${{ matrix.arch }}
+          path: /tmp/packages-${{ matrix.arch }}.tar.gz
+          retention-days: 1 # Low ttl since this is just an intermediary used once
+          if-no-files-found: warn
+
+  upload:
+    runs-on: ubuntu-latest
+    needs: build
+
+    permissions:
+      id-token: write
+      contents: read
+
+    container:
+      # NOTE: This step only signs and uploads, so it doesn't need any privileges
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:fe85df7dc646f29552dab0ebd7e6e6e1cc6f4a5ce83e724693cf0fece5b8f8ac
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: "Trust the github workspace"
+        run: |
+          # This is to avoid fatal errors about "dubious ownership" because we are
+          # running inside of a container action with the workspace mounted in.
+          git config --global --add safe.directory "$(pwd)"
+
+      - id: auth
+        name: "Authenticate to Google Cloud"
+        uses: google-github-actions/auth@v0
+        with:
+          workload_identity_provider: "projects/618116202522/locations/global/workloadIdentityPools/prod-shared-e350/providers/prod-shared-gha"
+          service_account: "prod-images-ci@prod-images-c6e5.iam.gserviceaccount.com"
+
+      - uses: google-github-actions/setup-gcloud@v0
+        with:
+          project_id: prod-images-c6e5
+
+      - name: "Download x86_64 package archives"
+        uses: actions/download-artifact@v3
+        with:
+          path: /tmp/artifacts/
+          name: packages-x86_64
+
+      - name: "Download aarch64 package archives"
+        uses: actions/download-artifact@v3
+        with:
+          path: /tmp/artifacts/
+          name: packages-aarch64
+
+      - run: echo "${{ secrets.MELANGE_CHAINGUARD_EXTRAS_RSA }}" > ./chainguard-extras.rsa
+      - run: |
+          mkdir -p /etc/apk/keys
+          cp ./chainguard-extras.rsa.pub /etc/apk/keys/chainguard-extras.rsa.pub
+
+      - name: "Update the APKINDEX"
+        run: |
+          for arch in "x86_64" "aarch64"; do
+            mkdir -p ./packages/${arch}
+
+            # Consolidate with the built artifacts
+            tar xvf /tmp/artifacts/packages-${arch}.tar.gz
+
+            # Sign the APK index
+            melange sign-index -f --signing-key ./chainguard-extras.rsa packages/${arch}/APKINDEX.tar.gz
+
+            # Only attempt to sign when *.apk's exist.
+            apks=$(ls ./packages/${arch}/*.apk 2>/dev/null || true)
+            if [ -n "$apks" ]; then
+              melange sign --signing-key ./chainguard-extras.rsa ./packages/${arch}/*.apk
+            fi
+          done
+
+      - name: "Upload the repository to the bucket"
+        run: |
+          for arch in "x86_64" "aarch64"; do
+            # Don't cache the APKINDEX.
+            gcloud --quiet storage cp \
+                --cache-control=no-store \
+                "./packages/${arch}/APKINDEX.tar.gz" "gs://chainguard-extras-apk-registry/extras/${arch}/"
+
+            gcloud --quiet storage cp \
+                --cache-control=no-store \
+                "./packages/${arch}/APKINDEX.json" "gs://chainguard-extras-apk-registry/extras/${arch}/"
+
+            # Only attempt to sign when *.apk's exist
+            apks=$(ls ./packages/${arch}/*.apk 2>/dev/null || true)
+            if [ -n "$apks" ]; then
+              # apks will be cached in CDN for an hour by default.
+              # Don't upload the object if it already exists.
+              gcloud --quiet storage cp \
+                  --no-clobber \
+                  "./packages/${arch}/*.apk" "gs://chainguard-extras-apk-registry/extras/${arch}/"
+            fi
+          done
+
+  postrun:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: [build, upload]
+    steps:
+      - uses: rtCamp/action-slack-notify@v2.2.1
+        env:
+          SLACK_ICON: http://github.com/chainguard-dev.png?size=48
+          SLACK_USERNAME: guardian
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: chainguard-images-alerts
+          SLACK_MSG_AUTHOR: wolfi-bot
+          SLACK_COLOR: "#8E1600"
+          MSG_MINIMAL: "true"
+          SLACK_TITLE: "[build extras] failure: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_MESSAGE: |
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -1,0 +1,187 @@
+name: CI build action
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches:
+      - gh-readonly-queue/main/**
+
+jobs:
+  changes:
+    name: Determine packages to test building
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{steps.package-list.outputs.packages}}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Look for changed files
+        id: changes
+        uses: tj-actions/changed-files@v35
+        with:
+          files: ./*.yaml
+
+      - name: "Install wolfictl onto PATH"
+        run: |
+          # Copy wolfictl out of the wolfictl image and onto PATH
+          TMP=$(mktemp -d)
+          docker run --rm -i -v $TMP:/out --entrypoint /bin/sh ghcr.io/wolfi-dev/sdk:latest@sha256:fe85df7dc646f29552dab0ebd7e6e6e1cc6f4a5ce83e724693cf0fece5b8f8ac -c "cp /usr/bin/wolfictl /out"
+          echo "$TMP" >> $GITHUB_PATH
+
+      # Assuming that we have a list of changed files such as `foo.yaml` and `bar.yaml`, this
+      # strips the list down into `foo` and `bar`.
+      - name: Build package list
+        id: package-list
+        run: |
+          printf "packages=" >> $GITHUB_OUTPUT
+
+          wolfictl text -t name --pipeline-dir=./pipelines/ \
+              -r https://packages.wolfi.dev/bootstrap/stage3 \
+              -k https://packages.wolfi.dev/bootstrap/stage3/wolfi-signing.rsa.pub > packages-list
+          while read pkg; do
+            for file in ${{ steps.changes.outputs.all_changed_files }}; do
+              [ "${file%.yaml}" = "$pkg" ] && printf "%s " ${file%.yaml} >> $GITHUB_OUTPUT
+            done
+          done < packages-list
+
+          printf "\n" >> $GITHUB_OUTPUT
+
+  build:
+    name: Test building of packages
+    strategy:
+      matrix:
+        arch: ["x86_64", "aarch64"]
+      fail-fast: false
+    runs-on:
+      group: cgi-builder-${{ matrix.arch }}
+    needs: changes
+    container:
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:fe85df7dc646f29552dab0ebd7e6e6e1cc6f4a5ce83e724693cf0fece5b8f8ac
+      options: |
+        --cap-add NET_ADMIN --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor:unconfined
+    outputs:
+      packages_were_built: ${{ steps.file_check.outputs.exists }}
+
+    permissions:
+      packages: write
+      contents: read
+      pull-requests: write # so we have permission to comment on pull requests
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: "Trust the github workspace"
+        run: |
+          # This is to avoid fatal errors about "dubious ownership" because we are
+          # running inside of a container action with the workspace mounted in.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: "Generate local signing key"
+        run: |
+          make MELANGE="melange" local-melange.rsa
+
+      - name: "Build extras"
+        run: |
+          for package in ${{needs.changes.outputs.packages}}; do
+            make MELANGE="melange" MELANGE_EXTRA_OPTS="--create-build-log" package/$package -j1
+          done
+
+      - name: Check for file
+        id: file_check
+        run: |
+          if test -f "packages.log"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check sonames
+        if: steps.file_check.outputs.exists == 'true'
+        run: |
+          wolfictl check so-name
+
+      - name: Check diff
+        if: steps.file_check.outputs.exists == 'true'
+        # Let's not fail the whole job if this step fails as it is for improved UX rather than an enforced check
+        continue-on-error: true
+        run: |
+          wolfictl check diff
+
+      - name: Check for diff file
+        id: diff_file_check
+        run: |
+          if test -f "diff.log"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Use the x86_64 build results for the comment for now so we don't have duplicates.
+      - name: PR comment diff
+        if: steps.diff_file_check.outputs.exists == 'true' && matrix.arch == 'x86_64'
+        uses: thollander/actions-comment-pull-request@632cf9ce90574d125be56b5f3405cda41a84e2fd # v2.3.1
+        # We're seeing jobs using merge queues fail
+        continue-on-error: true
+        with:
+          filePath: diff.log
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Upload built packages to GitHub artifacts"
+        uses: actions/upload-artifact@v3
+        with:
+          path: |
+            ./packages/${{ matrix.arch }}
+            ./packages.log
+          name: packages-${{ matrix.arch }}
+          retention-days: 1
+          if-no-files-found: warn
+
+  # TODO: Enable when extras advisory is set up
+  # scan:
+  #   name: "Scan packages for CVEs"
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: ghcr.io/wolfi-dev/sdk:latest@sha256:fe85df7dc646f29552dab0ebd7e6e6e1cc6f4a5ce83e724693cf0fece5b8f8ac
+  #   needs: build
+  #   if: needs.build.outputs.packages_were_built == 'true'
+  #
+  #   steps:
+  #     - name: "Retrieve x86_64 packages"
+  #       uses: actions/download-artifact@v3
+  #       with:
+  #         name: packages-x86_64
+  #         path: /tmp/artifacts-1/
+  #
+  #     - name: "Retrieve aarch64 packages"
+  #       uses: actions/download-artifact@v3
+  #       with:
+  #         name: packages-aarch64
+  #         path: /tmp/artifacts-2/
+  #
+  #     - name: "Collect packages from all architectures into one place"
+  #       run: |
+  #         cd /tmp/artifacts-1
+  #
+  #         # Put the packages into one place
+  #         mv /tmp/artifacts-2/packages/* ./packages/
+  #
+  #         # Merge the build log ("packages.log") files
+  #         cat /tmp/artifacts-2/packages.log >> ./packages.log
+  #
+  #     - name: "Retrieve extras advisory data"
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: "wolfi-dev/advisories"
+  #         path: "data/wolfi-advisories"
+  #
+  #     - name: Scan for CVEs
+  #       run: |
+  #         wolfictl scan \
+  #           --build-log \
+  #           --advisories-repo-dir 'data/wolfi-advisories' \
+  #           --advisory-filter 'all' \
+  #           --require-zero \
+  #           /tmp/artifacts-1 \
+  #           2> /dev/null # The error message renders strangely on GitHub Actions, and the important information is already being sent to stdout.

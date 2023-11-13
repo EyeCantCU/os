@@ -12,29 +12,29 @@ REPO ?= $(shell pwd)/packages
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
 MELANGE_OPTS += --signing-key ${KEY}
-MELANGE_OPTS += --pipeline-dir ${MELANGE_DIR}/pipelines
 MELANGE_OPTS += --arch ${ARCH}
 MELANGE_OPTS += --env-file build-${ARCH}.env
 MELANGE_OPTS += --namespace chainguard
+MELANGE_OPTS += --generate-index false
+MELANGE_OPTS += --pipeline-dir ./pipelines/
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
+
+ifeq (${LINT}, yes)
+	MELANGE_OPTS += --fail-on-lint-warning
+endif
 
 # The list of packages to be built. The order matters.
 # wolfictl determines the list and order
 # set only to be called when needed, so make can be instant to run
 # when it is not
-PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name --buildtime-repos-for-runtime
+PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name --pipeline-dir=./pipelines/
+
+EXTRAS_REPO ?= https://packages.cgr.dev/extras
+EXTRAS_KEY ?= https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 
 all: ${KEY} .build-packages
-
-# this ensures two things:
-# 1. We only generate the graph for the list of commands that requires it
-# 2. If generating the graph fails, we error out; without this, a failure in $(shell) might go unnoticed.
-ifneq ($(findstring $(MAKECMDGOALS),all list list-yaml),)
-  PKGNAMES := $(shell $(PKGLISTCMD) || echo "failed")
-  ifeq ($(PKGNAMES),failed)
-    $(error $(PKGLISTCMD) failed)
-  endif
-  PKGLIST := $(addprefix package/,$(PKGNAMES))
+ifeq ($(MAKECMDGOALS),all)
+  PKGLIST := $(addprefix package/,$(shell $(PKGLISTCMD)))
 else
   PKGLIST :=
 endif
@@ -47,13 +47,12 @@ clean:
 	rm -rf packages/${ARCH}
 
 .PHONY: list list-yaml
-
 list:
-	$(info $(PKGNAMES))
+	$(info $(shell $(PKGLISTCMD)))
 	@printf ''
 
 list-yaml:
-	$(info $(addsuffix .yaml,$(PKGNAMES)))
+	$(info $(addsuffix .yaml,$(shell $(PKGLISTCMD))))
 	@printf ''
 
 package/%:
@@ -67,4 +66,8 @@ packages/$(ARCH)/%.apk: $(KEY)
 	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) --source-dir ./$(pkgname)/ --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 dev-container:
-	docker run --privileged --rm -it -v "${PWD}:${PWD}" -w "${PWD}" ghcr.io/wolfi-dev/sdk:latest@sha256:3ef78225a85ab45f46faac66603c9da2877489deb643174ba1e42d8cbf0e0644
+	docker run --privileged --rm -it \
+	    -v "${PWD}:${PWD}" \
+	    -w "${PWD}" \
+	    -e SOURCE_DATE_EPOCH=0 \
+	    ghcr.io/wolfi-dev/sdk:latest@sha256:fe85df7dc646f29552dab0ebd7e6e6e1cc6f4a5ce83e724693cf0fece5b8f8ac
