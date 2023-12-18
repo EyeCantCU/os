@@ -11,6 +11,8 @@ REPO ?= $(shell pwd)/packages
 
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
+MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
+MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_OPTS += --signing-key ${KEY}
 MELANGE_OPTS += --arch ${ARCH}
 MELANGE_OPTS += --env-file build-${ARCH}.env
