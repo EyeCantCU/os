@@ -32,6 +32,12 @@ PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name --pipeline-dir=./pipelines/
 EXTRAS_REPO ?= https://packages.cgr.dev/extras
 EXTRAS_KEY ?= https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 
+# Add the extras repository to the list of repositories
+MELANGE_OPTS += -k ${EXTRAS_KEY}
+MELANGE_OPTS += -r ${EXTRAS_REPO}
+PKGLISTCMD += -k ${EXTRAS_KEY}
+PKGLISTCMD += -r ${EXTRAS_REPO}
+
 all: ${KEY} .build-packages
 ifeq ($(MAKECMDGOALS),all)
   PKGLIST := $(addprefix package/,$(shell $(PKGLISTCMD)))
