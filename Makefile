@@ -70,4 +70,4 @@ dev-container:
 	    -v "${PWD}:${PWD}" \
 	    -w "${PWD}" \
 	    -e SOURCE_DATE_EPOCH=0 \
-	    ghcr.io/wolfi-dev/sdk:latest@sha256:fe85df7dc646f29552dab0ebd7e6e6e1cc6f4a5ce83e724693cf0fece5b8f8ac
+	    ghcr.io/wolfi-dev/sdk:latest@sha256:d1d9112ba405077785787e5c0f97c3f544e7e2f786292040aa908e29ca48ca25
