@@ -37,8 +37,8 @@ EXTRAS_KEY ?= https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 # Add the extras repository to the list of repositories
 MELANGE_OPTS += -k ${EXTRAS_KEY}
 MELANGE_OPTS += -r ${EXTRAS_REPO}
-PKGLISTCMD += -k ${EXTRAS_KEY}
-PKGLISTCMD += -r ${EXTRAS_REPO}
+PKGLISTCMD += -k ${EXTRAS_KEY} -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+PKGLISTCMD += -r ${EXTRAS_REPO} -r https://packages.wolfi.dev/os
 
 all: ${KEY} .build-packages
 ifeq ($(MAKECMDGOALS),all)
