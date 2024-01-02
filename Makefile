@@ -40,6 +40,16 @@ MELANGE_OPTS += -r ${EXTRAS_REPO}
 PKGLISTCMD += -k ${EXTRAS_KEY} -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 PKGLISTCMD += -r ${EXTRAS_REPO} -r https://packages.wolfi.dev/os
 
+# These are separate from MELANGE_OPTS because for building we need additional
+# ones that are not defined for tests.
+MELANGE_TEST_OPTS += --repository-append ${REPO}
+MELANGE_TEST_OPTS += --keyring-append ${KEY}.pub
+MELANGE_TEST_OPTS += --arch ${ARCH}
+MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
+MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
+MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
+
 all: ${KEY} .build-packages
 ifeq ($(MAKECMDGOALS),all)
   PKGLIST := $(addprefix package/,$(shell $(PKGLISTCMD)))
@@ -67,6 +77,12 @@ package/%:
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(MAKE) yamlfile=$(yamlfile) pkgname=$* packages/$(ARCH)/$(pkgver).apk
+
+test/%:
+	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
+	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
+	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
+	$(MELANGE) test $(yamlfile) --source-dir ./$*/ $(MELANGE_TEST_OPTS) --log-policy builtin:stderr
 
 packages/$(ARCH)/%.apk: $(KEY)
 	@mkdir -p ./$(pkgname)/
