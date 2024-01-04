@@ -1,0 +1,141 @@
+package:
+  name: pytorch-cuda12
+  version: 2.1.2
+  epoch: 0
+  description: Tensors and Dynamic neural networks in Python with strong GPU acceleration
+  copyright:
+    - license: BSD-3-Clause # NVIDIA?
+  dependencies:
+    runtime:
+      # For some reason this isn't detected
+      - libgomp
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - py3.11-installer
+      - py3.11-pip
+      - python-3.11
+      - python-3.11-dev
+      - samurai
+      - clang-15-dev
+      - clang-15
+      - llvm15
+      - llvm15-dev
+      - llvm-lld-15
+      - clang-15-default
+      - openmp-17-dev
+      - posix-libc-utils
+      # Cuda
+      - nvidia-driver
+      - nvidia-libcusparse-12
+      - nvidia-cuda-cccl-12
+      - nvidia-cuda-cudart-12
+      - nvidia-cuda-nvcc-12
+      - nvidia-cuda-nvml-dev-12
+      - nvidia-cuda-nvrtc-12
+      - nvidia-cuda-nvtx-12
+      - nvidia-cuda-profiler-api-12
+      - nvidia-libcublas-12
+      - nvidia-libcufft-12
+      - nvidia-libcurand-12
+      - nvidia-libcusolver-12
+      - nvidia-libcusparse-12
+      - nvidia-libnvjitlink-12
+      - nvidia-cudnn-8
+      - nvidia-cudnn-8-cuda-12
+      - git
+      - coreutils
+      - libgomp
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pytorch/pytorch.git
+      tag: v${{package.version}}
+      expected-commit: a8e7c98cb95ff97bb30a728c6b2a1ce6bff946eb
+
+  - uses: patch
+    with:
+      patches: cstdint.patch
+  
+  - uses: patch
+    with:
+      patches: w-cast-function-types.patch
+
+  # Patch modified from here: https://github.com/pytorch/pytorch/pull/115988/files
+  - uses: patch
+    with:
+      patches: cusparselt.patch
+
+  - runs: pip install -r requirements.txt
+
+  - name: Python Build
+    runs: |
+      export PYTORCH_BUILD_VERSION=${{package.version}}
+      export PYTORCH_BUILD_NUMBER=0
+      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-12.3/lib:/usr/local/cudann-8.9"
+      export PATH="$PATH:/usr/local/cuda-12.3/bin"
+      export CMAKE_CUDA_ARCHITECTURES=all
+      export USE_CUDA=1
+      export USE_CUDNN=1
+      export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
+      export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
+
+      # Use clang instead of gcc
+      export CC=clang
+      export CXX=clang++
+      export LD=lld
+      
+      # Disable some warnings
+      export CFLAGS="$CFLAGS -Wno-error=nonnull -Wno-nonnull"
+      export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull -Wno-error=c++11-narrowing"
+
+      export CUDA_VERSION="12.3"
+
+      python setup.py bdist_wheel
+
+  - runs: |
+      # Setup the virtualenv
+      python -m venv .venv --system-site-packages
+      # Bump pip to patch a CVE
+      .venv/bin/pip install --upgrade pip==23.3.2 setuptools==65.5.1
+
+  - runs: |
+      .venv/bin/pip install -I --no-compile dist/*.whl
+
+      # For some reason numpy isn't installed by default but is required.
+      .venv/bin/pip install -I numpy==1.26.2 --no-compile
+
+      # torchvision and elastic are also required
+      .venv/bin/pip install torchvision==0.16.2 torchelastic==0.2.2 --no-compile
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/pytorch
+      mv .venv ${{targets.destdir}}/usr/share/pytorch/
+
+      # edit the venv paths
+      sed -i "s|/home/build|/usr/share/pytorch|g" ${{targets.destdir}}/usr/share/pytorch/.venv/bin/*
+
+      # allow site-packages
+      sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/usr/share/pytorch/.venv/pyvenv.cfg
+
+  - uses: strip
+
+subpackages:
+  # This is a version of pytorch installed by itself into site-packages
+  - name: py3.11-pytorch-cuda12
+    pipeline:
+      - runs: |
+          python -m installer -d ${{targets.subpkgdir}}/ dist/*.whl
+          find ${{targets.subpkgdir}} -name "*.pyc" -exec rm -rf '{}' +
+
+update:
+  enabled: true
+  github:
+    identifier: pytorch/pytorch
+    strip-prefix: v
