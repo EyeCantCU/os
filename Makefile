@@ -48,6 +48,8 @@ MELANGE_TEST_OPTS += --arch ${ARCH}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+MELANGE_TEST_OPTS += --repository-append ${EXTRAS_REPO}
+MELANGE_TEST_OPTS += --keyring-append ${EXTRAS_KEY}
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
 all: ${KEY} .build-packages
