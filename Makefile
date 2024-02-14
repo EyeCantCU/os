@@ -159,10 +159,11 @@ TMP_REPOSITORIES_FILE := $(TMP_REPOSITORIES_DIR)/repositories
 # changes to the packages. It mounts the local packages folder as a read-only,
 # and sets up the necessary keys for you to run `apk add` commands, and then
 # test the packages however you see fit.
-local-wolfi:
+local-wolfi: $(KEY)
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
 	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+	@mkdir -p ${PWD}/packages
 	docker run --rm -it \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange.rsa.pub",destination="/etc/apk/keys/local-melange.rsa.pub",readonly \
