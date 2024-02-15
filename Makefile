@@ -14,6 +14,7 @@ GCS_FETCH_BUCKET_NAME ?= gs://chainguard-enterprise-registry-destination/os/
 
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
+MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
 MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_OPTS += --signing-key ${KEY}
