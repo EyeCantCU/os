@@ -1,7 +1,7 @@
 package:
   name: pytorch-cuda12
-  version: 2.1.2
-  epoch: 3
+  version: 2.2.0
+  epoch: 0
   description: Tensors and Dynamic neural networks in Python with strong GPU acceleration
   copyright:
     - license: BSD-3-Clause
@@ -14,11 +14,11 @@ package:
       # For some reason this isn't detected
       - libgomp
       - openmp-17-dev
-
 environment:
   contents:
     packages:
       - patchelf
+      - gcc-12-default
       - build-base
       - bash
       - busybox
@@ -29,18 +29,13 @@ environment:
       - python-3.11
       - python-3.11-dev
       - samurai
-      - clang-15-dev
-      - clang-15
       - libffi-dev
       - libjpeg-dev
       - libpng-dev
       - libjpeg-turbo-dev
-      - llvm15
-      - llvm15-dev
-      - llvm-lld-15
-      - clang-15-default
       - openmp-17-dev
       - posix-libc-utils
+      - openssl-dev
       # Cuda
       - nvidia-driver
       - nvidia-libcusparse-12
@@ -67,23 +62,16 @@ pipeline:
     with:
       repository: https://github.com/pytorch/pytorch.git
       tag: v${{package.version}}
-      expected-commit: a8e7c98cb95ff97bb30a728c6b2a1ce6bff946eb
+      expected-commit: 8ac9b20d4b090c213799e81acf48a55ea8d437d6
   - uses: patch
     with:
       patches: cstdint.patch
-  - uses: patch
-    with:
-      patches: w-cast-function-types.patch
-  # Patch modified from here: https://github.com/pytorch/pytorch/pull/115988/files
-  - uses: patch
-    with:
-      patches: cusparselt.patch
   - runs: pip install -r requirements.txt
   - name: Python Build
     runs: |
       export PYTORCH_BUILD_VERSION=${{package.version}}
       export PYTORCH_BUILD_NUMBER=0
-      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-12.3/lib:/usr/local/cudann-8.9"
+      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-12.3/lib:/usr/local/cudnn-8.9"
       export PATH="$PATH:/usr/local/cuda-12.3/bin"
       export CMAKE_CUDA_ARCHITECTURES=all
       export USE_CUDA=1
@@ -91,36 +79,34 @@ pipeline:
       export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
       export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
 
-      # Use clang instead of gcc
-      export CC=clang
-      export CXX=clang++
-      export LD=lld
-
       # Disable some warnings
       export CFLAGS="$CFLAGS -Wno-error=nonnull -Wno-nonnull"
-      export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull -Wno-error=c++11-narrowing"
+      export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull"
 
       export CUDA_VERSION="12.3"
 
-      python setup.py bdist_wheel
+      python -m venv .build-venv
+      .build-venv/bin/pip install -r requirements.txt
+      .build-venv/bin/python setup.py bdist_wheel
   - runs: |
       # Setup the virtualenv
       python -m venv .venv --system-site-packages
 
-      # Bump pip to patch a CVE
-      .venv/bin/pip install --upgrade pip==23.3.2 setuptools==65.5.1
+      .venv/bin/pip install -r requirements.txt
+
   - runs: |
-      .venv/bin/pip install -I --no-compile dist/*.whl
+      .venv/bin/pip install --ignore-installed --no-compile dist/*.whl
+      # maybe this is like (from pip_install_whl in .ci/pytorch/common_utils.sh)
+      #    pip install --no-index --no-deps dist/*.whl
 
       # For some reason numpy isn't installed by default but is required.
+      .venv/bin/pip install --ignore-installed --no-compile requests numpy==1.26.2
 
-      .venv/bin/pip install -I requests numpy==1.26.2 --no-compile
-
-      # torchvision and elastic are also required
-      .venv/bin/pip install torchaudio==2.1.2 torchvision==0.16.2 torchelastic==0.2.2 --no-compile
-
-      # installs the nvidia python packages required for torchvision and torchaudio in the venv
-      .venv/bin/pip install torchaudio torchvision --force-reinstall
+      .venv/bin/pip install --extra-index-url=https://pypi.ngc.nvidia.com \
+          nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 \
+          nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 \
+          nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 \
+          nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12
   - runs: |
       mkdir -p ${{targets.destdir}}/usr/share/pytorch
       mv .venv ${{targets.destdir}}/usr/share/pytorch/
@@ -130,7 +116,6 @@ pipeline:
 
       # allow site-packages
       sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/usr/share/pytorch/.venv/pyvenv.cfg
-
 subpackages:
   # This is a version of pytorch installed by itself into site-packages
   - name: py3.11-pytorch-cuda12
@@ -140,7 +125,6 @@ subpackages:
       - runs: |
           python -m installer -d ${{targets.subpkgdir}}/ dist/*.whl
           find ${{targets.subpkgdir}} -name "*.pyc" -exec rm -rf '{}' +
-
 update:
   enabled: true
   github:
