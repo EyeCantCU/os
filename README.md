@@ -134,7 +134,7 @@ make SINGLE_PACKAGE=<PACKAGE> fetch-single-package
 To fetch multiple packages:
 
 ```sh
-make PACKAGES=<PACKAGE1>,<PACKAGE2>,...,<PACKAGEN> fetch-multiple-packages
+make PACKAGES="<PACKAGE1> <PACKAGE2> ... <PACKAGEN>" fetch-multiple-packages
 ```
 
 To fetch the entire enterprise bucket locally:
