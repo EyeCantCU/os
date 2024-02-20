@@ -66,10 +66,9 @@ pipeline:
   - uses: patch
     with:
       patches: cstdint.patch
-  - runs: pip install -r requirements.txt
   - name: Python Build
     runs: |
-      export PYTORCH_BUILD_VERSION=${{package.version}}
+      export PYTORCH_BUILD_VERSION="${{package.version}}+cu121"
       export PYTORCH_BUILD_NUMBER=0
       export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-12.3/lib:/usr/local/cudnn-8.9"
       export PATH="$PATH:/usr/local/cuda-12.3/bin"
@@ -78,35 +77,39 @@ pipeline:
       export USE_CUDNN=1
       export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
       export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
+      export CUDA_VERSION="12.3"
 
+      # see pytorch doc on GLIBCXX_USE_CXX11_ABI at
+      # https://github.com/pytorch/pytorch/blob/b4b1480b0634a5fb7e116053464301d192e2583a/README.md?plain=1#L236
+      # and https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_dual_abi.html
+      export _GLIBCXX_USE_CXX11_ABI=1
+      
       # Disable some warnings
       export CFLAGS="$CFLAGS -Wno-error=nonnull -Wno-nonnull"
       export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull"
 
-      export CUDA_VERSION="12.3"
+      echo "--extra-index-url https://pypi.ngc.nvidia.com" >> requirements.txt
+      pip install -r requirements.txt
+      
+      pip install build
+      git submodule update --init --recursive
+      python3 -m build
 
-      python -m venv .build-venv
-      .build-venv/bin/pip install -r requirements.txt
-      .build-venv/bin/python setup.py bdist_wheel
   - runs: |
       # Setup the virtualenv
       python -m venv .venv --system-site-packages
 
-      .venv/bin/pip install -r requirements.txt
-
-  - runs: |
       .venv/bin/pip install --ignore-installed --no-compile dist/*.whl
-      # maybe this is like (from pip_install_whl in .ci/pytorch/common_utils.sh)
-      #    pip install --no-index --no-deps dist/*.whl
 
       # For some reason numpy isn't installed by default but is required.
       .venv/bin/pip install --ignore-installed --no-compile requests numpy==1.26.2
 
-      .venv/bin/pip install --extra-index-url=https://pypi.ngc.nvidia.com \
+      .venv/bin/pip install \
           nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 \
           nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 \
           nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 \
           nvidia-cusparse-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12
+
   - runs: |
       mkdir -p ${{targets.destdir}}/usr/share/pytorch
       mv .venv ${{targets.destdir}}/usr/share/pytorch/
@@ -130,3 +133,14 @@ update:
   github:
     identifier: pytorch/pytorch
     strip-prefix: v
+test:
+  environment:
+    contents:
+      packages:
+        - wolfi-base
+        - busybox
+  pipeline:
+    - runs: |
+        export PATH=/usr/share/pytorch/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        
+        python3 -c "import torch" 
