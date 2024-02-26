@@ -23,6 +23,10 @@ MELANGE_OPTS += --env-file build-${ARCH}.env
 MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
+# Enter interactive mode on failure for debug
+MELANGE_DEBUG_OPTS += --interactive
+MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
+
 # These are separate from MELANGE_OPTS because for building we need additional
 # ones that are not defined for tests.
 MELANGE_TEST_OPTS += --repository-append ${REPO}
@@ -126,6 +130,23 @@ packages/$(ARCH)/%.apk: $(KEY)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) $(srcdirflag) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
+debug/%:
+	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
+	@if [ -z "$(yamlfile)" ]; then \
+		echo "Error: could not find yaml file for $*"; exit 1; \
+	else \
+		echo "yamlfile is $(yamlfile)"; \
+	fi
+	$(eval $(call get-package-dir,pkgdir,$(yamlfile)))
+	$(info found package dir as $(pkgdir))
+	$(eval $(call get-source-dir,sourcedir,$(pkgdir),$*))
+	$(info found source dir as $(sourcedir))
+	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
+	$(info pkgver $(pkgver))
+	@mkdir -p ./"$*"/
+	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
+	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
+
 test/%:
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
 	@if [ -z "$(yamlfile)" ]; then \
@@ -146,7 +167,7 @@ dev-container:
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:d4dd58e64afeecc9705a3b4219d25fc17fcd44464674e356a44a04773c3762d9
+			ghcr.io/wolfi-dev/sdk:latest@sha256:e3b083572a1bccad1929f400bc78941abbb5d1a062396b756d6b881017ee5008
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -215,7 +236,7 @@ dev-container-wolfi:
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:d4dd58e64afeecc9705a3b4219d25fc17fcd44464674e356a44a04773c3762d9
+		ghcr.io/wolfi-dev/sdk:latest@sha256:e3b083572a1bccad1929f400bc78941abbb5d1a062396b756d6b881017ee5008
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
