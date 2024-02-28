@@ -1,0 +1,333 @@
+diff --git a/pkg/medusa/reconcile_test.go b/pkg/medusa/reconcile_test.go
+index 17b5c52..9d02409 100644
+--- a/pkg/medusa/reconcile_test.go
++++ b/pkg/medusa/reconcile_test.go
+@@ -20,6 +20,9 @@ func TestMedusaIni(t *testing.T) {
+ 	t.Run("Secured", testMedusaIniSecured)
+ 	t.Run("Unsecured", testMedusaIniUnsecured)
+ 	t.Run("MissingOptional", testMedusaIniMissingOptionalSettings)
++	t.Run("MergeVolumeMounts", testMergeVolumeMounts)
++	t.Run("MedusaConfigOverride", testMedusaConfigOverride)
++	t.Run("MergeEnvVars", testMergeEnvVars)
+ }
+ 
+ func testMedusaIniFull(t *testing.T) {
+@@ -548,3 +551,318 @@ func TestPurgeCronJobNameTooLong(t *testing.T) {
+ 	_, err := PurgeCronJob(dcConfig, clusterName, namespace, logger)
+ 	assert.NotNil(t, err)
+ }
++func testMergeVolumeMounts(t *testing.T) {
++	testCases := []struct {
++		Description   string
++		OverridesSpec []corev1.VolumeMount
++		DefaultSpec   []corev1.VolumeMount
++		Expected      []corev1.VolumeMount
++	}{
++		{
++			Description:   "1. OverridesSpec is empty, DefaultSpec is empty",
++			OverridesSpec: []corev1.VolumeMount{},
++			DefaultSpec:   []corev1.VolumeMount{},
++			Expected:      []corev1.VolumeMount{},
++		},
++		{
++			Description:   "2. OverridesSpec is empty, DefaultSpec is not empty",
++			OverridesSpec: []corev1.VolumeMount{},
++			DefaultSpec: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/var/lib/cassandra",
++				},
++			},
++			Expected: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/var/lib/cassandra",
++				},
++			},
++		},
++		{
++			Description: "3. OverridesSpec and DefaultSpec are not empty",
++			OverridesSpec: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/c3/cassandra",
++				},
++			},
++			DefaultSpec: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/var/lib/cassandra",
++				},
++			},
++			Expected: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/c3/cassandra",
++				},
++			},
++		},
++		{
++			Description: "4. Union of OverridesSpec and DefaultSpec",
++			OverridesSpec: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/c3/cassandra",
++				},
++				{
++					Name:      "server-data-2",
++					MountPath: "/c3/cassandra/2",
++				},
++				{
++					Name:      "server-data-3",
++					MountPath: "/c3/cassandra/3",
++				},
++			},
++			DefaultSpec: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/var/lib/cassandra",
++				},
++				{
++					Name:      "server-data-3",
++					MountPath: "/var/lib/cassandra/3",
++				},
++				{
++					Name:      "server-data-4",
++					MountPath: "/var/lib/cassandra/4",
++				},
++			},
++			Expected: []corev1.VolumeMount{
++				{
++					Name:      "server-data",
++					MountPath: "/c3/cassandra",
++				},
++				{
++					Name:      "server-data-2",
++					MountPath: "/c3/cassandra/2",
++				},
++				{
++					Name:      "server-data-3",
++					MountPath: "/c3/cassandra/3",
++				},
++				{
++					Name:      "server-data-4",
++					MountPath: "/var/lib/cassandra/4",
++				},
++			},
++		},
++	}
++
++	for _, tc := range testCases {
++		t.Run(tc.Description, func(t *testing.T) {
++			merged := mergeVolumeMounts(tc.OverridesSpec, tc.DefaultSpec)
++			assert.Equal(t, tc.Expected, merged)
++		})
++	}
++}
++
++func testMedusaConfigOverride(t *testing.T) {
++	medusaSpec := &medusaapi.MedusaClusterTemplate{
++		StorageProperties: medusaapi.Storage{
++			StorageProvider: "s3",
++			StorageSecretRef: corev1.LocalObjectReference{
++				Name: "secret",
++			},
++			BucketName: "bucket",
++		},
++		CassandraUserSecretRef: corev1.LocalObjectReference{
++			Name: "test-superuser",
++		},
++	}
++
++	dcConfig := cassandra.DatacenterConfig{
++		PodTemplateSpec: corev1.PodTemplateSpec{
++			Spec: corev1.PodSpec{
++				InitContainers: []corev1.Container{
++					{
++						Name: "medusa-restore",
++						VolumeMounts: []corev1.VolumeMount{
++							{
++								Name:      "server-data",
++								MountPath: "/c3/cassandra",
++							},
++						},
++						Env: []corev1.EnvVar{
++							{
++								Name:  "MEDUSA_TMP_DIR",
++								Value: "/c3/cassandra/medusa/tmp",
++							},
++						},
++					},
++				},
++				Containers: []corev1.Container{
++					{
++						Name: "medusa",
++						VolumeMounts: []corev1.VolumeMount{
++							{
++								Name:      "server-data",
++								MountPath: "/c3/cassandra",
++							},
++						},
++						Env: []corev1.EnvVar{
++							{
++								Name:  "MEDUSA_TMP_DIR",
++								Value: "/c3/cassandra/medusa/tmp",
++							},
++						},
++					},
++				},
++			},
++		},
++	}
++
++	logger := logr.New(logr.Discard().GetSink())
++
++	medusaContainer, err := CreateMedusaMainContainer(&dcConfig, medusaSpec, false, "test", logger)
++	assert.Nil(t, err, "Failed to create medusa container")
++
++	UpdateMedusaInitContainer(&dcConfig, medusaSpec, false, "test", logger)
++	UpdateMedusaMainContainer(&dcConfig, medusaContainer)
++
++	medusaInitContainerIndex, found := cassandra.FindInitContainer(&dcConfig.PodTemplateSpec, "medusa-restore")
++	assert.True(t, found, "Couldn't find medusa-restore init container")
++	medusaMainContainerIndex, found := cassandra.FindContainer(&dcConfig.PodTemplateSpec, "medusa")
++	assert.True(t, found, "Couldn't find medusa init container")
++
++	medusaRestore := dcConfig.PodTemplateSpec.Spec.InitContainers[medusaInitContainerIndex]
++	*medusaContainer = dcConfig.PodTemplateSpec.Spec.Containers[medusaMainContainerIndex]
++
++	assertMountPath(medusaRestore.VolumeMounts, "server-data", "/c3/cassandra", t)
++	assertEnvVar(medusaRestore.Env, "MEDUSA_TMP_DIR", "/c3/cassandra/medusa/tmp", t)
++
++	assertMountPath(medusaContainer.VolumeMounts, "server-data", "/c3/cassandra", t)
++	assertEnvVar(medusaContainer.Env, "MEDUSA_TMP_DIR", "/c3/cassandra/medusa/tmp", t)
++}
++
++func assertMountPath(volumes []corev1.VolumeMount, name string, expectedMountPath string, t *testing.T) {
++	for _, v := range volumes {
++		if v.Name == name {
++			assert.Equal(t, expectedMountPath, v.MountPath)
++			return
++		}
++	}
++	assert.Fail(t, "Volume mount %s not found", name)
++}
++
++func assertEnvVar(envVars []corev1.EnvVar, expectedName, expectedValue string, t *testing.T) {
++	for _, env := range envVars {
++		if env.Name == expectedName {
++			assert.Equal(t, expectedValue, env.Value, "Expected env var %s to have value %s", expectedName, expectedValue)
++			return
++		}
++	}
++	assert.Fail(t, "Env var %s not found", expectedName)
++}
++
++func testMergeEnvVars(t *testing.T) {
++	testCases := []struct {
++		Description   string
++		OverridesSpec []corev1.EnvVar
++		DefaultSpec   []corev1.EnvVar
++		Expected      []corev1.EnvVar
++	}{
++		{
++			Description:   "1. OverridesSpec is empty, DefaultSpec is empty",
++			OverridesSpec: []corev1.EnvVar{},
++			DefaultSpec:   []corev1.EnvVar{},
++			Expected:      []corev1.EnvVar{},
++		},
++		{
++			Description:   "2. OverridesSpec is empty, DefaultSpec is not empty",
++			OverridesSpec: []corev1.EnvVar{},
++			DefaultSpec: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_TMP_DIR",
++					Value: "/c3/cassandra/medusa/tmp",
++				},
++			},
++			Expected: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_TMP_DIR",
++					Value: "/c3/cassandra/medusa/tmp",
++				},
++			},
++		},
++		{
++			Description: "3. OverridesSpec and DefaultSpec are not empty",
++			OverridesSpec: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_TMP_DIR",
++					Value: "/c3/cassandra/medusa/tmp",
++				},
++			},
++			DefaultSpec: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_TMP_DIR",
++					Value: "/var/lib/cassandra",
++				},
++			},
++			Expected: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_TMP_DIR",
++					Value: "/c3/cassandra/medusa/tmp",
++				},
++			},
++		},
++		{
++			Description: "4. Union of OverridesSpec and DefaultSpec",
++			OverridesSpec: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_DIR",
++					Value: "/c3/cassandra",
++				},
++				{
++					Name:  "MEDUSA_DIR_2",
++					Value: "/c3/cassandra/2",
++				},
++				{
++					Name:  "MEDUSA_DIR_3",
++					Value: "/c3/cassandra/3",
++				},
++			},
++			DefaultSpec: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_DIR",
++					Value: "/var/lib/cassandra",
++				},
++				{
++					Name:  "MEDUSA_DIR_3",
++					Value: "/var/lib/cassandra/3",
++				},
++				{
++					Name:  "MEDUSA_DIR_4",
++					Value: "/var/lib/cassandra/4",
++				},
++			},
++			Expected: []corev1.EnvVar{
++				{
++					Name:  "MEDUSA_DIR",
++					Value: "/c3/cassandra",
++				},
++				{
++					Name:  "MEDUSA_DIR_2",
++					Value: "/c3/cassandra/2",
++				},
++				{
++					Name:  "MEDUSA_DIR_3",
++					Value: "/c3/cassandra/3",
++				},
++				{
++					Name:  "MEDUSA_DIR_4",
++					Value: "/var/lib/cassandra/4",
++				},
++			},
++		},
++	}
++
++	for _, tc := range testCases {
++		t.Run(tc.Description, func(t *testing.T) {
++			merged := mergeEnvVars(tc.OverridesSpec, tc.DefaultSpec)
++			assert.Equal(t, tc.Expected, merged)
++		})
++	}
++}

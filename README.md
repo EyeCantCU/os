@@ -45,7 +45,7 @@ __This repository also includes:__
 
 ## Git Submodules
 
-The Enterprise package repository provides APK packages for paid Chainguard Images.  As a result there are certain cases where the source that is being compiled into APK comes from a private Git location, as an example Chainguard maintains a private fork of [Grafana](https://github.com/chainguard-images/grafana/).
+The Enterprise package repository provides APK packages for paid Chainguard Images.  As a result there are certain cases where the source that is being compiled into APK comes from a private Git location, as an example Chainguard maintains a private fork of [Grafana](https://github.com/chainguard-dev/grafana/).
 
 Today, melange does not support auth when fetching from private source Git Repositories.  As a tactical solution for now we are using Git Submodules to add a reference to the private Git repository, when our pipelines checkout the enterprise repo we include the submodules.  When the melange build runs the source is already available in the `--source-dir` for the package, i.e. `./grafana`.
 
@@ -54,7 +54,7 @@ Today, melange does not support auth when fetching from private source Git Repos
 The Grafana Submodule was added using...
 
 ```sh
-git submodule add --depth 1  https://github.com/chainguard-images/grafana.git grafana
+git submodule add --depth 1  https://github.com/chainguard-dev/grafana.git grafana
 ```
 
 To add a new Submodule use the example above, ensuring the target directory matches the melange package name.
@@ -65,7 +65,7 @@ Once done make sure the `.gitmodules` file contains the correct repo and path.  
 
 Using Git Submodules can cause some pain.  For this reason we have built some automation to keep these submodules up to date.  Continuing with the Grafana example, when a merge to the main branch is performed there is a GitHub Action that creates a new version based on previous Git Tags, creates a new GitHub Release and upgrades this Enterprise Git Repository via Pull Request.
 
-[This is the GitHub Action](https://github.com/chainguard-images/grafana/blob/2679925fb0a0a27e6ff4aef94fd011955f3e969c/.github/workflows/cg-release.yaml#L25-L44) that does this automation, built with `wolfictl`.  You should be able to copy the same Action into your new fork when adding another.
+[This is the GitHub Action](https://github.com/chainguard-dev/grafana/blob/2679925fb0a0a27e6ff4aef94fd011955f3e969c/.github/workflows/cg-release.yaml#L25-L44) that does this automation, built with `wolfictl`.  You should be able to copy the same Action into your new fork when adding another.
 
 The `wolfictl update package` command will update the `.gitmodules` file as well as fetching the corresponding commit reference which in effect triggers an upgrade via automated GitHub Pull Request.
 
@@ -125,17 +125,21 @@ To use a sub package repository when building more apks or images via apko you c
 
 #### Example:
 
-Create a clean folder
+To fetch a single package:
 
 ```sh
-mkdir ent-test
-cd ent-test
+make SINGLE_PACKAGE=<PACKAGE> fetch-single-package
 ```
 
-Fetch the enterprise bucket locally
+To fetch multiple packages:
+
 ```sh
-mkdir ent
-gsutil -m rsync -r gs://chainguard-enterprise-registry-destination/os/ "./ent/"
+make PACKAGES="<PACKAGE1> <PACKAGE2> ... <PACKAGEN>" fetch-multiple-packages
+```
+
+To fetch the entire enterprise bucket locally:
+```sh
+make fetch-all-packages
 ```
 
 Create a melange config file called, e.g. `foo.melange.yaml`  and copy this into it
@@ -157,11 +161,10 @@ environment:
  contents:
    repositories:
      - https://packages.wolfi.dev/os
-     - /work/ent
-     - /work/ent/sub-os-openssl1
+     - ./packages
    keyring:
      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
-     - /work/ent/chainguard-enterprise.rsa.pub
+     - chainguard-enterprise.rsa.pub
    packages:
      - busybox
      - grafana

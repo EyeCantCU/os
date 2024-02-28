@@ -10,6 +10,7 @@ MELANGE ?= $(shell which melange)
 WOLFICTL ?= $(shell which wolfictl)
 KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
+GCS_FETCH_BUCKET_NAME ?= gs://chainguard-enterprise-registry-destination/os/
 
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
@@ -21,6 +22,10 @@ MELANGE_OPTS += --arch ${ARCH}
 MELANGE_OPTS += --env-file build-${ARCH}.env
 MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
+
+# Enter interactive mode on failure for debug
+MELANGE_DEBUG_OPTS += --interactive
+MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 
 # These are separate from MELANGE_OPTS because for building we need additional
 # ones that are not defined for tests.
@@ -98,14 +103,10 @@ endef
 #$(call get-source-dir,ret-variable-for-source-dir,package-dir,package-name)
 define get-source-dir
 	$(info getting source dir for package $(3) with dir $(2))
-	$(1) := $(shell if [[ "." == "$(2)" ]]; then \
-		if [[ -d "./$(3)" ]]; then \
-			echo "--source-dir ./$(3)"; \
-		fi \
+	$(1) := $(shell set -x; if [[ "." == "$(2)" ]]; then \
+		echo "--source-dir ./$(3)"; \
 	else \
-		if [[ -d "$(2)" ]]; then \
-			echo "--source-dir $(2)"; \
-		fi \
+		echo "--source-dir $(2)"; \
 	fi)
 endef
 
@@ -129,6 +130,23 @@ packages/$(ARCH)/%.apk: $(KEY)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) $(srcdirflag) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
+debug/%:
+	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
+	@if [ -z "$(yamlfile)" ]; then \
+		echo "Error: could not find yaml file for $*"; exit 1; \
+	else \
+		echo "yamlfile is $(yamlfile)"; \
+	fi
+	$(eval $(call get-package-dir,pkgdir,$(yamlfile)))
+	$(info found package dir as $(pkgdir))
+	$(eval $(call get-source-dir,sourcedir,$(pkgdir),$*))
+	$(info found source dir as $(sourcedir))
+	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
+	$(info pkgver $(pkgver))
+	@mkdir -p ./"$*"/
+	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
+	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
+
 test/%:
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
 	@if [ -z "$(yamlfile)" ]; then \
@@ -149,7 +167,7 @@ dev-container:
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:d4dd58e64afeecc9705a3b4219d25fc17fcd44464674e356a44a04773c3762d9
+			ghcr.io/wolfi-dev/sdk:latest@sha256:e3b083572a1bccad1929f400bc78941abbb5d1a062396b756d6b881017ee5008
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -218,6 +236,43 @@ dev-container-wolfi:
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:d4dd58e64afeecc9705a3b4219d25fc17fcd44464674e356a44a04773c3762d9
+		ghcr.io/wolfi-dev/sdk:latest@sha256:e3b083572a1bccad1929f400bc78941abbb5d1a062396b756d6b881017ee5008
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
+
+.PHONY: fetch-baselayout
+fetch-baselayout:
+	echo "Fetching baselayout from GCS..." && \
+		mkdir -p ./packages/x86_64/ && \
+		mkdir -p ./packages/aarch64/ && \
+		gsutil cp $(GCS_FETCH_BUCKET_NAME)chainguard-enterprise.rsa.pub ./packages/ && \
+        gsutil cp $(GCS_FETCH_BUCKET_NAME)x86_64/APKINDEX.tar.gz ./packages/x86_64/ && \
+        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)x86_64/chainguard-baselayout-* ./packages/x86_64/ && \
+        gsutil cp $(GCS_FETCH_BUCKET_NAME)aarch64/APKINDEX.tar.gz ./packages/aarch64/ && \
+        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)aarch64/chainguard-baselayout-* ./packages/aarch64/
+
+SINGLE_PACKAGE ?= unknown
+
+.PHONY: fetch-single-package
+fetch-single-package: fetch-baselayout
+	echo "Fetching single package from GCS..." && \
+		mkdir -p ./packages/x86_64/ && \
+		mkdir -p ./packages/aarch64/ && \
+        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)x86_64/$(SINGLE_PACKAGE)-* ./packages/x86_64/ && \
+        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)aarch64/$(SINGLE_PACKAGE)-* ./packages/aarch64/
+
+# List of package names to fetch, separated by spaces
+PACKAGES ?= unknown
+
+.PHONY: fetch-multiple-packages
+fetch-multiple-packages: $(addprefix fetch-package-,$(PACKAGES))
+
+fetch-package-%:
+	@echo "Fetching package $* from GCS..."
+	@$(MAKE) fetch-single-package SINGLE_PACKAGE=$*
+
+.PHONY: fetch-all-packages
+fetch-all-packages:
+	echo "Fetching all packages from GCS..." && \
+		mkdir -p ./packages/ && \
+		gsutil -m cp -r -n 'gs://chainguard-enterprise-registry-destination/os/*' packages/
