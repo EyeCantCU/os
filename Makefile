@@ -145,7 +145,7 @@ debug/%:
 	$(info pkgver $(pkgver))
 	@mkdir -p ./"$*"/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
-	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(srcdirflag) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
+	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 test/%:
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))

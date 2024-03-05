@@ -1,0 +1,113 @@
+package:
+  name: argo-workflows-fips
+  version: 3.5.5
+  epoch: 0
+  description: Workflow engine for Kubernetes.
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go-fips
+      - nodejs-20
+      - openssl
+      - python3
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: c80b2e91ebd7e7f604e88442f45ec630380effa0
+      repository: https://github.com/argoproj/argo-workflows
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: github.com/docker/docker@v24.0.7
+      replaces: github.com/whilp/git-urls=github.com/dlorenc/git-urls@v0.0.1
+
+  - runs: |
+      # NODE_OPTIONS has to been set
+      sed -i 's/NODE_OPTIONS='\''[^'\'']*'\''/NODE_OPTIONS='\''--openssl-legacy-provider'\''/g' ui/package.json
+      cp ui/package.json .
+      cp ui/yarn.lock .
+
+      yarn install
+      yarn cache clean
+
+      # Our global LDFLAGS conflict with a Makefile parameter
+      unset LDFLAGS
+
+      make dist/workflow-controller
+      make dist/argo
+      make dist/argoexec
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mv dist/argo ${{targets.destdir}}/usr/bin/
+
+  - uses: strip
+
+subpackages:
+  - name: "argo-workflows-known-hosts-fips"
+    description: "known hosts file for argo workflows"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc/ssh
+          cp hack/ssh_known_hosts ${{targets.subpkgdir}}/etc/ssh/
+      - uses: strip
+
+  - name: "argo-workflow-controller-fips"
+    description: "Argo workflow controller"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin/
+          mv dist/workflow-controller ${{targets.subpkgdir}}/usr/bin/
+      - uses: strip
+
+  - name: "argo-workflow-executor-fips"
+    description: "Argo workflow executor"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin/
+          mv dist/argoexec ${{targets.subpkgdir}}/usr/bin/
+      - uses: strip
+
+  - name: argo-workflow-controller-compat-fips
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/workflow-controller ${{targets.subpkgdir}}/workflow-controller
+    dependencies:
+      runtime:
+        - argo-workflow-controller-fips
+
+  - name: argo-workflow-executor-compat-fips
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/argoexec ${{targets.subpkgdir}}/argoexec
+    dependencies:
+      runtime:
+        - argo-workflow-executor-fips
+
+  - name: argo-workflow-cli-fips
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /
+          # Argocli serves the server https://github.com/argoproj/argo-workflows/blob/master/Dockerfile#L110
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/argo ${{targets.subpkgdir}}/argo
+    dependencies:
+      runtime:
+        - argo-workflows-fips
+
+update:
+  enabled: true
+  github:
+    identifier: argoproj/argo-workflows
+    strip-prefix: v
