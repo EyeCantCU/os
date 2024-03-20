@@ -1,0 +1,149 @@
+package:
+  name: firefox-esr
+  version: 115.8.0
+  epoch: 0
+  description: Firefox web browser - Extended Support Release
+  copyright:
+    - license: GPL-3.0-only AND LGPL-2.1-only AND LGPL-3.0-only AND MPL-2.0
+  dependencies:
+    runtime:
+      - mesa-gl
+      - pciutils-libs
+
+environment:
+  contents:
+    packages:
+      - alsa-lib
+      - alsa-lib-dev
+      - bash
+      - build-base
+      - busybox
+      - cairo-dev
+      - clang-17
+      - clang-17-dev
+      - dbus-dev
+      - dbus-glib-dev
+      - dbus-libs
+      - expat-dev
+      - fribidi-dev
+      - glib-dev
+      - gnutar
+      - gtk-3
+      - gtk-3-dev
+      - harfbuzz-dev
+      - libice-dev
+      - libsm-dev
+      - libxcomposite-dev
+      - libxcursor-dev
+      - libxdamage-dev
+      - libxfixes-dev
+      - libxft-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxtst-dev
+      - llvm17
+      - llvm-lld-17
+      - m4
+      - mercurial=6.4.5-r0
+      - nasm
+      - nodejs
+      - pango-dev
+      - pulseaudio-dev
+      - py3.11-pip
+      - python-3.11
+      - python-3.11-dev
+      - rust
+      - wasi-sdk-libclang-rt-builtins
+      - wasi-sdk-sysroot
+      - wget
+
+var-transforms:
+  - from: ${{package.version}}
+    match: \.
+    replace: '_'
+    to: mangled-package-version
+
+pipeline:
+  - runs: |
+      # Craft the name of the final distfile.
+      distfile="obj-${{cross.triplet.gnu.glibc}}/dist/firefox-${{package.version}}.en-US.linux-${{build.arch}}.tar.bz2"
+
+      RELEASE_TAG=FIREFOX_${{vars.mangled-package-version}}esr_RELEASE
+      echo "RELEASE_TAG=${RELEASE_TAG}"
+
+      # This gets the bootstrapper for the build system. It fails, but gets
+      # far enough along with the build time dependencies that we can
+      # keep going.
+      wget https://hg.mozilla.org/mozilla-central/raw-file/default/python/mozboot/bin/bootstrap.py
+
+      # Answer y to all prompts, and use the application
+      # as browser to reduce any imcompatibilities with the build system. One
+      # might be able to switch this to 'browser_artifact_mode' that uses
+      # prebuilt artifacts.
+      # This fails because it does not love wolfi like we do, but keep on
+      # going.
+      set +x
+      ! python3 bootstrap.py --no-interactive --application-choice browser
+      set -e
+      cd mozilla-unified
+
+      # Choose the proper release tag.
+      hg up -C ${RELEASE_TAG}
+
+      # TODO: Install this as cargo, prebuilt one does not work without nigtly
+      # rust, so something is amiss.
+      cargo install cbindgen
+      export PATH=/root/.cargo/bin:$PATH
+
+      # This fails because it does not love wolfi like we do, but keep on
+      # going.
+      set +x
+      ! ./mach bootstrap
+      set -e
+
+      # wasi stuff is version dependent, we're using 17, so copy it over
+      # there.
+      mkdir -p /usr/lib/clang/17/lib/wasi/
+      cp /usr/lib/clang/lib/wasi/libclang_rt.builtins-wasm32.a /usr/lib/clang/17/lib/wasi/
+
+      # Explicitly point to wasi-sysroot, so it picks up the wasi stuff.
+      # For some reason it does not pick it up by default? :shrug:
+      ./mach configure --with-wasi-sysroot=/usr/share/wasi-sysroot
+
+      # Well, alllrighty then, let's build...
+      ./mach build
+
+      # Assuming all goes well, package it up. I'm not sure if we need one, or
+      # both of these.
+      ./mach package
+      ./mach release
+
+      # Add some symlinks as other distros seem to do.
+      mkdir -p ${{targets.destdir}}/usr/lib
+      mkdir -p ${{targets.destdir}}/usr/bin
+      tar -jxvf ${distfile} -C ${{targets.destdir}}/usr/lib
+      ln -s /usr/lib/firefox/firefox ${{targets.destdir}}/usr/bin/firefox
+      ln -s /usr/bin/firefox ${{targets.destdir}}/usr/bin/firefox-esr-bin
+      ln -s /usr/bin/firefox ${{targets.destdir}}/usr/bin/firefox-esr
+      ln -s /usr/bin/firefox ${{targets.destdir}}/usr/bin/firefox-bin
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 16838
+
+test:
+  environment:
+    contents:
+      packages:
+        - wolfi-base
+  pipeline:
+    - runs: |
+        /usr/bin/firefox-bin --version | grep esr
+        /usr/bin/firefox-esr-bin --version | grep esr
+        /usr/bin/firefox-esr --version | grep esr
+        /usr/bin/firefox --version | grep esr
+        # Just takes a screenshot of google.com.
+        /usr/bin/firefox-esr-bin -screenshot https://www.google.com
+        # TODO: Add more tests here once we know how it works.
