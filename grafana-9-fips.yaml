@@ -1,0 +1,97 @@
+package:
+  name: grafana-9-fips
+  version: 9.5.18
+  epoch: 1
+  description: The open and composable observability and data visualization platform.
+  copyright:
+    - license: AGPL-3.0-or-later
+  dependencies:
+    runtime:
+      - openssl-config-fipshardened
+      - bash
+      - so:libcrypto.so.3
+      - so:libssl.so.3
+    provides:
+      - grafana-fips=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - findutils
+      - git
+      - go-fips
+      - nodejs-16
+      - posix-libc-utils
+      - py3-setuptools
+      - python3
+      - yarn
+      - openssl-config-fipshardened
+  environment:
+    CGO_ENABLED: "1"
+    NODE_OPTIONS: "--openssl-legacy-provider"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: f4c5a603b25f69127bfe065381ff454e55b334c5
+      repository: https://github.com/grafana/grafana
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: github.com/elazarl/goproxy@v0.0.0-20231117061959-7cc037d33fb5 github.com/go-jose/go-jose/v3@v3.0.3 google.golang.org/protobuf@v1.33.0 github.com/golang/protobuf@v1.5.4
+
+  - runs: |
+      yarn install
+      yarn run build
+      yarn run plugins:build-bundled
+
+      # Bump the version of wire used, the old version panics with new Go
+      # https://github.com/google/wire/issues/400
+      sed -i "s/v0.5.0/v0.6.0/g" .bingo/wire.mod
+      # this file uses type aliases which are supported on or after go1.9
+      sed -i "s/go1.3/go1.9/g" pkg/web/macaron.go
+
+      make build
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mv ./bin/linux-*/* ${{targets.destdir}}/usr/bin/
+
+  - name: package
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/grafana/plugins-bundled
+      mkdir -p ${{targets.destdir}}/usr/share/grafana/scripts
+      mkdir -p ${{targets.destdir}}/usr/share/grafana/bin
+
+      mv ./conf ${{targets.destdir}}/usr/share/grafana/
+      mv ./plugins-bundled/internal ${{targets.destdir}}/usr/share/grafana/plugins-bundled/
+      mv ./public ${{targets.destdir}}/usr/share/grafana/
+      mv ./scripts/*.sh ${{targets.destdir}}/usr/share/grafana/scripts/
+
+      mkdir -p ${{targets.destdir}}/etc/grafana/
+      cp ${{targets.destdir}}/usr/share/grafana/conf/sample.ini ${{targets.destdir}}/etc/grafana/grafana.ini
+
+subpackages:
+  - name: ${{package.name}}-oci-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/opt/grafana
+          mv ./packaging/docker/run.sh ${{targets.subpkgdir}}/opt/grafana/
+
+update:
+  enabled: true
+  github:
+    use-tag: true
+    identifier: grafana/grafana
+    tag-filter-prefix: v9.
+    strip-prefix: v
+
+test:
+  pipeline:
+    - runs: /usr/bin/grafana --version
+    - runs: /usr/bin/grafana -h
+    - runs: /usr/bin/grafana-server -v
+    - runs: /usr/bin/grafana-cli -v
