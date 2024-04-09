@@ -40,6 +40,11 @@ MELANGE_OPTS += -r ${EXTRAS_REPO}
 PKGLISTCMD += -k ${EXTRAS_KEY} -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 PKGLISTCMD += -r ${EXTRAS_REPO} -r https://packages.wolfi.dev/os
 
+# Enter interactive mode on failure for debug
+MELANGE_DEBUG_OPTS += --interactive
+MELANGE_DEBUG_OPTS += --package-append apk-tools
+MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
+
 # These are separate from MELANGE_OPTS because for building we need additional
 # ones that are not defined for tests.
 MELANGE_TEST_OPTS += --repository-append ${REPO}
@@ -125,6 +130,24 @@ package/%:
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	$(MAKE) yamlfile=$(yamlfile) srcdirflag="$(sourcedir)" pkgname=$* packages/$(ARCH)/$(pkgver).apk
+
+debug/%:
+	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
+	@if [ -z "$(yamlfile)" ]; then \
+		echo "Error: could not find yaml file for $*"; exit 1; \
+	else \
+		echo "yamlfile is $(yamlfile)"; \
+	fi
+	$(eval $(call get-package-dir,pkgdir,$(yamlfile)))
+	$(info found package dir as $(pkgdir))
+	$(eval $(call get-source-dir,sourcedir,$(pkgdir),$*))
+	$(info found source dir as $(sourcedir))   
+	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
+	@printf "Building package $* with version $(pkgver) from file $(yamlfile)\n"
+	@mkdir -p ./"$*"/
+	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
+	$(info @SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log)
+	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 test/%:
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
