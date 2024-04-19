@@ -14,14 +14,17 @@ GCS_FETCH_BUCKET_NAME ?= gs://chainguard-enterprise-registry-destination/os/
 
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
+MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
 MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
-MELANGE_OPTS += --signing-key ${KEY}
-MELANGE_OPTS += --pipeline-dir ./pipelines/
 MELANGE_OPTS += --arch ${ARCH}
-MELANGE_OPTS += --env-file build-${ARCH}.env
-MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
+
+MELANGE_BUILD_OPTS += ${MELANGE_OPTS}
+MELANGE_BUILD_OPTS += --signing-key ${KEY}
+MELANGE_BUILD_OPTS += --pipeline-dir ./pipelines/
+MELANGE_BUILD_OPTS += --env-file build-${ARCH}.env
+MELANGE_BUILD_OPTS += --namespace chainguard
 
 # Enter interactive mode on failure for debug
 MELANGE_DEBUG_OPTS += --interactive
@@ -29,12 +32,9 @@ MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 
 # These are separate from MELANGE_OPTS because for building we need additional
 # ones that are not defined for tests.
-MELANGE_TEST_OPTS += --repository-append ${REPO}
-MELANGE_TEST_OPTS += --keyring-append ${KEY}.pub
-MELANGE_TEST_OPTS += --arch ${ARCH}
+MELANGE_TEST_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
-MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
-MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+MELANGE_TEST_OPTS += --test-package-append wolfi-base
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
 # The list of packages to be built. The order matters.
@@ -103,7 +103,7 @@ endef
 #$(call get-source-dir,ret-variable-for-source-dir,package-dir,package-name)
 define get-source-dir
 	$(info getting source dir for package $(3) with dir $(2))
-	$(1) := $(shell set -x; if [[ "." == "$(2)" ]]; then \
+	$(1) := $(shell set -x; if [ "." = "$(2)" ]; then \
 		echo "--source-dir ./$(3)"; \
 	else \
 		echo "--source-dir $(2)"; \
@@ -128,7 +128,7 @@ package/%:
 packages/$(ARCH)/%.apk: $(KEY)
 	@mkdir -p ./$(pkgname)/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
-	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) $(srcdirflag) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
+	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) $(srcdirflag) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 debug/%:
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
@@ -148,6 +148,7 @@ debug/%:
 	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 test/%:
+	@mkdir -p ./$(*)/
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
 	@if [ -z "$(yamlfile)" ]; then \
 		echo "Error: could not find yaml file for $*"; exit 1; \
