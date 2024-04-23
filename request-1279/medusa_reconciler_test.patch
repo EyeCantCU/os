@@ -1,0 +1,188 @@
+diff --git a/controllers/k8ssandra/medusa_reconciler_test.go b/controllers/k8ssandra/medusa_reconciler_test.go
+index fe5d94c..9efd0b7 100644
+--- a/controllers/k8ssandra/medusa_reconciler_test.go
++++ b/controllers/k8ssandra/medusa_reconciler_test.go
+@@ -6,6 +6,8 @@ import (
+ 	"strings"
+ 	"testing"
+ 
++	"github.com/k8ssandra/k8ssandra-operator/pkg/meta"
++
+ 	cassdcapi "github.com/k8ssandra/cass-operator/apis/cassandra/v1beta1"
+ 	api "github.com/k8ssandra/k8ssandra-operator/apis/k8ssandra/v1alpha1"
+ 	medusaapi "github.com/k8ssandra/k8ssandra-operator/apis/medusa/v1alpha1"
+@@ -36,6 +38,7 @@ const (
+ 	prefixFromClusterSpec               = "prefix-from-cluster-spec"
+ 	defaultConcurrentTransfers          = 1
+ 	concurrentTransfersFromMedusaConfig = 2
++	expectedServiceAccount              = "c3cassandra"
+ )
+ 
+ func dcTemplate(dcName string, dataPlaneContext string) api.CassandraDatacenterTemplate {
+@@ -141,6 +144,18 @@ func medusaTemplate(configObjectReference *corev1.ObjectReference) *medusaapi.Me
+ 	return &template
+ }
+ 
++func testLabels() map[string]string {
++	return map[string]string{
++		"c3":   "ai",
++		"foo":  "bar",
++		"toto": "tutu",
++	}
++}
++
++func int64Ptr(i int64) *int64 {
++	return &i
++}
++
+ func createMultiDcClusterWithMedusa(t *testing.T, ctx context.Context, f *framework.Framework, namespace string) {
+ 	require := require.New(t)
+ 
+@@ -151,12 +166,93 @@ func createMultiDcClusterWithMedusa(t *testing.T, ctx context.Context, f *framew
+ 		},
+ 		Spec: api.K8ssandraClusterSpec{
+ 			Cassandra: &api.CassandraClusterTemplate{
++				DatacenterOptions: api.DatacenterOptions{
++					PodSecurityContext: &corev1.PodSecurityContext{
++						FSGroup:    int64Ptr(1001),
++						RunAsUser:  int64Ptr(1001),
++						RunAsGroup: int64Ptr(1001),
++					},
++				},
+ 				Datacenters: []api.CassandraDatacenterTemplate{
+ 					dcTemplate("dc1", f.DataPlaneContexts[0]),
+ 					dcTemplate("dc2", f.DataPlaneContexts[1]),
++					{
++						Meta: api.EmbeddedObjectMeta{
++							Name: "dc1",
++							Pods: meta.Tags{
++								Labels: testLabels(),
++							},
++						},
++						K8sContext: f.DataPlaneContexts[0],
++						Size:       3,
++						DatacenterOptions: api.DatacenterOptions{
++							ServiceAccount: expectedServiceAccount,
++							ServerVersion:  "3.11.14",
++							StorageConfig: &cassdcapi.StorageConfig{
++								CassandraDataVolumeClaimSpec: &corev1.PersistentVolumeClaimSpec{
++									StorageClassName: &defaultStorageClass,
++								},
++							},
++						},
++					},
++					{
++						Meta: api.EmbeddedObjectMeta{
++							Name: "dc2",
++							Pods: meta.Tags{
++								Labels: testLabels(),
++							},
++						},
++						K8sContext: f.DataPlaneContexts[1],
++						Size:       3,
++						DatacenterOptions: api.DatacenterOptions{
++							ServiceAccount: expectedServiceAccount,
++							ServerVersion:  "3.11.14",
++							StorageConfig: &cassdcapi.StorageConfig{
++								CassandraDataVolumeClaimSpec: &corev1.PersistentVolumeClaimSpec{
++									StorageClassName: &defaultStorageClass,
++								},
++							},
++						},
++					},
++				},
++			},
++			Medusa: &medusaapi.MedusaClusterTemplate{
++				ContainerImage: &images.Image{
++					Repository: medusaImageRepo,
++				},
++				StorageProperties: medusaapi.Storage{
++					StorageSecretRef: corev1.LocalObjectReference{
++						Name: cassandraUserSecret,
++					},
++				},
++				CassandraUserSecretRef: corev1.LocalObjectReference{
++					Name: cassandraUserSecret,
++				},
++				ReadinessProbe: &corev1.Probe{
++					InitialDelaySeconds: 1,
++					TimeoutSeconds:      2,
++					PeriodSeconds:       3,
++					SuccessThreshold:    1,
++					FailureThreshold:    5,
++				},
++				LivenessProbe: &corev1.Probe{
++					InitialDelaySeconds: 6,
++					TimeoutSeconds:      7,
++					PeriodSeconds:       8,
++					SuccessThreshold:    1,
++					FailureThreshold:    10,
++				},
++				Resources: &corev1.ResourceRequirements{
++					Limits: corev1.ResourceList{
++						corev1.ResourceCPU:    resource.MustParse("500m"),
++						corev1.ResourceMemory: resource.MustParse("1Gi"),
++					},
++					Requests: corev1.ResourceList{
++						corev1.ResourceCPU:    resource.MustParse("150m"),
++						corev1.ResourceMemory: resource.MustParse("500Mi"),
++					},
+ 				},
+ 			},
+-			Medusa: medusaTemplateWithoutConfigRef(),
+ 		},
+ 	}
+ 	require.NotNil(kc.Spec.Medusa.MedusaConfigurationRef)
+@@ -187,6 +283,8 @@ func createMultiDcClusterWithMedusa(t *testing.T, ctx context.Context, f *framew
+ 		return true
+ 	}, timeout, interval)
+ 
++	verifyStandaloneMedusaDeployment(t, medusaDeployment1)
++
+ 	require.True(f.ContainerHasEnvVar(medusaDeployment1.Spec.Template.Spec.Containers[0], "MEDUSA_RESOLVE_IP_ADDRESSES", "False"))
+ 
+ 	t.Log("check that the standalone Medusa service was created")
+@@ -560,6 +658,43 @@ func creatingSingleDcClusterWithoutPrefixInClusterSpecFails(t *testing.T, ctx co
+ 	require.Never(f.DatacenterExists(ctx, dc1Key), timeout, interval)
+ }
+ 
++func verifyStandaloneMedusaDeployment(t *testing.T, deployment *appsv1.Deployment) {
++	t.Log("Verifying standalone Medusa deployment")
++
++	assert.Eventually(t, func() bool {
++		if deployment == nil {
++			t.Logf("Standalone Medusa deployment is nil")
++			return false
++		}
++
++		if actualSA := deployment.Spec.Template.Spec.ServiceAccountName; actualSA != expectedServiceAccount {
++			t.Logf("Standalone Medusa deployment service account is [%s], expected [%s]", actualSA, expectedServiceAccount)
++			return false
++		}
++
++		expectedLabels := testLabels()
++		// Ensure that label selector is unchanged
++		expectedLabels["app"] = deployment.Name
++
++		actualLabels := deployment.Spec.Template.Labels
++
++		assert.Equal(t, expectedLabels, actualLabels, "Standalone Medusa deployment labels are not as expected")
++		assert.NotNil(t, deployment.Spec.Template.Spec.SecurityContext, "Standalone Medusa deployment security context is nil")
++		if deployment.Spec.Template.Spec.SecurityContext == nil {
++			return false
++		}
++
++		var expectedUser int64 = 1001
++
++		// Ensure pod security context is set
++		assert.Equal(t, &expectedUser, deployment.Spec.Template.Spec.SecurityContext.RunAsUser, "Standalone Medusa deployment runAsUser is not set")
++		assert.Equal(t, &expectedUser, deployment.Spec.Template.Spec.SecurityContext.RunAsGroup, "Standalone Medusa deployment runAsGroup is not set")
++		assert.Equal(t, &expectedUser, deployment.Spec.Template.Spec.SecurityContext.FSGroup, "Standalone Medusa deployment fsGroup is not set")
++
++		return true
++	}, timeout, interval, "Standalone Medusa deployment is invalid")
++}
++
+ func controlPlaneContextKey(f *framework.Framework, object metav1.Object, contextName string) framework.ClusterKey {
+ 	return framework.ClusterKey{NamespacedName: utils.GetKey(object), K8sContext: contextName}
+ }

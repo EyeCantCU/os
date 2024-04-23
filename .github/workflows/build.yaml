@@ -12,6 +12,9 @@ on:
 # Only run one build at a time to prevent out of sync signatures
 concurrency: build
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build packages
@@ -24,28 +27,20 @@ jobs:
 
     runs-on:
       group: cgi-builder-${{ matrix.arch }}
+    timeout-minutes: 600 # default is 360
 
     permissions:
       contents: read # To clone the repo
-      id-token: write # To federate with Octo STS
+      id-token: write # Needed to federate with Google
 
     container:
-      image: ghcr.io/wolfi-dev/sdk:latest@sha256:376e4465d3cc22c081e7e4b960d47413f5e958fd41031a8076340e4b18c94f7c
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:339906034b6fbe9a3e4e15404110010c03479ce38c24c6db794cbe7c72776ee2
       # TODO: Deprivilege
       options: |
         --cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/fuse --security-opt seccomp=unconfined --security-opt apparmor:unconfined
 
     steps:
-      - uses: chainguard-dev/octo-sts-action@6177b4481c00308b3839969c3eca88c96a91775f # v1.0.0
-        id: octo-sts
-        with:
-          scope: chainguard-dev
-          identity: enterprise-build
-
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-        with:
-          submodules: "recursive"
-          token: ${{ steps.octo-sts.outputs.token }}
+      - uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3
 
       - name: 'Trust the github workspace'
         run: |
@@ -83,10 +78,19 @@ jobs:
       - name: 'Build Enterprise Packages'
         timeout-minutes: 600
         run: |
-          make \
-            ARCH=${{ matrix.arch }} \
-            MELANGE_EXTRA_OPTS="--keyring-append=/gcsfuse/enterprise-registry/chainguard-enterprise.rsa.pub" \
-            all -j1
+          wolfictl build \
+            --runner bubblewrap \
+            --keyring-append /gcsfuse/enterprise-registry/chainguard-enterprise.rsa.pub \
+            --repository-append ./packages \
+            --keyring-append local-melange-enterprise.rsa.pub \
+            --repository-append https://packages.wolfi.dev/os \
+            --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub \
+            --signing-key local-melange-enterprise.rsa \
+            --arch ${{ matrix.arch }} \
+            --namespace chainguard \
+            --pipeline-dir ./pipelines/ \
+            --destination-repository https://packages.cgr.dev/os \
+            --trace ./packages/${{ matrix.arch }}/trace.json
 
       # Always run this step for https://github.com/wolfi-dev/os/issues/8698
       - if: ${{ always() }}
@@ -123,12 +127,33 @@ jobs:
             <(cat /gcsfuse/enterprise-registry/${{ matrix.arch }}/APKINDEX.tar.gz | tar -Oxz APKINDEX) \
             <(cat ./packages/${{ matrix.arch }}/APKINDEX.tar.gz | tar -Oxz APKINDEX) || true
 
+          # Move logs so we can upload them separately.
+          mv ./packages/${{ matrix.arch }}/buildlogs /tmp/buildlogs
+
+          # Move trace so we can upload it separately.
+          mv ./packages/${{ matrix.arch }}/trace.json /tmp/trace.json
+
+          # Create an archive for uploading
           tar -cvzf /tmp/packages-${{ matrix.arch }}.tar.gz ./packages/${{ matrix.arch }}
 
-      # Always run this step for https://github.com/wolfi-dev/os/issues/8698
+      # Always run these steps for https://github.com/wolfi-dev/os/issues/8698
+      - if: ${{ always() }}
+        name: 'Upload logs archive to GitHub Artifacts'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: logs-${{ matrix.arch }}
+          path: /tmp/buildlogs/
+          if-no-files-found: warn
+      - if: ${{ always() }}
+        name: 'Upload trace to GitHub Artifacts'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: trace-${{ matrix.arch }}
+          path: /tmp/trace.json
+          if-no-files-found: warn
       - if: ${{ always() }}
         name: 'Upload built packages archive to GitHub Artifacts'
-        uses: actions/upload-artifact@1eb3cb2b3e0f29609092a73eb033bb759a334595 # v4.1.0
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
         with:
           name: packages-${{ matrix.arch }}
           path: /tmp/packages-${{ matrix.arch }}.tar.gz
@@ -148,10 +173,14 @@ jobs:
 
     container:
       # NOTE: This step only signs and uploads, so it doesn't need any privileges
-      image: ghcr.io/wolfi-dev/sdk:latest@sha256:376e4465d3cc22c081e7e4b960d47413f5e958fd41031a8076340e4b18c94f7c
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:339906034b6fbe9a3e4e15404110010c03479ce38c24c6db794cbe7c72776ee2
 
     steps:
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3
 
       - name: 'Trust the github workspace'
         run: |
@@ -159,35 +188,50 @@ jobs:
           # running inside of a container action with the workspace mounted in.
           git config --global --add safe.directory "$(pwd)"
 
-      - uses: google-github-actions/auth@f6de81663f7788d05bd15bcce18f0e57f23f0846 # v2.0.1
+      - uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
         with:
           workload_identity_provider: "projects/618116202522/locations/global/workloadIdentityPools/prod-shared-e350/providers/prod-shared-gha"
           service_account: "prod-images-ci@prod-images-c6e5.iam.gserviceaccount.com"
 
-      - uses: google-github-actions/setup-gcloud@5a5f7b85fca43e76e53463acaa9d408a03c98d3a # v2.0.1
+      - uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
         with:
           project_id: prod-images-c6e5
 
       - name: 'Download x86_64 package archives'
-        uses: actions/download-artifact@21e5c25de9cf2ee24742cd3e822327f3be6dd2a3 # v4.1.1
+        uses: actions/download-artifact@9c19ed7fe5d278cd354c7dfd5d3b88589c7e2395 # v4.1.6
         with:
           path: /tmp/artifacts/
           name: packages-x86_64
 
       - name: 'Download aarch64 package archives'
-        uses: actions/download-artifact@21e5c25de9cf2ee24742cd3e822327f3be6dd2a3 # v4.1.1
+        uses: actions/download-artifact@9c19ed7fe5d278cd354c7dfd5d3b88589c7e2395 # v4.1.6
         with:
           path: /tmp/artifacts/
           name: packages-aarch64
 
-      - run: echo "${{ secrets.MELANGE_RSA }}" > ./chainguard-enterprise.rsa
+      # This is managed here: https://github.com/chainguard-dev/secrets/blob/main/enterprise-packages.tf
+      - uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
+        id: auth
+        with:
+          workload_identity_provider: "projects/12758742386/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "enterprise-packages@chainguard-github-secrets.iam.gserviceaccount.com"
+      - uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
+        with:
+          project_id: "chainguard-github-secrets"
+      - uses: 'google-github-actions/get-secretmanager-secrets@b655b87fa10e527c5c5a3abfd795c6f46e0399b1' # v2.1.1
+        id: secrets
+        with:
+          secrets: |-
+            token:chainguard-github-secrets/enterprise-packages-signing-key
+
+      - run: echo "${{ steps.secrets.outputs.token }}" > ./chainguard-enterprise.rsa
       - run: |
-          mkdir -p /etc/apk/keys
-          cp ./chainguard-enterprise.rsa.pub /etc/apk/keys/chainguard-enterprise.rsa.pub
+         mkdir -p /etc/apk/keys
+         cp ./chainguard-enterprise.rsa.pub /etc/apk/keys/chainguard-enterprise.rsa.pub
 
       - name: 'Update the APKINDEX'
         run: |
-          for arch in "x86_64" "aarch64"; do
+          for arch in "aarch64" "x86_64"; do
             mkdir -p ./packages/${arch}
 
             # Consolidate with the built artifacts
@@ -203,9 +247,18 @@ jobs:
             fi
           done
 
+      # We use a different GSA for our interaction with GCS.
+      - uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
+        with:
+          workload_identity_provider: "projects/618116202522/locations/global/workloadIdentityPools/prod-shared-e350/providers/prod-shared-gha"
+          service_account: "prod-images-ci@prod-images-c6e5.iam.gserviceaccount.com"
+      - uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
+        with:
+          project_id: "prod-images-c6e5"
+
       - name: 'Upload packages to GCS'
         run: |
-          for arch in "x86_64" "aarch64"; do
+          for arch in "aarch64" "x86_64"; do
             # Only attempt to upload when *.apk's exist
             apks=$(ls ./packages/${arch}/*.apk 2>/dev/null || true)
             if [ -n "$apks" ]; then
@@ -223,7 +276,7 @@ jobs:
           tar -cvzf /tmp/indexes.tar.gz --files-from to-include
 
       - name: 'Upload APKINDEX archive to GitHub Artifacts'
-        uses: actions/upload-artifact@1eb3cb2b3e0f29609092a73eb033bb759a334595 # v4.1.0
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
         with:
           name: indexes
           path: /tmp/indexes.tar.gz
@@ -240,10 +293,14 @@ jobs:
 
     container:
       # NOTE: This step only signs and uploads, so it doesn't need any privileges
-      image: ghcr.io/wolfi-dev/sdk:latest@sha256:376e4465d3cc22c081e7e4b960d47413f5e958fd41031a8076340e4b18c94f7c
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:339906034b6fbe9a3e4e15404110010c03479ce38c24c6db794cbe7c72776ee2
 
     steps:
-      - uses: actions/download-artifact@21e5c25de9cf2ee24742cd3e822327f3be6dd2a3 # v4.1.1
+      - uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/download-artifact@9c19ed7fe5d278cd354c7dfd5d3b88589c7e2395 # v4.1.6
 
       - name: 'Trust the github workspace'
         run: |
@@ -253,17 +310,17 @@ jobs:
 
       - id: auth
         name: 'Authenticate to Google Cloud'
-        uses: google-github-actions/auth@f6de81663f7788d05bd15bcce18f0e57f23f0846 # v2.0.1
+        uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
         with:
           workload_identity_provider: "projects/618116202522/locations/global/workloadIdentityPools/prod-shared-e350/providers/prod-shared-gha"
           service_account: "prod-images-ci@prod-images-c6e5.iam.gserviceaccount.com"
 
-      - uses: google-github-actions/setup-gcloud@5a5f7b85fca43e76e53463acaa9d408a03c98d3a # v2.0.1
+      - uses: google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200 # v2.1.0
         with:
           project_id: prod-images-c6e5
 
       - name: 'Download index archive'
-        uses: actions/download-artifact@21e5c25de9cf2ee24742cd3e822327f3be6dd2a3 # v4.1.1
+        uses: actions/download-artifact@9c19ed7fe5d278cd354c7dfd5d3b88589c7e2395 # v4.1.6
         with:
           path: /tmp/artifacts/
           name: indexes
@@ -272,7 +329,7 @@ jobs:
         run: |
           tar xvf /tmp/artifacts/indexes.tar.gz
 
-          for arch in "x86_64" "aarch64"; do
+          for arch in "aarch64" "x86_64"; do
             # Don't cache the APKINDEX.
             gcloud --quiet storage cp \
                 --cache-control=no-store \
@@ -292,7 +349,11 @@ jobs:
     if: failure()
     needs: [build, upload-packages, upload-index]
     steps:
-      - uses: rtCamp/action-slack-notify@f05987dc91a66984f1666f486497def2cf85183d # v2.2.1
+      - uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
+        with:
+          egress-policy: audit
+
+      - uses: rtCamp/action-slack-notify@4e5fb42d249be6a45a298f3c9543b111b02f7907 # v2.3.0
         env:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48
           SLACK_USERNAME: guardian

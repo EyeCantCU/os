@@ -19,23 +19,28 @@ jobs:
       packages: ${{steps.package-list.outputs.packages}}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Free up runner disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+      - uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3
 
       - name: Look for changed files
         id: changes
-        uses: tj-actions/changed-files@716b1e13042866565e00e85fd4ec490e186c4a2f #tj-actions/changed-files@v41.0.1
+        uses: tj-actions/changed-files@e052d30e1c0bdf27cd806b01ca3b393f47b50c62 #tj-actions/changed-files@v44.1.0
         with:
           files_yaml: |
             melange:
               - ./*.yaml # Only top level files without structure
               - ./*/*/*.melange.yaml # Support recursive melange files with the new naming convention.
 
-      - name: "Install wolfictl onto PATH"
-        run: |
-          # Copy wolfictl out of the wolfictl image and onto PATH
-          TMP=$(mktemp -d)
-          docker run --rm -i -v $TMP:/out --entrypoint /bin/sh ghcr.io/wolfi-dev/sdk:latest@sha256:376e4465d3cc22c081e7e4b960d47413f5e958fd41031a8076340e4b18c94f7c -c "cp /usr/bin/wolfictl /out"
-          echo "$TMP" >> $GITHUB_PATH
+      # this need to point to main to always get the latest
+      - uses: wolfi-dev/actions/install-wolfictl@main # main
 
       # Assuming that we have a list of changed files such as `foo.yaml` and `bar.yaml`, this
       # strips the list down into `foo` and `bar`.
@@ -67,6 +72,7 @@ jobs:
     name: Test building of packages
     runs-on:
       group: cgi-builder-${{ matrix.arch }}
+    timeout-minutes: 600 # default is 360
 
     strategy:
       matrix:
@@ -75,16 +81,25 @@ jobs:
     needs: changes
 
     container:
-      image: ghcr.io/wolfi-dev/sdk:latest@sha256:376e4465d3cc22c081e7e4b960d47413f5e958fd41031a8076340e4b18c94f7c
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:339906034b6fbe9a3e4e15404110010c03479ce38c24c6db794cbe7c72776ee2
       # TODO: Deprivilege
       options: |
         --cap-add NET_ADMIN --cap-add SYS_ADMIN --device /dev/fuse --security-opt seccomp=unconfined --security-opt apparmor:unconfined
+      volumes:
+        # GHA assumes we mount /var/run/docker.sock for dind, which means we're
+        # working with host bind mounts, so we need a volume on the host that
+        # we can leverage for other bind mounts created by melange commands
+        # using the docker runner.
+        #
+        # This is named `temp` on purpose so we don't interfere with the host's
+        # /tmp or the inner containers /tmp.
+        - "/temp:/temp"
 
     permissions:
       packages: read
       contents: read
       pull-requests: read
-      id-token: write
+      id-token: write # Needed to federate with Google
 
     env:
       PROJECT: prod-images-c6e5
@@ -94,17 +109,9 @@ jobs:
       packages_were_built: ${{ steps.file_check.outputs.exists }}
 
     steps:
-      - uses: chainguard-dev/octo-sts-action@6177b4481c00308b3839969c3eca88c96a91775f # v1.0.0
-        id: octo-sts
-        with:
-          scope: chainguard-dev
-          identity: enterprise-presubmit-build
-
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          submodules: "recursive"
-          token: ${{ steps.octo-sts.outputs.token }}
 
       - name: "Trust the github workspace"
         run: |
@@ -119,7 +126,7 @@ jobs:
           echo "epoch=$(date -u +%s)" >> "$GITHUB_OUTPUT"
         shell: bash
 
-      - uses: google-github-actions/auth@f6de81663f7788d05bd15bcce18f0e57f23f0846 # v2.0.1
+      - uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
         with:
           workload_identity_provider: "projects/618116202522/locations/global/workloadIdentityPools/prod-shared-e350/providers/prod-shared-gha"
           service_account: ${{ env.FQ_SERVICE_ACCOUNT }}
@@ -159,7 +166,7 @@ jobs:
           mkdir ../.melangecache
           for package in ${{needs.changes.outputs.packages}}; do
             make MELANGE_EXTRA_OPTS="--create-build-log --cache-dir=$(pwd)/../.melangecache --keyring-append=/gcsfuse/enterprise-registry/chainguard-enterprise.rsa.pub" REPO="$GITHUB_WORKSPACE/packages" package/$package -j1
-            make REPO="$GITHUB_WORKSPACE/packages" MELANGE_EXTRA_OPTS="--keyring-append=/gcsfuse/enterprise-registry/chainguard-enterprise.rsa.pub" test/$package -j1
+            TMPDIR="/temp" make REPO="$GITHUB_WORKSPACE/packages" MELANGE_EXTRA_OPTS="--runner docker --keyring-append=/gcsfuse/enterprise-registry/chainguard-enterprise.rsa.pub" test/$package -j1
           done
 
       - name: Check for file
@@ -215,7 +222,7 @@ jobs:
           wolfictl check diff
 
       - name: 'Upload built packages to GitHub artifacts'
-        uses: actions/upload-artifact@1eb3cb2b3e0f29609092a73eb033bb759a334595 # v4.1.0
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
         with:
           path: |
             ${{ steps.list_built_packages.outputs.files_to_upload }}
@@ -227,8 +234,7 @@ jobs:
   scan:
     name: "Scan packages for CVEs"
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/wolfi-dev/sdk:latest@sha256:376e4465d3cc22c081e7e4b960d47413f5e958fd41031a8076340e4b18c94f7c
+
     needs: build
     if: needs.build.outputs.packages_were_built == 'true'
 
@@ -237,14 +243,18 @@ jobs:
       id-token: write # Needed to federate with octo-sts
 
     steps:
+      - uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
+        with:
+          egress-policy: audit
+
       - name: 'Retrieve x86_64 packages'
-        uses: actions/download-artifact@21e5c25de9cf2ee24742cd3e822327f3be6dd2a3 # v4.1.1
+        uses: actions/download-artifact@9c19ed7fe5d278cd354c7dfd5d3b88589c7e2395 # v4.1.6
         with:
           name: packages-x86_64
           path: /tmp/artifacts-1/
 
       - name: 'Retrieve aarch64 packages'
-        uses: actions/download-artifact@21e5c25de9cf2ee24742cd3e822327f3be6dd2a3 # v4.1.1
+        uses: actions/download-artifact@9c19ed7fe5d278cd354c7dfd5d3b88589c7e2395 # v4.1.6
         with:
           name: packages-aarch64
           path: /tmp/artifacts-2/
@@ -260,19 +270,22 @@ jobs:
             cat /tmp/artifacts-2/packages.log >> ./packages.log
           fi
 
-      - uses: chainguard-dev/octo-sts-action@6177b4481c00308b3839969c3eca88c96a91775f # v1.0.0
+      - uses: octo-sts/action@6177b4481c00308b3839969c3eca88c96a91775f # v1.0.0
         id: octo-sts
         with:
           scope: chainguard-dev
           identity: enterprise-presubmit-build
 
       - name: 'Retrieve enterprise advisory data'
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@1d96c772d19495a3b5c517cd2bc0cb401ea0529f # v4.1.3
         with:
           repository: 'chainguard-dev/enterprise-advisories'
           path: 'data/enterprise-advisories'
           ref: 'main'
           token: ${{ steps.octo-sts.outputs.token }}
+
+      # this need to point to main to always get the latest action
+      - uses: wolfi-dev/actions/install-wolfictl@main # main
 
       - name: Scan for CVEs
         run: |
