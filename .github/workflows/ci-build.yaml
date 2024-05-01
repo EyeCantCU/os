@@ -97,9 +97,12 @@ jobs:
           # running inside of a container action with the workspace mounted in.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: "Print melange version"
+      - name: Generate snapshot date
+        id: snapshot-date
         run: |
-          melange version
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+        shell: bash
 
       - name: "Generate local signing key"
         run: |
@@ -145,6 +148,38 @@ jobs:
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
+          touch packages.log
+
+      - name: Identify newly built packages
+        id: list_built_packages
+        if: ${{ steps.file_check.outputs.exists == 'true'}}
+        run: |
+          {
+            echo 'files_to_upload<<EOF'
+
+            awk -F'|' '{ printf "./packages/%s/%s-%s.apk\n", $1, $3, $4}' < packages.log
+
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: "Check that packages can be installed with apk add"
+        run: |
+          # Create a fake linux fs under /tmp/emptyroot to pass to `apk --root`.
+          mkdir -p /tmp/emptyroot/etc/apk
+          cp -r /etc/apk/* /tmp/emptyroot/etc/apk/
+          cat /dev/null > /tmp/emptyroot/etc/apk/world
+
+          mkdir -p /tmp/emptyroot/lib/apk/db
+          touch /tmp/emptyroot/lib/apk/db/{installed,lock,scripts.tar,triggers}
+
+          mkdir -p /tmp/emptyroot/var/cache/apk
+          apk update --root /tmp/emptyroot
+
+          # Find .apk files and add them to the string
+          for f in $(echo "${{ steps.list_built_packages.outputs.files_to_upload }}"); do
+              tar -Oxf $f .PKGINFO
+              apk add --root /tmp/emptyroot --repository ./packages --allow-untrusted --simulate $f
+          done
 
       - name: Check sonames
         if: steps.file_check.outputs.exists == 'true'
@@ -181,7 +216,7 @@ jobs:
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
         with:
           path: |
-            ./packages/${{ matrix.arch }}
+            ${{ steps.list_built_packages.outputs.files_to_upload }}
             ./packages.log
           name: packages-${{ matrix.arch }}
           retention-days: 1
