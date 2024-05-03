@@ -1,7 +1,7 @@
 package:
   name: cilium-fips-1.14
   version: 1.14.9
-  epoch: 3
+  epoch: 4
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -66,13 +66,16 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: dfaccc1264521ecbb75d2f0766a0f6b2417a3e29
 
+  - uses: go/bump
+    with:
+      deps: github.com/go-jose/go-jose/v3@v3.0.3 golang.org/x/net@v0.23.0
+
   - uses: patch
     with:
       patches: loopback-location.patch
 
-  - uses: patch
-    with:
-      patches: go.mod.patch
+  - runs: |
+      sed -Ei 's/(go [0-9]+\.[0-9]+)\.[0-9]+/\1/' go.mod
 
   - runs: |
       # Remove groupadd from Makefile: it's not doing anything useful in
@@ -115,6 +118,11 @@ pipeline:
     with:
       patches: boringssl_fips.genrule_cmd.patch
 
+  - uses: go/bump
+    with:
+      deps: golang.org/x/net@v0.23.0
+      modroot: envoy
+
   - runs: |
       cd /home/build/envoy/proxylib
       make
@@ -141,6 +149,49 @@ pipeline:
   - uses: strip
 
 subpackages:
+  - name: ${{package.name}}-container-init
+    description: init scripts for cilium
+    dependencies:
+      provides:
+        - cilium-container-init-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          cp images/cilium/init-container.sh \
+             plugins/cilium-cni/install-plugin.sh \
+             plugins/cilium-cni/cni-uninstall.sh \
+            ${{targets.subpkgdir}}/usr/bin
+
+  - name: ${{package.name}}-container-init-compat
+    description: init scripts for cilium
+    dependencies:
+      runtime:
+        - ${{package.name}}-container-init
+      provides:
+        - cilium-container-init-compat-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}
+          ln -sf /usr/bin/init-container.sh ${{targets.subpkgdir}}/init-container.sh
+          ln -sf /usr/bin/install-plugin.sh ${{targets.subpkgdir}}/install-plugin.sh
+          ln -sf /usr/bin/cni-uninstall.sh ${{targets.subpkgdir}}/cni-uninstall.sh
+
+  - name: ${{package.name}}-iptables
+    description: iptables compatibility package for cilium
+    dependencies:
+      runtime:
+        - iptables
+      provides:
+        - cilium-iptables-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          # This script generates a wrapper based on the version
+          # of iptables provided by the build environment.
+          ./images/runtime/iptables-wrapper-installer.sh
+          mkdir -p ${{targets.subpkgdir}}/sbin
+          mv /sbin/iptables-wrapper ${{targets.subpkgdir}}/sbin/iptables-wrapper
+      - uses: strip
+
   - name: ${{package.name}}-operator-generic
     description: Generic operator for cilium
     dependencies:
@@ -149,9 +200,6 @@ subpackages:
       provides:
         - cilium-operator-generic-fips=${{package.full-version}}
     pipeline:
-      - uses: go/bump
-        with:
-          deps: github.com/go-jose/go-jose/v3@v3.0.3
       - runs: |
           cd /home/build/operator
           make cilium-operator-generic
