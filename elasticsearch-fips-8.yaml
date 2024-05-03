@@ -1,0 +1,134 @@
+# NOTE: A license is required to use this package!
+# To run Elasticsearch in FIPS mode, you will need to provide a license key. To obtain
+# a license for Elasticsearch, see their subscriptions page [here](https://www.elastic.co/subscriptions).
+# This package is equipped with the essential components for Elasticsearch to operate in
+# FIPS mode. However, it's important for users to ensure they use it in line with
+# FIPS compliance standards.
+# This includes tasks such as keystore generation, configuration, and launching
+# Elasticsearch with the correct configuration parameters.
+package:
+  name: elasticsearch-fips-8
+  version: 8.13.2
+  epoch: 0
+  description:
+  copyright:
+    - license: SSPL-1.0 and Elastic-2.0
+  dependencies:
+    runtime:
+      - bash # some helper scripts use bash
+      - busybox
+      - elasticsearch-fips-8-config
+      - openjdk-17-jre-bcfips
+      - openjdk-17-default-jvm-bcfips
+      - openssl-config-fipshardened
+      - tini
+    provides:
+      - elasticsearch=${{package.full-version}}
+
+environment:
+  environment:
+    LANG: "en_US.UTF-8"
+  contents:
+    packages:
+      - busybox
+      - openjdk-17
+      - openjdk-17-default-jvm
+      - bouncycastle-fips
+      - wolfi-base
+      - build-base
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/elasticsearch
+      tag: v${{package.version}}
+      expected-commit: 16cc90cd2d08a3147ce02b07e50894bc060a4cbf
+
+  - uses: patch
+    with:
+      patches: |
+        geoip-cli-gradle.patch
+        gradle-build-versions.patch
+        gradle-verification-metadata.patch
+        ingest-attachment-gradle.patch
+        x-content-gradle.patch
+        build-gradle-x-pack-core.patch
+        build-gradle-x-pack-security.patch
+        build-gradle-modules-repo-azure.patch
+        build-gradle-modules-transport-netty.patch
+
+  - runs: |
+      ./gradlew localDistro
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/logs
+
+      # https://github.com/elastic/elasticsearch/blob/d87b93f3174e82a86f4fad0ea8b85ac7b454f96d/plugins/examples/settings.gradle#L59-L76
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        BUILD_DIR="linux-aarch64-tar"
+      else
+        BUILD_DIR="linux-tar"
+      fi
+
+      find distribution/archives
+      install -dm777 ${{targets.destdir}}/usr/share/elasticsearch/
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}-SNAPSHOT/bin ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}-SNAPSHOT/lib ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}-SNAPSHOT/config ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}-SNAPSHOT/modules ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}-SNAPSHOT/plugins ${{targets.destdir}}/usr/share/elasticsearch
+
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
+      # Set permissions to read/write the config dir
+      chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
+        name=$(basename $i)
+        ln -sf /usr/share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+      done
+
+      # We get this from elasticsearch-fips-8-config
+      mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
+      sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
+
+      # To remove jar-hell problem
+      rm -rf ${{targets.destdir}}/usr/share/elasticsearch/modules/x-pack-core/bc-fips-1.0.2.4.jar
+      rm -rf ${{targets.destdir}}/usr/share/elasticsearch/modules/x-pack-core/bcpg-fips-1.0.7.1.jar
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/lib
+
+      # elasticsearch requires bcfips jars.
+      # Symlink these from runtime dependency: 'openjdk-17-bcfips'.
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/elasticsearch/lib/
+
+      # Add java.policy
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/config
+      mv java.policy ${{targets.destdir}}/usr/share/elasticsearch/config/java.policy
+
+subpackages:
+  - name: elasticsearch-fips-8-config
+    description: Creates a usable elasticsearch.yml config
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/share/elasticsearch/config
+          install -m644 elasticsearch.yml ${{targets.subpkgdir}}/usr/share/elasticsearch/config/elasticsearch.yml
+
+test:
+  environment:
+    environment:
+      ES_JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
+  pipeline:
+    - runs: |
+        # Using generic tests as entire tests require creation of keystore and it requires separate env
+        /usr/share/elasticsearch/bin/elasticsearch -h
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/elasticsearch
+    strip-prefix: v
+    tag-filter: v8.
