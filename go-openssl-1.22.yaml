@@ -1,14 +1,17 @@
-# NB! this source patches are also used by go-openssl-1.22
+## go-openssl-1.22 is vanilla-build of golang-fips/go patches that
+## produce binaries that can opt-in/out of FIPS mode, or require
+## non-FIPS altogether. This one is only shipped as an image to
+## customers as 3rd party software, not to be used to build any wolfi
+## packages. this package uses the patches from the go-fips-1.22
+## package, which are symlinked to the ./go-openssl-1.22 directory.
 package:
-  name: go-fips-1.22
+  name: go-openssl-1.22
   version: 1.22.3
   epoch: 1
-  description: "the Go programming language"
+  description: "pure unpatched https://github.com/golang-fips/go toolchain"
   copyright:
     - license: BSD-3-Clause
   dependencies:
-    provides:
-      - go-fips=${{package.full-version}}
     runtime:
       - '!go-1.22'
       - bash
@@ -85,22 +88,9 @@ pipeline:
         with:
           patches: /home/build/golang-fips/013-fixes.patch
 
-  # now the extra patches
-  - working-directory: /home/build/go
-    pipeline:
-      - uses: patch
-        with:
-          patches: /home/build/extra/0001-openssl-fips-unconditionally-use-openssl-backend.patch
-      - uses: patch
-        with:
-          patches: /home/build/extra/0002-boring-always-enable-access-to-boring.Enabled-functi.patch
-      - uses: patch
-        with:
-          patches: /home/build/extra/cmd-go-always-emit-ldflags-version-information.patch
-
   - runs: |
       cd go/src
-      GOEXPERIMENT=boringcrypto ./make.bash -v
+      ./make.bash -v
 
   - runs: |
       cd go
@@ -206,10 +196,26 @@ test:
             exit 1
         fi
 
-        ./sha256 "Go Cubs Go" > sha256.out 2>&1 && rc=0 || rc=$?
-        [ $rc -eq 0 ] && fail "ERROR: sha256 ran successfully without fips provider"
-        [ $rc -eq 2 ] || { cat sha256.out; fail "ERROR: expected rc=2 found rc=$rc:"; }
-        grep -q "panic.*opensslcrypto" sha256.out || {
-          cat sha256.out
-          fail "sha256 output did not contain panic.*opensslcrypto"
+        # vanilla golang-fips/go allows the caller to control behavior
+        # https://github.com/golang-fips/go/blob/8092b8157908b59e5930a1247b6f41842a25f89e/patches/003-init-openssl-v2-backend.patch
+        # + // 0: FIPS opt-out: abort the process if it is enabled and can't be disabled.
+        # + // 1: FIPS required: abort the process if it is not enabled and can't be enabled.
+        run_test() {
+          local gfval="$1" exrc="$2" msg="$3" rc=""
+          shift 3
+          # env -i cleans environment
+          set -- env -i ${gfval:+"GOLANG_FIPS=$gfval"} ./sha256 "Go Cubs Go"
+          echo "$msg"
+          echo "execute:" "$@"
+          "$@" >sha256.out 2>&1 && rc=0 || rc=$?
+          echo "expected rc=$exrc found=$rc"
+          if [ "$exrc" != "$rc" ]; then
+              cat sha256.out
+              fail "ERROR: sha256 ran and exited $exrc when GOLANG_FIPS=$gfval. expected $rc."
+          fi
         }
+
+        set +x
+        run_test 0  0 "GOLANG_FIPS=0 should run fine outside fips environment"
+        run_test "" 0 "unset GOLANG_FIPS should run fine outside fips environment"
+        run_test 1  2 "GOLANG_FIPS=1 should fail outside fips environment"
