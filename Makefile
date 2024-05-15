@@ -168,7 +168,7 @@ dev-container:
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:e3b083572a1bccad1929f400bc78941abbb5d1a062396b756d6b881017ee5008
+			ghcr.io/wolfi-dev/sdk:latest@sha256:3dfec67aef242ea65469111ffb5f2eb92c70f422615e07f3ae3646ccf5048b5c
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -237,7 +237,7 @@ dev-container-wolfi:
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:e3b083572a1bccad1929f400bc78941abbb5d1a062396b756d6b881017ee5008
+		ghcr.io/wolfi-dev/sdk:latest@sha256:3dfec67aef242ea65469111ffb5f2eb92c70f422615e07f3ae3646ccf5048b5c
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
