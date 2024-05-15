@@ -1,0 +1,91 @@
+package:
+  name: kibana-8.13
+  version: 8.13.4
+  epoch: 0
+  description: Your window into the Elastic Stack
+  copyright:
+    - license: Apache-2.0
+    - license: BSD-3-Clause
+    - license: Elastic-2.0
+    - license: ISC
+    - license: MIT
+  resources:
+    cpu: 42 # max is 48 for arm64
+    memory: 64Gi
+  dependencies:
+    provides:
+      - kibana=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - jq
+      - node-gyp
+      - npm
+      - python3
+      - wget
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/kibana
+      tag: v${{package.version}}
+      expected-commit: f5dc24d1969f80e4aa3ced7cc375dd00554f8c0c
+
+  - runs: |
+      # find kibana's pinned node version, download it, use it to bootstrap
+      # it will run bazel and then vendor a copy.
+      node_version=$(jq -r .engines.node package.json)
+      arch="x64"
+      if [ $(uname -m) != "x86_64" ]; then
+        arch="arm64"
+      fi
+      node_filename="node-v${node_version}-linux-${arch}.tar.xz"
+      node_sha256sum=$(egrep -o "linux-${arch}.+[a-z0-9]{32}" WORKSPACE.bazel |awk -F '"' '{print $NF}')
+      node_url="https://us-central1-elastic-kibana-184716.cloudfunctions.net/kibana-ci-proxy-cache/dist/v${node_version}/${node_filename}"
+      wget $node_url
+      our_sha256sum=$(sha256sum $node_filename |awk '{print $1}')
+      if [ $our_sha256sum != $node_sha256sum ]; then
+        echo "mismatched sha256sums: ours=$our_sha256sum theirs=$node_sha256sum"
+        exit 1
+      fi
+      unxz $node_filename
+      tar xf $(basename -s .xz $node_filename) -C /usr --strip-components=1
+
+  - runs: |
+      yarn install --force-install
+      yarn kbn bootstrap --allow-root
+
+  - runs: |
+      # builds fail in x86_64 CI without upping bazel's available memory
+      echo "startup --host_jvm_args=-Xmx40g" >> ~/.bazelrc
+      NODE_OPTIONS="--huge-max-old-generation-size" node --no-memory-reducer --no-compact --predictable scripts/build --release --skip-os-packages --skip-canvas-shareable-runtime --skip-docker-ubi --skip-docker-ubuntu --skip-docker-fips
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/usr/share/kibana
+      tar xf target/kibana-${{package.version}}-linux-*.tar.gz -C ${{targets.destdir}}/usr/share/kibana --strip-components=1
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/kibana
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+  pipeline:
+    - runs: |
+        export HOME=/usr/share/kibana
+        cd $HOME
+        ./node/bin/node src/cli/dist.js |head -n 1 |jq -r .config.serviceVersion.value |grep ${{package.version}}
