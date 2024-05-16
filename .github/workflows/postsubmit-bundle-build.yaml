@@ -1,0 +1,120 @@
+name: Bundle Build Enterprise Packages
+
+on:
+  workflow_dispatch:
+
+# Only run one build at a time to prevent out of sync signatures.
+concurrency: bundle-build
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build packages
+    if: github.repository == 'chainguard-dev/enterprise-packages'
+
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:ab0a3520b29f737b1219bb744f282e3e28bb55c889bc89e5a289f8a5e9380678
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@a4aa98b93cab29d9b1101a6143fb8bce00e2eac4 # v2.7.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@44c2b7a8a4ea60a981eaca3cf939b5f4305c123b # v4.1.5
+
+      - name: Authenticate to Google Cloud
+        uses: "google-github-actions/auth@71fee32a0bb7e97b4d33d548e7d957010649d8fa" # v2.1.3
+        with:
+          workload_identity_provider: "projects/567187841907/locations/global/workloadIdentityPools/bundle-post-enterprise/providers/github-provider"
+          service_account: "bundle-runner-post-enterprise@staging-images-183e.iam.gserviceaccount.com"
+      - name: Setup G Cloud SDK
+        uses: "google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200" # v2.0.11
+      - name: Print gcloud info
+        shell: bash
+        run: "gcloud info"
+      - name: Configure GCR auth
+        shell: bash
+        run: gcloud auth configure-docker
+      - name: Configure AR auth
+        shell: bash
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Connect to cluster
+        uses: "google-github-actions/get-gke-credentials@c02be8662df01db62234e9b9cff0765d1c1827ae" # v2.1.0
+        with:
+          cluster_name: "bundle-runner-a"
+          location: "us-central1"
+          project_id: "staging-images-183e"
+
+      - name: kubectl test
+        shell: bash
+        run: |
+          apk add kubectl
+          kubectl get namespaces
+
+      - name: "Generate local signing key"
+        run: |
+          make local-melange.rsa
+
+      - name: "bundle build"
+        shell: bash
+        env:
+          BUNDLE_REPO: us-central1-docker.pkg.dev/staging-images-183e/bundles
+          BUCKET: "chainguard-staging-enterprise-registry-destination/${{ github.run_id }}"
+        run: |
+          set -x
+          set -v
+
+          COMMON_FLAGS=$(cat <<-END
+            --keyring-append ./local-melange.rsa.pub
+            --keyring-append https://packages.cgr.dev/os/chainguard-enterprise.rsa.pub
+            --repository-append https://packages.cgr.dev/os
+            --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+            --repository-append https://packages.wolfi.dev/os
+          END
+          )
+
+          BUNDLE=$(wolfictl bundle \
+            --bundle-base ghcr.io/wolfi-dev/sdk:latest \
+            --bundle-repo "${BUNDLE_REPO}" \
+            ${COMMON_FLAGS} \
+            --runner bubblewrap \
+            )
+          wolfictl build \
+            --jobs 64 \
+            --bucket "${BUCKET}" \
+            ${COMMON_FLAGS} \
+            --signing-key ./local-melange.rsa \
+            --bundle "${BUNDLE}"
+
+  postrun:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    if: failure() && false # TODO(kleung): remove `&& false` when ready to slack
+    needs: [build]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@a4aa98b93cab29d9b1101a6143fb8bce00e2eac4 # v2.7.1
+        with:
+          egress-policy: audit
+
+      - uses: rtCamp/action-slack-notify@4e5fb42d249be6a45a298f3c9543b111b02f7907 # v2.3.0
+        env:
+          SLACK_ICON: http://github.com/chainguard-dev.png?size=48
+          SLACK_USERNAME: guardian
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: chainguard-images-alerts
+          SLACK_MSG_AUTHOR: wolfi-bot
+          SLACK_COLOR: "#8E1600"
+          MSG_MINIMAL: "true"
+          SLACK_TITLE: "[bundle build enterprise] failure: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_MESSAGE: |
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
