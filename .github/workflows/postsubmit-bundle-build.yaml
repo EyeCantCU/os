@@ -2,9 +2,23 @@ name: Bundle Build Enterprise Packages
 
 on:
   workflow_dispatch:
+    inputs:
+      cluster_name:
+        required: false
+        type: choice
+        default: "bundle-runner-a"
+        description: "name of cluster to run build on."
+        options:
+          - "bundle-runner-a"
+          - "bundle-a-nap"
+      package_names:
+        required: false
+        type: string
+        default: ""
+        description: "comma separated list of package names to build. If empty, build all packages."
 
 # Only run one build at a time to prevent out of sync signatures.
-concurrency: bundle-build
+concurrency: ${{ github.event.inputs.cluster_name || 'bundle-runner-a' }}
 
 permissions:
   contents: read
@@ -14,13 +28,16 @@ jobs:
     name: Build packages
     if: github.repository == 'chainguard-dev/enterprise-packages'
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-8-core
     container:
       image: ghcr.io/wolfi-dev/sdk:latest@sha256:ab0a3520b29f737b1219bb744f282e3e28bb55c889bc89e5a289f8a5e9380678
 
     permissions:
       id-token: write
       contents: read
+
+    env:
+      CLUSTER_NAME: ${{ github.event.inputs.cluster_name || 'bundle-runner-a' }}
 
     steps:
       - name: Harden Runner
@@ -37,6 +54,8 @@ jobs:
           service_account: "bundle-runner-post-enterprise@staging-images-183e.iam.gserviceaccount.com"
       - name: Setup G Cloud SDK
         uses: "google-github-actions/setup-gcloud@98ddc00a17442e89a24bbf282954a3b65ce6d200" # v2.0.11
+        with:
+          install_components: 'gke-gcloud-auth-plugin'
       - name: Print gcloud info
         shell: bash
         run: "gcloud info"
@@ -50,7 +69,7 @@ jobs:
       - name: Connect to cluster
         uses: "google-github-actions/get-gke-credentials@c02be8662df01db62234e9b9cff0765d1c1827ae" # v2.1.0
         with:
-          cluster_name: "bundle-runner-a"
+          cluster_name: ${{ env.CLUSTER_NAME }}
           location: "us-central1"
           project_id: "staging-images-183e"
 
@@ -64,10 +83,6 @@ jobs:
         run: |
           make local-melange-enterprise.rsa
 
-      - name: "Pull enterprise key"
-        run: |
-          gsutil cp gs://chainguard-enterprise-registry-destination/os/chainguard-enterprise.rsa.pub .
-
       - name: "bundle build"
         shell: bash
         env:
@@ -79,7 +94,7 @@ jobs:
 
           COMMON_FLAGS=$(cat <<-END
             --keyring-append ./local-melange-enterprise.rsa.pub
-            --keyring-append ./chainguard-enterprise.rsa.pub
+            --keyring-append https://raw.githubusercontent.com/wolfi-dev/os/main/chainguard-keys/chainguard-enterprise.rsa.pub
             --repository-append https://packages.cgr.dev/os
             --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
             --repository-append https://packages.wolfi.dev/os
@@ -91,6 +106,7 @@ jobs:
             --bundle-repo "${BUNDLE_REPO}" \
             ${COMMON_FLAGS} \
             --runner bubblewrap \
+            ${{ github.event.inputs.package_names }}
             )
           wolfictl build \
             --jobs 64 \
