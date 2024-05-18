@@ -1,0 +1,92 @@
+package:
+  name: kibana-7.17
+  version: 7.17.21
+  epoch: 0
+  description: Your window into the Elastic Stack
+  copyright:
+    - license: Apache-2.0
+    - license: BSD-3-Clause
+    - license: Elastic-2.0
+    - license: ISC
+    - license: MIT
+  target-architecture:
+    - x86_64
+  dependencies:
+    provides:
+      - kibana=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - jq
+      - node-gyp
+      - npm
+      - python3
+      - wget
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/kibana
+      tag: v${{package.version}}
+      expected-commit: 34995fdf7c8c448c6fc99cd0a5e50c88479ff59f
+
+  - runs: |
+      # find kibana's pinned node version, download it, use it to bootstrap
+      # it will run bazel and then vendor a copy.
+      node_version=$(jq -r .engines.node package.json)
+      arch="x64"
+      if [ $(uname -m) != "x86_64" ]; then
+        arch="arm64"
+      fi
+      node_filename="node-v${node_version}-linux-${arch}.tar.xz"
+      node_sha256sum=$(egrep -o "linux-${arch}.+[a-z0-9]{32}" WORKSPACE.bazel |awk -F '"' '{print $NF}')
+      node_url="https://us-central1-elastic-kibana-184716.cloudfunctions.net/kibana-ci-proxy-cache/dist/v${node_version}/${node_filename}"
+      wget $node_url
+      our_sha256sum=$(sha256sum $node_filename |awk '{print $1}')
+      if [ $our_sha256sum != $node_sha256sum ]; then
+        echo "mismatched sha256sums: ours=$our_sha256sum theirs=$node_sha256sum"
+        exit 1
+      fi
+      unxz $node_filename
+      tar xf $(basename -s .xz $node_filename) -C /usr --strip-components=1
+
+  - runs: |
+      yarn install --force-install
+      yarn kbn bootstrap --allow-root
+
+  - runs: |
+      # builds fail in x86_64 CI without upping bazel's available memory
+      echo "startup --host_jvm_args=-Xmx40g" >> ~/.bazelrc
+      NODE_OPTIONS="--huge-max-old-generation-size" node --no-memory-reducer --no-compact --predictable scripts/build --release --skip-os-packages --skip-docker-ubi --skip-docker-ubuntu
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/usr/share/kibana
+      tar xf target/kibana-${{package.version}}-linux-*.tar.gz -C ${{targets.destdir}}/usr/share/kibana --strip-components=1
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/kibana
+    tag-filter: v7
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+  pipeline:
+    - runs: |
+        # Add a $HOME - otherwise node throws ENOENT when running uv_os_homedir syscal
+        export HOME=/usr/share/kibana
+        # 7.x throws errors when it can't connect to elasticsearch, so just check the version
+        /usr/share/kibana/bin/kibana --allow-root --version |grep ${{package.version}}
