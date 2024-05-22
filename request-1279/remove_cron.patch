@@ -1,18 +1,3 @@
-diff --git a/charts/k8ssandra-operator/templates/deployment.yaml b/charts/k8ssandra-operator/templates/deployment.yaml
-index 12585d9..c7a0535 100644
---- a/charts/k8ssandra-operator/templates/deployment.yaml
-+++ b/charts/k8ssandra-operator/templates/deployment.yaml
-@@ -47,10 +47,6 @@ spec:
-           valueFrom:
-             fieldRef:
-               fieldPath: spec.serviceAccountName
--        - name: OPERATOR_NAMESPACE
--          valueFrom:
--            fieldRef:
--              fieldPath: metadata.namespace
-         image: {{ include "k8ssandra-common.flattenedImage" .Values.image }}
-         imagePullPolicy: {{ .Values.image.pullPolicy }}
-         securityContext:
 diff --git a/config/manager/manager.yaml b/config/manager/manager.yaml
 index f08b837..d610eb2 100644
 --- a/config/manager/manager.yaml
@@ -29,7 +14,7 @@ index f08b837..d610eb2 100644
            allowPrivilegeEscalation: false
          livenessProbe:
 diff --git a/config/rbac/role.yaml b/config/rbac/role.yaml
-index 7129241..0a16245 100644
+index 0ac4016..eec8d82 100644
 --- a/config/rbac/role.yaml
 +++ b/config/rbac/role.yaml
 @@ -40,17 +40,6 @@ rules:
@@ -120,7 +105,7 @@ index e589f1c..478a0fb 100644
  func (r *K8ssandraClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
  	logger := log.FromContext(ctx).WithValues("K8ssandraCluster", req.NamespacedName)
 diff --git a/controllers/k8ssandra/medusa_reconciler.go b/controllers/k8ssandra/medusa_reconciler.go
-index ba2a83a..eb51f74 100644
+index b23bb0c..0756dab 100644
 --- a/controllers/k8ssandra/medusa_reconciler.go
 +++ b/controllers/k8ssandra/medusa_reconciler.go
 @@ -3,7 +3,6 @@ package k8ssandra
@@ -131,8 +116,8 @@ index ba2a83a..eb51f74 100644
  
  	"github.com/adutra/goalesce"
  	"github.com/go-logr/logr"
-@@ -23,10 +22,6 @@ import (
- 	"sigs.k8s.io/controller-runtime/pkg/client"
+@@ -26,10 +25,6 @@ import (
+ 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
  )
  
 -const (
@@ -142,7 +127,16 @@ index ba2a83a..eb51f74 100644
  // Create all things Medusa related in the cassdc podTemplateSpec
  func (r *K8ssandraClusterReconciler) reconcileMedusa(
  	ctx context.Context,
-@@ -138,22 +133,6 @@ func (r *K8ssandraClusterReconciler) reconcileMedusa(
+@@ -86,7 +81,7 @@ func (r *K8ssandraClusterReconciler) reconcileMedusa(
+ 		}
+ 
+ 		// Create the Medusa standalone pod
+-		desiredMedusaStandalone := medusa.StandaloneMedusaDeployment(*medusaContainer, kc.SanitizedName(), dcConfig.SanitizedName(), dcNamespace, logger, kc.Spec.Medusa.ContainerImage)
++		desiredMedusaStandalone := medusa.StandaloneMedusaDeployment(*medusaContainer, kc.SanitizedName(), dcConfig.SanitizedName(), dcNamespace, logger)
+ 
+ 		// Add the volumes previously computed to the Medusa standalone pod
+ 		for _, volume := range volumes {
+@@ -137,22 +132,6 @@ func (r *K8ssandraClusterReconciler) reconcileMedusa(
  			logger.Info("Medusa standalone deployment is not ready yet")
  			return result.RequeueSoon(r.DefaultDelay)
  		}
@@ -165,9 +159,18 @@ index ba2a83a..eb51f74 100644
  	} else {
  		logger.Info("Medusa is not enabled")
  	}
-@@ -330,11 +309,3 @@ func (r *K8ssandraClusterReconciler) reconcileBucketSecrets(
+@@ -224,7 +203,7 @@ func (r *K8ssandraClusterReconciler) reconcileMedusaConfigMap(
+ ) result.ReconcileResult {
+ 	logger.Info("Reconciling Medusa configMap on namespace : " + namespace)
+ 	if kc.Spec.Medusa != nil {
+-		medusaIni := medusa.CreateMedusaIni(kc, dcConfig)
++		medusaIni := medusa.CreateMedusaIni(kc)
+ 		desiredConfigMap := medusa.CreateMedusaConfigMap(namespace, kc.SanitizedName(), medusaIni)
+ 		kcKey := utils.GetKey(kc)
+ 		desiredConfigMap.SetLabels(labels.CleanedUpByLabels(kcKey))
+@@ -364,11 +343,3 @@ func (r *K8ssandraClusterReconciler) reconcileRemoteBucketSecretsDeprecated(
+ 	return reconciliation.ReconcileObject(ctx, c, r.DefaultDelay, repSecret)
  
- 	return nil
  }
 -
 -func (r *K8ssandraClusterReconciler) getOperatorNamespace() string {
@@ -178,10 +181,15 @@ index ba2a83a..eb51f74 100644
 -	return operatorNamespace
 -}
 diff --git a/pkg/medusa/reconcile.go b/pkg/medusa/reconcile.go
-index 8b0da36..b09e4e8 100644
+index 48c28b9..f0ab3d7 100644
 --- a/pkg/medusa/reconcile.go
 +++ b/pkg/medusa/reconcile.go
-@@ -8,12 +8,10 @@ import (
+@@ -3,17 +3,14 @@ package medusa
+ import (
+ 	"bytes"
+ 	"fmt"
+-	"os"
+ 	reflect "reflect"
  	"text/template"
  
  	"github.com/adutra/goalesce"
@@ -194,15 +202,212 @@ index 8b0da36..b09e4e8 100644
  	corev1 "k8s.io/api/core/v1"
  	"k8s.io/utils/pointer"
  
-@@ -317,6 +315,7 @@ func medusaVolumeMounts(dcConfig *cassandra.DatacenterConfig, medusaSpec *api.Me
- 	// Mount secret with Medusa storage backend credentials if the secret ref is provided.
- 	if medusaSpec.StorageProperties.StorageSecretRef.Name != "" {
- 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-+			// Medusa storage secret volume
- 			Name:      medusaSpec.StorageProperties.StorageSecretRef.Name,
- 			MountPath: "/etc/medusa-secrets",
+@@ -42,20 +39,20 @@ const (
+ 	MainContainerMemLimit   = "8Gi"
+ 	MainContainerCpuRequest = "100m"
+ 
+-	MedusaBackupsVolumeName  = "medusa-backups"
+-	MedusaBackupsMountPath   = "/mnt/backups"
+-	serviceAccountNameEnvVar = "SERVICE_ACCOUNT_NAME"
++	MedusaBackupsVolumeName = "medusa-backups"
++	MedusaBackupsMountPath  = "/mnt/backups"
+ )
+ 
+ var (
+ 	defaultMedusaImage = images.Image{
++		Registry:   images.DefaultRegistry,
+ 		Repository: DefaultMedusaImageRepository,
+ 		Name:       DefaultMedusaImageName,
+ 		Tag:        DefaultMedusaVersion,
+ 	}
+ )
+ 
+-func CreateMedusaIni(kc *k8ss.K8ssandraCluster, dcConfig *cassandra.DatacenterConfig) string {
++func CreateMedusaIni(kc *k8ss.K8ssandraCluster) string {
+ 	medusaIniTemplate := `
+     [cassandra]
+     use_sudo = false
+@@ -69,9 +66,7 @@ func CreateMedusaIni(kc *k8ss.K8ssandraCluster, dcConfig *cassandra.DatacenterCo
+     use_sudo_for_restore = false
+     storage_provider = {{ .Spec.Medusa.StorageProperties.StorageProvider }}
+     bucket_name = {{ .Spec.Medusa.StorageProperties.BucketName }}
+-    {{- if .Spec.Medusa.StorageProperties.StorageSecretRef.Name }}
+     key_file = /etc/medusa-secrets/credentials
+-    {{- end }}
+     {{- if .Spec.Medusa.StorageProperties.Prefix }}
+     prefix = {{ .Spec.Medusa.StorageProperties.Prefix }}
+     {{- else }}
+@@ -117,42 +112,25 @@ func CreateMedusaIni(kc *k8ss.K8ssandraCluster, dcConfig *cassandra.DatacenterCo
+     [grpc]
+     enabled = 1
+ 
+-    [logging]
+-    level = DEBUG
+-
+     [kubernetes]
++    cassandra_url = http://127.0.0.1:8080/api/v0/ops/node/snapshots
+     use_mgmt_api = 1
+-    enabled = 1`
++    enabled = 1
++
++    [logging]
++    level = DEBUG`
+ 
+-	kcWithProperlyConcurrentMedusa := kc.DeepCopy()
+-	if kc.Spec.Medusa.StorageProperties.ConcurrentTransfers == 0 {
+-		kcWithProperlyConcurrentMedusa.Spec.Medusa.StorageProperties.ConcurrentTransfers = 1
+-	}
+ 	t, err := template.New("ini").Parse(medusaIniTemplate)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+ 	medusaIni := new(bytes.Buffer)
+-	err = t.Execute(medusaIni, kcWithProperlyConcurrentMedusa)
++	err = t.Execute(medusaIni, kc)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+ 
+-	medusaConfig := medusaIni.String()
+-
+-	// Create Kubernetes config here and append it
+-	if dcConfig.ManagementApiAuth != nil && dcConfig.ManagementApiAuth.Manual != nil {
+-		medusaConfig += `
+-    cassandra_url = https://127.0.0.1:8080/api/v0/ops/node/snapshots
+-    ca_cert = /etc/encryption/mgmt/ca.crt
+-    tls_cert = /etc/encryption/mgmt/tls.crt
+-    tls_key = /etc/encryption/mgmt/tls.key`
+-	} else {
+-		medusaConfig += `
+-    cassandra_url = http://127.0.0.1:8080/api/v0/ops/node/snapshots`
+-	}
+-
+-	return medusaConfig
++	return medusaIni.String()
+ }
+ 
+ func CreateMedusaConfigMap(namespace, k8cName, medusaIni string) *corev1.ConfigMap {
+@@ -187,7 +165,7 @@ func UpdateMedusaInitContainer(dcConfig *cassandra.DatacenterConfig, medusaSpec
+ 	setImage(medusaSpec.ContainerImage, restoreContainer)
+ 	restoreContainer.SecurityContext = medusaSpec.SecurityContext
+ 	restoreContainer.Env = medusaEnvVars(medusaSpec, k8cName, useExternalSecrets, "RESTORE")
+-	restoreContainer.VolumeMounts = medusaVolumeMounts(dcConfig, medusaSpec, k8cName)
++	restoreContainer.VolumeMounts = medusaVolumeMounts(medusaSpec, k8cName)
+ 	restoreContainer.Resources = medusaInitContainerResources(medusaSpec)
+ 
+ 	if !found {
+@@ -247,7 +225,7 @@ func CreateMedusaMainContainer(dcConfig *cassandra.DatacenterConfig, medusaSpec
+ 
+ 	medusaContainer.ReadinessProbe = readinessProbe
+ 	medusaContainer.LivenessProbe = livenessProbe
+-	medusaContainer.VolumeMounts = medusaVolumeMounts(dcConfig, medusaSpec, k8cName)
++	medusaContainer.VolumeMounts = medusaVolumeMounts(medusaSpec, k8cName)
+ 	medusaContainer.Resources = medusaMainContainerResources(medusaSpec)
+ 	return medusaContainer, nil
+ }
+@@ -281,7 +259,7 @@ func setImage(containerImage *images.Image, container *corev1.Container) {
+ 	container.ImagePullPolicy = image.PullPolicy
+ }
+ 
+-func medusaVolumeMounts(dcConfig *cassandra.DatacenterConfig, medusaSpec *api.MedusaClusterTemplate, k8cName string) []corev1.VolumeMount {
++func medusaVolumeMounts(medusaSpec *api.MedusaClusterTemplate, k8cName string) []corev1.VolumeMount {
+ 	volumeMounts := []corev1.VolumeMount{
+ 		{ // Cassandra config volume
+ 			Name:      "server-config",
+@@ -309,21 +287,12 @@ func medusaVolumeMounts(dcConfig *cassandra.DatacenterConfig, medusaSpec *api.Me
  		})
-@@ -505,10 +504,6 @@ func MedusaStandaloneDeploymentName(clusterName string, dcName string) string {
+ 	}
+ 
+-	// Mount secret with Medusa storage backend credentials if the secret ref is provided.
+-	if medusaSpec.StorageProperties.StorageSecretRef.Name != "" {
+-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+-			Name:      medusaSpec.StorageProperties.StorageSecretRef.Name,
+-			MountPath: "/etc/medusa-secrets",
+-		})
+-	}
+-
+-	// Management-api encryption client certificates
+-	if dcConfig.ManagementApiAuth != nil && dcConfig.ManagementApiAuth.Manual != nil {
+-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+-			Name:      "mgmt-encryption",
+-			MountPath: "/etc/encryption/mgmt",
+-		})
+-	}
++	// Mount secret with Medusa storage backend credentials
++	volumeMounts = append(volumeMounts, corev1.VolumeMount{
++		// Medusa storage secret volume
++		Name:      medusaSpec.StorageProperties.StorageSecretRef.Name,
++		MountPath: "/etc/medusa-secrets",
++	})
+ 
+ 	return volumeMounts
+ }
+@@ -409,24 +378,22 @@ func GenerateMedusaVolumes(dcConfig *cassandra.DatacenterConfig, medusaSpec *api
+ 	})
+ 
+ 	// Medusa credentials volume using the referenced secret
+-	if medusaSpec.StorageProperties.StorageSecretRef.Name != "" {
+-		secretVolumeIndex, found := cassandra.FindVolume(&dcConfig.PodTemplateSpec, medusaSpec.StorageProperties.StorageSecretRef.Name)
+-		secretVolume := &corev1.Volume{
+-			Name: medusaSpec.StorageProperties.StorageSecretRef.Name,
+-			VolumeSource: corev1.VolumeSource{
+-				Secret: &corev1.SecretVolumeSource{
+-					SecretName: medusaSpec.StorageProperties.StorageSecretRef.Name,
+-				},
++	secretVolumeIndex, found := cassandra.FindVolume(&dcConfig.PodTemplateSpec, medusaSpec.StorageProperties.StorageSecretRef.Name)
++	secretVolume := &corev1.Volume{
++		Name: medusaSpec.StorageProperties.StorageSecretRef.Name,
++		VolumeSource: corev1.VolumeSource{
++			Secret: &corev1.SecretVolumeSource{
++				SecretName: medusaSpec.StorageProperties.StorageSecretRef.Name,
+ 			},
+-		}
+-
+-		newVolumes = append(newVolumes, medusaVolume{
+-			Volume:      secretVolume,
+-			VolumeIndex: secretVolumeIndex,
+-			Exists:      found,
+-		})
++		},
+ 	}
+ 
++	newVolumes = append(newVolumes, medusaVolume{
++		Volume:      secretVolume,
++		VolumeIndex: secretVolumeIndex,
++		Exists:      found,
++	})
++
+ 	// Pod info volume
+ 	podInfoVolumeIndex, found := cassandra.FindVolume(&dcConfig.PodTemplateSpec, "podinfo")
+ 	podInfoVolume := &corev1.Volume{
+@@ -469,26 +436,6 @@ func GenerateMedusaVolumes(dcConfig *cassandra.DatacenterConfig, medusaSpec *api
+ 			Exists:      found,
+ 		})
+ 	}
+-
+-	// Management-api client certificates
+-	if dcConfig.ManagementApiAuth != nil && dcConfig.ManagementApiAuth.Manual != nil {
+-		managementApiVolumeIndex, found := cassandra.FindVolume(&dcConfig.PodTemplateSpec, "mgmt-encryption")
+-		managementApiVolume := &corev1.Volume{
+-			Name: "mgmt-encryption",
+-			VolumeSource: corev1.VolumeSource{
+-				Secret: &corev1.SecretVolumeSource{
+-					SecretName: dcConfig.ManagementApiAuth.Manual.ClientSecretName,
+-				},
+-			},
+-		}
+-
+-		newVolumes = append(newVolumes, medusaVolume{
+-			Volume:      managementApiVolume,
+-			VolumeIndex: managementApiVolumeIndex,
+-			Exists:      found,
+-		})
+-	}
+-
+ 	return newVolumes
+ }
+ 
+@@ -500,11 +447,7 @@ func MedusaStandaloneDeploymentName(clusterName string, dcName string) string {
  	return fmt.Sprintf("%s-%s-medusa-standalone", clusterName, dcName)
  }
  
@@ -210,10 +415,24 @@ index 8b0da36..b09e4e8 100644
 -	return fmt.Sprintf("%s-%s-medusa-purge", clusterName, dcName)
 -}
 -
- func StandaloneMedusaDeployment(medusaContainer corev1.Container, clusterName, dcName, namespace string, logger logr.Logger) *appsv1.Deployment {
+-func StandaloneMedusaDeployment(medusaContainer corev1.Container, clusterName, dcName, namespace string, logger logr.Logger, medusaImage *images.Image) *appsv1.Deployment {
++func StandaloneMedusaDeployment(medusaContainer corev1.Container, clusterName, dcName, namespace string, logger logr.Logger) *appsv1.Deployment {
  	// The standalone medusa pod won't be able to resolve its own IP address using DNS entries
  	medusaContainer.Env = append(medusaContainer.Env, corev1.EnvVar{Name: "MEDUSA_RESOLVE_IP_ADDRESSES", Value: "False"})
-@@ -580,51 +575,6 @@ func StandaloneMedusaService(dcConfig *cassandra.DatacenterConfig, medusaSpec *a
+ 	medusaDeployment := &appsv1.Deployment{
+@@ -529,9 +472,8 @@ func StandaloneMedusaDeployment(medusaContainer corev1.Container, clusterName, d
+ 					Containers: []corev1.Container{
+ 						medusaContainer,
+ 					},
+-					ImagePullSecrets: images.CollectPullSecrets(medusaImage.ApplyDefaults(defaultMedusaImage)),
+-					Volumes:          []corev1.Volume{},
+-					Hostname:         MedusaStandaloneDeploymentName(clusterName, dcName),
++					Volumes:  []corev1.Volume{},
++					Hostname: MedusaStandaloneDeploymentName(clusterName, dcName),
+ 				},
+ 			},
+ 		},
+@@ -576,51 +518,6 @@ func StandaloneMedusaService(dcConfig *cassandra.DatacenterConfig, medusaSpec *a
  	return medusaService
  }
  
@@ -265,10 +484,11 @@ index 8b0da36..b09e4e8 100644
  func generateMedusaProbe(configuredProbe *corev1.Probe) (*corev1.Probe, error) {
  	// Goalesce the custom probe with the default probe,
  	defaultProbe := defaultMedusaProbe()
-@@ -693,21 +643,6 @@ func mergeStructSlice[T any](overridesSpec, defaultSpec []T, getKey func(T) stri
- 	return overridesSpec
- }
+@@ -654,26 +551,3 @@ func defaultMedusaProbe() *corev1.Probe {
  
+ 	return probe
+ }
+-
 -func createPurgeTaskStr(dcName string, namespace string) string {
 -	return fmt.Sprintf("printf \""+
 -		"apiVersion: medusa.k8ssandra.io/v1alpha1\\n"+
@@ -284,25 +504,342 @@ index 8b0da36..b09e4e8 100644
 -		"| kubectl apply -f -", namespace, dcName)
 -}
 -
- func getServiceAccountName() string {
- 	val, found := os.LookupEnv(serviceAccountNameEnvVar)
- 	if !found {
+-func getServiceAccountName() string {
+-	val, found := os.LookupEnv(serviceAccountNameEnvVar)
+-	if !found {
+-		return "default"
+-	}
+-	return val
+-}
 diff --git a/pkg/medusa/reconcile_test.go b/pkg/medusa/reconcile_test.go
-index ab37640..eff9283 100644
+index f9b49bd..6832a5b 100644
 --- a/pkg/medusa/reconcile_test.go
 +++ b/pkg/medusa/reconcile_test.go
-@@ -1,7 +1,6 @@
- package medusa
- 
- import (
--	"fmt"
+@@ -5,11 +5,9 @@ import (
  	"testing"
  
  	"github.com/go-logr/logr"
-@@ -678,38 +677,6 @@ func TestGenerateMedusaProbe(t *testing.T) {
- 	assert.Nil(t, probe)
+-	cassdcapi "github.com/k8ssandra/cass-operator/apis/cassandra/v1beta1"
+ 	api "github.com/k8ssandra/k8ssandra-operator/apis/k8ssandra/v1alpha1"
+ 	medusaapi "github.com/k8ssandra/k8ssandra-operator/apis/medusa/v1alpha1"
+ 	"github.com/k8ssandra/k8ssandra-operator/pkg/cassandra"
+-	"github.com/k8ssandra/k8ssandra-operator/pkg/images"
+ 	"github.com/stretchr/testify/assert"
+ 	corev1 "k8s.io/api/core/v1"
+ 	"k8s.io/apimachinery/pkg/api/resource"
+@@ -19,11 +17,9 @@ import (
+ func TestMedusaIni(t *testing.T) {
+ 	t.Run("Full", testMedusaIniFull)
+ 	t.Run("NoPrefix", testMedusaIniNoPrefix)
+-	t.Run("ZeroConcurrentTransfers", testMedusaIniZeroConcurrentTransfers)
+ 	t.Run("Secured", testMedusaIniSecured)
+ 	t.Run("Unsecured", testMedusaIniUnsecured)
+ 	t.Run("MissingOptional", testMedusaIniMissingOptionalSettings)
+-	t.Run("SecuredDcLevelSetting", testMedusaIniSecuredDcLevelSetting)
  }
  
+ func testMedusaIniFull(t *testing.T) {
+@@ -74,8 +70,7 @@ func testMedusaIniFull(t *testing.T) {
+ 		},
+ 	}
+ 
+-	dcConfig := cassandra.Coalesce(kc.CassClusterName(), kc.Spec.Cassandra.DeepCopy(), kc.Spec.Cassandra.Datacenters[0].DeepCopy())
+-	medusaIni := CreateMedusaIni(kc, dcConfig)
++	medusaIni := CreateMedusaIni(kc)
+ 
+ 	assert.Contains(t, medusaIni, "storage_provider = s3")
+ 	assert.Contains(t, medusaIni, "bucket_name = bucket")
+@@ -140,9 +135,7 @@ func testMedusaIniNoPrefix(t *testing.T) {
+ 		},
+ 	}
+ 
+-	dcConfig := cassandra.Coalesce(kc.CassClusterName(), kc.Spec.Cassandra.DeepCopy(), kc.Spec.Cassandra.Datacenters[0].DeepCopy())
+-	medusaIni := CreateMedusaIni(kc, dcConfig)
+-
++	medusaIni := CreateMedusaIni(kc)
+ 	assert.Contains(t, medusaIni, "storage_provider = s3")
+ 	assert.Contains(t, medusaIni, "bucket_name = bucket")
+ 	assert.Contains(t, medusaIni, "prefix = demo")
+@@ -157,10 +150,9 @@ func testMedusaIniNoPrefix(t *testing.T) {
+ 	assert.Contains(t, medusaIni, "port = 9001")
+ 	assert.Contains(t, medusaIni, "secure = False")
+ 	assert.Contains(t, medusaIni, "backup_grace_period_in_days = 7")
+-	assert.Contains(t, medusaIni, "cassandra_url = http://127.0.0.1:8080/api/v0/ops/node/snapshots")
+ }
+ 
+-func testMedusaIniZeroConcurrentTransfers(t *testing.T) {
++func testMedusaIniSecured(t *testing.T) {
+ 	kc := &api.K8ssandraCluster{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Namespace: "test",
+@@ -192,12 +184,13 @@ func testMedusaIniZeroConcurrentTransfers(t *testing.T) {
+ 					MaxBackupCount:           20,
+ 					ApiProfile:               "default",
+ 					TransferMaxBandwidth:     "100MB/s",
+-					ConcurrentTransfers:      0,
++					ConcurrentTransfers:      2,
+ 					MultiPartUploadThreshold: 204857600,
+ 					Host:                     "192.168.0.1",
+ 					Region:                   "us-east-1",
+ 					Port:                     9001,
+-					Secure:                   false,
++					Secure:                   true,
++					SslVerify:                true,
+ 					BackupGracePeriodInDays:  7,
+ 				},
+ 				CassandraUserSecretRef: corev1.LocalObjectReference{
+@@ -207,9 +200,7 @@ func testMedusaIniZeroConcurrentTransfers(t *testing.T) {
+ 		},
+ 	}
+ 
+-	dcConfig := cassandra.Coalesce(kc.CassClusterName(), kc.Spec.Cassandra.DeepCopy(), kc.Spec.Cassandra.Datacenters[0].DeepCopy())
+-	medusaIni := CreateMedusaIni(kc, dcConfig)
+-
++	medusaIni := CreateMedusaIni(kc)
+ 	assert.Contains(t, medusaIni, "storage_provider = s3")
+ 	assert.Contains(t, medusaIni, "bucket_name = bucket")
+ 	assert.Contains(t, medusaIni, "prefix = demo")
+@@ -217,159 +208,14 @@ func testMedusaIniZeroConcurrentTransfers(t *testing.T) {
+ 	assert.Contains(t, medusaIni, "max_backup_count = 20")
+ 	assert.Contains(t, medusaIni, "api_profile = default")
+ 	assert.Contains(t, medusaIni, "transfer_max_bandwidth = 100MB/s")
+-	assert.Contains(t, medusaIni, "concurrent_transfers = 1")
++	assert.Contains(t, medusaIni, "concurrent_transfers = 2")
+ 	assert.Contains(t, medusaIni, "multi_part_upload_threshold = 204857600")
+ 	assert.Contains(t, medusaIni, "host = 192.168.0.1")
+ 	assert.Contains(t, medusaIni, "region = us-east-1")
+ 	assert.Contains(t, medusaIni, "port = 9001")
+-	assert.Contains(t, medusaIni, "secure = False")
++	assert.Contains(t, medusaIni, "secure = True")
++	assert.Contains(t, medusaIni, "ssl_verify = True")
+ 	assert.Contains(t, medusaIni, "backup_grace_period_in_days = 7")
+-	assert.Contains(t, medusaIni, "cassandra_url = http://127.0.0.1:8080/api/v0/ops/node/snapshots")
+-}
+-
+-func testMedusaIniSecured(t *testing.T) {
+-	kc := &api.K8ssandraCluster{
+-		ObjectMeta: metav1.ObjectMeta{
+-			Namespace: "test",
+-			Name:      "demo",
+-		},
+-		Spec: api.K8ssandraClusterSpec{
+-			Cassandra: &api.CassandraClusterTemplate{
+-				DatacenterOptions: api.DatacenterOptions{
+-					ManagementApiAuth: &cassdcapi.ManagementApiAuthConfig{
+-						Manual: &cassdcapi.ManagementApiAuthManualConfig{
+-							ClientSecretName: "test-client-secret",
+-						},
+-					},
+-				},
+-				Datacenters: []api.CassandraDatacenterTemplate{
+-					{
+-						Meta: api.EmbeddedObjectMeta{
+-							Name: "dc1",
+-						},
+-						K8sContext: "k8sCtx0",
+-						Size:       3,
+-						DatacenterOptions: api.DatacenterOptions{
+-							ServerVersion: "3.11.14",
+-						},
+-					},
+-				},
+-			},
+-			Medusa: &medusaapi.MedusaClusterTemplate{
+-				StorageProperties: medusaapi.Storage{
+-					StorageProvider: "s3",
+-					StorageSecretRef: corev1.LocalObjectReference{
+-						Name: "secret",
+-					},
+-					BucketName:               "bucket",
+-					MaxBackupAge:             10,
+-					MaxBackupCount:           20,
+-					ApiProfile:               "default",
+-					TransferMaxBandwidth:     "100MB/s",
+-					ConcurrentTransfers:      2,
+-					MultiPartUploadThreshold: 204857600,
+-					Host:                     "192.168.0.1",
+-					Region:                   "us-east-1",
+-					Port:                     9001,
+-					Secure:                   true,
+-					SslVerify:                true,
+-					BackupGracePeriodInDays:  7,
+-				},
+-				CassandraUserSecretRef: corev1.LocalObjectReference{
+-					Name: "test-superuser",
+-				},
+-			},
+-		},
+-	}
+-
+-	assert := assert.New(t)
+-	dcConfig := cassandra.Coalesce(kc.CassClusterName(), kc.Spec.Cassandra.DeepCopy(), kc.Spec.Cassandra.Datacenters[0].DeepCopy())
+-	medusaIni := CreateMedusaIni(kc, dcConfig)
+-
+-	assert.Contains(medusaIni, "storage_provider = s3")
+-	assert.Contains(medusaIni, "bucket_name = bucket")
+-	assert.Contains(medusaIni, "prefix = demo")
+-	assert.Contains(medusaIni, "max_backup_age = 10")
+-	assert.Contains(medusaIni, "max_backup_count = 20")
+-	assert.Contains(medusaIni, "api_profile = default")
+-	assert.Contains(medusaIni, "transfer_max_bandwidth = 100MB/s")
+-	assert.Contains(medusaIni, "concurrent_transfers = 2")
+-	assert.Contains(medusaIni, "multi_part_upload_threshold = 204857600")
+-	assert.Contains(medusaIni, "host = 192.168.0.1")
+-	assert.Contains(medusaIni, "region = us-east-1")
+-	assert.Contains(medusaIni, "port = 9001")
+-	assert.Contains(medusaIni, "secure = True")
+-	assert.Contains(medusaIni, "ssl_verify = True")
+-	assert.Contains(medusaIni, "backup_grace_period_in_days = 7")
+-	assert.Contains(medusaIni, "ca_cert = /etc/encryption/mgmt/ca.crt")
+-	assert.Contains(medusaIni, "tls_cert = /etc/encryption/mgmt/tls.crt")
+-	assert.Contains(medusaIni, "tls_key = /etc/encryption/mgmt/tls.key")
+-	assert.Contains(medusaIni, "cassandra_url = https://127.0.0.1:8080/api/v0/ops/node/snapshots")
+-
+-	assert.NotContains(medusaIni, "\t")
+-}
+-
+-func testMedusaIniSecuredDcLevelSetting(t *testing.T) {
+-	kc := &api.K8ssandraCluster{
+-		ObjectMeta: metav1.ObjectMeta{
+-			Namespace: "test",
+-			Name:      "demo",
+-		},
+-		Spec: api.K8ssandraClusterSpec{
+-			Cassandra: &api.CassandraClusterTemplate{
+-				Datacenters: []api.CassandraDatacenterTemplate{
+-					{
+-						Meta: api.EmbeddedObjectMeta{
+-							Name: "dc1",
+-						},
+-						K8sContext: "k8sCtx0",
+-						Size:       3,
+-						DatacenterOptions: api.DatacenterOptions{
+-							ManagementApiAuth: &cassdcapi.ManagementApiAuthConfig{
+-								Manual: &cassdcapi.ManagementApiAuthManualConfig{
+-									ClientSecretName: "test-client-secret",
+-								},
+-							},
+-							ServerVersion: "3.11.14",
+-						},
+-					},
+-				},
+-			},
+-			Medusa: &medusaapi.MedusaClusterTemplate{
+-				StorageProperties: medusaapi.Storage{
+-					StorageProvider: "s3",
+-					StorageSecretRef: corev1.LocalObjectReference{
+-						Name: "secret",
+-					},
+-					BucketName:               "bucket",
+-					MaxBackupAge:             10,
+-					MaxBackupCount:           20,
+-					ApiProfile:               "default",
+-					TransferMaxBandwidth:     "100MB/s",
+-					ConcurrentTransfers:      2,
+-					MultiPartUploadThreshold: 204857600,
+-					Host:                     "192.168.0.1",
+-					Region:                   "us-east-1",
+-					Port:                     9001,
+-					Secure:                   true,
+-					SslVerify:                true,
+-					BackupGracePeriodInDays:  7,
+-				},
+-				CassandraUserSecretRef: corev1.LocalObjectReference{
+-					Name: "test-superuser",
+-				},
+-			},
+-		},
+-	}
+-
+-	assert := assert.New(t)
+-	dcConfig := cassandra.Coalesce(kc.CassClusterName(), kc.Spec.Cassandra.DeepCopy(), kc.Spec.Cassandra.Datacenters[0].DeepCopy())
+-	medusaIni := CreateMedusaIni(kc, dcConfig)
+-
+-	assert.Contains(medusaIni, "ca_cert = /etc/encryption/mgmt/ca.crt")
+-	assert.Contains(medusaIni, "tls_cert = /etc/encryption/mgmt/tls.crt")
+-	assert.Contains(medusaIni, "tls_key = /etc/encryption/mgmt/tls.key")
+-	assert.Contains(medusaIni, "cassandra_url = https://127.0.0.1:8080/api/v0/ops/node/snapshots")
+ }
+ 
+ func testMedusaIniUnsecured(t *testing.T) {
+@@ -419,9 +265,7 @@ func testMedusaIniUnsecured(t *testing.T) {
+ 		},
+ 	}
+ 
+-	dcConfig := cassandra.Coalesce(kc.CassClusterName(), kc.Spec.Cassandra.DeepCopy(), kc.Spec.Cassandra.Datacenters[0].DeepCopy())
+-	medusaIni := CreateMedusaIni(kc, dcConfig)
+-
++	medusaIni := CreateMedusaIni(kc)
+ 	assert.Contains(t, medusaIni, "storage_provider = s3")
+ 	assert.Contains(t, medusaIni, "bucket_name = bucket")
+ 	assert.Contains(t, medusaIni, "prefix = demo")
+@@ -475,9 +319,7 @@ func testMedusaIniMissingOptionalSettings(t *testing.T) {
+ 		},
+ 	}
+ 
+-	dcConfig := cassandra.Coalesce(kc.CassClusterName(), kc.Spec.Cassandra.DeepCopy(), kc.Spec.Cassandra.Datacenters[0].DeepCopy())
+-	medusaIni := CreateMedusaIni(kc, dcConfig)
+-
++	medusaIni := CreateMedusaIni(kc)
+ 	assert.Contains(t, medusaIni, "storage_provider = s3")
+ 	assert.Contains(t, medusaIni, "bucket_name = bucket")
+ 	assert.Contains(t, medusaIni, "prefix = demo")
+@@ -485,7 +327,7 @@ func testMedusaIniMissingOptionalSettings(t *testing.T) {
+ 	assert.Contains(t, medusaIni, "max_backup_count = 0")
+ 	assert.NotContains(t, medusaIni, "api_profile =")
+ 	assert.NotContains(t, medusaIni, "transfer_max_bandwidth =")
+-	assert.Contains(t, medusaIni, "concurrent_transfers = 1")
++	assert.NotContains(t, medusaIni, "concurrent_transfers =")
+ 	assert.NotContains(t, medusaIni, "multi_part_upload_threshold =")
+ 	assert.NotContains(t, medusaIni, "host =")
+ 	assert.NotContains(t, medusaIni, "region =")
+@@ -596,41 +438,6 @@ func TestInitContainerCustomResources(t *testing.T) {
+ 
+ }
+ 
+-func TestStandaloneMedusaDeploymentImageSettings(t *testing.T) {
+-	medusaSpec := &medusaapi.MedusaClusterTemplate{
+-		StorageProperties: medusaapi.Storage{
+-			StorageProvider: "s3",
+-			StorageSecretRef: corev1.LocalObjectReference{
+-				Name: "secret",
+-			},
+-			BucketName: "bucket",
+-		},
+-		ContainerImage: &images.Image{
+-			Registry:      "reg1",
+-			Name:          "img1",
+-			Repository:    "repo1",
+-			Tag:           "tag1",
+-			PullPolicy:    "Always",
+-			PullSecretRef: &corev1.LocalObjectReference{Name: "main-secret"},
+-		},
+-	}
+-
+-	dcConfig := cassandra.DatacenterConfig{}
+-
+-	logger := logr.New(logr.Discard().GetSink())
+-
+-	medusaContainer, err := CreateMedusaMainContainer(&dcConfig, medusaSpec, false, "test", logger)
+-	assert.NoError(t, err)
+-	UpdateMedusaInitContainer(&dcConfig, medusaSpec, false, "test", logger)
+-	UpdateMedusaMainContainer(&dcConfig, medusaContainer)
+-
+-	desiredMedusaStandalone := StandaloneMedusaDeployment(*medusaContainer, "dc1", dcConfig.SanitizedName(), "test", logger, medusaSpec.ContainerImage)
+-
+-	assert.Equal(t, "main-secret", desiredMedusaStandalone.Spec.Template.Spec.ImagePullSecrets[0].Name, "expected standalone container image pull secret to be set")
+-	assert.Equal(t, "reg1/repo1/img1:tag1", desiredMedusaStandalone.Spec.Template.Spec.Containers[0].Image, "expected standalone container image to be set to reg1/repo1/img1:tag1")
+-	assert.Equal(t, corev1.PullAlways, desiredMedusaStandalone.Spec.Template.Spec.Containers[0].ImagePullPolicy, "expected standalone pull policy to be set to Always")
+-}
+-
+ func TestExternalSecretsFlag(t *testing.T) {
+ 	medusaSpec := &medusaapi.MedusaClusterTemplate{
+ 		StorageProperties: medusaapi.Storage{
+@@ -710,35 +517,3 @@ func TestGenerateMedusaProbe(t *testing.T) {
+ 	assert.Error(t, err)
+ 	assert.Nil(t, probe)
+ }
+-
 -func TestPurgeCronJob(t *testing.T) {
 -	// Define your test inputs
 -	dcConfig := &cassandra.DatacenterConfig{
@@ -334,26 +871,20 @@ index ab37640..eff9283 100644
 -	_, err := PurgeCronJob(dcConfig, clusterName, namespace, logger)
 -	assert.NotNil(t, err)
 -}
--
- func testMergeVolumeMounts(t *testing.T) {
- 	testCases := []struct {
- 		Description   string
 diff --git a/test/e2e/medusa_test.go b/test/e2e/medusa_test.go
-index f52f085..b78dcce 100644
+index 14752f4..d841891 100644
 --- a/test/e2e/medusa_test.go
 +++ b/test/e2e/medusa_test.go
-@@ -3,9 +3,8 @@ package e2e
- import (
- 	"context"
+@@ -5,8 +5,6 @@ import (
  	"fmt"
--	"testing"
--
- 	"github.com/stretchr/testify/assert"
-+	"testing"
+ 	"testing"
  
+-	"github.com/stretchr/testify/assert"
+-
  	cassdcapi "github.com/k8ssandra/cass-operator/apis/cassandra/v1beta1"
  	api "github.com/k8ssandra/k8ssandra-operator/apis/k8ssandra/v1alpha1"
-@@ -16,7 +15,6 @@ import (
+ 	k8ssandraapi "github.com/k8ssandra/k8ssandra-operator/apis/k8ssandra/v1alpha1"
+@@ -16,7 +14,6 @@ import (
  	"github.com/k8ssandra/k8ssandra-operator/test/framework"
  	"github.com/stretchr/testify/require"
  	appsv1 "k8s.io/api/apps/v1"
@@ -361,7 +892,19 @@ index f52f085..b78dcce 100644
  	corev1 "k8s.io/api/core/v1"
  	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
  	"k8s.io/apimachinery/pkg/types"
-@@ -41,7 +39,6 @@ func createSingleMedusaJob(t *testing.T, ctx context.Context, namespace string,
+@@ -24,9 +21,8 @@ import (
+ )
+ 
+ const (
+-	backupName             = "backup1"
+-	clusterName            = "test"
+-	globalBucketSecretName = "global-bucket-key"
++	backupName  = "backup1"
++	clusterName = "test"
+ )
+ 
+ func createSingleMedusaJob(t *testing.T, ctx context.Context, namespace string, f *framework.E2eFramework) {
+@@ -41,7 +37,6 @@ func createSingleMedusaJob(t *testing.T, ctx context.Context, namespace string,
  
  	checkDatacenterReady(t, ctx, dcKey, f)
  	checkMedusaContainersExist(t, ctx, namespace, dcKey, f, kc)
@@ -369,23 +912,62 @@ index f52f085..b78dcce 100644
  	createBackupJob(t, ctx, namespace, f, dcKey)
  	verifyBackupJobFinished(t, ctx, f, dcKey, backupKey)
  	restoreBackupJob(t, ctx, namespace, f, dcKey)
-@@ -81,7 +78,6 @@ func createMultiMedusaJob(t *testing.T, ctx context.Context, namespace string, f
+@@ -72,19 +67,12 @@ func createMultiMedusaJob(t *testing.T, ctx context.Context, namespace string, f
+ 	dc1Key := framework.ClusterKey{K8sContext: "kind-k8ssandra-0", NamespacedName: types.NamespacedName{Namespace: namespace, Name: "dc1"}}
+ 	dc2Key := framework.ClusterKey{K8sContext: "kind-k8ssandra-1", NamespacedName: types.NamespacedName{Namespace: namespace, Name: "dc2"}}
+ 
+-	// Check that Medusa's bucket key has been replicated to the current namespace
+-	for _, dcKey := range []framework.ClusterKey{dc1Key, dc2Key} {
+-		checkBucketKeyPresent(t, f, ctx, namespace, dcKey.K8sContext, kc)
+-	}
+-
+ 	// Check that both DCs are ready and have Medusa containers
  	for _, dcKey := range []framework.ClusterKey{dc1Key, dc2Key} {
  		checkDatacenterReady(t, ctx, dcKey, f)
  		checkMedusaContainersExist(t, ctx, namespace, dcKey, f, kc)
 -		checkPurgeCronJobExists(t, ctx, namespace, dcKey, f, kc)
  		checkMedusaStandaloneDeploymentExists(t, ctx, dcKey, f, kc)
  		checkMedusaStandaloneServiceExists(t, ctx, dcKey, f, kc)
- 		checkReplicatedSecretMounted(t, ctx, f, dcKey, dcKey.Namespace, kc)
-@@ -116,7 +112,6 @@ func createMultiDcSingleMedusaJob(t *testing.T, ctx context.Context, namespace s
+-		checkReplicatedSecretMounted(t, ctx, f, dcKey, dcKey.Namespace, kc)
+ 	}
  
- 	checkDatacenterReady(t, ctx, dcKey, f)
- 	checkMedusaContainersExist(t, ctx, namespace, dcKey, f, kc)
--	checkPurgeCronJobExists(t, ctx, namespace, dcKey, f, kc)
- 	createBackupJob(t, ctx, namespace, f, dcKey)
+ 	// Create a backup in each DC and verify their completion
+@@ -121,34 +109,6 @@ func createMultiDcSingleMedusaJob(t *testing.T, ctx context.Context, namespace s
  	verifyBackupJobFinished(t, ctx, f, dcKey, backupKey)
  }
-@@ -167,40 +162,6 @@ func checkMedusaContainersExist(t *testing.T, ctx context.Context, namespace str
+ 
+-func checkBucketKeyPresent(t *testing.T, f *framework.E2eFramework, ctx context.Context, namespace string, k8sContext string, kc *k8ssandraapi.K8ssandraCluster) {
+-	require := require.New(t)
+-
+-	// work out the name of the replicated bucket key. should be "clusterName-<original-bucket-key-name>"
+-	localBucketKeyName := "test-" + globalBucketSecretName
+-
+-	// Check that the bucket key has been replicated to the current namespace
+-	bucketKey := &corev1.Secret{}
+-	require.Eventually(func() bool {
+-		err := f.Get(ctx, framework.NewClusterKey(k8sContext, namespace, localBucketKeyName), bucketKey)
+-		return err == nil
+-	}, polling.medusaConfigurationReady.timeout, polling.medusaConfigurationReady.interval,
+-		fmt.Sprintf("Error getting the Medusa bucket key secret. Context: %s, ClusterName: %s, Namespace: %s", k8sContext, kc.SanitizedName(), namespace),
+-	)
+-}
+-
+-func checkReplicatedSecretMounted(t *testing.T, ctx context.Context, f *framework.E2eFramework, dcKey framework.ClusterKey, namespace string, kc *api.K8ssandraCluster) {
+-	require := require.New(t)
+-	dc := &cassdcapi.CassandraDatacenter{}
+-	err := f.Get(ctx, dcKey, dc)
+-	require.NoError(err, fmt.Sprintf("Error getting the CassandraDatacenter %s", dcKey.Name))
+-	index, found := cassandra.FindContainer(dc.Spec.PodTemplateSpec, "medusa")
+-	require.True(found, fmt.Sprintf("%s doesn't have medusa container", dc.Name))
+-	medusaContainer := dc.Spec.PodTemplateSpec.Spec.Containers[index]
+-	hasMount := f.ContainerHasVolumeMount(medusaContainer, fmt.Sprintf("%s-%s", clusterName, globalBucketSecretName), "/etc/medusa-secrets")
+-	assert.True(t, hasMount, "Missing Volume Mount for Medusa bucket key")
+-}
+-
+ func checkMedusaContainersExist(t *testing.T, ctx context.Context, namespace string, dcKey framework.ClusterKey, f *framework.E2eFramework, kc *api.K8ssandraCluster) {
+ 	require := require.New(t)
+ 	// Get the Cassandra pod
+@@ -167,40 +127,6 @@ func checkMedusaContainersExist(t *testing.T, ctx context.Context, namespace str
  	require.True(found, fmt.Sprintf("%s doesn't have medusa container", dc1.Name))
  }
  
@@ -426,3 +1008,30 @@ index f52f085..b78dcce 100644
  func createBackupJob(t *testing.T, ctx context.Context, namespace string, f *framework.E2eFramework, dcKey framework.ClusterKey) {
  	require := require.New(t)
  	t.Log("creating MedusaBackupJob")
+@@ -335,26 +261,3 @@ func checkMedusaStandaloneServiceExists(t *testing.T, ctx context.Context, dcKey
+ 		return err == nil
+ 	}, polling.medusaReady.timeout, polling.medusaReady.interval, "Medusa standalone service doesn't exist")
+ }
+-
+-func createMedusaConfiguration(t *testing.T, ctx context.Context, namespace string, f *framework.E2eFramework) {
+-	require := require.New(t)
+-	medusaConfig := &medusa.MedusaConfiguration{}
+-	medusaConfigKey := framework.ClusterKey{K8sContext: "kind-k8ssandra-0", NamespacedName: types.NamespacedName{Namespace: namespace, Name: "config1"}}
+-	err := f.Get(ctx, medusaConfigKey, medusaConfig)
+-	require.NoError(err, "Error getting the MedusaConfiguration")
+-
+-	require.Eventually(func() bool {
+-		updated := &medusa.MedusaConfiguration{}
+-		err := f.Get(ctx, medusaConfigKey, updated)
+-		if err != nil {
+-			t.Logf("failed to get medusa configuration: %v", err)
+-			return false
+-		}
+-		for _, condition := range updated.Status.Conditions {
+-			if condition.Type == string(medusa.ControlStatusReady) {
+-				return condition.Status == metav1.ConditionTrue
+-			}
+-		}
+-		return false
+-	}, polling.medusaConfigurationReady.timeout, polling.medusaConfigurationReady.interval)
+-}
