@@ -1,0 +1,107 @@
+package:
+  name: zookeeper-fips-3.9
+  version: 3.9.2.0
+  epoch: 0
+  description: Distributed, highly available, robust, fault-tolerant system for distributed coordination
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash # some helper scripts use bash
+      - openjdk-17-default-jvm-bcfips
+      - openssl-config-fipshardened
+      - xmlstarlet
+    provides:
+      - zookeeper-fips=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: \.(\d+)$
+    replace: "-$1"
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: short-package-version
+
+environment:
+  contents:
+    packages:
+      - bouncycastle-fips
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - maven
+      - openjdk-17
+      - openjdk-17-default-jvm
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/zookeeper
+      tag: release-${{vars.mangled-package-version}}
+      expected-commit: e454e8c7283100c7caec6dcae2bc82aaecb63023
+
+  - runs: |
+      # Patch netty version for CVE-2023-4586 CVE-2023-44487
+      mvn install -DskipTests -Dnetty.version=4.1.108.Final
+      tar -xf zookeeper-assembly/target/apache-zookeeper-${{vars.short-package-version}}-bin.tar.gz
+
+      # Cleanup Windows files
+      rm -rf apache-zookeeper-${{vars.short-package-version}}-bin/bin/*.cmd
+
+      # Install Zookeeper
+      mkdir -p ${{targets.destdir}}/usr/share/java/zookeeper
+      mv apache-zookeeper-${{vars.short-package-version}}-bin/lib ${{targets.destdir}}/usr/share/java/zookeeper/
+      mv apache-zookeeper-${{vars.short-package-version}}-bin/bin ${{targets.destdir}}/usr/share/java/zookeeper/
+      mv apache-zookeeper-${{vars.short-package-version}}-bin/conf ${{targets.destdir}}/usr/share/java/zookeeper/
+
+      # Load bcfips
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/java/zookeeper/lib/
+
+test:
+  environment:
+    contents:
+      packages:
+        - uuidgen
+    environment:
+      LANG: en_US.UTF-8
+      JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS"
+      ZK_HOME: "/usr/share/java/zookeeper"
+  pipeline:
+    - runs: |
+        # Go to installed dir
+        cd "${ZK_HOME}"
+
+        # Use sample config
+        cp conf/zoo_sample.cfg conf/zoo.cfg
+
+        # Start Zookeeper
+        bin/zkServer.sh start-foreground &
+
+        # Grab PID
+        ZOOKEEPER_PID=$!
+
+        # Start the CLI and check output
+        bin/zkCli.sh | grep "Welcome to ZooKeeper!"
+
+        # Create a node
+        bin/zkCli.sh create /test-$(uuidgen) '$(uuidgen)'
+
+        # Kill Zookeeper
+        kill "${ZOOKEEPER_PID}"
+
+update:
+  enabled: true
+  version-transform:
+    - match: ^(.+)\-(\d+)$
+      replace: $1.$2
+  github:
+    tag-filter: release-3.9
+    identifier: apache/zookeeper
+    strip-prefix: release-
+    use-tag: true
