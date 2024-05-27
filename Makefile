@@ -174,7 +174,7 @@ dev-container:
 	    -v "${PWD}:${PWD}" \
 	    -w "${PWD}" \
 	    -e SOURCE_DATE_EPOCH=0 \
-	    ghcr.io/wolfi-dev/sdk:latest@sha256:cef3580e9f9e2fb69fe6eec01799b2b015f97a01fe89b372c084a726b2b1a32a
+	    ghcr.io/wolfi-dev/sdk:latest@sha256:92eb5fc091da6d2ea4c770e2f190d6982a7b0fdc47d3c84ae4f368a5ba9ab210
 
 PACKAGES_CONTAINER_FOLDER ?= /work/packages
 TMP_REPOSITORIES_DIR := $(shell mktemp -d)
