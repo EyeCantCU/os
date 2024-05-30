@@ -342,6 +342,73 @@ jobs:
                 "./packages/${arch}/APKINDEX.json" "gs://chainguard-enterprise-registry-destination/os/${arch}/"
           done
 
+  upload-packages-to-cgr:
+    runs-on: ubuntu-latest
+    needs: build
+
+    # Always run this job for https://github.com/wolfi-dev/os/issues/8698
+    if: ${{ always() }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    container:
+      # NOTE: This step only signs and uploads, so it doesn't need any privileges
+      image: ghcr.io/wolfi-dev/sdk:latest@sha256:dedf54657f0c9371876fdedc6ee7b7a265c1f67615807d3f2da4018bafd06f71
+
+    steps:
+      - uses: step-security/harden-runner@f086349bfa2bd1361f7909c78558e816508cdc10 # v2.8.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+
+      - name: 'Trust the github workspace'
+        run: |
+          # This is to avoid fatal errors about "dubious ownership" because we are
+          # running inside of a container action with the workspace mounted in.
+          git config --global --add safe.directory "$(pwd)"
+
+      - name: 'Download x86_64 package archives'
+        uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
+        with:
+          path: /tmp/artifacts/
+          name: packages-x86_64
+
+      - name: 'Download aarch64 package archives'
+        uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
+        with:
+          path: /tmp/artifacts/
+          name: packages-aarch64
+
+      - name: 'Unpack the package archives'
+        run: |
+          for arch in "aarch64" "x86_64"; do
+            mkdir -p ./packages/${arch}
+
+            # Consolidate with the built artifacts
+            tar xvf /tmp/artifacts/packages-${arch}.tar.gz
+          done
+
+      # use public chainguard provider.
+      - uses: chainguard-dev/setup-chainctl@4c4c132b7b1dd7c9283ff5331e3190ecf9a35755 # v0.1.1
+        with:
+          # Managed here:
+          # https://github.com/chainguard-dev/mono/blob/main/env/chainguard-images/iac/enterprise-packages-pusher.tf
+          identity: "ce2d1984a010471142503340d670612d63ffb9f6/2dbafccb31bd638d"
+
+      - name: 'Upload packages to apk.cgr.dev'
+        run: |
+          for arch in "aarch64" "x86_64"; do
+            for apk in ./packages/${arch}/*.apk; do
+              package="$(basename ${apk})"
+              curl -X POST \
+                  --user "user:$(chainctl auth token --audience apk.cgr.dev)" \
+                  --data-binary "@${apk}" \
+                  "https://apk.cgr.dev/chainguard-private/${arch}/${package}"
+            done
+          done
 
   postrun:
     name: Notify Slack
