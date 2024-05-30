@@ -28,6 +28,8 @@ MELANGE_BUILD_OPTS += --namespace chainguard
 
 # Enter interactive mode on failure for debug
 MELANGE_DEBUG_OPTS += --interactive
+MELANGE_DEBUG_OPTS += --debug
+MELANGE_DEBUG_OPTS += --package-append apk-tools
 MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 
 # These are separate from MELANGE_OPTS because for building we need additional
@@ -145,7 +147,7 @@ debug/%:
 	$(info pkgver $(pkgver))
 	@mkdir -p ./"$*"/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
-	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
+	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 test/%:
 	@mkdir -p ./$(*)/
