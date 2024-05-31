@@ -12,7 +12,7 @@ inputs:
     description: |
       regex matching packages to check.
     required: true
-    default: '^${{package.name}}'
+    default: 'DEFAULT'
 
 pipeline:
   - name: "check golang files for fips-ness"
@@ -61,6 +61,9 @@ pipeline:
       errors=0
       files=0
       DEBUG=false
+      command -v go >/dev/null 2>&1 ||
+          { echo "ERROR: You need 'go' executable"; exit 1; }
+
       if [ "$packages" = "true" ]; then
           flist="${TEMP_D}/files"
           cd /
@@ -75,10 +78,12 @@ pipeline:
                   [ -z "$f" ] && continue
                   [ -d "$f" ] && continue
                   outf="${TEMP_D}/version.out"
-                  if ! LANG=C go version "$f" > "$outf"; then
+                  errf="${TEMP_D}/version.err"
+                  if ! LANG=C go version "$f" > "$outf" 2> "$errf"; then
                       rc=$?
                       echo "ERROR: go version '$f' exited $rc"
                       cat "$outf"
+                      cat "$errf"
                       exit 2
                   fi
                   # outputs nothing on lots of files (text files)
@@ -87,7 +92,7 @@ pipeline:
                       debug "$f: skipping non-binary file"
                       continue
                   fi
-                  if grep -qi "not a Go executable" "$outf"; then
+                  if grep -qi "not a Go executable" "$errf"; then
                       debug "$f: not a go executable"
                       continue
                   fi
@@ -122,10 +127,26 @@ pipeline:
       chmod 755 /tmp/check-fips
 
       pkgmatch='${{inputs.package-match}}'
-      packages=$(apk info -L | grep "$pkgmatch")
+      pkgname='${{package.name}}'
+      if [ "${pkgmatch}" = "DEFAULT" ]; then
+        # default behavior is just "pkgname" intending for 'pkg-fips' to
+        # match it and its subpkgs, but those would be named pkg-<thing>-fips
+        pkgmatch="^${pkgname%-fips}"
+      fi
+
+      pfile=/tmp/packages.list
+      if ! apk info -L >"$pfile" 2>"$pfile.err" ; then
+        echo "ERROR: apk info -L failed"
+        cat "$pfile" "$pfile.err"
+        exit 1
+      fi
+      packages=$(grep "$pkgmatch" "$pfile") || :
       set -- ${packages}
       if [ $# -eq 0 ]; then
-        echo "ERROR: package match '$pkgmatch' did not match any packages"
+        echo "packages:"
+        sed 's,^,>  ,' "$pfile"
+        echo "ERROR: package-match '$pkgmatch'" \
+            "did not match any installed packages (see list above)"
         exit 1
       fi
       echo "checking $# packages: $*"
