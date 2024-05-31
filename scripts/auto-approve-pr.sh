@@ -14,8 +14,13 @@ readarray -t PRS < <(get_prs)
 for pr in "${PRS[@]}"; do
   echo ">>> Reviewing PR: ${pr}"
 
-  # Get the review ID for the PR
-  gh api repos/"${repo}"/pulls/"${pr}" > review_output.json
+  # Approve PR
+  curl \
+  -o review_output.json \
+  -X POST \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer ${GH_TOKEN}" \
+  https://api.github.com/repos/"${repo}"/pulls/"${pr}"/reviews
 
   echo "review: "
   cat review_output.json
