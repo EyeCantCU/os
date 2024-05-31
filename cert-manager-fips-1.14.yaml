@@ -2,7 +2,7 @@ package:
   name: cert-manager-fips-1.14
   # See https://cert-manager.io/docs/installation/supported-releases/ for upstream-supported versions
   version: 1.14.5
-  epoch: 1
+  epoch: 2
   description: Automatically provision and manage TLS certificates in Kubernetes
   copyright:
     - license: Apache-2.0
@@ -13,12 +13,7 @@ package:
 environment:
   contents:
     packages:
-      - busybox
-      - ca-certificates-bundle
-      - curl
-      - go-fips
-      - jq
-      - make
+      - go-fips-1.22
 
 pipeline:
   - uses: git-checkout
@@ -33,25 +28,67 @@ pipeline:
       replaces: k8s.io/apimachinery=github.com/kubernetes/apimachinery@v0.30.0
       modroot: cmd/ctl
 
-  # the makefile hardcodes the requirement for some container runtime (CTR), even when we don't need it
-  # to workaround, set CTR to anything $(command -v)able
+  # This is needed because the go bumps above affect these packages
   - runs: |
-      # This is needed because the go bumps above affect these packages
       for mod in cainjector acmesolver controller webhook; do
         cd cmd/$mod
         go mod tidy
         cd ../..
       done
 
-      make CTR=make _bin/server/controller-linux-$(go env GOARCH)
-      make CTR=make _bin/server/webhook-linux-$(go env GOARCH)
-      make CTR=make _bin/server/cainjector-linux-$(go env GOARCH)
-      make CTR=make _bin/server/acmesolver-linux-$(go env GOARCH)
+  # ldflags comes from:
+  # https://github.com/cert-manager/cert-manager/blob/master/make/00_mod.mk#L54
+  - uses: go/build
+    with:
+      go-package: go-fips-1.22
+      modroot: cmd/controller
+      packages: main.go
+      output: controller-linux-${{build.arch}}
+      tags: netgo,osusergo
+      ldflags: -X github.com/cert-manager/cert-manager/pkg/util.AppVersion=$(git describe --tags --always --match='v*' --abbrev=14 --dirty) -X github.com/cert-manager/cert-manager/pkg/util.AppGitCommit=$(git rev-parse HEAD)
 
-      mkdir -p ${{targets.destdir}}/usr/bin
-      mv _bin/server/* ${{targets.destdir}}/usr/bin/
+  - uses: go/build
+    with:
+      go-package: go-fips-1.22
+      modroot: cmd/acmesolver
+      packages: main.go
+      output: acmesolver-linux-${{build.arch}}
+      tags: netgo,osusergo
+      ldflags: -X github.com/cert-manager/cert-manager/pkg/util.AppVersion=$(git describe --tags --always --match='v*' --abbrev=14 --dirty) -X github.com/cert-manager/cert-manager/pkg/util.AppGitCommit=$(git rev-parse HEAD)
 
-  - uses: strip
+  - uses: go/build
+    with:
+      go-package: go-fips-1.22
+      modroot: cmd/cainjector
+      packages: main.go
+      output: cainjector-linux-${{build.arch}}
+      tags: netgo,osusergo
+      ldflags: -X github.com/cert-manager/cert-manager/pkg/util.AppVersion=$(git describe --tags --always --match='v*' --abbrev=14 --dirty) -X github.com/cert-manager/cert-manager/pkg/util.AppGitCommit=$(git rev-parse HEAD)
+
+  - uses: go/build
+    with:
+      go-package: go-fips-1.22
+      modroot: cmd/webhook
+      packages: main.go
+      output: webhook-linux-${{build.arch}}
+      tags: netgo,osusergo
+      ldflags: -X github.com/cert-manager/cert-manager/pkg/util.AppVersion=$(git describe --tags --always --match='v*' --abbrev=14 --dirty) -X github.com/cert-manager/cert-manager/pkg/util.AppGitCommit=$(git rev-parse HEAD)
+
+  # HACK: We need the binaries to be arm64 but the build.arch gives us aarch64
+  # Once this propagates through, remove this hack, and use the
+  # ${{build.goarch}} everywhere in the `output:` fields for the go/build steps.
+  # https://github.com/chainguard-dev/melange/pull/1242
+  - if: ${{build.arch}} == "aarch64"
+    runs: |
+      for mod in cainjector acmesolver controller webhook; do
+        mv ${{targets.destdir}}/usr/bin/$mod-linux-aarch64 ${{targets.destdir}}/usr/bin/$mod-linux-$(go env GOARCH)
+      done
+
+  - if: ${{build.arch}} == "x86_64"
+    runs: |
+      for mod in cainjector acmesolver controller webhook; do
+        mv ${{targets.destdir}}/usr/bin/$mod-linux-x86_64 ${{targets.destdir}}/usr/bin/$mod-linux-$(go env GOARCH)
+      done
 
 subpackages:
   - name: ${{package.name}}-controller
@@ -86,16 +123,25 @@ subpackages:
       provides:
         - cert-manager-acmesolver-fips=${{package.full-version}}
 
-  - name: cmctl-1.14-fips
+  - name: ${{package.name}}-cmctl
     pipeline:
-      - runs: |
-          make CTR=make cmctl-linux
-      - runs: |
-          install -Dm755 _bin/cmctl/cmctl-linux-$(go env GOARCH) ${{targets.subpkgdir}}/usr/bin/cmctl
-      - uses: strip
-    dependencies:
-      provides:
-        - cmctl-fips=${{package.full-version}}
+      - uses: go/build
+        with:
+          go-package: go-fips-1.22
+          modroot: cmd/ctl
+          packages: main.go
+          output: cmctl-1.14-fips
+          tags: netgo,osusergo
+          ldflags: -X github.com/cert-manager/cert-manager/pkg/util.AppVersion=$(git describe --tags --always --match='v*' --abbrev=14 --dirty) -X github.com/cert-manager/cert-manager/pkg/util.AppGitCommit=$(git rev-parse HEAD)
+    test:
+      environment:
+        contents:
+          packages:
+            - go-fips
+            - wolfi-base
+      pipeline:
+        - runs: |
+            cmctl-1.14-fips -h
 
 update:
   enabled: true
@@ -115,4 +161,5 @@ test:
     - runs: |
         acmesolver-linux-$(go env GOARCH) -h
         cainjector-linux-$(go env GOARCH) -h
+        controller-linux-$(go env GOARCH) -h
         webhook-linux-$(go env GOARCH) -h
