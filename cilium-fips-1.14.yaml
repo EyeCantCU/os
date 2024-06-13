@@ -1,7 +1,7 @@
 package:
   name: cilium-fips-1.14
   version: 1.14.11
-  epoch: 1
+  epoch: 2
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -21,9 +21,15 @@ package:
       - kmod
       - llvm15
       - llvm15-tools
+      - cilium-host-utils=${{package.full-version}}
     provides:
       - cilium=${{package.full-version}}
 
+# This package contains cni binaries. They can be copied out of Wolfi
+# onto older host-os During build-time link against an older glibc, to
+# ensure go-fips built cni remain ABI compatible with old foreign
+# host-os. Majority of regular go-fips binaries/images do not need
+# this.
 environment:
   contents:
     packages:
@@ -48,6 +54,7 @@ environment:
       - llvm15-cmake-default
       - llvm15-dev
       - llvm15-tools
+      - oldglibc
       - openjdk-11
       - patch
       - python3
@@ -81,10 +88,13 @@ pipeline:
 
   - uses: go/remove-cgo-enabled-0
     with:
-      files: Makefile.defs images/runtime/build-gops.sh
+      files: Makefile Makefile.defs images/runtime/build-gops.sh
       seds: |
         s,CGO_ENABLED=0[ ]*,,g
         s,-s -w,-w,g
+        s,tools/mount,,g
+        s,tools/sysctlfix,,g
+        s,plugins/cilium-cni,,g
 
   - runs: |
       # Remove groupadd from Makefile: it's not doing anything useful in
@@ -93,6 +103,15 @@ pipeline:
 
       DESTDIR=${{targets.destdir}} DISABLE_ENVOY_INSTALLATION=1 make build-container
       DESTDIR=${{targets.destdir}} DISABLE_ENVOY_INSTALLATION=1 make install-container
+
+  - runs: |
+      # these tools run on host and are linked against oldglibc for compatability
+      export CGO_CFLAGS=-I/usr/lib/oldglibc/include
+      export CGO_LDFLAGS=-L/usr/lib/oldglibc/lib
+      for d in tools/sysctlfix tools/mount plugins/cilium-cni; do
+          make -C $d clean all
+          DESTDIR=${{targets.destdir}} make -C $d install
+      done
 
   - runs: |
       # Check the Dockerfile for a SHA and match against the proxy SHA
@@ -156,7 +175,7 @@ pipeline:
         --conlyopt="-Wno-strict-prototypes" \
         --verbose_failures -c opt //:cilium-envoy
 
-      cp -v bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
+      install -m 755  bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
 
   - uses: strip
 
@@ -229,6 +248,24 @@ subpackages:
           make hubble-relay
           DESTDIR=${{targets.subpkgdir}} make install
       - uses: strip
+
+  - name: ${{package.name}}-host-utils
+    description: Cilium binaries that run on the host.
+    dependencies:
+      provides:
+        - cilium-host-utils=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for p in cilium-mount cilium-sysctlfix; do
+              mv "${{targets.destdir}}"/usr/bin/$p "${{targets.contextdir}}"/usr/bin
+          done
+          mkdir -p "${{targets.contextdir}}/opt/cni/bin"
+          mv "${{targets.destdir}}"/opt/cni/bin/cilium-cni "${{targets.contextdir}}"/opt/cni/bin
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/go-fips-check
 
 test:
   pipeline:
