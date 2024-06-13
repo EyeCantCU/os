@@ -17,6 +17,8 @@ MELANGE_OPTS += --keyring-append ${KEY}.pub
 MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
 MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard-private
+MELANGE_OPTS += --keyring-append https://apk.cgr.dev/chainguard-private/chainguard-7fb528a64a862d44bbea6069093f1fec29fa864ba7e9754828eeceed3f487239.rsa.pub
 MELANGE_OPTS += --arch ${ARCH}
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
@@ -112,6 +114,9 @@ define get-source-dir
 	fi)
 endef
 
+apk-token:
+	chainctl auth login --audience apk.cgr.dev
+
 package/%:
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
 	@if [ -z "$(yamlfile)" ]; then \
@@ -130,7 +135,7 @@ package/%:
 packages/$(ARCH)/%.apk: $(KEY)
 	@mkdir -p ./$(pkgname)/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
-	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) $(srcdirflag) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
+	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) $(srcdirflag) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 debug/%:
 	$(eval yamlfile := $(shell find . -type f \( -name "$*.yaml" -o -path "*/$*/$*.melange.yaml" \) | head -n 1))
@@ -147,7 +152,7 @@ debug/%:
 	$(info pkgver $(pkgver))
 	@mkdir -p ./"$*"/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
-	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
+	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS) $(sourcedir) --log-policy builtin:stderr,$(TARGETDIR)/buildlogs/$*.log
 
 test/%:
 	@mkdir -p ./$(*)/
@@ -163,7 +168,7 @@ test/%:
 	$(info found source dir as $(sourcedir))
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
-	$(MELANGE) test $(yamlfile) $(sourcedir) $(MELANGE_TEST_OPTS) --log-policy builtin:stderr
+	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(sourcedir) $(MELANGE_TEST_OPTS) --log-policy builtin:stderr
 
 dev-container:
 	docker run --privileged --rm -it \
