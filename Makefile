@@ -146,13 +146,14 @@ local-wolfi: ${KEY}
 	@echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
 	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
 	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+	@mkdir -p ${PWD}/packages
 	docker run --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		cgr.dev/chainguard/wolfi-base:latest
+		cgr.dev/chainguard-private/chainguard-base:latest
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
