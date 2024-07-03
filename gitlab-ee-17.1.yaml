@@ -1,0 +1,122 @@
+# source is gitlab so we can't use github updates to get expected commit
+# let's still auto create the PR, it will fail as expected commit will be wrong
+# however it will be easy to fix
+#nolint:git-checkout-must-use-github-updates
+package:
+  name: gitlab-ee-17.1
+  version: 17.1.1
+  epoch: 0
+  description: GitLab is an open source end-to-end software development platform with built-in version control, issue tracking, code review, CI/CD, and more.
+  copyright:
+    - license: MIT
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: d0ac56e0be2576f3101025fb4a977a5e2a88d3ab
+      repository: https://gitlab.com/gitlab-org/gitlab.git
+      tag: v${{package.version}}-ee
+
+subpackages:
+  - name: ${{package.name}}-workhorse
+    pipeline:
+      - uses: go/bump
+        with:
+          deps: github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.6.0 golang.org/x/image@v0.18.0
+          modroot: ./workhorse
+      - uses: go/build
+        with:
+          modroot: ./workhorse
+          packages: ./cmd/gitlab-workhorse
+          output: gitlab-workhorse
+      - uses: strip
+
+  - name: ${{package.name}}-resize-image
+    pipeline:
+      - uses: go/build
+        with:
+          modroot: ./workhorse
+          packages: ./cmd/gitlab-resize-image
+          output: gitlab-resize-image
+      - uses: strip
+
+  - name: ${{package.name}}-zip-cat
+    pipeline:
+      - uses: go/build
+        with:
+          modroot: ./workhorse
+          packages: ./cmd/gitlab-zip-cat
+          output: gitlab-zip-cat
+      - uses: strip
+
+  - name: ${{package.name}}-zip-metadata
+    pipeline:
+      - uses: go/build
+        with:
+          modroot: ./workhorse
+          packages: ./cmd/gitlab-zip-metadata
+          output: gitlab-zip-metadata
+      - uses: strip
+
+update:
+  manual: true
+  enabled: true
+  release-monitor:
+    identifier: 373181
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - redis
+        - ${{package.name}}-workhorse
+  pipeline:
+    - runs: |
+        #!/bin/bash
+
+        set -e
+        export TMPDIR=/tmp/gitlab
+        mkdir -p -m 3770 $TMPDIR
+
+        export GITLAB_WORKHORSE_LOG_FILE=${GITLAB_WORKHORSE_LOG_FILE:-stdout}
+        export GITLAB_WORKHORSE_LOG_FORMAT=${GITLAB_WORKHORSE_LOG_FORMAT:-json}
+
+        GITLAB_WORKHORSE_CONFIG_FILE=/tmp/workhorse-config.toml
+
+        # Create a configuration file for gitlab-workhorse with the dynamic port
+        tee $GITLAB_WORKHORSE_CONFIG_FILE <<EOL
+        [redis]
+        URL = "redis://localhost:6379"
+
+        [metadata]
+          zip_reader_limit_bytes = 104857600
+
+        [image_resizer]
+          max_scaler_procs = 4
+          max_filesize = 250000
+
+        [[listeners]]
+          network = "tcp"
+          addr = "127.0.0.1:3443"
+        EOL
+
+        redis-server --daemonize yes
+
+        gitlab-workhorse \
+          -logFile ${GITLAB_WORKHORSE_LOG_FILE} \
+          -logFormat ${GITLAB_WORKHORSE_LOG_FORMAT} \
+          -authBackend ${GITLAB_WORKHORSE_AUTH_BACKEND:-http://localhost:8080} \
+          -config "${GITLAB_WORKHORSE_CONFIG_FILE}" \
+          2>&1 &
+          WORKHORSE_PID=$!
+
+        sleep 10
+
+        # Check if the server is running using BusyBox ps
+        if ! ps | grep $WORKHORSE_PID > /dev/null; then
+            echo "Workhorse server failed to start"
+            exit 1
+        fi
+
+        # Need to test the health endpoint once rails is packaged.
