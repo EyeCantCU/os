@@ -1,7 +1,7 @@
 package:
   name: gitlab-cng-ee-fips-17.1
   version: 17.1.2
-  epoch: 0
+  epoch: 1
   description: Cloud Native container images per component of GitLab
   copyright:
     - license: MIT
@@ -11,12 +11,16 @@ package:
     provides:
       - gitlab-cng-ee-fips=${{package.full-version}}
 
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
 environment:
   contents:
     packages:
       - busybox
-      - py3-pip
-      - python3
 
 pipeline:
   - uses: git-checkout
@@ -25,38 +29,7 @@ pipeline:
       tag: v${{package.version}}-ee
       expected-commit: 481689ca6785771fb4cd2290a898852dd80ae2e0
 
-data:
-  # Used to create all of the *-scripts subpackages from the CNG repo.
-  - name: scripts
-    items:
-      cfssl-self-sign: ./cfssl-self-sign
-      container-registry: ./gitlab-container-registry
-      exporter: ./gitlab-exporter
-      geo-logcursor: ./gitlab-geo-logcursor
-      gitaly: ./gitaly
-      mailroom: ./gitlab-mailroom
-      pages: ./gitlab-pages
-      rails: ./gitlab-rails
-      shell: ./gitlab-shell
-      sidekiq: ./gitlab-sidekiq
-      toolbox: ./gitlab-toolbox
-      webservice: ./gitlab-webservice
-      workhorse: ./gitlab-workhorse
-
 subpackages:
-  - range: scripts
-    name: "${{package.name}}-${{range.key}}-scripts"
-    dependencies:
-      provides:
-        - "gitlab-cng-ee-fips-${{range.key}}-scripts=${{package.full-version}}"
-    pipeline:
-      - runs: |
-          cd ${{range.value}}
-          for x in $(find scripts/ -type f); do
-            mkdir -p ${{targets.subpkgdir}}/$(dirname $x)
-            cp -r $x ${{targets.subpkgdir}}/$x
-          done
-
   - name: "${{package.name}}-base"
     pipeline:
       - runs: |
@@ -72,78 +45,10 @@ subpackages:
         - busybox
         - ca-certificates-bundle
         - curl
-        - gitlab-logger-fips
+        - gitlab-cng-fips-${{vars.major-minor-version}}-gitlab-logger
         - gomplate-fips
         - procps
         - xtail
-
-  - name: "${{package.name}}-certificates"
-    pipeline:
-      - runs: |
-          cd ./certificates
-          for x in $(find scripts/ -type f); do
-            mkdir -p ${{targets.subpkgdir}}/$(dirname $x)
-            cp -r $x ${{targets.subpkgdir}}/$x
-          done
-          ./scripts/bundle-certificates
-    dependencies:
-      runtime:
-        - ca-certificates
-        - ${{package.name}}-base
-    test:
-      pipeline:
-        - name: Test bundle-certificates script
-          runs: |
-            # if bundle-certificates runs correctly, it dereferences symlinks outside of /etc/ssl/certs
-            for f in /etc/ssl/certs/*.pem /etc/ssl/certs/*.crt; do
-              if [ -L "$f" ]; then
-                origin=$(readlink -f "$f")
-                originPath=${origin%/*}
-                if [ "$originPath" != "/etc/ssl/certs" ]; then
-                  echo "Error: $f is a symlink pointing outside of /etc/ssl/certs to $origin"
-                  exit 1
-                fi
-              fi
-            done
-
-  - name: "${{package.name}}-gitlab-toolbox"
-    dependencies:
-      runtime:
-        - openssl-config-fipshardened
-        - py3-wheel
-        - azcopy-fips
-        - s3cmd-fips
-        - aws-cli-fips-v1
-    pipeline:
-      - name: Install gsutil
-        runs: |
-          python -m venv .venv --system-site-packages
-          source .venv/bin/activate
-          pip install gsutil
-
-          mkdir -p ${{targets.subpkgdir}}/usr/share/gsutil
-          mv .venv ${{targets.subpkgdir}}/usr/share/gsutil/
-
-          # edit the venv paths
-          sed -i "s|/home/build|/usr/share/gsutil|g" ${{targets.subpkgdir}}/usr/share/gsutil/.venv/bin/*
-      - name: Symlink gsutil
-        runs: |
-          mkdir -p ${{targets.subpkgdir}}/usr/bin
-          ln -s /usr/share/gsutil/.venv/bin/gsutil ${{targets.subpkgdir}}/usr/bin/gsutil
-      - name: Move provided scripts
-        runs: |
-          mkdir -p ${{targets.subpkgdir}}/usr/lib/ruby/vendor_ruby
-          mkdir -p ${{targets.subpkgdir}}/usr/bin
-          cp -rf gitlab-toolbox/scripts/lib/* ${{targets.subpkgdir}}/usr/lib/ruby/vendor_ruby/
-          cp -rf gitlab-toolbox/scripts/bin/* ${{targets.subpkgdir}}/usr/bin/
-    test:
-      pipeline:
-        - name: Verify tools from gitlab-toolbox
-          runs: |
-            aws --version
-            s3cmd --version
-            azcopy --version
-            gsutil --version
 
 update:
   enabled: true
