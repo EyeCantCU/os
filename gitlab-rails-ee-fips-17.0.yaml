@@ -1,0 +1,116 @@
+package:
+  name: gitlab-rails-ee-fips-17.0
+  version: 17.0.4
+  epoch: 0
+  description: "GitLab's core webapp, built with Ruby on Rails"
+  copyright:
+    # GitLab Enterprise Edition license bundled with package
+    - license: MIT
+  dependencies:
+    provides:
+      - gitlab-rails-ee=${{package.full-version}}
+    runtime:
+      - ruby-3.2
+      - ruby3.2-bundler
+      - tzdata
+      - posix-libc-utils
+      - icu-dev
+      - krb5-dev
+      - libpq-16
+      - libffi-dev
+      - exiftool
+      - graphicsmagick
+      - openssl-config-fipshardened
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - bash
+      - busybox
+      - ca-certificates-bundle
+      - clang
+      - cmake
+      - git
+      - glibc-dev
+      - icu-dev
+      - krb5-dev
+      - libpq-16
+      - libffi-dev
+      - nodejs-20
+      - node-gyp
+      - postgresql-dev
+      - python3
+      - ruby-3.2
+      - ruby-3.2-dev
+      - ruby3.2-bundler
+      - tzdata
+      - yarn
+      - zlib-dev
+      - posix-libc-utils
+      - go-fips
+  environment:
+    CC: clang
+    CXX: clang++
+    CXXFLAGS: "-std=c++17 -fPIC"
+    LDSHARED: "clang++-18 -shared"
+    TZINFO_DATA: /usr/share/zoneinfo
+    RAILS_ENV: production
+    NODE_ENV: production
+    USE_DB: false
+    SKIP_STORAGE_VALIDATION: true
+    GITLAB_USER: git
+    RUBY_VERSION: $(ruby -e 'print RUBY_VERSION')
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 9dbd6804d1bdceedc3d1ff12baa6e6fb37eb4963
+      repository: https://gitlab.com/gitlab-org/gitlab.git
+      tag: v${{package.version}}-ee
+      destination: ${{targets.contextdir}}/srv/gitlab
+
+  - working-directory: ${{targets.contextdir}}/srv/gitlab
+    runs: |
+      bundle config set --local path ${{targets.contextdir}}/srv/gitlab/vendor/bundle/
+      bundle config set --local clean 'true'
+      bundle config set --local deployment 'true'
+      bundle config set --local without 'development test mysql aws'
+      bundle config build.static_holmes --with-cflags="-fPIC" --with-cxxflags="-std=c++17 -fPIC" --with-ldflags="-shared -lstdc++"
+      bundle install --jobs 4 --retry 5
+
+      # Create GitLab datadir
+      export DATADIR=${{targets.contextdir}}/var/opt/gitlab
+      mkdir -p ${DATADIR}
+
+      cp config/gitlab.yml.example config/gitlab.yml
+      cp config/resque.yml.example config/resque.yml
+      cp config/secrets.yml.example config/secrets.yml
+      cp config/database.yml.postgresql config/database.yml
+
+      sed --in-place "/host: localhost/d" config/gitlab.yml
+      sed --in-place "/port: 80/d" config/gitlab.yml
+      sed --in-place "s/# user:.*/user: ${GITLAB_USER}/" config/gitlab.yml
+      sed --in-place "s:/home/git/repositories:${DATADIR}/repo:" config/gitlab.yml
+
+      yarn install --production --pure-lockfile
+      bundle exec rake gettext:compile
+      bundle exec rake gitlab:assets:compile
+      mkdir -p ${{targets.contextdir}}/assets/licenses
+      cp LICENSE ${{targets.contextdir}}/assets/licenses/GitLab.txt
+      bundle config unset --local path
+
+      # Cleanup
+      rm -rf node_modules/ tmp/ spec/ ee/spec/ qa/ rubocop/ tooling/ .git/ .gitlab/ \
+             .github/ docker/ changelogs/ danger/ Dangerfile
+      # TODO: Create gitlab-cng-ee-rails-buildscripts packagee
+      /home/build/build-scripts/cleanup-gems
+
+update:
+  enabled: true
+  github:
+    identifier: gitlabhq/gitlabhq
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v17.0
+    strip-suffix: -ee
