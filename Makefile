@@ -22,7 +22,7 @@ initrd:
 	ls initrd*gz 2>/dev/null || docker run --rm -it \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/.mkinitrd $(shell id -u):$(shell id -g)
+		/srv/.mkinitrd $(shell uname -m) $(shell id -u):$(shell id -g)
 
 clean:
 	rm -f disk* initrd*gz vmlinuz*

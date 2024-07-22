@@ -31,13 +31,6 @@ Options:
 
 # You will need to add more memory if you want to do things like adding apk's in this VM
 dir=$(dirname $0)/
-mem=2000
-arch=$(uname -m)
-kernel=$(ls $(dirname "$0")/vmlinuz-$arch* 2>/dev/null | sort | tail -n1)
-initrd=$(dirname "$0")/initrd.$arch.cpio.gz
-diskimg=$(dirname "$0")/disk.$arch.img
-smp=$(nproc)
-ephemeral=0
 
 # Handle command line options
 while [ ! -z "$1" ]; do
@@ -75,7 +68,7 @@ while [ ! -z "$1" ]; do
 			shift 2
 		;;
 		-q|--qemu-opts)
-			qemu="$2"
+			qemu_opts="$2"
 			shift 2
 		;;
 		-s|--smp)
@@ -88,10 +81,16 @@ while [ ! -z "$1" ]; do
 		;;
 	esac
 done
-qemu_opts="-m $mem -smp $smp -nographic $qemu"
+[ -z "$arch" ] && arch=$(uname -m)
+[ -z "$initrd" ] && initrd=$(dirname "$0")/initrd.$arch.cpio.gz
+[ -z "$diskimg" ] && diskimg=$(dirname "$0")/disk.$arch.img
+[ -z "$kernel" ] && kernel=$(ls $(dirname "$0")/vmlinuz-$arch* 2>/dev/null | sort | tail -n1)
+[ -z "$mem" ] && mem=2000
+[ -z "$smp" ] && smp=$(nproc)
+[ -z "$ephemeral" ] && ephemeral=0
 
 # Fetch a kernel, if needed
-[ -e "$kernel" ] || kernel=$($dir/.fetch-linux-kernel)
+[ -e "$kernel" ] || kernel=$($dir/.fetch-linux-kernel --arch $arch)
 info "kernel = $kernel"
 
 # Build a new initrd if one doesn't exist, or we need to copy an executable into it
@@ -108,7 +107,7 @@ if [ ! -e "$initrd" ] || [ -f "$mission" ]; then
 	docker run --rm -it \
 		--mount type=bind,source="$dir",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/.mkinitrd $(id -u):$(id -g) $m
+		/srv/.mkinitrd $(id -u):$(id -g) $arch $m
 	info "initrd = $initrd"
 	rm -f $mission_tmp
 fi
@@ -140,7 +139,7 @@ fi
 case "$arch" in
 	x86_64)
 		qemu="qemu-system-x86_64"
-		if [ -w /dev/kvm ]; then
+		if [ -w /dev/kvm ] && [ "$arch" = "$(uname -m)" ]; then
 			# Run x86_64/amd64 with acceleration:
 			qemu_opts="$qemu_opts -cpu host -enable-kvm"
 		else
@@ -151,7 +150,8 @@ case "$arch" in
 	;;
 	aarch64)
 		qemu="qemu-system-aarch64"
-		if [ -w /dev/kvm ]; then
+		[ "$smp" -gt 8 ] && smp=8
+		if [ -w /dev/kvm ] && [ "$arch" = "$(uname -m)" ]; then
 			# Run on Linux aarch64 with /dev/kvm acceleration:
 			qemu_opts="$qemu_opts -cpu host -accel kvm -machine virt"
 		# elif somehow test if running on a Mac
@@ -165,6 +165,7 @@ case "$arch" in
 	;;
 esac
 
+qemu_opts="$qemu_opts -m $mem -smp $smp -nographic"
 case "$qemu_opts" in
 	*-kernel*)
 		exec $qemu -append "$append" $qemu_opts
