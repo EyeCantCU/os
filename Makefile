@@ -17,7 +17,7 @@ disk: kernel initrd
 
 
 kernel:
-	ls vmlinuz* 2>/dev/null || ./fetch-linux-kernel
+	ls vmlinuz* 2>/dev/null || ./.fetch-linux-kernel
 
 initrd:
 	ls initrd*gz 2>/dev/null || docker run --rm -it \
