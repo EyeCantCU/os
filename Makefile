@@ -13,7 +13,7 @@ disk: kernel initrd
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls vmlinuz* | sort -V | tail -n1) /srv/$(shell ls initrd* | sort -V | tail -n1)
+		/srv/.mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls vmlinuz* | sort -V | tail -n1) /srv/$(shell ls initrd* | sort -V | tail -n1)
 
 
 kernel:
@@ -23,7 +23,7 @@ initrd:
 	ls initrd*gz 2>/dev/null || docker run --rm -it \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/mkinitrd $(shell id -u):$(shell id -g)
+		/srv/.mkinitrd $(shell id -u):$(shell id -g)
 
 clean:
 	rm -f disk* initrd*gz vmlinuz*
