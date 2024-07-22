@@ -1,0 +1,109 @@
+#!/bin/sh
+
+# This must run within a docker container in order to run mknod and create nodes inside of the cpio tarball
+
+set -e
+set -x
+
+[ -z "$1" ] && echo "ERROR: please supply your UID:GID as the first argument" 1>&2 && exit 1
+
+owner="$1"
+mission="$2"
+dir="/tmp"
+
+# Make an initrd
+apk update
+apk add apko
+
+# Start with wolfi-base, add systemd for init and mount for some boot processes
+cat <<EOF >"$dir"/base.yaml
+contents:
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+  repositories:
+    - https://packages.wolfi.dev/os
+  packages:
+    - mount
+    - systemd
+    - umount
+    - util-linux-misc
+    - wolfi-base
+EOF
+
+# Generate a base wolfi tarball
+apko build-minirootfs $dir/base.yaml $dir/base.tar.gz
+mkdir -p $dir/initrd/rootfs
+
+# Extract that tarball so that we can add some configuration
+tar -C $dir/initrd/rootfs -xf $dir/base.tar.gz || true
+
+# Create an init script in our initrd
+cat <<EOF >"$dir"/initrd/rootfs/init
+#!/bin/busybox sh
+
+set -x
+
+mkdir -p /proc /sys /dev
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+
+mkdir -p /root_dir
+uuid=\$(sed -e "s:.*root=::" -e "s: .*::" /proc/cmdline)
+init=\$(sed -e "s:.*init=::" -e "s: .*::" /proc/cmdline)
+if [ -x "\$init" ]; then
+	# Exec init as overriden on the kernel command line
+	exec \$init
+elif mount --uuid \$uuid /root_dir 2>/dev/null; then
+	# Mount specified persistent disk and boot systemd
+        exec switch_root /root_dir /usr/lib/systemd/systemd
+else
+	# Boot systemd in initrd
+        exec /usr/lib/systemd/systemd
+fi
+EOF
+chmod 755 "$dir"/initrd/rootfs/init
+
+# Symlink a timezone to avoid boot prompt for timezone
+ln -sf /usr/share/zoneinfo/UTC $dir/initrd/rootfs/etc/localtime
+
+# Let's make our on login shell or executable runner
+if [ -f "/srv/$mission" ] && [ -x "/srv/$mission" ]; then
+	cp -af /srv/$mission $dir/initrd/rootfs/root/
+	cat <<EOF >$dir/initrd/rootfs/root/$mission.sh
+#!/bin/sh
+/root/$mission
+poweroff >/dev/null 2>&1
+EOF
+	chmod 700 $dir/initrd/rootfs/root/$mission.sh
+	# Boot straight to a wrapper script that executes our "mission"
+	sed -i "s|^ExecStart=.*agetty.*|ExecStart=-/bin/sh -l /root/$mission.sh|" $dir/initrd/rootfs/usr/lib/systemd/system/serial-getty@.service
+else
+	# Boot straight to busybox shell as root (like a container!)
+	sed -i "s|^ExecStart=.*agetty.*|ExecStart=-/bin/sh -l|" $dir/initrd/rootfs/usr/lib/systemd/system/serial-getty@.service
+fi
+
+# Disable systemd login; boot straight to busybox shell as root (like a container!)
+mkdir -p $dir/initrd/rootfs/etc/systemd/system/
+ln -sf /dev/null $dir/initrd/rootfs/etc/systemd/system/systemd-logind.service
+sed -i 's|^ExecStart=.*|ExecStart=/bin/true|' $dir/initrd/rootfs/usr/lib/systemd/system/systemd-vconsole-setup.service
+
+# Set the hostname to "wolfi" for a little lightweight branding
+echo "wolfi" > $dir/initrd/rootfs/etc/hostname
+sed -i -e "s/\slocalhost\s/ localhost wolfi /" $dir/initrd/rootfs/etc/hosts
+
+# Setup dhcp networking
+cat > $dir/initrd/rootfs/etc/systemd/network/20-wired.network <<- EOF
+[Match]
+Name=en*
+[Network]
+DHCP=yes
+EOF
+
+# Archive and compress this directory structure into a cpio file for initrd
+( cd $dir/initrd/rootfs && find . >../files )
+( cd $dir/initrd/rootfs && cpio --format=newc -o ) <$dir/initrd/files | gzip --to-stdout >/srv/initrd.$(uname -m).cpio.gz
+
+# Chown this file back to the user who ran the docker command that built this file
+# Otherwise, the user is going to end up with a root-owned file in their directory
+chown "$owner" /srv/initrd.$(uname -m).cpio.gz
