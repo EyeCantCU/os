@@ -15,7 +15,6 @@ disk: kernel initrd
 		cgr.dev/chainguard/wolfi-base:latest \
 		/srv/.mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls vmlinuz* | sort -V | tail -n1) /srv/$(shell ls initrd* | sort -V | tail -n1)
 
-
 kernel:
 	ls vmlinuz* 2>/dev/null || ./.fetch-linux-kernel
 
