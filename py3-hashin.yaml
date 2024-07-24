@@ -2,14 +2,10 @@
 package:
   name: py3-hashin
   version: 1.0.1
-  epoch: 0
+  epoch: 1
   description: "Helps you write your requirements.txt with hashes so you can install with pip install --require-hashes -r ..."
   copyright:
     - license: MIT
-  dependencies:
-    runtime:
-      - python3
-      - py3-pip
 
 environment:
   contents:
@@ -18,6 +14,7 @@ environment:
       - ca-certificates-bundle
       - build-base
       - py3-pip
+      - python3
 
 pipeline:
   - uses: git-checkout
@@ -27,9 +24,60 @@ pipeline:
       expected-commit: 808a2fc3713011c544496d58403b6a572e160dff
 
   - runs: |
-      pip install . --prefix=/usr --root=${{targets.destdir}}
+      python3 -m venv .venv
+      . .venv/bin/activate
+
+      # do the install with python3.XX so we get that in shbang
+      python3=$(echo ./.venv/bin/python3.[0-9]*)
+      [ -x "$python3" ]
+      $python3 -m pip wheel --wheel-dir=./dist --verbose .
+      $python3 -m pip install --verbose ./dist/*.whl
+
+  - runs: |
+      destd=/usr/share/hashin
+      mkdir -p "${{targets.contextdir}}${destd}"
+      mv .venv "${{targets.contextdir}}${destd}/"
+      # edit the venv paths
+      sed -i "s|/home/build|${destd}|g" "${{targets.contextdir}}${destd}/.venv/bin"/*
+
+      # symlink binaries to /usr/bin
+      mkdir -p "${{targets.contextdir}}/usr/bin"
+      for p in "${{targets.contextdir}}${destd}/.venv/bin"/*; do
+         [ -f "$p" -a -x "$p" ] || continue
+         bn=${p##*/}
+         case "$bn" in
+             python*|[Aa]ctivate*|pip*) continue;;
+         esac
+         ln -sv "../${destd#/usr/}/.venv/bin/$bn" "${{targets.contextdir}}/usr/bin/"
+      done
 
   - uses: strip
+
+test:
+  pipeline:
+    - name: "run hashin --help"
+      runs: |
+        hashin --help
+    - name: "test hashin"
+      runs: |
+        cat >expected.txt <<"EOF"
+        setuptools==71.1.0 \
+            --hash=sha256:032d42ee9fb536e33087fb66cac5f840eb9391ed05637b3f2a76a7c8fb477936 \
+            --hash=sha256:33874fdc59b3188304b2e7c80d9029097ea31627180896fb549c578ceb8a0855
+        EOF
+
+        : > req.txt
+        set -- hashin --requirements=req.txt setuptools==71.1.0
+        "$@"
+        if diff -u expected.txt req.txt; then
+          echo "PASS: verified expected output for: $*"
+          exit 0
+        fi
+        echo "FAIL: $*"
+        echo "expected:"
+        sed 's,^,>,' expected.txt
+        echo "found:"
+        sed 's,^,>,' req.txt
 
 update:
   enabled: true
