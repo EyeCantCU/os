@@ -2,11 +2,13 @@
 package:
   name: ingress-nginx-controller-fips-1.9
   version: 1.9.6
-  epoch: 6
+  epoch: 7
   description: "Ingress-NGINX Controller for Kubernetes"
   copyright:
     - license: Apache-2.0
   dependencies:
+    provides:
+      - ingress-nginx-controller=${{package.full-version}}
     runtime:
       - ca-certificates-bundle
       - ca-certificates
@@ -41,6 +43,12 @@ package:
       - modsecurity
       - mimalloc
       - pcre
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: nginx-ingress-major-minor
 
 environment:
   contents:
@@ -461,12 +469,43 @@ pipeline:
         && setcap -v cap_net_bind_service=+ep ${{targets.destdir}}/usr/bin/dumb-init
 
 subpackages:
+  - name: ingress-nginx-controller-compat-fips-${{vars.nginx-ingress-major-minor}}
+    description: Compatibility package for ingress-nginx-controller
+    dependencies:
+      provides:
+        - ingress-nginx-controller-compat-fips=${{package.full-version}}
+      runtime:
+        - modsecurity-config
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -s /usr/bin/nginx ${{targets.subpkgdir}}/usr/local/bin/nginx
+
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          ln -s /usr/bin/nginx-ingress-controller ${{targets.subpkgdir}}/nginx-ingress-controller
+          ln -s /usr/bin/waitshutdown ${{targets.subpkgdir}}/waitshutdown
+          ln -s /usr/bin/nginx-dbg ${{targets.subpkgdir}}/dbg
+
+          mkdir -p ${{targets.subpkgdir}}/etc/nginx/modsecurity
+          ln -s /etc/modsecurity/modsecurity.conf-concurrent ${{targets.subpkgdir}}/etc/nginx/modsecurity/modsecurity.conf
+          ln -s /etc/modsecurity/unicode.mapping ${{targets.subpkgdir}}/etc/nginx/modsecurity/unicode.mapping
+
+          mkdir -p ${{targets.subpkgdir}}/var/log/nginx
+          # Create symlinks to redirect nginx logs to stdout and stderr docker log collector
+          ln -sf /dev/stdout ${{targets.subpkgdir}}/var/log/nginx/access.log
+          ln -sf /dev/stderr ${{targets.subpkgdir}}/var/log/nginx/error.log
+
+          # symlink to satisfy hard coded path to mimalloc
+          # https://github.com/kubernetes/ingress-nginx/blob/8f54b538d9b32649411d9e507ca38fbee55ce51c/charts/ingress-nginx/templates/controller-daemonset.yaml#L99-L100
+          mkdir -p ${{targets.subpkgdir}}/usr/local/lib
+          ln -s /usr/lib/libmimalloc.so.1 ${{targets.subpkgdir}}/usr/local/lib/libmimalloc.so
+
   # This is a maintained fork of the unmaintained
   # https://github.com/jet/kube-webhook-certgen/. We keep it as a
   # subpackage of ingress-nginx-controller since the one use
   # (kube-prometheus-stack charts) points to a hybrid tag of the
   # $ingress-nginx-$kube-webhook-certgen version.    # $ingress-nginx-$kube-webhook-certgen version.
-  - name: kube-webhook-certgen-fips-1.9
+  - name: kube-webhook-certgen-fips-${{vars.nginx-ingress-major-minor}}
     description: Tools to help with self signed cert generation for Kubernetes test environment
     dependencies:
       provides:
@@ -479,6 +518,13 @@ subpackages:
           modroot: ./images/kube-webhook-certgen/rootfs
           packages: .
           go-package: go-fips
+    test:
+      pipeline:
+        - runs: |
+            /usr/bin/kube-webhook-certgen version
+        - uses: test/go-fips-check
+          with:
+            package-match: "^kube-webhook-certgen-fips-${{vars.nginx-ingress-major-minor}}"
 
 update:
   enabled: true
@@ -490,5 +536,5 @@ update:
 test:
   pipeline:
     - runs: |
-        /usr/bin/nginx -v
-        /usr/bin/nginx-ingress-controller --version
+        nginx -v
+        nginx-ingress-controller --version
