@@ -1,0 +1,103 @@
+package:
+  name: redis-7.4
+  version: 7.4.0
+  epoch: 0
+  description: Advanced key-value store
+  copyright:
+    # IMPORTANT: redis v7.4+ introduced a licensing change, which provides two
+    # choices. We are selecting SSPL instead of RSAL, as that restricts our use-case.
+    - license: SSPL-1.0
+  dependencies:
+    provides:
+      - redis=${{package.full-version}}
+    runtime:
+      - posix-libc-utils # `getent` is required on startup in ha mode for ip introspection cluster formation
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - linux-headers
+      - openssl-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: c9d29f6a918c335bc1778d9f68e521c1bbb36a0f
+      repository: https://github.com/redis/redis.git
+      tag: ${{package.version}}
+
+  - uses: patch
+    with:
+      patches: 0000-Disable-protected-mode.patch
+
+  - runs: |
+      export CFLAGS="$CFLAGS -DUSE_MALLOC_USABLE_SIZE"
+        make USE_JEMALLOC=no \
+        MALLOC=libc \
+        BUILD_TLS=yes \
+        all -j$(nproc)
+      make install PREFIX=/usr INSTALL_BIN="${{targets.destdir}}/usr/bin"
+
+  - uses: strip
+
+# NOTE: The 'redis' package has historically included bitnami compat packages,
+# however bitnami has not, at the time of writing (Aug 2024), released any
+# support for v7.4. With that in mind i've dropped the bitnami subpackages, as
+# the latest versions supported upstream are still v7.2.
+subpackages:
+  - name: redis-cli-${{vars.major-minor-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mv "${{targets.destdir}}"/usr/bin/redis-cli "${{targets.subpkgdir}}"/usr/bin/redis-cli
+    description: redis-cli is the command line interface utility to talk with Redis.
+    dependencies:
+      provides:
+        - redis-cli=${{package.full-version}}
+  - name: redis-benchmark-${{vars.major-minor-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mv "${{targets.destdir}}"/usr/bin/redis-benchmark "${{targets.subpkgdir}}"/usr/bin/redis-benchmark
+    description: redis-benchmark utility that simulates running commands done by N clients while at the same time sending M total queries.
+    dependencies:
+      provides:
+        - redis-benchmark=${{package.full-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: redis/redis
+    tag-filter-prefix: "7.4."
+
+test:
+  environment:
+    contents:
+      packages:
+        - redis-cli
+  pipeline:
+    - runs: |
+        cat <<EOF >> /tmp/redis.conf
+        dbfilename dump.rdb
+        pidfile /tmp/redis_6379.pid
+        dir /tmp/
+        EOF
+
+        redis-server /tmp/redis.conf &
+        sleep 2 # wait for redis to start
+        redis-cli SET bike:1 "Process 134" || exit 1
+        redis-cli GET bike:1 | grep 'Process 134' || exit 1
+        redis-cli exists bike:1 | grep 1 || exit 1
+        redis-cli exists bike:2 | grep 0 || exit 1
