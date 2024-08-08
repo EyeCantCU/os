@@ -4,6 +4,7 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 import java.security.*;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Stream;
@@ -42,6 +43,37 @@ public class Test {
             "TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256" // OpenSSL: RSA-PSK-CHACHA20-POLY1305
     ));
 
+    
+    final static Map<String,String> UNSUPPORTED_DIGESTS = Map.ofEntries(
+        Map.entry("Blowfish", "Blowfish/CBC/PKCS5Padding"),
+        Map.entry("AES in EAX Mode", "AES/EAX/NoPadding"),
+        Map.entry("ChaCha20", "ChaCha20"),
+        Map.entry("Arc4", "Arc4"),
+        Map.entry("Camellia", "Camellia/CCM/PKCS5Padding"),
+        Map.entry("CAST5", "CAST5/CFB8/PKCS5Padding"),
+        Map.entry("DES", "DES/CBC/NoPadding"),
+        Map.entry("GOST28147", "GOST28147/CFB64/NoPadding"),
+        Map.entry("IDEA", "IDEA/OFB/NoPadding"),
+        Map.entry("RC2", "RC2/CTR/NoPadding"),
+        Map.entry("SEED", "SEED/GCM/NoPadding"),
+        Map.entry("Serpent", "Serpent/CCM/NoPadding"),
+        Map.entry("SHACAL-2", "SHACAL-2/CTR/PKCS5Padding"),
+        Map.entry("TripleDES in EAX", "DESede/EAX/NoPadding"),
+        Map.entry("Twofish", "Twofish/OFB/NoPadding")
+    );
+
+    final static Map<String,String> SUPPORTED_DIGESTS = Map.of(
+        // According to BC:
+        // FIPS is largely ambivalent towards padding mechanisms, so all modes are available in both approved-mode and general operation
+        // We add a couple modes / paddings just to be sure
+        "AES in CBC, NoPadding", "AES/CBC/NoPadding",
+        "AES in ECB, NoPadding", "AES/ECB/NoPadding",
+        "AES in CBC, PKCS5Padding", "AES/CBC/PKCS5Padding",
+        "TripleDES in ECB, NOPadding", "DESede/ECB/NoPadding",
+        "TripleDES in CBC, NoPadding", "DESede/CBC/NoPadding",
+        "TripleDES in ECB, PKCS5Padding", "DESede/ECB/PKCS5Padding"
+    );
+
     private static void testDigestCiphers() {
         try {
             MessageDigest digest = MessageDigest.getInstance("MD5");
@@ -56,50 +88,34 @@ public class Test {
             // this is unreachable code. MD5 is always available.
         }
 
-        try {
-            Cipher cipher = Cipher.getInstance("Blowfish/CBC/PKCS5Padding");
-            System.out.println(cipher.getAlgorithm());
-            System.out.println(cipher.getProvider());
+        for (Map.Entry<String, String> entry : UNSUPPORTED_DIGESTS.entrySet()) {
+            try {
+                Cipher cipher = Cipher.getInstance(entry.getValue());
+                System.out.println(cipher.getAlgorithm());
+                System.out.println(cipher.getProvider());
 
-            System.err.println("Blowfish should not be available. Validation failed.");
-            System.exit(1);
-        } catch (NoSuchAlgorithmException | NoSuchPaddingException e) {
-            // expected
-            System.out.println("Blowfish is not available. Validation passed.");
-            System.out.println("Details: ");
-            e.printStackTrace();
+                System.err.println(entry.getKey() + " is available. Validation failed.");
+                System.exit(1);
+            } catch (NoSuchAlgorithmException | NoSuchPaddingException e) {
+                // expected
+                System.out.println(entry.getKey() + " is not available. Validation passed.");
+                System.out.println("Details: ");
+                e.printStackTrace();
+            }
         }
 
-        try {
-            Cipher.getInstance("AES/CBC/NoPadding");
-            Cipher.getInstance("AES/CBC/PKCS5Padding");
-            System.out.println("AES cipher is available. Validation passed.");
-        } catch (NoSuchAlgorithmException | NoSuchPaddingException e) {
-            System.err.println("AES is not available. Validation failed.");
-            e.printStackTrace();
-            System.exit(1);
-        }
+        for (Map.Entry<String, String> entry : SUPPORTED_DIGESTS.entrySet()) {
+            try {
+                Cipher cipher = Cipher.getInstance(entry.getValue());
+                System.out.println(cipher.getAlgorithm());
+                System.out.println(cipher.getProvider());
 
-        try {
-            Cipher.getInstance("AES/EAX/NoPadding");
-            System.err.println("AES cipher is available in EAX mode. Validation failed.");
-            System.exit(1);
-        } catch (NoSuchAlgorithmException | NoSuchPaddingException e) {
-            // AES/EAX is not available
-            System.out.println("AES/EAX is not available. Validation passed.");
-            System.out.println("Details: ");
-            e.printStackTrace();
-        }
-
-        try {
-            Cipher.getInstance("ChaCha20");
-            System.err.println("ChaCha20 cipher is available. Validation failed.");
-            System.exit(1);
-        } catch (NoSuchAlgorithmException | NoSuchPaddingException e) {
-            // ChaCha20 is not available
-            System.out.println("ChaCha20 is not available. Validation passed.");
-            System.out.println("Details: ");
-            e.printStackTrace();
+                System.out.println(entry.getKey() + " is available. Validation passed.");
+            } catch (NoSuchAlgorithmException | NoSuchPaddingException e) {
+                System.err.println(entry.getKey() + " is not available. Validation failed.");
+                e.printStackTrace();
+                System.exit(1);
+            }
         }
     }
 
