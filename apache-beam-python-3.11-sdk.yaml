@@ -1,0 +1,157 @@
+package:
+  name: apache-beam-python-3.11-sdk
+  version: 2.58.0
+  epoch: 0
+  description: Apache Beam Python SDK
+  copyright:
+    - license: Apache-2.0
+  options:
+    #  There is a dependency on libarrow-substrait.so although it
+    #  is provided in the virtual environment. Enabling no-depends
+    #  works around this
+    no-depends: true
+  dependencies:
+    runtime:
+      - geos-dev
+      - py3.11-google-cloud-sdk
+      - openjdk-17-default-jvm
+      - python-3.11
+      - snappy-dev
+      - yaml-dev
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gcc-12-default
+      - go
+      - openjdk-17
+      - openjdk-17-default-jvm
+      - py3.11-pip
+      - python-3.11-base
+      - python-3.11-base-dev
+      - python-3.11
+      - python-3.11-dev
+      - python-3.8-base
+      - python-3.8-base-dev
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/beam
+      expected-commit: d8315f63270b6b4d79afd2579b41dba23b999235
+      tag: v${{package.version}}
+
+  # Fixes some CVEs and has python deps based on https://github.com/apache/beam/pull/32132/files for python3.11
+  - uses: patch
+    with:
+      patches: python-deps.patch
+
+  - runs: |
+      # Set the version: https://github.com/apache/beam/issues/21302#issuecomment-1912679793
+      ./release/src/main/scripts/set_version.sh ${{package.version}} --release
+
+  - runs: |
+      # Create the output directories we need.
+      mkdir -p ${{targets.destdir}}/opt/apache/beam/third_party_licenses
+
+  - uses: go/build
+    with:
+      packages: .
+      modroot: ./sdks/java/container
+      prefix: /opt
+      install-dir: apache/beam
+      output: boot
+
+  - runs: |
+      ./gradlew :sdks:python:container:py311:generatePythonRequirements
+
+  - runs: |
+      # Create virtual environment
+      python3.11 -m venv venv --system-site-packages
+      source venv/bin/activate
+
+      # Install apache-beam
+      pip install --no-deps -v sdks/python/build/apache-beam.tar.gz
+      python3.11 -m pip install --no-compile -r sdks/python/container/py311/base_image_requirements.txt
+
+      # Install Python deps related licenses.
+      mkdir -p /opt/apache/beam/third_party_licenses/
+      chmod -R 755 /opt/apache/beam/third_party_licenses/
+      mkdir -p /tmp/
+      cp -r sdks/python/container/license_scripts /tmp/
+
+      pip install 'pip-licenses<5' pyyaml tenacity && \
+      python /tmp/license_scripts/pull_licenses_py.py ; \
+      cp -r /opt/apache/beam/third_party_licenses/* ${{targets.destdir}}/opt/apache/beam/third_party_licenses
+
+      find venv -name "__pycache__" -exec rm -rf {} +
+      # Remove pip
+      pip uninstall --yes pip
+
+      # Use Python in virtual environment
+      sed -i "s|/home/build/venv|/usr/share/apache-beam|g" venv/pyvenv.cfg
+      sed -i "s|/home/build/venv|/usr/share/apache-beam|g" venv/bin/*
+
+      # Install virtual environment
+      mkdir -p ${{targets.contextdir}}/usr/share/apache-beam
+      cp -r venv/* ${{targets.contextdir}}/usr/share/apache-beam/
+
+      destd=/usr/share/apache-beam
+
+      # symlink binaries to /usr/bin
+      mkdir -p "${{targets.contextdir}}/usr/bin"
+      for p in "${{targets.contextdir}}${destd}/venv/bin"/*; do
+         [ -f "$p" -a -x "$p" ] || continue
+         bn=${p##*/}
+         case "$bn" in
+             python*|[Aa]ctivate*|pip*) continue;;
+         esac
+         ln -sv "../${destd#/usr/}/venv/bin/$bn" "${{targets.contextdir}}/usr/bin/"
+      done
+
+  - runs: |
+      # Generate / copy the licenses.
+
+      # Copy LICENSE and NOTICE first
+      cp ./LICENSE ${{targets.destdir}}/opt/apache/beam/LICENSE
+      cp ./NOTICE ${{targets.destdir}}/opt/apache/beam/NOTICE
+      cp ./LICENSE.python ${{targets.destdir}}/opt/apache/beam/LICENSE.python
+
+      # Generate go licenses. With our apk package go-licenses does not work
+      # so just working around with this for it.
+      # https://github.com/chainguard-dev/enterprise-packages/issues/6507
+      mkdir /tmp/go
+      export GOPATH=/tmp/go
+      go install github.com/google/go-licenses@latest
+
+      cp LICENSE sdks/python/container/
+      cd sdks/python/container
+      /tmp/go/bin/go-licenses save . --save_path=${{targets.destdir}}/opt/apache/beam/third_party_licenses/golang
+      go-licenses csv . | tee ${{targets.destdir}}/opt/apache/beam/third_party_licenses/golang/list.csv
+      cd ../../../
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - ca-certificates-bundle
+        - openjdk-17
+        - openjdk-17-default-jvm
+  pipeline:
+    - runs: /opt/apache/beam/boot --help
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - sdks/
+    - '-RC'
+  github:
+    identifier: apache/beam
+    strip-prefix: v
+    use-tag: true
