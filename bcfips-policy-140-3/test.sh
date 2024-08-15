@@ -2,7 +2,7 @@
 
 set -o errexit -o nounset -o errtrace -o pipefail -x
 
-CLASSPATH="/usr/share/java/bouncycastle-fips/*:."
+CLASSPATH="${CLASSPATH:-/usr/share/java/bouncycastle-fips/*:.}"
 export CLASSPATH
 
 "${JAVA_HOME}/bin/javac" Test.java
