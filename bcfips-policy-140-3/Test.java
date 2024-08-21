@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.stream.Stream;
 
 public class Test {
-    final static List<String> UNSUPPORTED_CIPHERS = Collections.unmodifiableList(Arrays.asList(
+    final static List<String> UNSUPPORTED_TLS_CIPHERS = Collections.unmodifiableList(Arrays.asList(
             // TLS v1.3
             "TLS_CHACHA20_POLY1305_SHA256",
             "TLS_AES_128_CCM_SHA256",
@@ -44,7 +44,7 @@ public class Test {
     ));
 
     
-    final static Map<String,String> UNSUPPORTED_DIGESTS = Map.ofEntries(
+    final static Map<String,String> UNSUPPORTED_CIPHER_MODES = Map.ofEntries(
         Map.entry("Blowfish", "Blowfish/CBC/PKCS5Padding"),
         Map.entry("AES in EAX Mode", "AES/EAX/NoPadding"),
         Map.entry("ChaCha20", "ChaCha20"),
@@ -62,7 +62,7 @@ public class Test {
         Map.entry("Twofish", "Twofish/OFB/NoPadding")
     );
 
-    final static Map<String,String> SUPPORTED_DIGESTS = Map.of(
+    final static Map<String,String> SUPPORTED_CIPHER_MODES = Map.of(
         // According to BC:
         // FIPS is largely ambivalent towards padding mechanisms, so all modes are available in both approved-mode and general operation
         // We add a couple modes / paddings just to be sure
@@ -74,21 +74,83 @@ public class Test {
         "TripleDES in ECB, PKCS5Padding", "DESede/ECB/PKCS5Padding"
     );
 
-    private static void testDigestCiphers() {
+    final static List<String> SUPPORTED_DIGESTS = Collections.unmodifiableList(Arrays.asList(
+        "SHA-1",
+        "SHA-224",
+        "SHA-256",
+        "SHA-384",
+        "SHA-512",
+        "SHA-512(224)",
+        "SHA-512(256)",
+        "SHA3-224",
+        "SHA3-256",
+        "SHA3-384",
+        "SHA3-512",
+        "SHAKE128",
+        "SHAKE256"
+    ));
+
+    final static List<String> UNSUPPORTED_DIGESTS = Collections.unmodifiableList(Arrays.asList(
+        "GOST3411",
+        "GOST3411-2012-256",
+        "GOST3411-2012-512",
+        "RIPEMD128",
+        "RIPEMD160",
+        "RIPEMD256",
+        "RIPEMD320",
+        "Tiger",
+        "Whirlpool",
+        "MD5" // MD5 is not allowed when provider is BCFIPS
+    ));
+
+    private static void testMessageDigestsAndCiphers() {
+
         try {
             MessageDigest digest = MessageDigest.getInstance("MD5");
             System.out.println(digest.getAlgorithm());
             System.out.println(digest.getProvider());
-
-            System.out.println("MD5 is always available");
-            System.out.println(
-                    "* see table 7 of https://downloads.bouncycastle.org/fips-java/BC-FJA-SecurityPolicy-1.0.2.pdf");
-            System.out.println("* see https://github.com/bcgit/bc-java/issues/1282");
-        } catch (final NoSuchAlgorithmException e) {
-            // this is unreachable code. MD5 is always available.
+            System.err.println("MD5 is allowed when provider is not specified (aka SUN). Validation Passed.");
+        } catch (NoSuchAlgorithmException e) {
+            // expected
+            System.out.println("MD5 is not available. Validation failed.");
+            System.out.println("Details: ");
+            e.printStackTrace();
+            System.exit(1);
         }
 
-        for (Map.Entry<String, String> entry : UNSUPPORTED_DIGESTS.entrySet()) {
+        for (String entry : SUPPORTED_DIGESTS) {
+            try {
+                MessageDigest digest = MessageDigest.getInstance(entry, "BCFIPS");
+                System.out.println(digest.getAlgorithm());
+                System.out.println(digest.getProvider());
+
+                // expected
+                System.out.println(entry + " is available. Validation passed.");
+            } catch (NoSuchAlgorithmException | NoSuchProviderException e) {
+                System.err.println(entry + " is not available. Validation failed. See page 37 of https://downloads.bouncycastle.org/fips-java/docs/BC-FJA-UserGuide-2.0.0.pdf");
+                System.out.println("Details: ");
+                e.printStackTrace();
+                System.exit(1);
+            }
+        }
+
+        for (String entry : UNSUPPORTED_DIGESTS) {
+            try {
+                MessageDigest digest = MessageDigest.getInstance(entry, "BCFIPS");
+                System.out.println(digest.getAlgorithm());
+                System.out.println(digest.getProvider());
+
+                System.err.println(entry + " is available. Validation failed. See page 37 of https://downloads.bouncycastle.org/fips-java/docs/BC-FJA-UserGuide-2.0.0.pdf");
+                System.exit(1);
+            } catch (NoSuchAlgorithmException | NoSuchProviderException e) {
+                // expected
+                System.out.println(entry + " is not available. Validation passed.");
+                System.out.println("Details: ");
+                e.printStackTrace();
+            }
+        }
+
+        for (Map.Entry<String, String> entry : UNSUPPORTED_CIPHER_MODES.entrySet()) {
             try {
                 Cipher cipher = Cipher.getInstance(entry.getValue());
                 System.out.println(cipher.getAlgorithm());
@@ -104,7 +166,7 @@ public class Test {
             }
         }
 
-        for (Map.Entry<String, String> entry : SUPPORTED_DIGESTS.entrySet()) {
+        for (Map.Entry<String, String> entry : SUPPORTED_CIPHER_MODES.entrySet()) {
             try {
                 Cipher cipher = Cipher.getInstance(entry.getValue());
                 System.out.println(cipher.getAlgorithm());
@@ -152,7 +214,7 @@ public class Test {
         // check unsupported ciphers first
         for (final String cipher : sslContext.getSupportedSSLParameters().getCipherSuites()) {
             try {
-                if (UNSUPPORTED_CIPHERS.contains(cipher)) {
+                if (UNSUPPORTED_TLS_CIPHERS.contains(cipher)) {
                     Cipher.getInstance(cipher, sslProvider);
                     System.err.println("cipher " + cipher + " is prohibited, but remains available");
                     System.exit(1);
@@ -171,7 +233,7 @@ public class Test {
 
         System.out.println("Available providers: " + Arrays.asList(Security.getProviders()));
 
-        testDigestCiphers();
+        testMessageDigestsAndCiphers();
         testSSLCiphers();
     }
 }
