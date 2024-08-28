@@ -1,0 +1,108 @@
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+package:
+  name: tritonserver-backend-python
+  version: 24.04
+  epoch: 0
+  description: NVIDIA Triton Inference Server Python Backend
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  dependencies:
+    runtime:
+      - libarchive
+      - nvidia-cuda-cudart-12.3
+      - rapidjson
+      - zlib
+  options:
+    no-depends: true
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - cuda-toolkit-12.3
+      - file
+      - gcc-12
+      - gcc-12-default
+      - libarchive-dev
+      - nvidia-cuda-cudart-12.3
+      - nvidia-cuda-cudart-12.3-dev
+      - nvidia-cuda-nvcc-12.3-dev
+      - py3.10-setuptools
+      - py3.10-wheel
+      - python-3.10
+      - python-3.10-dev
+      - rapidjson-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      # c848884d24e71b20a1636e7e63435ca8daba097b is the commit for r24.04
+      # Becareful about changing the commit because you need to keep it in sync with the tags for the other repositories it pulls in.
+      # N.B. r24.04 is a branch; there doesn't appear to be specific tags. So I think potentially they could push a change to the
+      # branch and it would end up changing the commit we build but hopefully that's caught by expected commit
+      expected-commit: c848884d24e71b20a1636e7e63435ca8daba097b
+      repository: https://github.com/triton-inference-server/python_backend.git
+      branch: r${{package.version}}
+      destination: backend
+      recurse-submodules: true
+
+  - runs: |
+      # This is a bit of hack to fix the warnings
+      # See: https://github.com/chainguard-dev/extra-packages/pull/407#issuecomment-2223704174
+      sed -e 's/-Werror//g' -i /home/build/backend/CMakeLists.txt
+
+  # TRT_VERSION is set based on the instructions in the repository
+  # https://github.com/triton-inference-server/tensorrtllm_backend?tab=readme-ov-file#option-1-build-via-the-buildpy-script-in-server-repo
+  #
+  # N.B. Memory tracker is currently disabled because it requires CUPTI and there currently
+  # isn't a CUPTI package for CUDA 12.3
+  - uses: cmake/configure
+    with:
+      output-dir: output
+      opts: |
+        "-DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.3" \
+        "-DTRT_VERSION=10.0.1.6" \
+        "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}" \
+        "-DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}" \
+        "-DCMAKE_BUILD_TYPE=Release" \
+        "-DCMAKE_INSTALL_PREFIX:PATH=/tmp/tritonbuild/python/install" \
+        "-DTRITON_REPO_ORGANIZATION:STRING=https://github.com/triton-inference-server" \
+        "-DTRITON_COMMON_REPO_TAG:STRING=r24.05" \
+        "-DTRITON_CORE_REPO_TAG:STRING=r24.05" \
+        "-DTRITON_BACKEND_REPO_TAG:STRING=r24.05" \
+        "-DTRITON_ENABLE_GPU:BOOL=ON" \
+        "-DTRITON_ENABLE_MALI_GPU:BOOL=OFF" \
+        "-DTRITON_ENABLE_STATS:BOOL=ON" \
+        "-DTRITON_ENABLE_METRICS:BOOL=ON" \
+        "-DTRITON_ENABLE_MEMORY_TRACKER:BOOL=OFF" \
+        "-DCMAKE_CXX_FLAGS=\"-Wno-error=deprecated-declarations\""  \
+        /home/build/backend
+
+  - runs: |
+      # N.B. I'm not sure how we would convert this to use the cmake/build pipeline
+      # https://github.com/chainguard-dev/melange/blob/main/pkg/build/pipelines/cmake/build.yaml
+      # Because it doesn't look like that lets us specify additional options.
+      cmake --build /home/build/output --config Release -j20  -t install
+
+      # INSTALLDIR is the directory where the built artifacts are placed after running cmake install
+      export INSTALLDIR=/tmp/tritonbuild/python/install
+
+      # Dest dir is the directory in final output where we should put the artifacts
+      # See https://github.com/triton-inference-server/server/issues/7410#issuecomment-2218856792
+      # If we don't put the python backend in the default location /opt/tritonserver/backends/python
+      # we have problems later on when trying to specify the location of the backend.
+      # So just use the default location.
+      export DESTDIR="${{targets.contextdir}}/opt/tritonserver"
+      mkdir -p ${DESTDIR}/backends
+      rm -fr ${DESTDIR}/backends/python
+      cp -r ${INSTALLDIR}/backends/python ${DESTDIR}/backends
+
+update:
+  enabled: false
+  exclude-reason: "upstream not using tags or releases"
