@@ -1,7 +1,7 @@
 package:
   name: aws-k8s-cni-fips
   version: 1.18.3
-  epoch: 0
+  epoch: 1
   description: Networking plugin repository for pod networking in Kubernetes using Elastic Network Interfaces on AWS
   copyright:
     - license: Apache-2.0
@@ -11,6 +11,8 @@ environment:
     packages:
       - busybox
       - ca-certificates-bundle
+      - cni-plugins-fips
+      - curl
       - go-fips
       - oldglibc
   environment:
@@ -36,6 +38,7 @@ data:
       aws-vpc-cni: aws-vpc-cni
       egress-cni: egress-cni-plugin
       grpc-health-probe: grpc-health-probe
+      aws-vpc-cni-init: aws-vpc-cni-init
 
 subpackages:
   - range: binaries
@@ -48,6 +51,20 @@ subpackages:
           ldflags: -X pkg/version/info.Version=${{package.version}} -X pkg/awsutils/awssession.version=${{package.version}}
           output: ${{range.key}}
           packages: ./cmd/${{range.value}}
+
+  - name: "aws-k8s-cni-init-fips-compat"
+    description: "Compatibility package to place binaries in the location expected by upstream helm charts"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/init
+          ln -sf /usr/bin/aws-vpc-cni-init ${{targets.subpkgdir}}/init/aws-vpc-cni-init
+          # Copying FIPS compliant container networking plugins
+          binaries="bandwidth bridge dhcp dummy firewall host-device host-local ipvlan loopback macvlan portmap ptp sbr static tap tuning vlan vrf"
+          for bin in $binaries; do
+            cp /usr/bin/$bin ${{targets.subpkgdir}}/init/$bin
+          done
+          # Download the debug script from awslabs/amazon-eks-ami
+          curl -L https://raw.githubusercontent.com/awslabs/amazon-eks-ami/master/log-collector-script/linux/eks-log-collector.sh -o ${{targets.subpkgdir}}/init/aws-cni-support.sh
 
 update:
   enabled: true
@@ -66,6 +83,8 @@ test:
         - aws-k8s-cni-aws-vpc-cni-fips
         - aws-k8s-cni-egress-cni-fips
         - aws-k8s-cni-grpc-health-probe-fips
+        - aws-k8s-cni-aws-vpc-cni-init-fips
+        - aws-k8s-cni-init-fips-compat
   pipeline:
     - name: Verify installation
       runs: |
@@ -73,3 +92,11 @@ test:
         aws-vpc-cni 2>&1 | grep -q 'Failed to install CNI binaries" error="Failed to install /host/opt/cni/bin/aws-cni: failed to copy file: stat aws-cni: no such file or directory'
         egress-cni 2>&1 | grep -q 'CNI protocol versions supported: 0.1.0, 0.2.0, 0.3.0, 0.3.1, 0.4.0, 1.0.0, 1.1.0'
         grpc-health-probe 2>&1 | grep -q '"caller":"github.com/aws/amazon-vpc-cni-k8s/cmd/grpc-health-probe/main.go:59","msg":"error: --addr not specified"'
+    - name: Verify aws-vpc-cni-init
+      runs: |
+        cd /init
+        HOST_CNI_BIN_PATH="/tmp" aws-vpc-cni-init 2>&1 | grep -q 'Copied all CNI plugin binaries to /tmp'
+        if [ -z "$(ls -A /tmp)" ]; then
+          echo "/tmp should have been populated with CNI plugin binaries."
+          exit 1
+        fi
