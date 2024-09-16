@@ -1,0 +1,133 @@
+package:
+  name: DCGM
+  version: 3.3.8
+  epoch: 0
+  description: "NVIDIA Data Center GPU Manager"
+  copyright:
+    - license: Apache-2.0
+  target-architecture:
+    - x86_64
+  dependencies:
+    runtime:
+      # Actually DCGM upstream tries to build both cuda11 and cuda12
+      # builds at the same time, force a single build for now.
+      # Possibly need DCGM-cuda11 build, which does full build, but
+      # then only keeps the compiled 11 code paths.
+      - cuda-toolkit-12.6
+      - numactl
+      - nvidia-cuda-cudart-12.6
+      - so:ld-linux-x86-64.so.2
+      - so:libc.so.6
+      - so:libdl.so.2
+      - fmt-9.1
+      - so:libgcc_s.so.1
+      - so:libm.so.6
+      - so:libpthread.so.0
+      - so:librt.so.1
+      - so:libstdc++.so.6
+      - so:libyaml-cpp.so.0.8
+  options:
+    no-depends: true
+
+environment:
+  contents:
+    packages:
+      - wolfi-baselayout
+      - busybox
+      - ca-certificates-bundle
+      - bash
+      - build-base
+      - cmake
+      - gcc~13
+      - yaml-cpp-dev
+      - boost-dev
+      - boost-static
+      - jsoncpp-dev
+      - jsoncpp-static
+      - libevent-dev
+      - libevent-static
+      - fmt-9.1-dev
+      - Catch2-2.13-dev
+      - Catch2-2.13-static
+      - cuda-toolkit-12.6-dev
+      - nvidia-cuda-cccl-12.6
+      - coreutils
+      - tclap
+      - plog-dev
+      - plog-static
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NVIDIA/DCGM
+      expected-commit: 903d745504f50153be8293f8566346f9de3b3c93
+      tag: v${{package.version}}
+
+  - uses: patch
+    with:
+      patches: ftbfs.patch
+
+  - runs: |
+      # code has unused variables in C code
+      sed -i 's|-Werror|-Wno-error|' CMakeLists.txt
+      # Cannot currently coinstall, hence both are the same build, and
+      # "11" one is removed
+      sed -i 's|11.8|12.6|' -i ./cmake/FindCuda.cmake
+      sed -i 's|12.0|12.6|' -i ./cmake/FindCuda.cmake
+
+  - uses: cmake/configure
+    with:
+      opts: -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -UDCGM_LIB_INSTALL_PREFIX -UDCGM_PACKAGING -UDCGM_PACKAGING_ENGINE -DBUILD_TESTING=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - runs: |
+      # Remove pre-built binaries (native and foreign arch)
+      find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_64bit' -delete
+      find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_aarch64' -delete
+      find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_ppc64le' -delete
+
+  - uses: strip
+
+  - name: Remove cuda11 build, which was missbuilt with cuda12
+    runs: |
+      cd ${{targets.destdir}}
+      rm usr/bin/dcgmproftester11
+      rm usr/lib/libdcgm_cublas_proxy11.so
+      rm usr/share/dcgm_tests/apps/amd64/dcgmproftester11
+      rm usr/share/dcgm_tests/apps/amd64/libdcgm_cublas_proxy11.so
+      rm -r usr/share/nvidia-validation-suite/plugins/cuda11
+      rm -r usr/share/dcgm_tests/apps/nvvs/plugins/cuda11
+
+subpackages:
+  - name: ${{package.name}}-dev
+    pipeline:
+      - uses: split/dev
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/dcgm/sdk_samples
+          mv ${{targets.destdir}}/usr/local/dcgm/sdk_samples/c_src ${{targets.contextdir}}/usr/local/dcgm/sdk_samples
+
+  - name: ${{package.name}}-tests
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share
+          mv ${{targets.destdir}}/usr/share/dcgm_tests ${{targets.contextdir}}/usr/share
+
+  - name: ${{package.name}}-nvvs
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share
+          mv ${{targets.destdir}}/usr/share/nvidia-validation-suite ${{targets.contextdir}}/usr/share
+          mkdir -p ${{targets.contextdir}}/usr/
+          # TODO this path looks weird
+          mv ${{targets.destdir}}/usr/etc ${{targets.contextdir}}/usr/
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/DCGM
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
