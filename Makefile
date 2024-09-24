@@ -129,6 +129,7 @@ dev-container:
 	docker run --privileged --rm -it \
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
+			-v "${HOME}/.config/chainctl/config.yaml:/root/.config/chainctl/config.yaml" \
 			-w "${PWD}" \
 			ghcr.io/wolfi-dev/sdk:latest@sha256:0b42f12333ae9234a6cf949346173d7f348657fea14b88fbf6fe7e832cfab6dd
 
