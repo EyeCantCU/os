@@ -1,0 +1,130 @@
+#!/bin/sh
+
+# This must run within a docker container in order to run mknod and create nodes inside of the cpio tarball
+
+set -e
+[ "$verbose" = "1" ] && set -x
+
+[ -z "$1" ] && echo "ERROR: please supply your UID:GID as the first argument" 1>&2 && exit 1
+[ -z "$2" ] && echo "ERROR: please supply your ARCH as the second argument" 1>&2 && exit 1
+
+owner="$2"
+arch="$1"
+manifest="$3"
+cloud="$4"
+dir="/tmp"
+
+[ -z "$cloud" ] && cloud="qemu"
+
+# Make an initrd
+apk update
+apk add apko curl jq
+
+curl -o /usr/bin/chainctl "https://dl.enforce.dev/chainctl/latest/chainctl_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/aarch64/arm64/')"
+chmod +x /usr/bin/chainctl
+
+# Appending needed packag4es to image
+#	we still append systemd for systemd-boot
+#	TODO: remove systemd, package grub or see UEFI stubs
+jq '.contents.packages |= . + ["systemd-boot", "umount", "mount", "dhclient", "util-linux-misc", "grype", "openssh-server"]' "$manifest" > "$manifest.2.json"
+jq '.contents.repositories |= . + ["/work/packages"] | .contents.keyring |= . + ["/etc/apk/keys/local-melange.rsa.pub"]' "$manifest.2.json" > "$manifest.updated.json"
+# Generate a base wolfi tarball
+apko build-minirootfs "$manifest.updated.json" $dir/base.tar.gz
+mkdir -p $dir/initrd/rootfs
+
+# Extract that tarball so that we can add some configuration
+tar -C $dir/initrd/rootfs -xf $dir/base.tar.gz || true
+
+# Create entrypoint file
+echo '#!/bin/sh' > "$dir"/initrd/rootfs/entrypoint
+echo "/network" >> "$dir"/initrd/rootfs/entrypoint
+# Environment setup
+jq -rM '.environment | to_entries|map("export \(.key)=\(.value|tostring)")|.[]' "$manifest.updated.json" >> "$dir"/initrd/rootfs/entrypoint
+echo "export PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin" >> "$dir"/initrd/rootfs/entrypoint
+echo "export POSTGRES_HOST_AUTH_METHOD=trust" >> "$dir"/initrd/rootfs/entrypoint
+# Workdir setup
+echo "cd $(jq -rM '."work-dir"' "$manifest.updated.json")" >> "$dir"/initrd/rootfs/entrypoint
+# Entrypoint setup
+echo "$(jq -rM .entrypoint.command "$manifest.updated.json") || bash" >> "$dir"/initrd/rootfs/entrypoint
+# echo "/bin/sh -l" >> "$dir"/initrd/rootfs/entrypoint
+chmod +x "$dir"/initrd/rootfs/entrypoint
+
+cat << EOF > "$dir"/initrd/rootfs/network
+# Setup tty/pty
+mkdir /dev/pts
+mount -t devpts devpts -o noexec,nosuid,newinstance,ptmxmode=0666,mode=0620,gid=tty /dev/pts/
+mount --bind /dev/pts/ptmx /dev/ptmx
+
+# some basic branding
+hostname wolfi
+
+# Setup default network
+interface_name="\$(ip -o link show | grep 'BROADCAST,MULTICAST' | head -n 1 | cut -d':' -f2 | tr -d ' ')"
+ip link set lo up
+ip link set "\${interface_name:-"eth0"}" up
+dhclient -v "\${interface_name:-"eth0"}"
+
+##############
+# Entrypoint #
+##############
+# Setup SSH keys for external access
+mkdir -p -m 0700 /root/.ssh/
+echo "${SSHKEY}" > /root/.ssh/authorized_keys
+chmod 0400 /root/.ssh/authorized_keys
+# Setting up AcceptEnv
+echo "AcceptEnv *" >> /etc/ssh/sshd_config
+ssh-keygen -A
+nohup /usr/sbin/sshd -D &
+EOF
+chmod +x "$dir"/initrd/rootfs/network
+
+cat "$dir"/initrd/rootfs/network
+
+# Create an init script in our initrd
+cat << EOF > "$dir"/initrd/rootfs/init
+#!/bin/busybox sh
+
+set -e
+set -x
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+mkdir -p /proc /dev /sys /tmp
+
+mount -t proc proc -o nodev,nosuid,hidepid=2 /proc
+mount -t devtmpfs -o nosuid,noexec devtmpfs /dev
+mount -t sysfs sys -o nodev,nosuid,noexec /sys
+mount -t tmpfs -o nodev,nosuid,noexec tmpfs /tmp
+
+ln -sf /proc/self/fd /dev/fd
+
+# ldconfig is run to prime ld.so.cache for glibc packages which require it.
+if [ -x /sbin/ldconfig ]; then
+	ldconfig /lib /usr/lib /usr/lib64
+fi
+
+mkdir -p /root_dir
+uuid=\$(sed -e "s:.*root=::" -e "s: .*::" /proc/cmdline)
+if mount --uuid \$uuid /root_dir 2>/dev/null; then
+	# Mount specified persistent disk and boot
+	exec switch_root /root_dir /entrypoint
+else
+	exec /entrypoint
+fi
+EOF
+chmod 755 "$dir"/initrd/rootfs/init
+
+# Symlink a timezone to avoid boot prompt for timezone
+ln -sf /usr/share/zoneinfo/UTC $dir/initrd/rootfs/etc/localtime
+
+# Set the hostname to "wolfi" for a little lightweight branding
+echo "wolfi" > $dir/initrd/rootfs/etc/hostname
+sed -i -e "s/\slocalhost\s/ localhost wolfi /" $dir/initrd/rootfs/etc/hosts
+
+# Archive and compress this directory structure into a cpio file for initrd
+( cd $dir/initrd/rootfs && find . > ../files)
+( cd $dir/initrd/rootfs && cpio --format=newc -o ) < $dir/initrd/files | gzip --to-stdout > /srv/initrd.$arch.cpio.gz
+
+# Chown this file back to the user who ran the docker command that built this file
+# Otherwise, the user is going to end up with a root-owned file in their directory
+chown "$owner" /srv/initrd.$arch.cpio.gz
