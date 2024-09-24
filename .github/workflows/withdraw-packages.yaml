@@ -45,16 +45,6 @@ jobs:
           sudo mkdir -p /etc/apk/keys
           sudo cp ./chainguard-enterprise.rsa.pub /etc/apk/keys/chainguard-enterprise.rsa.pub
 
-      - name: Withdraw from index
-        run: |
-          set -euo pipefail
-          for arch in x86_64 aarch64; do
-            mkdir -p $arch
-            curl https://packages.cgr.dev/os/$arch/APKINDEX.tar.gz | wolfictl withdraw $(grep -v '\#' withdrawn-packages.txt) --signing-key="${{ env.SIGNING_KEY }}" > $arch/APKINDEX.tar.gz
-          done
-        env:
-          SIGNING_KEY: "${{ github.workspace }}/chainguard-enterprise.rsa"
-
       # We use a different GSA for our interaction with GCS.
       - uses: google-github-actions/auth@62cf5bd3e4211a0a0b51f2c6d6a37129d828611d # v2.1.5
         with:
@@ -65,6 +55,26 @@ jobs:
         with:
           project_id: "prod-images-c6e5"
 
+      - name: Withdraw from index
+        run: |
+          set -euo pipefail
+          for arch in x86_64 aarch64; do
+            mkdir -p $arch
+
+            curl -v -H "Authorization: Bearer $(gcloud auth print-access-token)" https://packages.cgr.dev/os/$arch/APKINDEX.tar.gz 2>verbose | wolfictl withdraw $(grep -v '\#' withdrawn-packages.txt) --signing-key="${{ env.SIGNING_KEY }}" > $arch/APKINDEX.tar.gz
+
+            # Parse the object generation from the -v output.
+            GEN=$(grep "x-goog-generation" verbose | cut -d' ' -f3)
+            echo "APKINDEX.tar.gz object generation for ${arch} was ${GEN}"
+
+            # This will fail if the APKINDEX is modified between when we download it and when we upload the modified version.
+            # That's totally fine, just re-run the withdrawl workflow.
+            # This is a bit of a hack until we drop this APKINDEX entirely.
+            gcloud storage cp --if-generation-match="${GEN}" --cache-control="no-store" $arch/APKINDEX.tar.gz gs://chainguard-enterprise-registry-destination/os/$arch/APKINDEX.tar.gz
+          done
+        env:
+          SIGNING_KEY: "${{ github.workspace }}/chainguard-enterprise.rsa"
+
       - name: Delete withdrawn packages
         run: |
           set -euo pipefail
@@ -73,14 +83,6 @@ jobs:
               echo "=> $pkg"
               gsutil -m rm -f gs://chainguard-enterprise-registry-destination/os/$arch/$pkg || true
             done
-          done
-
-      - name: Upload modified index
-        run: |
-          set -euxo pipefail
-          for arch in x86_64 aarch64; do
-            gsutil -h "Cache-Control:no-store" cp -a "public-read" \
-                $arch/APKINDEX.tar.gz gs://chainguard-enterprise-registry-destination/os/$arch/APKINDEX.tar.gz || true
           done
 
       - name: Upload full withdrawn packages list
