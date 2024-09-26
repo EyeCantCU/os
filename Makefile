@@ -33,7 +33,7 @@ initrd-image:
 	# same as .mkinird but we pass a manifest and a cloud provider to behave accordingly
 	ls initrd*gz 2>/dev/null || docker run --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
-		-e SSHKEY="${SSHKEY}" \
+		-e SSHKEY="$(shell cat "${SSHKEY}" | base64 -w0)" \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
 		/srv/.mkinitrd-container $(shell uname -m) $(shell id -u):$(shell id -g) "/srv/tmp-manifest.json" "${CLOUD}"
@@ -52,9 +52,16 @@ disk-image-clean:
 	rm -f initrd*gz vmlinuz* disk*${DOCKER_IMAGE}*
 	$(MAKE) disk-image
 
+aws-image-upload:
+	# aws configure sso --profile cg-dev
+	$(eval filename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*.vmdk | tail -1))
+	$(eval imagename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*.vmdk | tail -1 | sed 's|\.tar\.gz||g'))
+	aws s3 cp --profile cg-dev ${filename}  s3://wolfi-vm-images-workloads/
+	aws ec2 import-image --profile cg-dev --description "chainguard-postgres-1316-r1-20240925152440" --disk-containers
+
 google-image-upload:
-	$(eval filename := $(shell ls -1 chainguard-${DOCKER_IMAGE}* | tail -1))
-	$(eval imagename := $(shell ls -1 chainguard-${DOCKER_IMAGE}* | tail -1 | sed 's|\.tar\.gz||g'))
+	$(eval filename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*.tar.gz | tail -1))
+	$(eval imagename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*.tar.gz | tail -1 | sed 's|\.tar\.gz||g'))
 	gcloud storage cp ${filename} gs://wolfi-vm-images-workloads/
 	gcloud compute images create \
 		${imagename} \
