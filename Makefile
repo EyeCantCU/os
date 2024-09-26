@@ -36,7 +36,7 @@ initrd-image:
 		-e SSHKEY="${SSHKEY}" \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/.mkinitrd-container $(shell uname -m) $(shell id -u):$(shell id -g) "/srv/tmp-manifest.json" "${CLOUD}" && rm -f tmp-manifest*
+		/srv/.mkinitrd-container $(shell uname -m) $(shell id -u):$(shell id -g) "/srv/tmp-manifest.json" "${CLOUD}"
 
 disk-image: kernel initrd-image
 	@if ! ls disk*${DOCKER_IMAGE}* 2>/dev/null; then\
@@ -45,13 +45,22 @@ disk-image: kernel initrd-image
 			--mount type=bind,source="./",destination="/srv" \
 			cgr.dev/chainguard/wolfi-base:latest \
 			/srv/.mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls vmlinuz* | sort -V | tail -n1) /srv/$(shell ls initrd* | sort -V | tail -n1);\
-		mv disk.$(shell uname -m).img disk.${DOCKER_IMAGE}.$(shell uname -m).img;\
-		rm -f disk.$(shell uname -m).img.tar.gz;\
+		mv disk.raw disk.${DOCKER_IMAGE}.$(shell uname -m).raw;\
 	fi
 
 disk-image-clean:
 	rm -f initrd*gz vmlinuz* disk*${DOCKER_IMAGE}*
 	$(MAKE) disk-image
+
+google-image-upload:
+	$(eval filename := $(shell ls -1 chainguard-${DOCKER_IMAGE}* | tail -1))
+	$(eval imagename := $(shell ls -1 chainguard-${DOCKER_IMAGE}* | tail -1 | sed 's|\.tar\.gz||g'))
+	gcloud storage cp ${filename} gs://wolfi-vm-images-workloads/
+	gcloud compute images create \
+		${imagename} \
+		--project=wolfi-vm \
+		--source-uri=https://storage.googleapis.com/wolfi-vm-images-workloads/${filename} \
+		--guest-os-features=UEFI_COMPATIBLE,VIRTIO_SCSI_MULTIQUEUE
 
 clean:
 	rm -f disk* initrd*gz vmlinuz*
