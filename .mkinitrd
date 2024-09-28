@@ -1,15 +1,15 @@
 #!/bin/sh
 
 # This must run within a docker container in order to run mknod and create nodes inside of the cpio tarball
-
+set -x
 set -e
 [ "$verbose" = "1" ] && set -x
 
 [ -z "$1" ] && echo "ERROR: please supply your UID:GID as the first argument" 1>&2 && exit 1
 [ -z "$2" ] && echo "ERROR: please supply your ARCH as the second argument" 1>&2 && exit 1
 
-owner="$1"
-arch="$2"
+owner="$2"
+arch="$1"
 mission="$3"
 dir="/tmp"
 
@@ -25,7 +25,14 @@ contents:
   repositories:
     - https://packages.wolfi.dev/os
   packages:
+    - busybox
+    - dhclient
+    - e2fsprogs
+    - grype
+    - iproute2
+    - kmod
     - mount
+    - openssh-server
     - systemd
     - umount
     - util-linux-misc
@@ -94,6 +101,27 @@ sed -i 's|^ExecStart=.*|ExecStart=/bin/true|' $dir/initrd/rootfs/usr/lib/systemd
 echo "wolfi" > $dir/initrd/rootfs/etc/hostname
 sed -i -e "s/\slocalhost\s/ localhost wolfi /" $dir/initrd/rootfs/etc/hosts
 
+cat > $dir/initrd/rootfs/etc/systemd/system/sshd.service <<-EOF
+[Unit]
+Description=OpenBSD Secure Shell server
+After=network.target auditd.service
+ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
+[Service]
+EnvironmentFile=-/etc/default/ssh
+ExecStartPre=/usr/bin/ssh-keygen -A
+ExecStart=/usr/sbin/sshd -D \$SSHD_OPTS
+ExecReload=/bin/kill -HUP \$MAINPID
+KillMode=process
+Restart=on-failure
+RestartPreventExitStatus=255
+Type=notify
+[Install]
+WantedBy=multi-user.target
+Alias=sshd.service
+EOF
+mkdir -p  $dir/initrd/rootfs/etc/systemd/system/multi-user.target.wants
+ln -sf /etc/systemd/system/sshd.service $dir/initrd/rootfs/etc/systemd/system/multi-user.target.wants/sshd.service
+
 # Setup dhcp networking
 cat > $dir/initrd/rootfs/etc/systemd/network/20-wired.network <<- EOF
 [Match]
@@ -101,6 +129,10 @@ Name=en*
 [Network]
 DHCP=yes
 EOF
+
+mkdir -p /$dir/initrd/rootfs/root/.ssh/
+echo "${SSHKEY}" | base64 -d > /$dir/initrd/rootfs/root/.ssh/authorized_keys
+chmod 0400 /$dir/initrd/rootfs/root/.ssh/authorized_keys
 
 # Archive and compress this directory structure into a cpio file for initrd
 ( cd $dir/initrd/rootfs && find . >../files )
