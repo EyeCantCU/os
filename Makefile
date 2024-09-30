@@ -31,13 +31,11 @@ endif
 # when it is not
 PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name --pipeline-dir=./pipelines/
 
-EXTRAS_REPO ?= https://packages.cgr.dev/extras
-EXTRAS_KEY ?= https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
+EXTRAS_REPO ?= https://apk.cgr.dev/extra-packages
 
 # Add the extras repository to the list of repositories
-MELANGE_OPTS += -k ${EXTRAS_KEY}
 MELANGE_OPTS += -r ${EXTRAS_REPO}
-PKGLISTCMD += -k ${EXTRAS_KEY} -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+PKGLISTCMD += -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 PKGLISTCMD += -r ${EXTRAS_REPO} -r https://packages.wolfi.dev/os
 
 # Enter interactive mode on failure for debug
@@ -56,7 +54,6 @@ MELANGE_TEST_OPTS += --test-package-append wolfi-base
 MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_TEST_OPTS += --repository-append ${EXTRAS_REPO}
-MELANGE_TEST_OPTS += --keyring-append ${EXTRAS_KEY}
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
 all: ${KEY} .build-packages
@@ -139,7 +136,7 @@ TMP_REPOSITORIES_FILE := $(TMP_REPOSITORIES_DIR)/repositories
 # test the packages however you see fit.
 local-wolfi: $(KEY)
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
-	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
+	@echo "https://apk.cgr.dev/extra-packages" >> $(TMP_REPOSITORIES_FILE)
 	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 	@mkdir -p ${PWD}/packages
 	docker run --rm -it \
