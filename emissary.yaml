@@ -9,15 +9,28 @@ package:
     runtime:
       - datawire-envoy-privileged
       - git
-      - python3
+
+vars:
+  py-pkg: ambassador
+
+data:
+  - name: py-versions
+    items:
+      3.10: "310"
+      3.11: "311"
+      3.12: "312"
+      3.13: "300"
 
 environment:
   contents:
     packages:
+      - build-base
+      - go
+      - busybox
       - iproute2
       - libcap-utils
-      - py3-pip
-      - python3
+      - py3-supported-pip
+      - rust
 
 pipeline:
   - uses: git-checkout
@@ -26,7 +39,7 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: 6e2ca35c11d124da26df8dd029c33954960b15ae
 
-  # # Go binaries
+  # Go binaries
   - uses: go/build
     with:
       packages: ./cmd/apiext
@@ -52,37 +65,73 @@ pipeline:
       packages: ./cmd/kubestatus
       output: kubestatus
 
-  - name: Python Build
-    runs: |
-      # Recommendation is to use the host pip instead of using venv.
-      # Pip will complain about being run as root - this disables that warning.
-      export PIP_ROOT_USER_ACTION=ignore
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{vars.py-pkg}}
+    description: python${{range.key}} version of ${{vars.py-pkg}}
+    dependencies:
+      provider-priority: ${{range.value}}
+      provides:
+        - py3-${{vars.py-pkg}}
+    pipeline:
+      - runs: |
+          # Recommendation is to use the host pip instead of using venv.
+          # Pip will complain about being run as root - this disables that warning.
+          export PIP_ROOT_USER_ACTION=ignore
 
-      # Install build time dependencies.
-      pip install -r python/requirements.txt
-      pip install -r python/requirements-dev.txt
+          # Install to target dir.
+          # Ignore installed packages, since this looks at the builder host packages, when we're trying to install
+          # the necessary packages into the target directory.
+          python${{range.key}} -m pip install --ignore-installed --prefix=/usr --root=${{targets.contextdir}} -r python/requirements.txt
 
-      # Install to target dir.
-      # Ignore installed packages, since this looks at the builder host packages, when we're trying to install
-      # the necessary packages into the target directory.
-      pip install --root ${{targets.contextdir}} --ignore-installed -r python/requirements.txt
+          # Generate version file - this static file is read by programs to provide version information in logs.
+          # See https://github.com/emissary-ingress/emissary/blob/ac2dc64c6621cd8ec5617f3328544364bdd3fb01/python/ambassador/VERSION.py#L26
+          make python/ambassador.version
+          cp -p python/ambassador.version ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages
 
-      # Generate version file - this static file is read by programs to provide version information in logs.
-      # See https://github.com/emissary-ingress/emissary/blob/ac2dc64c6621cd8ec5617f3328544364bdd3fb01/python/ambassador/VERSION.py#L26
-      make python/ambassador.version
-      cp -p python/ambassador.version ${{targets.contextdir}}/usr/lib/python3.12/site-packages
+          # Install Emissary Python package
+          cd python
+          python${{range.key}} setup.py install --prefix=/usr --root="${{targets.contextdir}}"
 
-      # Install Emissary Python package
-      cd python
-      python setup.py install --prefix=/usr --root="${{targets.contextdir}}"
+          # Install templates - this is not a python package, so it's not installed by the steps above.
+          # This contains a set of HTML templates used by the Python code, but is read relative to the module.
+          # See https://github.com/emissary-ingress/emissary/blob/ac2dc64c6621cd8ec5617f3328544364bdd3fb01/python/ambassador_diag/diagd.py#L603
+          cp -a templates ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/templates
+      - uses: strip
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python3.10
+            import: from ambassador import Version
 
-      # Install templates - this is not a python package, so it's not installed by the steps above.
-      # This contains a set of HTML templates used by the Python code, but is read relative to the module.
-      # See https://github.com/emissary-ingress/emissary/blob/ac2dc64c6621cd8ec5617f3328544364bdd3fb01/python/ambassador_diag/diagd.py#L603
-      cp -a templates ${{targets.contextdir}}/usr/lib/python3.12/site-packages/templates
+  - name: py3-supported-${{vars.py-pkg}}
+    description: meta package providing ${{vars.py-pkg}} for supported python versions.
+    dependencies:
+      runtime:
+        - py3.10-${{vars.py-pkg}}
+        - py3.11-${{vars.py-pkg}}
+        - py3.12-${{vars.py-pkg}}
+        - py3.13-${{vars.py-pkg}}
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python3.10
+            import: from ambassador import Version
 
-      cp -p entrypoint.sh ${{targets.contextdir}}/usr/bin/entrypoint.sh
-      chmod +x ${{targets.contextdir}}/usr/bin/entrypoint.sh
+  - name: ${{package.name}}-oci-entrypoint
+    description: Entrypoint for ${{package.name}}
+    dependencies:
+      runtime:
+        - emissary
+    pipeline:
+      - runs: |
+          cp -p entrypoint.sh ${{targets.contextdir}}/usr/bin/entrypoint.sh
+          chmod +x ${{targets.contextdir}}/usr/bin/entrypoint.sh
+    test:
+      pipeline:
+        - runs: stat /usr/bin/entrypoint.sh
 
 update:
   enabled: true
@@ -100,6 +149,7 @@ test:
     contents:
       packages:
         - curl
+        - py3-ambassador
   pipeline:
     - uses: python/import
       with:
