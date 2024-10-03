@@ -1,0 +1,303 @@
+package:
+  name: openjdk-crac-21
+  version: 21.0.5.0
+  epoch: 0
+  description: OpenJDK 21 with CRaC patches
+  copyright:
+    - license: GPL-2.0-or-later
+  dependencies:
+    runtime:
+      - crac-criu
+      - openjdk-crac-21-jre
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+.\d+.\d+)\.(\d+)$
+    replace: $1+$2
+    to: mangled-package-version
+
+environment:
+  contents:
+    packages:
+      - alsa-lib-dev
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cups-dev
+      - file
+      - fontconfig-dev
+      - freetype-dev
+      - giflib-dev
+      - lcms2-dev
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libx11-dev
+      - libxext-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxt-dev
+      - libxtst-dev
+      - openjdk-20
+      - openjdk-20-default-jvm
+      - zip
+  environment:
+    # This is needed to work around the error date 1970-01-01T00:00:00Z is not within the valid range 1980-01-01T00:00:02Z to 2099-12-31T23:59:59Z
+    SOURCE_DATE_EPOCH: 315532900
+    TARGET_JAVA_HOME: /usr/lib/jvm/java-21-openjdk-crac
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/canonical/openjdk-21-crac
+      tag: jdk-${{vars.mangled-package-version}}
+      expected-commit: 63d45adfeb996a5785713c85b95589b1cace109b
+
+  - working-directory: /home/build/googletest
+    pipeline:
+      - uses: fetch
+        with:
+          uri: https://github.com/google/googletest/archive/v1.13.0.tar.gz
+          expected-sha512: 70c0cfb1b4147bdecb467ecb22ae5b5529eec0abc085763213a796b7cdbd81d1761d12b342060539b936fa54f345d33f060601544874d6213fdde79111fa813e
+
+  # See Bug: https://bugs.openjdk.org/browse/JDK-8332297
+  # Patch source: https://github.com/openjdk/jdk/commit/9bfae8891e6efa58c557bd6dac61de111a16f71e
+  - uses: patch
+    with:
+      patches: JDK-8332297.patch
+
+  - runs: chmod +x configure
+
+  # Note that despite using --with-extra-cflags, --with-extra-cxxflags, and
+  # --with-extra-ldflags, the configure still produces warnings like:
+  # https://github.com/wolfi-dev/os/issues/18747
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --with-extra-cflags="$CFLAGS" \
+        --with-extra-cxxflags="$CXXFLAGS" \
+        --with-extra-ldflags="$LDFLAGS" \
+        --with-boot-jdk=/usr/lib/jvm/java-20-openjdk \
+        --prefix="$TARGET_JAVA_HOME" \
+        --with-vendor-name=wolfi \
+        --with-vendor-url=https://wolfi.dev \
+        --with-vendor-bug-url=https://github.com/wolfi-dev/os/issues \
+        --with-version-opt="wolfi-r${{package.epoch}}" \
+        --disable-warnings-as-errors \
+        --disable-precompiled-headers \
+        --enable-dtrace=no \
+        --with-zlib=system \
+        --with-debug-level=release \
+        --with-native-debug-symbols=internal \
+        --with-jvm-variants=server \
+        --with-jtreg=no  \
+        --with-libpng=system \
+        --with-jvm-variants=server \
+        --with-libjpeg=system \
+        --with-giflib=system \
+        --with-lcms=system \
+        --with-gtest="/home/build/googletest" \
+        --with-version-pre="no" \
+        --with-version-string=""
+
+  - runs: make jdk-image
+
+  # Check we built something valid
+  - runs: |
+      _java_bin="./build/*-server-release/images/jdk/bin"
+
+      $_java_bin/javac -d . HelloWorld.java
+      $_java_bin/java HelloWorld
+
+      # NOTE: Disable flakey tests for now as we're seeing builds hang on aarch64
+      # # run the gtest unittest suites
+      # make test-hotspot-gtest
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/$TARGET_JAVA_HOME
+      cp -r build/*-server-release/images/jdk/* "${{targets.destdir}}"/$TARGET_JAVA_HOME
+      rm "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/src.zip
+
+  - name: "Link CRaC patched CRIU to JDK"
+    runs: ln -sf /usr/sbin/crac-criu "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/criu
+
+subpackages:
+  - name: "openjdk-crac-21-dbg"
+    description: "OpenJDK 21 Java Debug Symbols"
+    pipeline:
+      - uses: split/debug
+    dependencies:
+      runtime:
+        - openjdk-crac-21
+
+  - name: "openjdk-crac-21-jre"
+    description: "OpenJDK 21 Java Runtime Environment"
+    dependencies:
+      runtime:
+        - alsa-lib
+        - freetype
+        - giflib
+        - libfontconfig1
+        - libjpeg-turbo
+        - libx11
+        - libxext
+        - libxi
+        - libxrender
+        - libxtst
+        - openjdk-crac-21-jre-base
+        - ttf-dejavu
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libawt_xawt.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libfontmanager.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libjavajpeg.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libjawt.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libjsound.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/liblcms.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libsplashscreen.so \
+              "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib
+
+  - name: "openjdk-crac-21-jre-base"
+    description: "OpenJDK 21 Java Runtime Environment (headless)"
+    dependencies:
+      runtime:
+        - java-common
+        - java-cacerts
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/bin
+          for i in java \
+                    jfr \
+                    jrunscript \
+                    jwebserver \
+                    keytool \
+                    rmiregistry; do
+            mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/bin/$i "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/bin/$i
+          done
+
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/legal "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/conf "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/release "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          cp ASSEMBLY_EXCEPTION \
+              LICENSE \
+              README.md \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+          # symlink to shared java cacerts store
+          rm -f "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib/security/cacerts
+          ln -sf /etc/ssl/certs/java/cacerts \
+            "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib/security/cacerts
+
+          # symlink for `java-common` to work (which expects jre in $TARGET_JAVA_HOME/jre)
+          ln -sf . "${{targets.subpkgdir}}/$TARGET_JAVA_HOME/jre"
+
+  - name: "openjdk-crac-21-jmods"
+    description: "OpenJDK 21 jmods"
+    dependencies:
+      provides:
+        - openjdk-jmods=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/jmods \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+  - name: "openjdk-crac-21-doc"
+    description: "OpenJDK 21 Documentation"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/man \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+  - name: "openjdk-crac-21-demos"
+    description: "OpenJDK 21 Demos"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/demo \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+  - name: "openjdk-crac-21-default-jvm"
+    description: "Use the openjdk-21 JVM as the default JVM"
+    dependencies:
+      runtime:
+        - openjdk-crac-21-jre
+      provides:
+        - default-jvm=1.21
+        - default-jvm-lts=1.21
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/jvm
+          ln -sf java-21-openjdk-crac "${{targets.subpkgdir}}"/usr/lib/jvm/default-jvm
+
+  - name: "openjdk-crac-21-default-jdk"
+    description: "Use the openjdk-21 JVM as the default JVM with the JDK installed"
+    dependencies:
+      runtime:
+        - openjdk-crac-21-default-jvm
+        - openjdk-crac-21
+      provides:
+        - default-jdk=1.21
+        - default-jdk-lts=1.21
+
+update:
+  enabled: true
+  version-transform:
+    - match: ^(.+)\+(\d+)$
+      replace: $1.$2
+  github:
+    identifier: canonical/openjdk-21-crac
+    strip-prefix: jdk-
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - openjdk-crac-21-default-jdk
+        - openjdk-crac-21-jmods
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-21-openjdk-crac
+  pipeline:
+    # Test a basic Hello World
+    - working-directory: basic
+      runs: |
+        javac HelloWorld.java
+        java HelloWorld | grep -qi "Hello World!"
+    # Test a basic HTTP connection
+    - working-directory: basic
+      runs: |
+        javac RequestTest.java
+        java RequestTest | grep -qi "Successfully connected to example.org"
+    # Test modules
+    - working-directory: advanced/module-project
+      runs: |
+        mkdir output
+        javac -d output --module-source-path modules $(find modules -name "*.java")
+
+        # Create a jar with the compiled classes
+        jar --verbose --create --file app.jar \
+          --main-class dev.chainguard.module.main.Main \
+          --module-version 1.0 \
+          -C output/test.modules . \
+          -C output/main.app .
+
+        # Test the jar
+        java -jar app.jar
+
+        # Test jlink
+        jlink --verbose --module-path "app.jar:$JAVA_HOME/jmods" \
+          --add-modules test.modules \
+          --output test-project-jre
+
+        # Test custom JRE
+        test-project-jre/bin/java -jar app.jar
