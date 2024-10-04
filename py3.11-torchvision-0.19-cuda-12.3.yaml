@@ -1,0 +1,147 @@
+package:
+  name: py3.11-torchvision-0.19-cuda-12.3
+  version: 0.19.1
+  epoch: 1
+  description: Datasets, Transforms and Models specific to Computer Vision
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  resources:
+    cpu: 16
+    memory: 16Gi
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      # For some reason this isn't detected
+      - libgomp
+      - openmp-17-dev
+      - libjpeg-turbo
+      - libpng
+      - nvidia-cudnn-8-cuda-12
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+      - cuda-toolkit-${{vars.cuda-version}}
+      - py3.11-numpy
+      - py3.11-pyyaml
+      - py3.11-typing-extensions
+      - py3.11-torch-2.4-cuda-${{vars.cuda-version}}
+      - py3.11-pillow
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.(\d+)$'
+    replace: 'cu$1$2'
+    to: cuda-pyvariant
+
+environment:
+  contents:
+    packages:
+      - patchelf
+      - build-base
+      - bash
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - py3.11-installer
+      - py3.11-numpy
+      - py3.11-pip
+      - py3.11-setuptools
+      - py3.11-wheel
+      - python-3.11
+      - python-3.11-dev
+      - samurai
+      - clang-15-dev
+      - clang-15
+      - libffi-dev
+      - libjpeg-dev
+      - libpng-dev
+      - libpng-utils
+      - libjpeg-turbo-dev
+      - llvm15
+      - llvm15-dev
+      - llvm-lld-15
+      - clang-15-default
+      - openmp-17-dev
+      - posix-libc-utils
+      - gcc-12-default
+      - git
+      - coreutils
+      - libgomp
+      - nvidia-driver
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - py3.11-torch-2.4-cuda-${{vars.cuda-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pytorch/vision.git
+      tag: v${{package.version}}
+      expected-commit: 61943691d3390bd3148a7003b4a501f0e2b7ac6e
+
+  - name: Python Build
+    runs: |
+      export CUDA_HOME=/usr/local/cuda-${{vars.cuda-version}}
+      export CUDA_NVCC_EXECUTABLE=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc
+      export CUDA_VERSION="${{vars.cuda-version}}"
+      export CUDA_HOME="/usr/local/cuda-${CUDA_VERSION}"
+      export PATH="$PATH:${CUDA_HOME}/bin"
+      export CMAKE_CUDA_ARCHITECTURES=all
+      export USE_CUDA=1
+      export FORCE_CUDA=1
+      export USE_CUDNN=1
+      export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
+      export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
+      export BLAS="OpenBLAS"
+
+      [ -d "$CUDA_HOME" ] || { echo "CUDA_HOME ($CUDA_HOME) is not a dir"; exit 1; }
+
+      # Disable some warnings
+      export CFLAGS="$CFLAGS -Wno-error=nonnull -Wno-nonnull"
+      export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull"
+
+      export BUILD_VERSION="${{package.version}}+${{vars.cuda-pyvariant}}"
+
+      python setup.py bdist_wheel
+            python3.11 -m pip install --verbose \
+        --no-index --no-build-isolation --no-deps \
+        --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/*.whl
+      sitepkgd=$(python3.11 -c 'import site; print(site.getsitepackages()[0])')
+      python3.11 -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
+
+update:
+  enabled: true
+  github:
+    identifier: pytorch/vision
+    strip-prefix: v
+    tag-filter: v0.19.
+
+test:
+  environment:
+    contents:
+      packages:
+        - wolfi-base
+        - busybox
+  pipeline:
+    - uses: python/import
+      with:
+        python: python3.11
+        import: torch
+    - uses: python/import
+      with:
+        python: python3.11
+        import: torchvision
+    - runs: |
+        python3.11 ./quickstart.py > output.out 2>&1
+        grep -E "ERROR|None" output.out && exit 1
