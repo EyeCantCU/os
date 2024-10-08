@@ -1,6 +1,7 @@
 #!/bin/sh
 
 set -e
+set -x
 [ "$verbose" = "1" ] && set -x
 
 # Cleanup our filesystem mounts and loop devices
@@ -19,7 +20,7 @@ cleanup() {
 }
 
 # Call cleanup() on any kind of exit
-trap "__e=\$?; cleanup \$loop_dev \$root_dir || true; return \$__e" EXIT HUP INT QUIT TERM
+trap '__e=$?; cleanup $loop_dev $root_dir || true; return $__e'     EXIT HUP INT QUIT TERM
 
 # Pass in 3 positional arguments:
 # (1) user:group, so that we can chown the file we're creating inside of this root container back to your user
@@ -33,7 +34,7 @@ kernel="$2"
 initrd="$3"
 
 # This is the bootable disk image that we will create
-disk="/srv/disk.$(uname -m).img"
+disk="/srv/disk.raw"
 
 # Add chainguard-keys, so that we can install "qemu" from enterprise packages
 apk update
@@ -54,6 +55,9 @@ apk add \
 	qemu \
 	systemd \
 	umount \
+	gnutar \
+	jq \
+	qemu \
 	util-linux-misc
 
 # Create a raw disk image, 10G seems to be the default disk image size for the major public clouds
@@ -112,15 +116,19 @@ cd -
 # Copy our kernel and initrd into our uefi boot partition
 mkdir -p $root_dir/boot/grub
 version=$(basename $kernel | sed -e "s:.*64-::")
-cp -f "$kernel" $root_dir/boot/vmlinuz
-cp -f "$initrd" $root_dir/boot/initrd
-ls -halF $root_dir/boot/
+if [ ! -e $root_dir/boot/vmlinuz ]; then
+	cp -f "$kernel" $root_dir/boot/vmlinuz
+else
+	echo "################# KERNEL ALREADY IN BOOT ####################"
+fi
+	cp -f "$initrd" $root_dir/boot/initrd
+	ls -halF $root_dir/boot/
 
 # Setup our kernel command line parameters
 # TODO: will need our filesystem uuid's here for switch_root
 mkdir -p $root_dir/etc/kernel
 uuid=$(blkid -o value $root_partition | head -n1)
-echo "root=$uuid console=ttyS0 quiet" >$root_dir/etc/kernel/cmdline
+echo "root=$uuid console=ttyS0 quiet net.ifnames=0 biosdevname=0" > $root_dir/etc/kernel/cmdline
 for i in dev dev/pts proc run sys; do
 	mkdir -p $root_dir/$i
 	mount -o bind /$i $root_dir/$i
@@ -151,7 +159,39 @@ cleanup $loop_dev $root_dir
 # Create a disk tarball for upload to Google Compute
 # https://cloud.google.com/compute/docs/import/import-existing-image
 sync
-tar --format=oldgnu -Sczf $disk.tar.gz $disk
-chown "$owner" $disk $disk.tar.gz
-sync
+# tar --format=oldgnu -Sczf $disk.tar.gz $disk
 
+image_name="$(basename "$(jq -rM '.annotations."org.opencontainers.image.source"' /srv/tmp-manifest.json)")"
+version="$(jq -rM .contents.packages /srv/tmp-manifest.json | grep "${image_name}.*=.*" | tr -d '"' | cut -d'=' -f2 | sort -u | tr -d ',' | tr -d '.')"
+timestamp="$(date "+%Y%m%d%H%M%S")"
+if [ "$image_name" = "null" ] || [ "$image_name" = "" ]; then
+	image_name="generic"
+fi
+if [ "$version" = "" ]; then
+	version="latest"
+fi
+
+cd /srv
+
+# Google format, raw+tar
+tar --format=oldgnu -Sczf $disk.tar.gz $(basename $disk)
+mv "$disk.tar.gz" "/srv/chainguard-${image_name}-${version}-${timestamp}.tar.gz"
+
+# AWS and Azure Format  VHD(vpc)
+# we need fixed and force_size because Azure will break down if we pass anything else
+qemu-img convert -f raw -o subformat=fixed,force_size -O vpc "${disk}" "/srv/chainguard-${image_name}-${version}-${timestamp}-azure.vhd"
+qemu-img convert -f raw -O vpc "${disk}" "/srv/chainguard-${image_name}-${version}-${timestamp}-aws.vhd"
+
+cat > "/srv/chainguard-${image_name}-${version}-${timestamp}-aws.vhd.json" <<- EOF
+	{
+	"Description": "chainguard-${image_name}-${version}-${timestamp}",
+	"Format": "vhd",
+	"UserBucket": {
+	"S3Bucket": "wolfi-vm-images-workloads",
+	"S3Key": "chainguard-${image_name}-${version}-${timestamp}-aws.vhd"
+	}
+	}
+EOF
+
+chown "$owner" $disk /srv/*.tar.gz /srv/*.vhd*
+sync
