@@ -1,0 +1,126 @@
+package:
+  name: hadoop-3.3
+  version: 3.3.6
+  epoch: 0
+  description: Open Source Identity and Access Management For Modern Applications and Services
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - curl
+      - findutils
+      - gawk
+      - hadoop-runner-3.3
+      - openjdk-8-default-jvm
+
+environment:
+  contents:
+    packages:
+      - abseil-cpp-dev
+      - autoconf
+      - automake
+      - bash
+      - boost
+      - boost-dev
+      - build-base
+      - busybox
+      - bzip2-dev
+      - ca-certificates-bundle
+      - cmake
+      - cyrus-sasl-dev
+      - fuse2-dev
+      - fuse2-static
+      - gcc
+      - gnutar
+      - libcrypto3
+      - libtirpc-dev
+      - libtool
+      - maven
+      - openjdk-8
+      - openssl-dev
+      - protobuf-dev~3.21
+      - protoc~3.21
+      - snappy-dev
+      - snappy-static
+      - zlib-dev
+      - zstd-dev
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-1.8-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/hadoop
+      tag: rel/release-${{package.version}}
+      expected-commit: 1be78238728da9266a4f88195058f08fd012bf9c
+
+  # Fix build when using OpenSSL > 1.1.1
+  - uses: patch
+    with:
+      patches: openssl.patch
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+      pom: hadoop-project/pom.xml
+
+  - uses: maven/pombump
+    with:
+      properties-file: hadoop-yarn-csi-properties.yaml
+      pom: hadoop-yarn-project/hadoop-yarn/hadoop-yarn-csi/pom.xml
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/java/hadoop
+      mkdir -p ${{targets.destdir}}/var/log/hadoop
+
+  - if: ${{build.arch}} == "aarch64"
+    runs: |
+      mvn -Pdist,native,src -DskipTests -Denforcer.skip=true -Dtar -Dmaven.javadoc.skip=true -Drequire.openssl -Drequire.fuse -Drequire.snappy clean package -e -X
+
+  - if: ${{build.arch}} == "x86_64"
+    runs: |
+      mvn -Pdist,yarn-ui,native,src -DskipTests -Denforcer.skip=true -Dtar -Dmaven.javadoc.skip=true -Drequire.openssl -Drequire.fuse -Drequire.snappy clean package -e -X
+
+  - runs: |
+      tar -xf hadoop-dist/target/hadoop-${{package.version}}.tar.gz --strip-components=1 -C ${{targets.destdir}}/usr/share/java/hadoop
+
+subpackages:
+  - name: ${{package.name}}-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt
+          ln -sf /usr/share/java/hadoop ${{targets.contextdir}}/opt/hadoop
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -RC
+  github:
+    identifier: apache/hadoop
+    use-tag: true
+    strip-prefix: rel/release-
+    tag-filter: rel/release-3.3
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - openjdk-8-jre
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-1.8-openjdk
+  pipeline:
+    - name: version check
+      runs: |
+        /usr/share/java/hadoop/bin/hadoop version
+    - name: help message
+      runs: |
+        /usr/share/java/hadoop/bin/hadoop --help
+    - name: simple test
+      runs: |
+        echo "127.0.0.1 $(hostname)" >> /etc/hosts
+        /usr/share/java/hadoop/bin/hdfs dfs -mkdir input
+        /usr/share/java/hadoop/bin/hadoop jar /usr/share/java/hadoop/share/hadoop/mapreduce/hadoop-mapreduce-examples-*.jar grep input output 'dfs[a-z.]+'
+        /usr/share/java/hadoop/bin/hadoop jar /usr/share/java/hadoop/share/hadoop/mapreduce/hadoop-mapreduce-examples-*.jar  pi 10 100
