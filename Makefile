@@ -25,7 +25,7 @@ initrd:
 		-e SSHKEY="$(shell cat "${SSHKEY}" | base64 -w0)" \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/.mkinitrd $(shell uname -m) $(shell id -u):$(shell id -g)
+		/srv/.mkinitrd $(shell id -u):$(shell id -g) $(shell uname -m)
 
 initrd-image:
 	cosign version >/dev/null || exit 127
@@ -42,7 +42,7 @@ initrd-image:
 		-e SSHKEY="$(shell cat "${SSHKEY}" | base64 -w0)" \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/.mkinitrd-container $(shell uname -m) $(shell id -u):$(shell id -g) "/srv/tmp-manifest.json"
+		/srv/.mkinitrd-container $(shell id -u):$(shell id -g) $(shell uname -m) "/srv/tmp-manifest.json"
 
 disk-image: initrd-image
 	@if ! ls disk*${DOCKER_IMAGE}* 2>/dev/null; then\
