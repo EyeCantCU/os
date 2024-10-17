@@ -6,7 +6,7 @@ wolfi-vm-ephemeral: kernel initrd
 	./wolfi-vm -e
 
 wolfi-vm-disk: kernel initrd disk
-	./wolfi-vm
+	./wolfi-vm -d disk.generic.x86_64.raw
 
 disk: kernel initrd
 	ls disk*generic* 2>/dev/null || docker run --privileged --rm -it \
@@ -14,7 +14,7 @@ disk: kernel initrd
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
 		/srv/.mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls vmlinuz* | sort -V | tail -n1) /srv/$(shell ls initrd* | sort -V | tail -n1)
-		mv disk.raw disk.generic.$(shell uname -m).raw;\
+		[ -f "disk.raw" ] && mv -f disk.raw disk.generic.$(shell uname -m).raw || true
 
 kernel:
 	ls vmlinuz* 2>/dev/null || ./.fetch-linux-kernel
@@ -98,4 +98,4 @@ google-image-upload:
 		--guest-os-features=UEFI_COMPATIBLE,VIRTIO_SCSI_MULTIQUEUE
 
 clean:
-	rm -f disk* initrd*gz vmlinuz*
+	rm -f chainguard-*.vhd* disk* *.gz vmlinuz*
