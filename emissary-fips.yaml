@@ -1,0 +1,110 @@
+package:
+  name: emissary-fips
+  version: 3.9.1
+  epoch: 0
+  description: "open source Kubernetes-native API gateway for microservices built on the Envoy Proxy"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - datawire-envoy-fips-privileged
+      - git
+      - py3-ambassador
+
+environment:
+  contents:
+    packages:
+      - libcap-utils
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/emissary-ingress/emissary
+      tag: v${{package.version}}
+      expected-commit: 6e2ca35c11d124da26df8dd029c33954960b15ae
+
+  # Go binaries
+  - uses: go/bump
+    with:
+      deps: golang.org/x/net@v0.23.0 google.golang.org/protobuf@v1.33.0 k8s.io/kubernetes@v1.28.12 k8s.io/apiserver@v0.28.12
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/apiext
+      output: apiext
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/busyambassador
+      output: busyambassador
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/capabilities_wrapper
+      output: wrapper
+
+  - name: wrapper-setcap
+    # See https://github.com/emissary-ingress/emissary/blob/ac2dc64c6621cd8ec5617f3328544364bdd3fb01/build-aux/Dockerfile#L129-L137
+    runs: |
+      setcap cap_net_bind_service=p ${{targets.contextdir}}/usr/bin/wrapper
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/kubestatus
+      output: kubestatus
+
+update:
+  enabled: true
+  github:
+    identifier: emissary-ingress/emissary
+    strip-prefix: v
+    use-tag: true
+  ignore-regex-patterns:
+    - -rc.*
+    - -dev.*
+    - ^chart/
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - emissary-fips
+        - emissary-oci-entrypoint
+        - busybox
+        - kwok
+        - kwokctl
+        - kubernetes
+        - etcd
+  pipeline:
+    - name: test/go-fips-check
+    - name: "Test entrypoint"
+      uses: test/daemon-check-output
+      with:
+        # The default kwok pipeline doesn't run in bubblewrap, so we need to spawn it ourselves in the same pipeline step.
+        setup: |
+          kwokctl create cluster --runtime binary \
+            --kube-apiserver-binary="/usr/bin/kube-apiserver" \
+            --kube-controller-manager-binary="/usr/bin/kube-controller-manager" \
+            --kube-scheduler-binary="/usr/bin/kube-scheduler" \
+            --kwok-controller-binary="/usr/bin/kwok" \
+            --etcd-binary="/usr/bin/etcd"
+
+          kwokctl scale node --replicas 1
+          kubectl wait --for=condition=Ready nodes --all
+          kubectl cluster-info
+        start: /usr/bin/entrypoint.sh
+        timeout: "30"
+        expected_output: "started command"
+        # Can't use default error string set because logs will print error messages complaining it's not running in a pod.
+        error_strings: |
+          FAIL
+          FATAL
+        post: |
+          sleep 10
+          curl -i http://127.0.0.1:8004/ambassador/v0/check_alive
+          curl -i http://127.0.0.1:8004/ambassador/v0/check_ready
