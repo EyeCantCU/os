@@ -10,7 +10,7 @@ else
     # Update-ca-certificates will cause an infinite bash loop if you force bash upon it when it thinks its invoking regular /bin/sh so making a temp symb link to busybox
     mv /bin/sh /bin/sh.bak
     ln -sf /bin/busybox /bin/sh
-    update-ca-certificates
+    update-ca-certificates >/dev/null 2>&1
     rm /bin/sh
     mv /bin/sh.bak /bin/sh
 fi
