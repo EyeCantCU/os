@@ -22,22 +22,29 @@ cat <<EOF >"$dir"/base.yaml
 contents:
   keyring:
     - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    - /etc/apk/keys/local-melange.rsa.pub
   repositories:
     - https://packages.wolfi.dev/os
+    - /work/packages
   packages:
-    - dash
-    - dhclient
+    - wolfi-base
     - e2fsprogs
-    - grype
     - iproute2
+    - mount
+    - umount
     - kmod
     - kmod-libs
-    - mount
-    - openssh-server
+    - kbd
     - systemd
-    - umount
+    - systemd-init
+    - systemd-default-network	# default DHCP for all interfaces, we can drop this if we configure manually
+    - systemd-logind-stub	# drop into a shell, we can remove this if we only want remote access
     - util-linux-misc
-    - wolfi-base
+    - dockerd-service
+    - containerd-service
+    - openssh-server
+    - openssh-service
+    - grype
 archs:
   - $arch
 EOF
@@ -49,6 +56,7 @@ mkdir -p $dir/initrd/rootfs
 # Extract that tarball so that we can add some configuration
 tar -C $dir/initrd/rootfs -xf $dir/base.tar.gz || true
 
+rm -f "$dir"/initrd/rootfs/init
 # Create an init script in our initrd
 cat <<EOF >"$dir"/initrd/rootfs/init
 #!/bin/sh
@@ -66,78 +74,17 @@ if [ -x "\$init" ]; then
 	exec \$init
 elif mount --uuid \$uuid /root_dir 2>/dev/null; then
 	# Mount specified persistent disk and boot systemd
-	exec switch_root /root_dir /usr/lib/systemd/systemd
+	exec switch_root /root_dir /usr/lib/systemd/systemd --system --log-target=console --unit=multi-user.target
 else
 	# Boot systemd in initrd
-	exec /usr/lib/systemd/systemd
+	exec /usr/lib/systemd/systemd --system --log-target=console --unit=multi-user.target
 fi
 EOF
 chmod 755 "$dir"/initrd/rootfs/init
 
-# Symlink a timezone to avoid boot prompt for timezone
-ln -sf /usr/share/zoneinfo/UTC $dir/initrd/rootfs/etc/localtime
-
-# Let's make our on login shell or executable runner
-if [ -f "/srv/$mission" ] && [ -x "/srv/$mission" ]; then
-	cp -af /srv/$mission $dir/initrd/rootfs/root/
-	cat <<EOF >$dir/initrd/rootfs/root/$mission.sh
-#!/bin/sh
-/root/$mission
-poweroff >/dev/null 2>&1
-EOF
-	chmod 700 $dir/initrd/rootfs/root/$mission.sh
-	# Boot straight to a wrapper script that executes our "mission"
-	sed -i "s|^ExecStart=.*agetty.*|ExecStart=-/bin/sh -l /root/$mission.sh|" $dir/initrd/rootfs/usr/lib/systemd/system/serial-getty@.service
-else
-	# Boot straight to busybox shell as root (like a container!)
-	sed -i "s|^ExecStart=.*agetty.*|ExecStart=-/bin/sh -l|" $dir/initrd/rootfs/usr/lib/systemd/system/serial-getty@.service
-fi
-
-# Disable systemd login; boot straight to busybox shell as root (like a container!)
-mkdir -p $dir/initrd/rootfs/etc/systemd/system/
-ln -sf /dev/null $dir/initrd/rootfs/etc/systemd/system/systemd-logind.service
-sed -i 's|^ExecStart=.*|ExecStart=/bin/true|' $dir/initrd/rootfs/usr/lib/systemd/system/systemd-vconsole-setup.service
-
 # Set the hostname to "wolfi" for a little lightweight branding
 echo "wolfi" > $dir/initrd/rootfs/etc/hostname
 sed -i -e "s/\slocalhost\s/ localhost wolfi /" $dir/initrd/rootfs/etc/hosts
-
-cat > $dir/initrd/rootfs/etc/systemd/system/sshd.service <<-EOF
-[Unit]
-Description=OpenBSD Secure Shell server
-After=network.target auditd.service
-ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
-[Service]
-EnvironmentFile=-/etc/default/ssh
-ExecStartPre=/usr/bin/ssh-keygen -A
-ExecStart=/usr/sbin/sshd -D \$SSHD_OPTS
-ExecReload=/bin/kill -HUP \$MAINPID
-KillMode=process
-Restart=on-failure
-RestartPreventExitStatus=255
-Type=notify
-[Install]
-WantedBy=multi-user.target
-Alias=sshd.service
-EOF
-mkdir -p  $dir/initrd/rootfs/etc/systemd/system/multi-user.target.wants
-ln -sf /etc/systemd/system/sshd.service $dir/initrd/rootfs/etc/systemd/system/multi-user.target.wants/sshd.service
-
-# Setup dhcp networking
-cat > $dir/initrd/rootfs/etc/systemd/network/20-wired.network <<- EOF
-[Match]
-Name=eth*
-[Network]
-DHCP=yes
-EOF
-
-# Setup dhcp networking
-cat > $dir/initrd/rootfs/etc/systemd/network/21-wired.network <<- EOF
-[Match]
-Name=enp*
-[Network]
-DHCP=yes
-EOF
 
 mkdir -p /$dir/initrd/rootfs/root/.ssh/
 echo "${SSHKEY}" | base64 -d > /$dir/initrd/rootfs/root/.ssh/authorized_keys
