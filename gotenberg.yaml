@@ -1,7 +1,7 @@
 package:
   name: gotenberg
   version: 8.12.0
-  epoch: 0
+  epoch: 1
   description: A developer-friendly API for converting numerous document formats into PDF files, and more!
   copyright:
     - license: Apache-2.0
@@ -78,12 +78,29 @@ pipeline:
     with:
       modroot: .
       packages: ./cmd/gotenberg/main.go
-      output: gotenberg
+      output: gotenberg.bin
       ldflags: "-s -w -X 'github.com/gotenberg/gotenberg/v8/cmd.Version=${{package.version}}'"
 
   - runs: |
       mkdir -p ${{targets.destdir}}/etc/fonts/conf.d
       cp build/fonts.conf ${{targets.destdir}}/etc/fonts/conf.d/100-gotenberg.conf
+
+  - runs: |
+      d=${{targets.destdir}}/usr/bin
+      mkdir -p "$d"
+      cat >"$d/gotenberg" <<"EOF"
+      #!/bin/sh
+      exec env \
+        CHROMIUM_BIN_PATH="${CHROMIUM_BIN_PATH:-/usr/bin/chromium}" \
+        EXIFTOOL_BIN_PATH="${EXIFTOOL_BIN_PATH:-/usr/bin/exiftool}" \
+        LIBREOFFICE_BIN_PATH="${LIBREOFFICE_BIN_PATH:-/usr/lib/libreoffice/program/soffice.bin}" \
+        PDFCPU_BIN_PATH="${PDFCPU_BIN_PATH:-/usr/bin/pdfcpu}" \
+        PDFTK_BIN_PATH="${PDFTK_BIN_PATH:-/usr/bin/pdftk}" \
+        QPDF_BIN_PATH="${QPDF_BIN_PATH:-/usr/bin/qpdf}" \
+        UNOCONVERTER_BIN_PATH="${UNOCONVERTER_BIN_PATH:-/usr/bin/unoconv}" \
+          gotenberg.bin "$@"
+      EOF
+      chmod 755 "$d/gotenberg"
 
   - uses: strip
 
@@ -99,15 +116,43 @@ test:
       packages:
         - wolfi-base
         - curl
+        - jq
   pipeline:
-    - runs: |
-        export EXIFTOOL_BIN_PATH=/usr/bin/exiftool
-        export CHROMIUM_BIN_PATH=/usr/bin/chromium
-        export LIBREOFFICE_BIN_PATH=/usr/lib/libreoffice/program/soffice.bin
-        export UNOCONVERTER_BIN_PATH=/usr/bin/unoconv
-        export PDFTK_BIN_PATH=/usr/bin/pdftk
-        export QPDF_BIN_PATH=/usr/bin/qpdf
-        export PDFCPU_BIN_PATH=/usr/bin/pdfcpu
-        gotenberg &
-        sleep 5
-        curl -i http://localhost:3000/health
+    - uses: test/daemon-check-output
+      with:
+        start: gotenberg
+        expected_output: |
+          Version: ${{package.version}}
+          libreoffice-api.* ready to start
+          api:.* started on.*3000
+          chromium:.* ready to start
+        post: |
+          #!/bin/sh
+          set +x
+          url=http://localhost:3000/health
+          echo "checking status at $url"
+          out=$(curl --silent "$url") || {
+            echo "FAIL[$?]: curl --silent $url"
+            curl -i "$url"
+            exit 1;
+          }
+
+          found=$(echo "$out" | jq) || {
+            echo "FAIL[$?]: parsing health with jq failed."
+            echo "health: $out"
+            exit 1
+          }
+
+          echo "health has:"
+          echo "$out" | jq
+
+          for p in .status .details.chromium.status .details.libreoffice.status ; do
+            found=$(echo "$out" | jq --raw-output "$p")
+            [ "$found" = "up" ] || {
+              echo "FAIL: $p expected 'up' found '$found'"
+              exit 1
+            }
+          done
+
+          echo "PASS: status looks good."
+          echo "$out"
