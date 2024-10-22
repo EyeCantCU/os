@@ -1,14 +1,19 @@
 package:
   name: unoconverter
   version: 0.0.1
-  epoch: 1
+  epoch: 2
   description: "URL retrieval utility and library"
   copyright:
     - license: MIT
   dependencies:
     runtime:
-      - python3
       - libreoffice
+
+# This should be kept in sync with libreoffice's 'python-version'
+# declaration to avoid getting duplicate pythons installed.
+# https://github.com/chainguard-dev/enterprise-packages/issues/8789
+vars:
+  python-version: 3.12
 
 environment:
   contents:
@@ -23,10 +28,25 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: 75831562112ae3f676a67c1bb2935490aaa7bc26
 
+  - uses: patch
+    with:
+      patches: drop-distutils-double-dashes-for-LibreOfficeDev.patch
+
   - runs: |
-      mkdir -p ${{targets.destdir}}/usr/bin
-      mv unoconv ${{targets.destdir}}/usr/bin
-      chmod +x ${{targets.destdir}}/usr/bin/unoconv
+      exe=${{targets.destdir}}/usr/bin/unoconv
+
+      # if the first line in unoconv is a shbang delete it
+      sed -e '1{/^#!/d}' unoconv > unoconv.new
+
+      mkdir -p "${exe%/*}"
+
+      # write /usr/bin/python3.XX shebang
+      echo "#!/usr/bin/python${{vars.python-version}}" > "$exe"
+      cat unoconv.new >> "$exe"
+
+      chmod +x "$exe"
+
+      rm -f unoconv.new
 
 update:
   enabled: true
@@ -38,7 +58,45 @@ test:
   environment:
     contents:
       packages:
-        - wolfi-base
+        - busybox
+        - file
   pipeline:
     - runs: |
         unoconv --version
+    - name: trivial csv convert
+      runs: |
+        set +x
+        fail() { echo "FAIL:" "$@"; exit 1; }
+
+        # unoconvert will fail if it cannot look up uid in /etc/passwd.
+        # the bubblewrap runner executes as uid 1000 which is not present.
+        uid=$(id -u) || fail "'id -u' exited $?: $uid"
+        if [ "$uid" != "0" ] && ! uout=$(id -un 2>/dev/null); then
+          usern="test-user"
+          gid=$(id -g) || fail "'id -g' exited $?"
+          echo "$usern:x:$uid:$gid:test user:${HOME:-$PWD}:/bin/sh" >>/etc/passwd
+          uout=$(id -un 2>&1) && [ "$uout" = "$usern" ] ||
+           fail "adding user to /etc/passwd didn't work: $uout"
+        fi
+
+        d=$(mktemp -d)
+        trap "rm -Rf $d" EXIT
+        cd "$d"
+
+        cat >my.csv <<EOF
+        1,2,3
+        2,10,15
+        EOF
+        echo "wrote my.csv in tmpdir $PWD"
+        sed 's,^,|,' my.csv
+
+        set -- unoconv -v my.csv
+        echo "execute $*"
+        HOME="$PWD" "$@" || fail "'$*' exited $?"
+
+        [ -f my.pdf ] || fail "'$*' exited 0 but did not produce my.pdf"
+
+        file my.pdf | grep "PDF document" ||
+          fail "'$*' did not create a PDF document"
+
+        echo "PASS: '$*' created a PDF"
