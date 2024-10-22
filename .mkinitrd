@@ -26,6 +26,7 @@ chmod +x /usr/bin/chainctl
 
 # Appending needed packag4es to image
 jq '.contents.packages |= . + ["linux", "systemd-boot", "umount", "mount", "dhclient", "util-linux-misc", "e2fsprogs", "kmod", "grype", "openssh-server", "dash"]' "$manifest" > "$manifest.updated.json"
+
 # Generate a base wolfi tarball
 apko build-minirootfs "$manifest.updated.json" $dir/base.tar.gz
 mkdir -p $dir/initrd/rootfs
@@ -33,21 +34,54 @@ mkdir -p $dir/initrd/rootfs
 # Extract that tarball so that we can add some configuration
 tar -C $dir/initrd/rootfs -xf $dir/base.tar.gz || true
 
+# Create an init script in our initrd
+rm -f "$dir"/initrd/rootfs/init
+cat << EOF > "$dir"/initrd/rootfs/init
+#!/bin/sh
+
+set -e
+set -x
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+mkdir -p /proc /dev /sys /tmp
+
+# mount -t proc proc -o nodev,nosuid,hidepid=2 /proc
+# mount -t devtmpfs -o nosuid,noexec devtmpfs /dev
+# mount -t sysfs sys -o nodev,nosuid,noexec /sys
+#
+mount -t tmpfs -o nodev,nosuid,noexec tmpfs /tmp
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+
+ln -sf /proc/self/fd /dev/fd
+
+mkdir -p /root_dir
+uuid=\$(sed -e "s:.*root=::" -e "s: .*::" /proc/cmdline)
+if mount --uuid \$uuid /root_dir 2>/dev/null; then
+	# Mount specified persistent disk and boot
+	exec switch_root /root_dir /entrypoint
+else
+	exec /entrypoint
+fi
+EOF
+chmod 755 "$dir"/initrd/rootfs/init
+
+mkdir -p /$dir/initrd/rootfs/root/.ssh/
+echo "${SSHKEY}" | base64 -d > /$dir/initrd/rootfs/root/.ssh/authorized_keys
+chmod 0400 /$dir/initrd/rootfs/root/.ssh/authorized_keys
+
 # Create entrypoint file
 echo '#!/bin/sh' > "$dir"/initrd/rootfs/entrypoint
-echo "/network" >> "$dir"/initrd/rootfs/entrypoint
-# Environment setup
-jq -rM '.environment | to_entries|map("export \(.key)=\(.value|tostring)")|.[]' "$manifest.updated.json" >> "$dir"/initrd/rootfs/entrypoint
-echo "export PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin" >> "$dir"/initrd/rootfs/entrypoint
-echo "export POSTGRES_HOST_AUTH_METHOD=trust" >> "$dir"/initrd/rootfs/entrypoint
-# Workdir setup
-echo "cd $(jq -rM '."work-dir"' "$manifest.updated.json")" >> "$dir"/initrd/rootfs/entrypoint
-# Entrypoint setup
-echo "$(jq -rM .entrypoint.command "$manifest.updated.json") || bash" >> "$dir"/initrd/rootfs/entrypoint
-# echo "/bin/sh -l" >> "$dir"/initrd/rootfs/entrypoint
-chmod +x "$dir"/initrd/rootfs/entrypoint
 
-cat << EOF > "$dir"/initrd/rootfs/network
+# On systemd systems, we skip this as it's already taken care
+if [ ! -e "$dir"/initrd/rootfs/usr/lib/systemd/systemd ]; then
+
+	# TODO: remove this, when we will have ability to pass env variables excternally
+	echo "export POSTGRES_HOST_AUTH_METHOD=trust" >> "$dir"/initrd/rootfs/entrypoint
+
+	cat << EOF > "$dir"/initrd/rootfs/network
 # Setup tty/pty
 mkdir /dev/pts
 mount -t devpts devpts -o noexec,nosuid,newinstance,ptmxmode=0666,mode=0620,gid=tty /dev/pts/
@@ -65,60 +99,25 @@ dhclient -v "\${interface_name:-"eth0"}"
 ##############
 # Entrypoint #
 ##############
-# Setup SSH keys for external access
-mkdir -p -m 0700 /root/.ssh/
-echo "${SSHKEY}" | base64 -d
-echo "${SSHKEY}" | base64 -d > /root/.ssh/authorized_keys
-chmod 0400 /root/.ssh/authorized_keys
 # Setting up AcceptEnv
 echo "AcceptEnv *" >> /etc/ssh/sshd_config
 ssh-keygen -A
 nohup /usr/sbin/sshd -D &
 EOF
-chmod +x "$dir"/initrd/rootfs/network
-
-cat "$dir"/initrd/rootfs/network
-
-# Create an init script in our initrd
-cat << EOF > "$dir"/initrd/rootfs/init
-#!/bin/sh
-
-set -e
-set -x
-
-PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin
-
-mkdir -p /proc /dev /sys /tmp
-
-mount -t proc proc -o nodev,nosuid,hidepid=2 /proc
-mount -t devtmpfs -o nosuid,noexec devtmpfs /dev
-mount -t sysfs sys -o nodev,nosuid,noexec /sys
-mount -t tmpfs -o nodev,nosuid,noexec tmpfs /tmp
-
-ln -sf /proc/self/fd /dev/fd
-
-# ldconfig is run to prime ld.so.cache for glibc packages which require it.
-if [ -x /sbin/ldconfig ]; then
-	ldconfig /lib /usr/lib /usr/lib64
+	chmod +x "$dir"/initrd/rootfs/network
+	echo "/network" >> "$dir"/initrd/rootfs/entrypoint
 fi
 
-mkdir -p /root_dir
-uuid=\$(sed -e "s:.*root=::" -e "s: .*::" /proc/cmdline)
-if mount --uuid \$uuid /root_dir 2>/dev/null; then
-	# Mount specified persistent disk and boot
-	exec switch_root /root_dir /entrypoint
-else
-	exec /entrypoint
-fi
-EOF
-chmod 755 "$dir"/initrd/rootfs/init
+# Environment setup
+jq -rM '.environment | to_entries|map("export \(.key)=\(.value|tostring)")|.[]' "$manifest.updated.json" >> "$dir"/initrd/rootfs/entrypoint
+echo "export PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin" >> "$dir"/initrd/rootfs/entrypoint
 
-# Symlink a timezone to avoid boot prompt for timezone
-ln -sf /usr/share/zoneinfo/UTC $dir/initrd/rootfs/etc/localtime
-
-# Set the hostname to "wolfi" for a little lightweight branding
-echo "wolfi" > $dir/initrd/rootfs/etc/hostname
-sed -i -e "s/\slocalhost\s/ localhost wolfi /" $dir/initrd/rootfs/etc/hosts
+# Workdir setup
+echo "cd $(jq -rM '."work-dir"' "$manifest.updated.json")" >> "$dir"/initrd/rootfs/entrypoint
+# Entrypoint setup
+echo "exec $(jq -rM .entrypoint.command "$manifest.updated.json")" >> "$dir"/initrd/rootfs/entrypoint
+# echo "/bin/sh -l" >> "$dir"/initrd/rootfs/entrypoint
+chmod +x "$dir"/initrd/rootfs/entrypoint
 
 # Archive and compress this directory structure into a cpio file for initrd
 ( cd $dir/initrd/rootfs && find . > ../files)
