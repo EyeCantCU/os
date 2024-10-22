@@ -34,10 +34,6 @@ initrd:
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 		-e SSHKEY="$(shell cat "${SSHKEY}" | base64 -w0)" \
 		--mount type=bind,source="./",destination="/srv" \
-		--mount type=bind,source="/home/luca-linux/Projects/Personal/wolfi-os/packages",destination="/work/packages",readonly \
-		--mount type=bind,source="/home/luca-linux/Projects/Personal/wolfi-os/local-melange.rsa.pub",destination="/etc/apk/keys/local-melange.rsa.pub",readonly \
-		--mount type=bind,source="/home/luca-linux/Projects/chainguard/enterprise-packages/packages/",destination="/work/enterprise-packages",readonly \
-		--mount type=bind,source="/home/luca-linux/Projects/chainguard/enterprise-packages/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		cgr.dev/chainguard/wolfi-base:latest \
 		/srv/.mkinitrd-container $(shell id -u):$(shell id -g) $(shell uname -m) "/srv/tmp-manifest.json"
 
