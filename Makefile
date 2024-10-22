@@ -1,15 +1,12 @@
-all: kernel initrd disk
+all: initrd disk
 
 wolfi-vm: wolfi-vm-ephemeral
 
-wolfi-vm-ephemeral: kernel initrd
+wolfi-vm-ephemeral: initrd
 	./wolfi-vm -e
 
-wolfi-vm-disk: kernel initrd disk
+wolfi-vm-disk: initrd disk
 	./wolfi-vm -d disk.generic.x86_64.raw
-
-kernel:
-	ls vmlinuz* 2>/dev/null || ./.fetch-linux-kernel
 
 docker-runner-image:
 	DOCKER_IMAGE=docker-runner make disk
