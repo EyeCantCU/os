@@ -8,5 +8,14 @@ The tools in this repo help build Chainguard / Wolfi virtual machine images.
  - ```.mkinitrd``` is a helper tool that builds an initrd filesystem needed by the Linux kernel to boot and run
 
 ## Examples:
- - ```wolfi-vm --ephemeral``` will build and launch an ephemeral virtual machine 
- - ```wolfi-vm --disk``` will build and launch a virtual machine backed by a disk image for persistent storage
+ - ```SSH_KEYS=/path/to/id_rsa.pub make generic-image```  will create a generic system with apk and systemd
+ - ```SSH_KEYS=/path/to/id_rsa.pub make docker-runner-image```  will create a generic system with apk, systemd and working docker/containerd
+ - ```SSH_KEYS=/path/to/id_rsa.pub DOCKER_IMAGE=foo make initrd``` will create an initrd of a chainguard docker image
+ - ```SSH_KEYS=/path/to/id_rsa.pub DOCKER_IMAGE=foo make image``` will create an system of a chainguard docker image
+ - ```DOCKER_IMAGE=foo make google-image-upload``` will upload generated image raw.tar.gz to gcp
+ - ```DOCKER_IMAGE=foo make azure-image-upload``` will upload generated image vhd to azure
+ - ```DOCKER_IMAGE=foo make aws-image-upload``` will upload generated image vhd to aws
+
+## Test the vm
+
+ - ```./wolfi-vm -d ./disk.<foo>.raw```
