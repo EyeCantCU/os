@@ -22,8 +22,6 @@ MELANGE_OPTS += --keyring-append https://apk.cgr.dev/chainguard-private/chaingua
 MELANGE_OPTS += --repository-append https://packages.cgr.dev/extras
 MELANGE_OPTS += --keyring-append https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 MELANGE_OPTS += --arch ${ARCH}
-MELANGE_OPTS += --license 'NONE'
-MELANGE_OPTS += --git-repo-url 'https://github.com/chainguard-dev/enterprise-packages'
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
 MELANGE_BUILD_OPTS += ${MELANGE_OPTS}
@@ -31,6 +29,8 @@ MELANGE_BUILD_OPTS += --signing-key ${KEY}
 MELANGE_BUILD_OPTS += --pipeline-dir ./pipelines/
 MELANGE_BUILD_OPTS += --env-file build-${ARCH}.env
 MELANGE_BUILD_OPTS += --namespace chainguard
+MELANGE_BUILD_OPTS += --license 'NONE'
+MELANGE_BUILD_OPTS += --git-repo-url 'https://github.com/chainguard-dev/enterprise-packages'
 
 # Enter interactive mode on failure for debug
 MELANGE_DEBUG_OPTS += --interactive
