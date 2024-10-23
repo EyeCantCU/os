@@ -1,0 +1,206 @@
+# This is based on: https://forums.swift.org/t/building-the-swift-project-on-linux-with-lld-instead-of-gold/73303/24
+package:
+  name: swift-bootstrap-5-10-1
+  version: 5.10.1
+  epoch: 0
+  description: Swift is a high-performance system programming language. It has a clean and modern syntax, offers seamless access to existing C and Objective-C code and frameworks, and is memory-safe by default.
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    # Note that this has probably way too much of what we'd need.
+    packages:
+      - bash
+      - binutils
+      - binutils-gold
+      - busybox
+      - clang-19
+      - cmake
+      - curl
+      - curl-dev
+      - gcc
+      - git
+      - icu
+      - icu-dev
+      - libbsd-dev
+      - libedit
+      - libedit-dev
+      - libuuid
+      - libxml2
+      - libxml2-dev
+      - ninja-build # `ninja` package is actually samurai, it fails with x86_64 with a floating point exception.
+      - patch # For patching some files
+      - perl # For pod2man?
+      - py3-pip
+      - python3
+      - python3-dev
+      - rsync # Needed to install driver in stage 1.
+      - sqlite
+      - sqlite-dev
+      - swig
+      - util-linux
+      - util-linux-dev # for uuid/uuid.h
+
+pipeline:
+  - runs: |
+      # Get ninja where the build tools expect it.
+      ln -s /usr/lib/ninja-build/bin/ninja /usr/bin/ninja
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/swiftlang/swift
+      tag: swift-${{package.version}}-RELEASE
+      expected-commit: 0cbf541194159e0576548a0f2b9bf41bf16ef631
+      destination: swift-project/swift
+
+  - runs: |
+      # Instead of using this script, maybe we should just
+      # use the git-checkout for all the repos instead?
+      # I manually verified with what fedora checks out directly from tarballs
+      # and they check are the same.
+      cd swift-project/swift
+      ./utils/update-checkout --clone --tag swift-${{package.version}}-RELEASE
+
+  - runs: |
+      # The above leaves the source in a funny state for a few repos, and causes
+      # failures, for example:
+      # CMake Error at cmake/modules/AddLLVM.cmake:895 (add_executable):
+      # Cannot find source file:
+      # ClangNvlinkWrapper.cpp
+      # And sure enough, it's been deleted:
+      # ~/swift-project/swift # cd ../llvm-project/
+      # ~/swift-project/llvm-project # git status
+      # HEAD detached at swift-5.10.1-RELEASE
+      # <SNIP>
+      # deleted:    LICENSE.txt
+      # deleted:    clang/docs/ClangNvlinkWrapper.rst
+      cd swift-project/llvm-project
+      git restore .
+
+      # The swiftpm looks like this, but does not seem to affect things?
+      # HEAD detached at swift-5.10.1-RELEASE
+      # Changes not staged for commit:
+      #  (use "git add/rm <file>..." to update what will be committed)
+      #  (use "git restore <file>..." to discard changes in working directory)
+      #	deleted:    Tests/PackageGraphTests/PubgrubTests.swift
+      cd ../swiftpm
+      git restore .
+
+      # cmake
+      # HEAD detached at v3.24.2
+      #Changes not staged for commit:
+      #  (use "git add/rm <file>..." to update what will be committed)
+      #  (use "git restore <file>..." to discard changes in working directory)
+      #	deleted:    Utilities/cmcurl/CMake/FindCARES.cmake
+      #	deleted:    Utilities/cmcurl/CMake/FindLibSSH2.cmake
+      #	deleted:    Utilities/cmcurl/CMake/FindQUICHE.cmake
+      #	deleted:    Utilities/cmlibarchive/build/cmake/FindLibGCC.cmake
+      cd ../cmake
+      git restore .
+
+  - runs: |
+      # Without this patch compile fails with:
+      # 2024/10/16 08:14:41 INFO /home/build/swift-corelibs-libdispatch/src/data.c:603:4: error: cast from 'dispatch_function_t' (aka 'void (*)(void * _Nullable)') to 'dispatch_data_applier_function_t' (aka 'bool (*)(void * _Nullable, struct dispatch_data_s * _Nonnull, unsigned long, const void * _Nonnull, unsigned long)') converts to incompatible function type [-Werror,-Wcast-function-type-mismatch]
+      # 2024/10/16 08:14:41 INFO   603 |                         (dispatch_data_applier_function_t)_dispatch_Block_invoke(applier));
+      cd swift-project/swift-corelibs-libdispatch
+      git apply ../../fix-cast-errors.patch
+
+  - runs: |
+      # Use this patch to fix: https://github.com/swiftlang/swift/issues/74696
+      cd swift-project/swift
+      git apply ../../clang-path-include-fix.patch
+
+  - runs: |
+      cd swift-project
+
+      # This builds the stage0 bootstrapper. Based off of this thread:
+      # https://forums.swift.org/t/building-the-swift-project-on-linux-with-lld-instead-of-gold/73303/24
+      ./swift/utils/build-script \
+      --verbose-build \
+      --release \
+      --install-destdir="./stage0" \
+      --bootstrapping=off \
+      --llvm-install-components='llvm-ar;llvm-cov;llvm-profdata;IndexStore;clang;clang-resource-headers;compiler-rt;clangd;lld;LTO;clang-features-file' \
+      --llvm-targets-to-build=host \
+      --skip-build-benchmarks \
+      --skip-early-swift-driver --skip-early-swiftsyntax \
+      --skip-test-cmark \
+      --xctest --llbuild \
+      --skip-test-linux \
+      --skip-test-swift \
+      --enable-sanitize-coverage=false \
+      --swiftsyntax-enable-test-fuzzing=false \
+      --install-all
+
+      # Set the path to the stage0 swift compiler
+      export ORIGINAL_PATH=$PATH
+      export PATH="/home/build/swift-project/stage0/usr/bin:$PATH"
+
+      # Then run stage 1 of the bootstrap.
+      "./swift/utils/build-script" \
+          --verbose-build \
+          --release \
+          --install-destdir="./stage1" \
+          --build-swift-libexec=false \
+          --cmark --skip-test-cmark \
+          --foundation --skip-test-foundation \
+          --libdispatch --skip-test-libdispatch \
+          --llbuild --skip-test-llbuild \
+          --skip-build-benchmarks \
+          --skip-build-llvm \
+          --skip-test-linux \
+          --skip-test-swift \
+          --swift-driver --skip-test-swift-driver \
+          --swiftpm --skip-test-swiftpm \
+          --xctest --skip-test-xctest \
+          --install-all \
+          --extra-cmake-options="-DBUILD_TESTING:BOOL=NO" \
+          --extra-cmake-options="-DSWIFT_INCLUDE_TESTS:BOOL=NO" \
+          --extra-cmake-options="-DSWIFT_INCLUDE_TEST_BINARIES:BOOL=NO" \
+          --extra-cmake-options="-DCOMPILER_RT_BUILD_ORC:BOOL=NO"
+
+        # Then run the final stage of the bootstrap that builds
+        # the whole toolchain.
+        export PATH="/home/build/swift-project/stage1/usr/bin:$ORIGINAL_PATH"
+        "./swift/utils/build-script" \
+          --verbose-build \
+          --release \
+          --install-destdir="${{targets.contextdir}}" \
+          --extra-cmake-options="${extra_cmake_options}" \
+          --build-swift-libexec=false \
+          --foundation --skip-test-foundation \
+          --indexstore-db --skip-test-indexstore-db \
+          --libdispatch --skip-test-libdispatch \
+          --llbuild --skip-test-llbuild \
+          --lldb --skip-test-lldb \
+          --skip-build-benchmarks \
+          --skip-build-llvm \
+          --skip-test-linux \
+          --skip-test-swift \
+          --sourcekit-lsp --skip-test-sourcekit-lsp \
+          --swift-driver --skip-test-swift-driver \
+          --swift-install-components='autolink-driver;compiler;clang-resource-dir-symlink;stdlib;swift-remote-mirror;sdk-overlay;static-mirror-lib;toolchain-tools;license;sourcekit-inproc' \
+          --swiftdocc --skip-test-swiftdocc \
+          --swiftpm --skip-test-swiftpm \
+          --xctest --skip-test-xctest \
+          --install-all \
+          --extra-cmake-options="-DBUILD_TESTING:BOOL=NO" \
+          --extra-cmake-options="-DSWIFT_INCLUDE_TESTS:BOOL=NO" \
+          --extra-cmake-options="-DSWIFT_INCLUDE_TEST_BINARIES:BOOL=NO" \
+          --extra-cmake-options="-DCOMPILER_RT_BUILD_ORC:BOOL=NO"
+
+  - uses: strip
+
+update:
+  # There are newer versions, but this is the latest one that
+  # can be bootstrapped without existing swift compiler.
+  enabled: false
+  exclude-reason: "This is the latest version that can be bootstrapped without existing swift compiler. There are newer ones that can be built, but not without existing swift compiler"
+
+test:
+  pipeline:
+    - name: Hello world
+      runs: |
+        echo 'print("Hello, World!")' > /tmp/hello.swift
+        swift /tmp/hello.swift | grep "Hello, World!"
