@@ -1,12 +1,15 @@
-all: initrd disk
+all: disk
 
 wolfi-vm: wolfi-vm-ephemeral
 
-wolfi-vm-ephemeral: initrd
+wolfi-vm-ephemeral: kernel initrd
 	./wolfi-vm -e
 
 wolfi-vm-disk: initrd disk
 	./wolfi-vm -d disk.generic.x86_64.raw
+
+kernel:
+	ls vmlinuz* 2>/dev/null || ./.fetch-linux-kernel
 
 docker-runner-image:
 	DOCKER_IMAGE=docker-runner make disk
@@ -32,7 +35,7 @@ initrd:
 		-e SSHKEY="$(shell cat "${SSHKEY}" | base64 -w0)" \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
-		/srv/.mkinitrd-container $(shell id -u):$(shell id -g) $(shell uname -m) "/srv/tmp-manifest.json"
+		/srv/.mkinitrd $(shell id -u):$(shell id -g) $(shell uname -m) "/srv/tmp-manifest.json"
 
 disk: initrd
 	@if ! ls disk*${DOCKER_IMAGE}* 2>/dev/null; then\
