@@ -1,0 +1,220 @@
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+package:
+  name: tritonserver-2.45
+  version: 2.45.0
+  epoch: 0
+  description: NVIDIA Triton Inference Server
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  resources:
+    cpu: 64
+    memory: 192Gi
+  dependencies:
+    provides:
+      - tritonserver=${{package.full-version}}
+    runtime:
+      - c-ares
+      - cuda-toolkit-${{vars.cuda-version}}
+      - libgomp
+      - libpsl
+      - numactl
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+      - openmp-17-dev
+      - py3.10-numpy
+  options:
+    no-depends: true
+
+# These need to be updated based upon the upstream release
+vars:
+  cuda-version: 12.4
+  cudnn-version: 9
+  tensorrt-version: 8.6.3
+  triton-repo-tag: r24.04
+
+var-transforms:
+  - from: ${{vars.cuda-version}}
+    match: (\d+)\.\d+
+    replace: $1
+    to: cuda-major-version
+  - from: ${{vars.cudnn-version}}
+    match: (\d+)\.\d+
+    replace: $1
+    to: cudnn-major-version
+
+environment:
+  contents:
+    packages:
+      - abseil-cpp-dev
+      - bash
+      - boost
+      - boost-dev
+      - build-base
+      - busybox
+      - c-ares
+      - c-ares-dev
+      - ca-certificates-bundle
+      - cmake
+      - crc32c-dev
+      - cuda-toolkit-${{vars.cuda-version}}
+      - curl-dev
+      - file
+      - gcc-12
+      - gcc-12-default
+      - gperf
+      - icu-dev
+      - libcurl-openssl4
+      - numactl-dev
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-compat-${{vars.cuda-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+      - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
+      - nvidia-cuda-profiler-api-${{vars.cuda-major-version}}
+      - nvidia-cudnn-${{vars.cudnn-major-version}}-cuda-${{vars.cuda-major-version}}
+      - nvidia-driver
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+      - openssl-dev
+      - py3.10-pip
+      - py3.10-requests
+      - py3.10-setuptools
+      - py3.10-wheel
+      - python-3.10
+      - python-3.10-dev
+      - rapidjson
+      - rapidjson-dev
+      - re2-dev
+      - zlib
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: bf430f8589c82c57cc28e64be456c63a65ce7664
+      repository: https://github.com/triton-inference-server/server
+      tag: v${{package.version}}
+      destination: server
+
+  - runs: |
+      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/local/cuda-${{vars.cuda-version}}/lib64/stubs"
+      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin"
+      export BUILDDIR=/home/build/tritonservver/build
+
+      # We need to update CMAKE_PREFIX_PATH otherwise with locations of the third-party libraries
+      export CMAKE_PREFIX_PATH=${BUILDDIR}/third-party/absl
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/cares
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/curl
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/cnmem
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/googletest
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/google-cloud-cpp
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/grpc
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/nlohmann_json
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/opentelemetry-cpp
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/protobuf
+      export CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:${BUILDDIR}/third-party/re2
+
+      # TODO(jeremy): The cmake option flags were the result of one build.py run using python3 build.py --enable-gpu. that doesn't include the tensorrt backend
+      # we may need to adjust this
+      #
+      # Create a directory to contain the build artifacts.
+      # This will also be the directory that cmake outputs the build files to
+      # This will be that we run cmake install from
+      mkdir -p "${BUILDDIR}"
+      cd ${BUILDDIR}
+
+      # N.B. I have changed the final argument to cmake to be the directory where the checkout step checks out the source to i.e /home/build/server
+      #
+      # TRT_VERSION is set based on the instructions in the repository
+      # https://github.com/triton-inference-server/tensorrtllm_backend?tab=readme-ov-file#option-1-build-via-the-buildpy-script-in-server-repo
+      export TRT_VERSION=${{vars.tensorrt-version}}
+      # The final argument of cmake is the directory where we checked out the triton server repository. This is the input to cmake.
+      cmake "-DTRT_VERSION=${TRT_VERSION}" \
+        "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}" \
+        "-DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}" \
+        "-DCMAKE_BUILD_TYPE=Release" \
+        "-DCMAKE_INSTALL_PREFIX:PATH=/tmp/tritonbuild/tritonserver/install" \
+        "-DTRITON_VERSION:STRING=${{package.version}}" \
+        "-DTRITON_REPO_ORGANIZATION:STRING=https://github.com/triton-inference-server" \
+        "-DTRITON_COMMON_REPO_TAG:STRING=${{vars.triton-repo-tag}}" \
+        "-DTRITON_CORE_REPO_TAG:STRING=${{vars.triton-repo-tag}}" \
+        "-DTRITON_BACKEND_REPO_TAG:STRING=${{vars.triton-repo-tag}}" \
+        "-DTRITON_THIRD_PARTY_REPO_TAG:STRING=${{vars.triton-repo-tag}}" \
+        "-DTRITON_ENABLE_LOGGING:BOOL=ON" \
+        "-DTRITON_ENABLE_STATS:BOOL=ON" \
+        "-DTRITON_ENABLE_METRICS:BOOL=OFF" \
+        "-DTRITON_ENABLE_METRICS_GPU:BOOL=OFF" \
+        "-DTRITON_ENABLE_METRICS_CPU:BOOL=OFF" \
+        "-DTRITON_ENABLE_TRACING:BOOL=ON" \
+        "-DTRITON_ENABLE_NVTX:BOOL=OFF" \
+        "-DTRITON_ENABLE_GPU:BOOL=ON" \
+        "-DTRITON_MIN_COMPUTE_CAPABILITY=6.0" \
+        "-DTRITON_ENABLE_MALI_GPU:BOOL=OFF" \
+        "-DTRITON_ENABLE_GRPC:BOOL=ON" \
+        "-DTRITON_ENABLE_HTTP:BOOL=OFF" \
+        "-DTRITON_ENABLE_SAGEMAKER:BOOL=OFF" \
+        "-DTRITON_ENABLE_VERTEX_AI:BOOL=OFF" \
+        "-DTRITON_ENABLE_GCS:BOOL=OFF" \
+        "-DTRITON_ENABLE_S3:BOOL=OFF" \
+        "-DTRITON_ENABLE_AZURE_STORAGE:BOOL=OFF" \
+        "-DTRITON_ENABLE_ENSEMBLE:BOOL=ON" \
+        "-DTRITON_ENABLE_TENSORRT:BOOL=OFF" \
+        "-DEVENT__HAVE_ARC4RANDOM=0" \
+        "-DEVENT__HAVE_ARC4RANDOM_BUF=0" \
+        "-DCMAKE_CXX_FLAGS=\"-Wno-error\"" \
+        /home/build/server
+
+      # This is a bit of hack to fix the warnings
+      # See: https://github.com/chainguard-dev/extra-packages/pull/407#issuecomment-2223704174
+      sed -e 's/-Werror//g' -i ./_deps/repo-core-src/src/CMakeLists.txt
+      sed -e 's/-Werror//g' -i ./_deps/repo-core-src/CMakeLists.txt
+
+      # Run the build using the generated files
+      cmake --build . --config Release -j$(nproc)  -t install
+
+  - runs: |
+      # INSTALLDIR is the directory where the built artifacts are placed after running cmake install
+      export INSTALLDIR=/tmp/tritonbuild/tritonserver/install
+      # Dest dir is the directory in final output where we should put the artifacts
+      export DESTDIR="${{targets.destdir}}/opt/tritonserver/"
+      mkdir -p ${DESTDIR}/bin
+      cp ${INSTALLDIR}/bin/tritonserver ${DESTDIR}/bin
+      mkdir -p ${DESTDIR}/lib
+      # N.B. The command in the generated cmake script was wrong it has lib but it looks like it gets built in the lib64 directory
+      cp ${INSTALLDIR}/lib64/libtritonserver.so ${DESTDIR}/lib
+      mkdir -p ${DESTDIR}/include/triton
+      cp -r ${INSTALLDIR}/include/triton/core ${DESTDIR}/include/triton/core
+      cp server/LICENSE ${INSTALLDIR}
+      cp server/TRITON_VERSION ${INSTALLDIR}
+
+  - runs: |
+      export INSTALLDIR=/tmp/tritonbuild/tritonserver/install
+
+      # Install the wheel.
+      # Important: We use no-deps because its dependencies should not get installed. Without it numpy was getting installed.
+      # TODO(pnasrat): Consider a py3.10-tritonserver subpackage
+      sitepkgd=$(python3.10 -c 'import site; print(site.getsitepackages()[0])')
+      sitepkgd=${sitepkgd#/}
+      pip install --no-deps --no-compile --prefix=/usr --root=${{targets.contextdir}} ${INSTALLDIR}/python/tritonserver*.whl
+      python3.10  -m compileall --invalidation-mode=unchecked-hash -r100 "${{targets.contextdir}}"/$sitepkgd
+
+test:
+  environment:
+    contents:
+      packages:
+        - wolfi-base
+        - busybox
+    environment:
+      LD_LIBRARY_PATH: "/usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/local/cuda-${{vars.cuda-version}}/lib64/stubs:/usr/local/cudnn-${{vars.cudnn-major-version}}/lib64"
+  pipeline:
+    - runs: |
+        /opt/tritonserver/bin/tritonserver 2>&1 | grep -q "${{package.version}}"
+
+update:
+  enabled: true
+  github:
+    identifier: triton-inference-server/server
+    strip-prefix: v
+    use-tag: true
+    tag-filter-prefix: v2.45.
