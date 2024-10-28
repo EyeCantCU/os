@@ -1,8 +1,8 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-fips-1.15
-  version: 1.15.9
-  epoch: 1
+  version: 1.15.10
+  epoch: 0
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -67,14 +67,14 @@ environment:
 
 vars:
   # https://github.com/cilium/cilium/blob/v1.15.6/images/cilium/Dockerfile
-  CILIUM_PROXY_COMMIT: "a90146d13b4cd7d168d573396ccf2b3db5a3b047"
+  CILIUM_PROXY_COMMIT: "0d05e48bfbb8c4737ec40d5781d970a550ed2bbd"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: 2ea0cf3328be75b4dbcead6d7d846ec07f0a4623
+      expected-commit: 2fdab41a13d2a3f8abbbb4d3b4ba8cc1624c3935
 
   - uses: patch
     with:
@@ -83,6 +83,16 @@ pipeline:
   - uses: go/bump
     with:
       deps: google.golang.org/grpc@v1.64.1
+
+  - runs: |
+      # Check the Dockerfile for a SHA and match against the proxy SHA
+      ENVOY_SHA=$(grep 'FROM.*cilium-envoy' ./images/cilium/Dockerfile \
+        | sed "s/^FROM.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
+
+      if [ "$ENVOY_SHA" != "${{vars.CILIUM_PROXY_COMMIT}}" ]; then
+        echo "Expected vars.CILIUM_PROXY_COMMIT to be $ENVOY_SHA. Please update" 1>&2
+        exit 1
+      fi
 
   - runs: |
       # Bazel errors out on toolchain stanza
@@ -117,16 +127,6 @@ pipeline:
           DESTDIR=${{targets.destdir}} make -C $d install
       done
 
-  - runs: |
-      # Check the Dockerfile for a SHA and match against the proxy SHA
-      ENVOY_SHA=$(grep 'FROM.*cilium-envoy' ./images/cilium/Dockerfile \
-        | sed "s/^FROM.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
-
-      if [ "$ENVOY_SHA" != "${{vars.CILIUM_PROXY_COMMIT}}" ]; then
-        echo "Expected vars.CILIUM_PROXY_COMMIT to be $ENVOY_SHA. Please update" 1>&2
-        exit 1
-      fi
-
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/proxy
@@ -140,19 +140,21 @@ pipeline:
   - runs: |
       git -C envoy reset --hard ${{vars.CILIUM_PROXY_COMMIT}}
 
-  - uses: patch
+  - working-directory: envoy
+    uses: patch
     with:
-      patches: toolchains-paths.patch
+      patches: ../envoy-toolchains-paths.patch
+
+  # Remove when Envoy > 1.29.9 is used.
+  - working-directory: envoy
+    uses: patch
+    with:
+      patches: ../envoy-googleurl.patch
 
   # Use the FIPS build of BoringSSL
   - uses: patch
     with:
       patches: boringssl_fips.genrule_cmd.patch
-
-  # Remove when Envoy > 1.29.9 is used.
-  - uses: patch
-    with:
-      patches: envoy-googleurl.patch
 
   - runs: |
       cd /home/build/envoy/proxylib
