@@ -1,21 +1,18 @@
-## go-openssl-1.22 is vanilla-build of golang-fips/go patches that
-## produce binaries that can opt-in/out of FIPS mode, or require
-## non-FIPS altogether. This one is only shipped as an image to
-## customers as 3rd party software, not to be used to build any wolfi
-## packages. this package uses the patches from the go-fips-1.22
-## package, which are symlinked to the ./go-openssl-1.22 directory.
+# NB! this source patches are also used by go-openssl-1.23
 package:
-  name: go-openssl-1.22
-  version: 1.22.8
-  epoch: 1
-  description: "pure unpatched https://github.com/golang-fips/go toolchain"
+  name: go-fips-1.23
+  version: 1.23.2
+  epoch: 0
+  description: "the Go programming language"
   copyright:
     - license: BSD-3-Clause
   dependencies:
+    provider-priority: 5
     provides:
-      - go-openssl=${{package.full-version}}
+      - go-fips=${{package.full-version}}
+      - go-fips-md5=${{package.full-version}}
     runtime:
-      - '!go-1.22'
+      - '!go-1.23'
       - bash
       - binutils-gold # Needed for cgo linking due to upstream issue #15696 which forces use of the gold linker.
       - build-base
@@ -33,8 +30,9 @@ environment:
       - busybox
       - ca-certificates-bundle
       # We always use the equivalent non-FIPS branch of Go to build this.
-      - go~1.22
+      - go~1.23
       - openssl-dev
+      - openssl-config-fipshardened # New patches enable go in fips mode
 
 pipeline:
   - uses: git-checkout
@@ -42,7 +40,7 @@ pipeline:
       repository: https://github.com/golang/go
       tag: go${{package.version}}
       destination: go
-      expected-commit: aeccd613c896d39f582036aa52917c85ecf0b0c0
+      expected-commit: ed07b321aef7632f956ce991dd10fdd7e1abd827
 
   # patches directly from openssl-fips/patches, skipping:
   # - 017-fix-linkage.patch breaks coverage for now TODO backport FNV-1 patch
@@ -98,14 +96,33 @@ pipeline:
           patches: /home/build/golang-fips/015-add-hash-sign-verify.patch
       - uses: patch
         with:
-          patches: /home/build/golang-fips/016-fix-crashdumpallthreads.patch
+          patches: /home/build/golang-fips/018-fix-std-crypto.patch
       - uses: patch
         with:
-          patches: /home/build/golang-fips/018-fix-std-crypto.patch
+          patches: /home/build/golang-fips/019-fix-vendor-test.patch
+      - uses: patch
+        with:
+          patches: /home/build/golang-fips/020-fix-boring-tls.patch
+      - uses: patch
+        with:
+          patches: /home/build/golang-fips/021-fix-index-error.patch
+
+  # now the extra patches
+  - working-directory: /home/build/go
+    pipeline:
+      - uses: patch
+        with:
+          patches: /home/build/extra/0001-openssl-fips-unconditionally-use-openssl-backend.patch
+      - uses: patch
+        with:
+          patches: /home/build/extra/0002-boring-always-enable-access-to-boring.Enabled-functi.patch
+      - uses: patch
+        with:
+          patches: /home/build/extra/cmd-go-always-emit-ldflags-version-information.patch
 
   - runs: |
       cd go/src
-      ./make.bash -v
+      GOEXPERIMENT=boringcrypto ./make.bash -v
 
   - runs: |
       cd go
@@ -158,10 +175,14 @@ update:
   github:
     identifier: golang/go
     strip-prefix: go
-    tag-filter: go1.22
+    tag-filter: go1.23
     use-tag: true
 
 test:
+  environment:
+    contents:
+      packages:
+        - openssl-config-fipshardened
   pipeline:
     - runs: |
         export HOME=$PWD
@@ -213,26 +234,76 @@ test:
             exit 1
         fi
 
-        # vanilla golang-fips/go allows the caller to control behavior
-        # https://github.com/golang-fips/go/blob/8092b8157908b59e5930a1247b6f41842a25f89e/patches/003-init-openssl-v2-backend.patch
-        # + // 0: FIPS opt-out: abort the process if it is enabled and can't be disabled.
-        # + // 1: FIPS required: abort the process if it is not enabled and can't be enabled.
-        run_test() {
-          local gfval="$1" exrc="$2" msg="$3" rc=""
-          shift 3
-          # env -i cleans environment
-          set -- env -i ${gfval:+"GOLANG_FIPS=$gfval"} ./sha256 "Go Cubs Go"
-          echo "$msg"
-          echo "execute:" "$@"
-          "$@" >sha256.out 2>&1 && rc=0 || rc=$?
-          echo "expected rc=$exrc found=$rc"
-          if [ "$exrc" != "$rc" ]; then
-              cat sha256.out
-              fail "ERROR: sha256 ran and exited $exrc when GOLANG_FIPS=$gfval. expected $rc."
-          fi
+        # go is now built in fips mode, mock lack of openssl fips
+        # provider with an empty openssl.conf
+        OPENSSL_CONF=/dev/null ./sha256 "Go Cubs Go" > sha256.out 2>&1 && rc=0 || rc=$?
+        [ $rc -eq 0 ] && fail "ERROR: sha256 ran successfully without fips provider"
+        [ $rc -eq 2 ] || { cat sha256.out; fail "ERROR: expected rc=2 found rc=$rc:"; }
+        grep -q "panic.*opensslcrypto" sha256.out || {
+          cat sha256.out
+          fail "sha256 output did not contain panic.*opensslcrypto"
         }
+    - name: "parallel decrypt test"
+      runs: |
+        fail() { echo "$@" 1>&2; exit 1; }
+        export HOME=$PWD
+        export GOPATH=$PWD
+        cat <<EOF >> /tmp/test-parallel-decrypt.go
+        // Test case from https://github.com/golang-fips/go/issues/187
+        package main
 
-        set +x
-        run_test 0  0 "GOLANG_FIPS=0 should run fine outside fips environment"
-        run_test "" 0 "unset GOLANG_FIPS should run fine outside fips environment"
-        run_test 1  2 "GOLANG_FIPS=1 should fail outside fips environment"
+        import (
+                "crypto/aes"
+                "crypto/cipher"
+                "crypto/rand"
+                "flag"
+                "log"
+                "os"
+                "time"
+        )
+
+        func main() {
+                numThreads := flag.Int("threads", 8, "number of threads")
+                timeout := flag.Int("timeout", 10,
+                        "time to run for (considered success if no panics before then")
+                flag.Parse()
+
+                log.Printf("Starting parallel GCM decrypt with %d threads for %ds", *numThreads, *timeout)
+
+                var key [32]byte
+                if _, err := rand.Read(key[:]); err != nil {
+                        panic(err)
+                }
+                block, err := aes.NewCipher(key[:])
+                if err != nil {
+                        panic(err)
+                }
+                gcm, err := cipher.NewGCM(block)
+                if err != nil {
+                        panic(err)
+                }
+                nonce := make([]byte, gcm.NonceSize())
+                if _, err := rand.Read(nonce[:]); err != nil {
+                        panic(err)
+                }
+                ciphertext := gcm.Seal(nil, nonce, []byte("hunter2"), nil)
+
+                for parallel := 0; parallel < *numThreads; parallel++ {
+                        go func() {
+                                for {
+                                        if _, err := gcm.Open(nil, nonce, ciphertext, nil); err != nil {
+                                                panic(err)
+                                        }
+                                }
+                        }()
+                }
+                <-time.After(time.Duration(*timeout) * time.Second)
+                log.Printf("Ran successfully for %d seconds. Exiting 0.", *timeout)
+                os.Exit(0)
+        }
+        EOF
+        go run /tmp/test-parallel-decrypt.go >decrypt.out 2>&1 || {
+            rc=$?
+            cat decrypt.out
+            fail "test-parallel-decrypt.go exited $rc"
+        }
