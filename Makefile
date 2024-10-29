@@ -12,9 +12,6 @@ KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
 GCS_FETCH_BUCKET_NAME ?= gs://chainguard-enterprise-registry-destination/os/
 
-# Default Melange runner is Docker.
-MELANGE_RUNNER ?= docker
-
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
 MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
@@ -34,7 +31,6 @@ MELANGE_BUILD_OPTS += --env-file build-${ARCH}.env
 MELANGE_BUILD_OPTS += --namespace chainguard
 MELANGE_BUILD_OPTS += --license 'NONE'
 MELANGE_BUILD_OPTS += --git-repo-url 'https://github.com/chainguard-dev/enterprise-packages'
-MELANGE_BUILD_OPTS += --runner=$(MELANGE_RUNNER)
 
 # Enter interactive mode on failure for debug
 MELANGE_DEBUG_OPTS += --interactive
@@ -47,7 +43,6 @@ MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --test-package-append wolfi-base
-MELANGE_TEST_OPTS += --runner=$(MELANGE_RUNNER)
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
 # The list of packages to be built. The order matters.
