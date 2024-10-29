@@ -1,0 +1,36 @@
+#!/bin/sh
+set -x
+
+DOCKER_IMAGE="$1"
+
+filename="$(ls -1 chainguard-${DOCKER_IMAGE}*aws*.vhd | tail -1)"
+imagename="$(ls -1 chainguard-${DOCKER_IMAGE}*aws*.vhd | tail -1))"
+
+rm -f /tmp/import-task.json
+aws s3 cp --profile cg-dev "${filename}"  s3://wolfi-vm-images-workloads/
+
+aws ec2 import-snapshot \
+	--profile cg-dev \
+	--description "${filename}" \
+	--disk-container "file://./${filename}.json" | tee /tmp/import-task.json
+
+taskid="$(jq -r '.ImportTaskId' /tmp/import-task.json)"
+echo ${taskid}
+status="$(aws ec2 describe-import-snapshot-tasks --profile cg-dev --region us-east-1 --import-task-ids ${taskid} | jq -r .ImportSnapshotTasks[0].SnapshotTaskDetail.Status)"
+while [ "${status}" != "completed" ]; do
+	echo "importing image...";
+	sleep 10;
+	status="$(aws ec2 describe-import-snapshot-tasks --profile cg-dev --region us-east-1 --import-task-ids ${taskid} | jq -r .ImportSnapshotTasks[0].SnapshotTaskDetail.Status)"
+done; \
+
+echo "importing done, creating AMI"
+snapshotid="$(aws ec2 describe-import-snapshot-tasks --profile cg-dev --region us-east-1 --import-task-ids ${taskid} | jq -r .ImportSnapshotTasks[0].SnapshotTaskDetail.SnapshotId)"
+aws ec2 register-image \
+	--profile cg-dev \
+	--ena-support \
+	--architecture "$(uname -m)" \
+	--name "${imagename}" \
+	--description "${imagename}" \
+	--block-device-mappings DeviceName="/dev/sda1",Ebs={SnapshotId="${snapshotid}"} \
+	--root-device-name "/dev/sda1" \
+	--boot-mode "uefi"

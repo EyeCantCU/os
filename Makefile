@@ -1,3 +1,4 @@
+.PHONY: all kernel clean aws-image-upload google-image-upload
 all: disk
 
 wolfi-vm: wolfi-vm-ephemeral
@@ -50,32 +51,7 @@ disk: initrd
 
 aws-image-upload:
 	# aws configure sso --profile cg-dev
-	rm -f /tmp/import-task.json
-	$(eval filename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*aws*.vhd | tail -1))
-	$(eval imagename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*aws*.vhd | tail -1 | sed 's|\.tar\.gz||g'))
-	aws s3 cp --profile cg-dev "${filename}"  s3://wolfi-vm-images-workloads/
-	aws ec2 import-snapshot \
-		--profile cg-dev \
-		--description "${filename}" \
-		--disk-container "file://./${filename}.json" | tee /tmp/import-task.json
-	$(eval taskid := $(shell jq -r '.ImportTaskId' /tmp/import-task.json))
-	echo ${taskid}
-	$(eval status := $(shell aws ec2 describe-import-snapshot-tasks --profile cg-dev --region us-east-1 --import-task-ids ${taskid} | jq -r .ImportSnapshotTasks[0].SnapshotTaskDetail.Status))
-	while [ "${status}" != "completed" ]; do \
-		@echo "importing image..."; \
-		sleep 10; \
-		$(eval status := $(shell  aws ec2 describe-import-snapshot-tasks --profile cg-dev --region us-east-1 --import-task-ids ${taskid} | jq -r .ImportSnapshotTasks[0].SnapshotTaskDetail.Status)) \
-	done; \
-	echo "importing done, creating AMI"
-	$(eval snapshotid := $(shell  aws ec2 describe-import-snapshot-tasks --profile cg-dev --region us-east-1 --import-task-ids ${taskid} | jq -r .ImportSnapshotTasks[0].SnapshotTaskDetail.SnapshotId))
-	aws ec2 register-image \
-		--profile cg-dev \
-		--name "${imagename}" \
-		--description "${imagename}" \
-		--block-device-mappings DeviceName="/dev/sda1",Ebs={SnapshotId="${snapshotid}"} \
-		--root-device-name "/dev/sda1" \
-		--boot-mode "uefi"
-
+	./aws-image-upload "${DOCKER_IMAGE}"
 
 google-image-upload:
 	$(eval filename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*.tar.gz | tail -1))
