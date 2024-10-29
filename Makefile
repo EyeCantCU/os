@@ -15,12 +15,9 @@ GCS_FETCH_BUCKET_NAME ?= gs://chainguard-enterprise-registry-destination/os/
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
 MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
-MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
-MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard
 MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard-private
-MELANGE_OPTS += --keyring-append https://apk.cgr.dev/chainguard-private/chainguard-7fb528a64a862d44bbea6069093f1fec29fa864ba7e9754828eeceed3f487239.rsa.pub
-MELANGE_OPTS += --repository-append https://packages.cgr.dev/extras
-MELANGE_OPTS += --keyring-append https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
+MELANGE_OPTS += --repository-append https://apk.cgr.dev/extra-packages
 MELANGE_OPTS += --arch ${ARCH}
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
