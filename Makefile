@@ -11,7 +11,8 @@ REPO ?= $(shell pwd)/packages
 
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
-MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard
+MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
+MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_OPTS += --signing-key ${KEY}
 MELANGE_OPTS += --arch ${ARCH}
 MELANGE_OPTS += --license 'Apache-2.0'
@@ -52,7 +53,8 @@ MELANGE_TEST_OPTS += --keyring-append ${KEY}.pub
 MELANGE_TEST_OPTS += --arch ${ARCH}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --test-package-append wolfi-base
-MELANGE_TEST_OPTS += --repository-append https://apk.cgr.dev/chainguard
+MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
+MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_TEST_OPTS += --repository-append ${EXTRAS_REPO}
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
