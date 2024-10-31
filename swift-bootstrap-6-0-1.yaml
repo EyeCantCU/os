@@ -1,0 +1,117 @@
+# This is a package that is used to build the Swift programming language.
+# It's called bootstrap, because while it builds a functioning swift compiler
+# it does not produce a working swift debugger:
+# https://github.com/swiftlang/swift/issues/77243
+# So we use the 5.10.1 version of the swift compiler that is the last version
+# of the swift that can be built without swift. Then we use that to build this
+# one to get a functioning swift compiler that will produce a functioning
+# debugger.
+package:
+  name: swift-bootstrap-6-0-1
+  version: 6.0.1
+  epoch: 0
+  description: Swift is a high-performance system programming language. It has a clean and modern syntax, offers seamless access to existing C and Objective-C code and frameworks, and is memory-safe by default.
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - bash
+      - binutils
+      - busybox
+      - cmake
+      - curl
+      - curl-dev
+      - gcc
+      - glibc-dev
+      - gnutar # busybox tar doesn't like --owner flag.
+      - libedit
+      - libedit-dev
+      - libuuid
+      - libxml2
+      - libxml2-dev
+      - make
+      - ncurses
+      - ncurses-dev
+      - ninja-build # We need ninja-build instead of ninja because it's samurai
+      - openssh-client
+      - patch
+      - perl
+      - posix-libc-utils # Tests require this for something
+      - py3-pip # for setuptools
+      - python3
+      - python3-dev
+      - rsync # Needed to package the swiftpm
+      - sqlite
+      - sqlite-dev
+      - swift-bootstrap-5-10-1
+      - swig
+      - util-linux-dev # for uuid/uuid.h
+      - wasi-libc # For tests
+      - wasi-sdk-libclang-rt-builtins # For tests
+
+pipeline:
+  - runs: |
+      # Get ninja where the build tools expect it.
+      ln -s /usr/lib/ninja-build/bin/ninja /usr/bin/ninja
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/swiftlang/swift
+      tag: swift-${{package.version}}-RELEASE
+      expected-commit: 01224689bf23d7eb20254ed6dfa99bd6200c2251
+      destination: swift-project/swift
+
+  - runs: |
+      cd swift-project/swift
+      ./utils/update-checkout --all-repositories --tag swift-${{package.version}}-RELEASE --skip-history --clone
+
+  - runs: |
+      # Again the checkout leaves things in a wonky state for swiftpm, like
+      # this:
+      # HEAD detached at swift-6.0.1-RELEASE
+      # Changes not staged for commit:
+      # (use "git add/rm <file>..." to update what will be committed)
+      # (use "git restore <file>..." to discard changes in working directory)
+      # deleted:    Tests/PackageGraphTests/PubgrubTests.swift
+      cd swift-project/swiftpm
+      git restore .
+
+  - runs: |
+      # Use this patch to fix: https://github.com/swiftlang/swift/issues/74696
+      cd swift-project/swift
+      git apply ../../clang-path-include-fix.patch
+
+  - runs: |
+      # Apply fedora patches from: https://src.fedoraproject.org/rpms/swift-lang/tree/rawhide
+      cd swift-project
+      patch -p0 < ../enable_lzma.patch
+      patch -p0 < ../need_pic.patch
+      patch -p0 < ../no_pipes.patch
+      patch -p0 < ../have_strcat.patch
+
+      cd swift
+      patch -p1 < ../../lldb-server.patch
+
+  - runs: |
+      cd swift-project
+      swift/utils/build-script --preset=wolfi install_destdir=${{targets.contextdir}} installable_package=${{targets.contextdir}}/swift-${{package.version}}-wolfi.tar.gz
+      # We do not use this but release script creates it, just remove it so
+      # it doesn't get packaged.
+      rm ${{targets.contextdir}}/swift-${{package.version}}-wolfi.tar.gz
+
+  - uses: strip
+
+test:
+  pipeline:
+    - name: Hello world
+      runs: |
+        echo 'print("Hello, World!")' > /tmp/hello.swift
+        swift /tmp/hello.swift | grep "Hello, World!"
+
+update:
+  # There are newer versions, but we need to use this for bootstrapping
+  # purposes, so disable the updates.
+  enabled: false
+  exclude-reason: "This is part of the swift bootstrapping process, so do not complain about newer ones, we know they exist."
