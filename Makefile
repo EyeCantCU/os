@@ -86,6 +86,19 @@ list-yaml:
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
 
+fetch-kernel:
+	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
+		zcat | \
+		grep -a -A1 "^P:linux" | \
+		grep "^V:" | \
+		sort -V | \
+		tail -n1 | sed -e "s/^V://"))
+	@curl -s -LSo /tmp/linux.apk --user user:$(shell chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/linux-$(KERNEL_PKG).apk
+	@mkdir -p /tmp/kernel
+	@tar -xf /tmp/linux.apk -C /tmp/kernel/ 2>/dev/null
+	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
+	export MELANGE_OPTS="--runner=qemu"
+
 package/%: apk-token
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
