@@ -1,7 +1,7 @@
 package:
   name: swift
-  version: 6.0.1
-  epoch: 1
+  version: 6.0.2
+  epoch: 0
   description: Swift is a high-performance system programming language. It has a clean and modern syntax, offers seamless access to existing C and Objective-C code and frameworks, and is memory-safe by default.
   copyright:
     - license: Apache-2.0
@@ -46,9 +46,8 @@ environment:
       - rsync # Needed to package the swiftpm
       - sqlite
       - sqlite-dev
-      # Build 6.0.1 with bootstrapped 6.0.1 to work around:
-      # https://github.com/swiftlang/swift/issues/77243
-      - swift-bootstrap-6-0-1
+      # This uses "previous" swift since it needs swift to build swift.
+      - swift
       - swig
       - util-linux-dev # for uuid/uuid.h
       - wasi-libc # For tests
@@ -63,23 +62,34 @@ pipeline:
     with:
       repository: https://github.com/swiftlang/swift
       tag: swift-${{package.version}}-RELEASE
-      expected-commit: 01224689bf23d7eb20254ed6dfa99bd6200c2251
+      expected-commit: 75ee22a51df9d89ae21597fad5eb21b5375fd160
       destination: swift-project/swift
 
   - runs: |
+      # This is the way the project tells you to update the dependent repos.
+      # I also tried independently checking out the various repos at various
+      # tags but that seemed like a maintenance nightmare. However, if this
+      # is something that we would prefer, then we can do that.
       cd swift-project/swift
-      ./utils/update-checkout --all-repositories --tag swift-${{package.version}}-RELEASE --skip-history --clone
+      MAX_RETRIES=5
 
-  - runs: |
-      # Again the checkout leaves things in a wonky state for swiftpm, like
-      # this:
-      # HEAD detached at swift-6.0.1-RELEASE
-      # Changes not staged for commit:
-      # (use "git add/rm <file>..." to update what will be committed)
-      # (use "git restore <file>..." to discard changes in working directory)
-      # deleted:    Tests/PackageGraphTests/PubgrubTests.swift
-      cd swift-project/swiftpm
-      git restore .
+      attempt=1
+      success=0
+      while [ $attempt -le $MAX_RETRIES ]; do
+        echo "Attempt $attempt of $MAX_RETRIES: Running update-checkout"
+        ./utils/update-checkout --all-repositories --tag swift-${{package.version}}-RELEASE --skip-history --clone && success=1 || success=0
+
+        if [ $success -eq 1 ]; then
+          echo "Command succeeded on attempt $attempt"
+          exit 0
+        fi
+
+        attempt=$(( attempt + 1 ))
+      done
+
+      # If we've reached here, all attempts failed
+      echo "update-checkout failed after $MAX_RETRIES attempts"
+      exit 1
 
   - runs: |
       # Use this patch to fix: https://github.com/swiftlang/swift/issues/74696
@@ -113,8 +123,28 @@ test:
         echo 'print("Hello, World!")' > /tmp/hello.swift
         swift /tmp/hello.swift | grep "Hello, World!"
 
+# The above test pipeline should run swift repl tests below since there were
+# problems in the past with it, so we should catch these as early as possible.
+# We do test them in the image tests, but catching them earlier would be better.
+# https://github.com/chainguard-images/images-private/blob/main/images/swift/tests/main.tf#L65
+#
+# Unfortunately we do not have the rights to run these as package tests, they
+# fail with:
+# error: failed to launch REPL process: Cannot launch '/usr/bin/repl_swift': personality set failed: Operation not permitted name="Hello world with repl"
+#
+# https://github.com/chainguard-dev/enterprise-packages/issues/9193
+#
+# https://github.com/swiftlang/swift-docker/issues/9
+#- name: Hello world with repl
+#  runs: |
+#    echo 'print("Hello, World!")' > /tmp/hello.swift
+#    cat /tmp/hello.swift | swift repl | grep "Hello, World!"
+#- name: Hard math
+#  runs: |
+#    echo "1+1" | swift repl | grep "Int = 2":
 update:
-  # There is a newer version 6.0.2, but let's first build a fully functioning
-  # 6.0.1 before we move on to the next version. Then, we can enable updates.
-  enabled: false
-  exclude-reason: "This is part of the swift bootstrapping process, so do not complain about newer ones, we know they exist."
+  enabled: true
+  github:
+    identifier: swiftlang/swift
+    strip-prefix: swift-
+    strip-suffix: -RELEASE
