@@ -32,6 +32,8 @@ MELANGE_BUILD_OPTS += --namespace chainguard
 MELANGE_BUILD_OPTS += --license 'NONE'
 MELANGE_BUILD_OPTS += --git-repo-url 'https://github.com/chainguard-dev/enterprise-packages'
 
+MELANGE_DEBUG_TEST_OPTS += --interactive
+
 # Enter interactive mode on failure for debug
 MELANGE_DEBUG_OPTS += --interactive
 MELANGE_DEBUG_OPTS += --debug
@@ -139,6 +141,18 @@ test/%:
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
+
+test-debug/%:
+	@mkdir -p ./$(*)/
+	$(eval yamlfile := $*.yaml)
+	@if [ -z "$(yamlfile)" ]; then \
+		echo "Error: could not find yaml file for $*"; exit 1; \
+	else \
+		echo "yamlfile is $(yamlfile)"; \
+	fi
+	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
+	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
+	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
 dev-container:
 	docker run --privileged --rm -it \
