@@ -6,7 +6,7 @@ wolfi-vm-ephemeral: kernel initrd
 	./wolfi-vm -e
 
 wolfi-vm-disk: kernel initrd disk
-	./wolfi-vm -d disk.generic.x86_64.raw
+	./wolfi-vm -d disk.generic.$(shell uname -m).raw
 
 disk: kernel initrd
 	ls disk*generic* 2>/dev/null || docker run --privileged --rm -it \
