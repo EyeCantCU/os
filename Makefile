@@ -6,8 +6,8 @@ wolfi-vm: wolfi-vm-ephemeral
 wolfi-vm-ephemeral: kernel initrd
 	./wolfi-vm -e
 
-wolfi-vm-disk: initrd disk
-	./wolfi-vm -d disk.generic.x86_64.raw
+wolfi-vm-disk: kernel initrd disk
+	./wolfi-vm -d disk.generic.$(shell uname -m).raw
 
 kernel:
 	ls vmlinuz* 2>/dev/null || ./.fetch-linux-kernel
