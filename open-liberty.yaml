@@ -1,0 +1,348 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: open-liberty
+  version: 24.0.0.11
+  epoch: 2
+  description: "Open Liberty is a highly composable, fast to start, dynamic application server runtime environment"
+  resources:
+    cpu: 64
+    memory: 128Gi
+  copyright:
+    - license: EPL-2.0
+  dependencies:
+    runtime:
+      # Installing open-liberty should at least do something
+      - ${{package.name}}-full
+
+vars:
+  build-java: "21"
+  # Tasks to generate zips for OL variants require isAutomatedBuild=true
+  build-opts: "-PisRelease=true -PisAutomatedBuild=true"
+  open-liberty-home: "/usr/share/java/open-liberty"
+
+data:
+  # The full variant provides all public plugins at runtime
+  # The kernel variant is just the Open Liberty kernel
+  - name: variants
+    items:
+      full: "full"
+      kernel: "kernel-slim"
+
+  - name: openjdk-versions
+    items:
+      11: "java-11-openjdk-openj9"
+      17: "java-17-openjdk-openj9"
+      21: "java-21-openjdk-openj9"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - findutils
+      - libarchive-tools
+      # Needed to generate SCC for all supported versions
+      - openjdk-11-openj9
+      - openjdk-17-openj9
+      - openjdk-21-openj9
+      - openjdk-${{vars.build-java}}-openj9-default-jdk
+      - sed
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.build-java}}-openjdk-openj9
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: daad205e2831f1d46bdb56781f75a0f17eaf9e3d
+      repository: https://github.com/OpenLiberty/open-liberty
+      tag: gm-${{package.version}}
+
+  # Tags aren't cut, a branch specific to the version of Open Liberty is created before release
+  - uses: git-checkout
+    with:
+      expected-commit: e4fb041438e51f86133be5ad296214e8a4e196d7
+      repository: https://github.com/OpenLiberty/ci.docker
+      branch: ${{package.version}}-release
+      destination: docker
+
+  - working-directory: dev
+    runs: |
+      # Parsed as a string rather than a boolean
+      sed -i "s|enabled isAutomatedBuild|enabled !!isAutomatedBuild|g" build.image/build.gradle
+
+      ./gradlew --parallel cnf:initialize ${{vars.build-opts}}
+      ./gradlew --parallel assemble ${{vars.build-opts}}
+      ./gradlew --parallel build.image:publish ${{vars.build-opts}}
+
+  - runs: |
+      # Use correct paths
+      find docker/releases/${{package.version}} -type f -exec sed -i 's|/opt/ol/wlp|${{vars.open-liberty-home}}|g' {} +
+      find docker/releases/${{package.version}} -type f -exec sed -i 's|/opt/ol|${{vars.open-liberty-home}}|g' {} +
+
+subpackages:
+  - range: variants
+    name: ${{package.name}}-${{range.key}}
+    description: "Open Liberty is a highly composable, fast to start, dynamic application server runtime environment - ${{range.key}}"
+    dependencies:
+      runtime:
+        - bash # required by scripts
+        - busybox # utilities used in scripts
+        - openssl # used for cert generation
+    pipeline:
+      - working-directory: dev/build.image/build/libs/distributions
+        runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.open-liberty-home}}
+
+          if [ "${{range.key}}" = "kernel" ]; then
+            bsdtar xvf openliberty-kernel-${{package.version}}-*.zip --strip-components=1 -C ${{targets.contextdir}}/${{vars.open-liberty-home}}
+          else
+            bsdtar xvf openliberty-${{package.version}}-*.zip --strip-components=1 -C ${{targets.contextdir}}/${{vars.open-liberty-home}}
+          fi
+
+          # Remove Windows batch scripts and executables
+          find ${{targets.contextdir}} -name "*.bat" -exec rm -rf '{}' +
+          find ${{targets.contextdir}} -name "*.exe" -exec rm -rf '{}' +
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-${{range.key}}
+            - openjdk-${{vars.build-java}}-openj9-default-jvm
+      pipeline:
+        - runs: |
+            export PATH="/usr/share/java/open-liberty/bin:$PATH"
+            server help
+            server create
+            server start
+            server stop
+
+  # We need to generate SCC for each supported java version
+  - range: openjdk-versions
+    name: ${{package.name}}-full-docker-j${{range.key}}
+    description: "Configuration and scripts for running Open Liberty in Docker - ${{range.key}}"
+    dependencies:
+      runtime:
+        - ${{package.name}}-full
+        - dumb-init # used in entrypoint
+        - glibc-locale-en # en-US set as default locale in image
+        - openjdk-${{range.key}}-openj9-default-jvm
+    pipeline:
+      - working-directory: docker/releases/${{package.version}}/full
+        runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.open-liberty-home}}
+          cp -r helpers ${{targets.contextdir}}/${{vars.open-liberty-home}}/helpers
+
+          # Use correct Java version
+          export JAVA_HOME="/usr/lib/jvm/${{range.value}}"
+
+          # Copy Open Liberty to host so that we can generate SCC
+          # This is so horrible, I know, but the least ugly way I can think of doing this
+          mkdir -p ${{vars.open-liberty-home}}
+          cp -r ${{targets.outdir}}/open-liberty-full/${{vars.open-liberty-home}}/* ${{vars.open-liberty-home}}
+          cp -r ${{targets.contextdir}}/${{vars.open-liberty-home}}/helpers ${{vars.open-liberty-home}}/helpers
+
+          # Export environment
+          export PATH="${PATH}:${{vars.open-liberty-home}}/bin:${{vars.open-liberty-home}}/helpers/build"
+          export LOG_DIR="/logs"
+          export WLP_OUTPUT_DIR="/usr/share/java/open-liberty/output"
+          export WLP_SKIP_MAXPERMSIZE="true"
+
+          # Create defaultServer
+          server create
+          rm -rf ${{vars.open-liberty-home}}/output/.classCache /output/workarea
+          rm -rf ${{vars.open-liberty-home}}/usr/servers/defaultServer/server.env
+
+          # Create symlinks and directories on the host
+          mkdir -p ${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache
+          ln -s ${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache /lib.index.cache
+          mkdir -p ${{vars.open-liberty-home}}/output/defaultServer/workarea
+          ln -s ${{vars.open-liberty-home}}/output/defaultServer /output
+          ln -s ${{vars.open-liberty-home}}/usr/servers/defaultServer /config
+          mkdir -p /config/configDropins/defaults
+          mkdir -p /config/configDropins/overrides
+          ln -s ${{vars.open-liberty-home}} /liberty
+          mkdir -p ${{vars.open-liberty-home}}/fixes
+          ln -s ${{vars.open-liberty-home}}/fixes /fixes
+          mkdir -p ${{targets.contextdir}}/etc/wlp
+          mkdir -p ${{targets.contextdir}}/logs
+          echo "<server description=\"Default Server\"><httpEndpoint id=\"defaultHttpEndpoint\" host=\"*\" /></server>" > \
+            /config/configDropins/defaults/open-default-port.xml
+
+          # Generate SCC
+          populate_scc.sh
+          rm -rf /output/messaging /output/resources/security /logs/* $WLP_OUTPUT_DIR/.classCache /output/workarea
+
+          # Copy cache and defaultServer to package
+          mv ${{vars.open-liberty-home}}/output ${{targets.contextdir}}/${{vars.open-liberty-home}}/output
+          mv ${{vars.open-liberty-home}}/usr ${{targets.contextdir}}/${{vars.open-liberty-home}}/usr
+
+          # Now create symlinks and directories in the package
+          mkdir -p ${{targets.contextdir}}/${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache
+          ln -s ${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache ${{targets.contextdir}}/lib.index.cache
+          mkdir -p ${{vars.open-liberty-home}}/output/defaultServer
+          ln -s ${{vars.open-liberty-home}}/output/defaultServer ${{targets.contextdir}}/output
+          ln -s ${{vars.open-liberty-home}}/usr/servers/defaultServer ${{targets.contextdir}}/config
+          mkdir -p ${{targets.contextdir}}/usr/servers/defaultServer/configDropins/defaults
+          mkdir -p ${{targets.contextdir}}/usr/servers/defaultServer/configDropins/overrides
+          ln -s ${{vars.open-liberty-home}} ${{targets.contextdir}}/liberty
+          mkdir -p ${{targets.contextdir}}/${{vars.open-liberty-home}}/fixes
+          ln -s ${{vars.open-liberty-home}}/fixes ${{targets.contextdir}}/fixes
+          mkdir -p ${{targets.contextdir}}/etc/wlp
+          mkdir -p ${{targets.contextdir}}/logs
+          echo "<server description=\"Default Server\"><httpEndpoint id=\"defaultHttpEndpoint\" host=\"*\" /></server>" > \
+            ${{targets.contextdir}}/${{vars.open-liberty-home}}/usr/servers/defaultServer/configDropins/defaults/open-default-port.xml
+
+          # Clean up host
+          rm -rf ${{vars.open-liberty-home}} /config /fixes /liberty /output
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-full
+            - ${{package.name}}-full-docker-j${{range.key}}
+        environment:
+          LANG: "en_US.UTF-8"
+          LANGUAGE: "en_US:en"
+          LC_ALL: "en_US.UTF-8"
+          PATH: "/usr/local/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/share/java/open-liberty/bin:/usr/share/java/open-liberty/helpers/build"
+          JAVA_HOME: "/usr/lib/jvm/default-jvm"
+          JAVA_TOOL_OPTIONS: "-XX:+IgnoreUnrecognizedVMOptions -XX:+PortableSharedCache -XX:+IdleTuningGcOnIdle -Xshareclasses:name=liberty,cacheDir=/output/.classCache,readonly,nonFatal"
+          LOG_DIR: "/logs"
+          WLP_OUTPUT_DIR: "/usr/share/java/open-liberty/output"
+          WLP_SKIP_MAXPERMSIZE: "true"
+          OPENJ9_SCC: "true"
+          RANDFILE: "/tmp/.rnd"
+          OPENJ9_JAVA_OPTIONS: "-XX:+IgnoreUnrecognizedVMOptions -XX:+IdleTuningGcOnIdle -Xshareclasses:name=liberty,cacheDir=/output/.classCache,readonly,nonFatal -Dosgi.checkConfiguration=false"
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            start: "/usr/share/java/open-liberty/helpers/runtime/docker-server.sh /usr/share/java/open-liberty/bin/server run defaultServer"
+            timeout: 15
+            expected_output: |
+              The server defaultServer has been launched
+              Processing configuration drop-ins resource
+              Monitoring dropins for applications
+              The defaultServer server is ready to run a smarter planet
+
+  - range: openjdk-versions
+    name: ${{package.name}}-kernel-docker-j${{range.key}}
+    description: "Configuration and scripts for running Open Liberty in Docker - ${{range.key}}"
+    dependencies:
+      runtime:
+        - ${{package.name}}-kernel
+        - dumb-init # used in entrypoint
+        - glibc-locale-en # en-US set as default locale in image
+        - openjdk-${{range.key}}-openj9-default-jvm
+    pipeline:
+      - working-directory: docker/releases/${{package.version}}/kernel-slim
+        runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.open-liberty-home}}
+          cp -r helpers ${{targets.contextdir}}/${{vars.open-liberty-home}}/helpers
+
+          # Use correct Java version
+          export JAVA_HOME="/usr/lib/jvm/${{range.value}}"
+
+          # Copy Open Liberty to host so that we can generate SCC
+          mkdir -p ${{vars.open-liberty-home}}
+          cp -r ${{targets.outdir}}/open-liberty-kernel/${{vars.open-liberty-home}}/* ${{vars.open-liberty-home}}
+          cp -r ${{targets.contextdir}}/${{vars.open-liberty-home}}/helpers ${{vars.open-liberty-home}}/helpers
+
+          # Export environment
+          export PATH="${PATH}:${{vars.open-liberty-home}}/bin:${{vars.open-liberty-home}}/helpers/build"
+          export LOG_DIR="/logs"
+          export WLP_OUTPUT_DIR="/usr/share/java/open-liberty/output"
+          export WLP_SKIP_MAXPERMSIZE="true"
+
+          # Create defaultServer
+          server create
+          rm -rf ${{vars.open-liberty-home}}/output/.classCache /output/workarea
+          rm -rf ${{vars.open-liberty-home}}/usr/servers/defaultServer/server.env
+
+          # Create symlinks and directories on the host
+          mkdir -p ${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache
+          ln -s ${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache /lib.index.cache
+          mkdir -p ${{vars.open-liberty-home}}/output/defaultServer/workarea
+          ln -s ${{vars.open-liberty-home}}/output/defaultServer /output
+          ln -s ${{vars.open-liberty-home}}/usr/servers/defaultServer /config
+          mkdir -p /config/configDropins/defaults
+          mkdir -p /config/configDropins/overrides
+          ln -s ${{vars.open-liberty-home}} /liberty
+          mkdir -p ${{vars.open-liberty-home}}/fixes
+          ln -s ${{vars.open-liberty-home}}/fixes /fixes
+          mkdir -p ${{targets.contextdir}}/etc/wlp
+          mkdir -p ${{targets.contextdir}}/logs
+          echo "<server description=\"Default Server\"><httpEndpoint id=\"defaultHttpEndpoint\" host=\"*\" /></server>" > \
+            /config/configDropins/defaults/open-default-port.xml
+
+          # Generate SCC
+          populate_scc.sh
+          rm -rf /output/messaging /output/resources/security /logs/* $WLP_OUTPUT_DIR/.classCache /output/workarea
+
+          # Copy cache and defaultServer to package
+          mv ${{vars.open-liberty-home}}/output ${{targets.contextdir}}/${{vars.open-liberty-home}}/output
+          mv ${{vars.open-liberty-home}}/usr ${{targets.contextdir}}/${{vars.open-liberty-home}}/usr
+
+          # Now create symlinks and directories in the package
+          mkdir -p ${{targets.contextdir}}/${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache
+          ln -s ${{vars.open-liberty-home}}/usr/shared/resources/lib.index.cache ${{targets.contextdir}}/lib.index.cache
+          mkdir -p ${{vars.open-liberty-home}}/output/defaultServer
+          ln -s ${{vars.open-liberty-home}}/output/defaultServer ${{targets.contextdir}}/output
+          ln -s ${{vars.open-liberty-home}}/usr/servers/defaultServer ${{targets.contextdir}}/config
+          mkdir -p ${{targets.contextdir}}/usr/servers/defaultServer/configDropins/defaults
+          mkdir -p ${{targets.contextdir}}/usr/servers/defaultServer/configDropins/overrides
+          ln -s ${{vars.open-liberty-home}} ${{targets.contextdir}}/liberty
+          mkdir -p ${{targets.contextdir}}/${{vars.open-liberty-home}}/fixes
+          ln -s ${{vars.open-liberty-home}}/fixes ${{targets.contextdir}}/fixes
+          mkdir -p ${{targets.contextdir}}/etc/wlp
+          mkdir -p ${{targets.contextdir}}/logs
+          echo "<server description=\"Default Server\"><httpEndpoint id=\"defaultHttpEndpoint\" host=\"*\" /></server>" > \
+            ${{targets.contextdir}}/${{vars.open-liberty-home}}/usr/servers/defaultServer/configDropins/defaults/open-default-port.xml
+
+          # Clean up host
+          rm -rf ${{vars.open-liberty-home}} /config /fixes /liberty /output
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-kernel
+            - ${{package.name}}-kernel-docker-j${{range.key}}
+        environment:
+          LANG: "en_US.UTF-8"
+          LANGUAGE: "en_US:en"
+          LC_ALL: "en_US.UTF-8"
+          PATH: "/usr/local/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/share/java/open-liberty/bin:/usr/share/java/open-liberty/helpers/build"
+          JAVA_HOME: "/usr/lib/jvm/default-jvm"
+          JAVA_TOOL_OPTIONS: "-XX:+IgnoreUnrecognizedVMOptions -XX:+PortableSharedCache -XX:+IdleTuningGcOnIdle -Xshareclasses:name=liberty,cacheDir=/output/.classCache,readonly,nonFatal"
+          LOG_DIR: "/logs"
+          WLP_OUTPUT_DIR: "/usr/share/java/open-liberty/output"
+          WLP_SKIP_MAXPERMSIZE: "true"
+          OPENJ9_SCC: "true"
+          RANDFILE: "/tmp/.rnd"
+          OPENJ9_JAVA_OPTIONS: "-XX:+IgnoreUnrecognizedVMOptions -XX:+IdleTuningGcOnIdle -Xshareclasses:name=liberty,cacheDir=/output/.classCache,readonly,nonFatal -Dosgi.checkConfiguration=false"
+      pipeline:
+        # Exclude ERROR from error strings, see issue here: https://github.com/OpenLiberty/open-liberty/issues/20248
+        # Only impacts kernel variant
+        - uses: test/daemon-check-output
+          with:
+            start: "/usr/share/java/open-liberty/helpers/runtime/docker-server.sh /usr/share/java/open-liberty/bin/server run defaultServer"
+            timeout: 15
+            expected_output: |
+              The server defaultServer has been launched
+              The defaultServer server is ready to run a smarter planet
+            error_strings: |
+              FAIL
+              Traceback.*most.recent.call
+              Exception in thread
+
+update:
+  enabled: true
+  github:
+    identifier: OpenLiberty/open-liberty
+    strip-prefix: gm-
+    tag-filter: gm-
