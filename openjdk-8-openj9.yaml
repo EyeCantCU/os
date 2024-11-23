@@ -1,0 +1,250 @@
+package:
+  name: openjdk-8-openj9
+  version: 0.48.0
+  epoch: 0
+  description: OpenJDK ${{vars.java-version}} with OpenJ9
+  copyright:
+    - license: EPL-2.0 OR Apache-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0 OR GPL-2.0-only WITH OpenJDK-assembly-exception-1.0
+  dependencies:
+    runtime:
+      - java-cacerts
+      - java-common
+      - libstdc++
+
+vars:
+  boot-jdk: "/usr/lib/jvm/java-1.8-openjdk"
+  java-home: "/usr/lib/jvm/java-1.8-openjdk-openj9"
+
+var-transforms:
+  - from: ${{package.name}}
+    match: openjdk-(\d+)-openj9
+    replace: $1
+    to: java-version
+  - from: ${{package.name}}
+    match: ^([^-]+)-\d+-(.+)$
+    replace: $1-$2
+    to: java-distro
+
+environment:
+  contents:
+    packages:
+      - alsa-lib-dev
+      - attr-dev
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - ca-certificates
+      - cairo-dev
+      - cmake
+      - coreutils
+      - cups-dev
+      - elfutils-dev
+      - expat-dev
+      - file
+      - findutils
+      - fontconfig-dev
+      - freetype-dev
+      - fribidi-dev
+      - gawk
+      - gcc-12
+      - gdk-pixbuf-dev
+      - giflib-dev
+      - glib-dev
+      - gtk-2.0-dev
+      - harfbuzz-dev
+      - krb5-dev
+      - lcms2-dev
+      - libdwarf-dev-20210528
+      - libffi-dev
+      - libice-dev
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - libtool
+      - libx11-dev
+      - libxcomposite-dev
+      - libxext-dev
+      - libxft-dev
+      - libxi-dev
+      - libxinerama-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxslt-dev
+      - libxt-dev
+      - libxtst-dev
+      - linux-headers
+      - openjdk-${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jvm
+      - nasm
+      - numactl-dev
+      - openssl-dev
+      - pango-dev
+      - patch
+      - pkgconf-dev
+      - posix-libc-utils
+      - sed
+      - util-linux-dev
+      - wolfi-base
+      - zip
+      - zlib-dev
+  environment:
+    # Set compiler to GCC 12
+    CC: "gcc-12"
+    CXX: "g++-12"
+    # Don't treat warnings as errors
+    # Host compiler flags are applied after embedded flags, causing -Werror to take precedence, so reset
+    CFLAGS: "-w -O2 -Wall -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
+    CXXFLAGS: "-w -O2 -Wall -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
+    CPPFLAGS: "-O2 -Wp,-D_FORTIFY_SOURCE=3 -Wp,-D_GLIBCXX_ASSERTIONS"
+    # Set -z notext, allows read-only segments to contain dynamic relocations
+    LDFLAGS: "-Wl,--as-needed,-O1,--sort-common -Wl,-z,relro,-z,now,-z,noexecstack -Wl,-z,notext"
+
+pipeline:
+  - name: Checkout OpenJ9 for OpenJDK ${{vars.java-version}}
+    uses: git-checkout
+    with:
+      repository: https://github.com/ibmruntimes/openj9-openjdk-jdk${{vars.java-version}}
+      tag: openj9-${{package.version}}
+      expected-commit: 306866566ff5fd6b798f64cec8b218df5fbea7b4
+
+  - name: Make scripts executable
+    runs: chmod +x *.sh configure
+
+  - name: Fetch OpenJ9 and Eclipse OMR
+    runs: |
+      ./get_source.sh
+
+  # CRIU support is temporarily disabled upstream
+  # We may be able to enable it in the future with --enable-criu-support
+  - name: Configure OpenJDK ${{vars.java-version}} with OpenJ9
+    uses: autoconf/configure
+    with:
+      opts: |
+        --with-boot-jdk=${{vars.boot-jdk}} \
+        --prefix=${{vars.java-home}} \
+        --with-vendor-name=wolfi \
+        --with-vendor-url=https://wolfi.dev \
+        --with-vendor-bug-url=https://github.com/wolfi-dev/os/issues \
+        --with-update-version="wolfi-r${{package.epoch}}" \
+        --enable-ddr \
+        --disable-precompiled-headers \
+        --with-openj9-cc="gcc" \
+        --with-openj9-cxx="g++" \
+        --with-openssl=system \
+        --with-zlib=system \
+        --with-debug-level=release \
+        --with-native-debug-symbols=internal \
+        --with-jvm-variants=server \
+        --with-jtreg=no  \
+        --with-jvm-variants=server \
+        --with-giflib=system
+
+  - name: Build JDK and JRE image
+    runs: make all
+
+  - name: Install OpenJDK ${{vars.java-version}} with OpenJ9
+    runs: |
+      mkdir -p "${{targets.contextdir}}"/${{vars.java-home}}
+      cp -r build/*-server-release/images/j2sdk-image/* "${{targets.contextdir}}"/${{vars.java-home}}
+      rm "${{targets.contextdir}}"/${{vars.java-home}}/src.zip
+
+      # This archive contains absolute paths from the build environment,
+      # so it does not work on the target system. User can generate it
+      # running 'java -Xshare:dump'.
+      rm -f "${{targets.contextdir}}"/${{vars.java-home}}/server/classes.jsa
+
+subpackages:
+  - name: "${{package.name}}-dbg"
+    description: "Java debug symbols for OpenJDK ${{vars.java-version}} with OpenJ9"
+    pipeline:
+      - name: Split Java debug symbols
+        uses: split/debug
+    dependencies:
+      runtime:
+        - ${{package.name}}
+
+  - name: "${{package.name}}-jre"
+    description: "Java Runtime Environment for OpenJDK ${{vars.java-version}} with OpenJ9"
+    dependencies:
+      runtime:
+        - java-cacerts
+        - java-common
+        - libstdc++
+    pipeline:
+      - name: Install JRE
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/${{vars.java-home}}
+          cp -r build/*-server-release/images/j2re-image/* "${{targets.contextdir}}"/${{vars.java-home}}
+
+          # This archive contains absolute paths from the build environment,
+          # so it does not work on the target system. User can generate it
+          # running 'java -Xshare:dump'.
+          rm -f "${{targets.contextdir}}"/${{vars.java-home}}/server/classes.jsa
+
+          # symlink for `java-common` to work (which expects jre in ${{vars.java-home}}/jre)
+          ln -sf . "${{targets.contextdir}}/${{vars.java-home}}/jre"
+
+  - name: "${{package.name}}-doc"
+    description: "Documentation for OpenJDK ${{vars.java-version}} with OpenJ9"
+    pipeline:
+      - name: Split docs
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/${{vars.java-home}}
+          mv "${{targets.destdir}}"/${{vars.java-home}}/man \
+             "${{targets.contextdir}}"/${{vars.java-home}}
+
+  - name: "${{package.name}}-default-jvm"
+    description: "Use OpenJ9 with OpenJDK ${{vars.java-version}} as the default JVM"
+    dependencies:
+      runtime:
+        - ${{package.name}}-jre
+      provides:
+        - ${{vars.java-distro}}-default-jvm=1.${{vars.java-version}}
+    pipeline:
+      - name: Create link for default jvm
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/lib/jvm
+          ln -sf $(basename ${{vars.java-home}}) "${{targets.contextdir}}"/usr/lib/jvm/default-jvm
+
+  - name: "${{package.name}}-default-jdk"
+    description: "Use OpenJ9 with OpenJDK ${{vars.java-version}} as the default JVM with the JDK installed"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+      provides:
+        - ${{vars.java-distro}}-default-jdk=1.${{vars.java-version}}
+    pipeline:
+      - name: Create link for default JDK
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/lib/jvm
+          ln -sf $(basename ${{vars.java-home}}) "${{targets.contextdir}}"/usr/lib/jvm/default-jvm
+
+update:
+  enabled: true
+  github:
+    identifier: ibmruntimes/openj9-openjdk-jdk21
+    tag-filter: openj9-
+    strip-prefix: openj9-
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-default-jdk
+    environment:
+      JAVA_HOME: ${{vars.java-home}}
+  pipeline:
+    - name: "Java version Test"
+      runs: |
+        java -version
+    # Test a basic Hello World
+    - working-directory: basic
+      runs: |
+        javac HelloWorld.java
+        java HelloWorld | grep -qi "Hello World!"
+    # Test a basic HTTP connection
+    - working-directory: basic
+      runs: |
+        javac RequestTest.java
+        java RequestTest | grep -qi "Successfully connected to example.org"
