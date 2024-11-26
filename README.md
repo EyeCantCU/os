@@ -1,7 +1,7 @@
 # Chainguard Extra Packages
-## Overview 
+## Overview
 This repository provides the latest packages for software products with non-open-source licenses. These packages are designed to be used with Chainguard Images, which provide a secure and reliable base for your applications.
-## Getting Started 
+## Getting Started
 To get started with this repository, you can use the [wolfi-base image](https://images.chainguard.dev/directory/image/wolfi-base/versions) as a starting point. This image includes the apk package manager, to facilitate adding additional software packages.
 
 ### Adding the repo to your Wolfi repositories

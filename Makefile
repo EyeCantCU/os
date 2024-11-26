@@ -15,6 +15,8 @@ MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_OPTS += --signing-key ${KEY}
 MELANGE_OPTS += --arch ${ARCH}
+MELANGE_OPTS += --license 'Apache-2.0'
+MELANGE_OPTS += --git-repo-url 'https://github.com/chainguard-dev/extra-packages'
 MELANGE_OPTS += --env-file build-${ARCH}.env
 MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += --generate-index false
@@ -31,13 +33,11 @@ endif
 # when it is not
 PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name --pipeline-dir=./pipelines/
 
-EXTRAS_REPO ?= https://packages.cgr.dev/extras
-EXTRAS_KEY ?= https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
+EXTRAS_REPO ?= https://apk.cgr.dev/extra-packages
 
 # Add the extras repository to the list of repositories
-MELANGE_OPTS += -k ${EXTRAS_KEY}
 MELANGE_OPTS += -r ${EXTRAS_REPO}
-PKGLISTCMD += -k ${EXTRAS_KEY} -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+PKGLISTCMD += -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 PKGLISTCMD += -r ${EXTRAS_REPO} -r https://packages.wolfi.dev/os
 
 # Enter interactive mode on failure for debug
@@ -56,7 +56,6 @@ MELANGE_TEST_OPTS += --test-package-append wolfi-base
 MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_TEST_OPTS += --repository-append ${EXTRAS_REPO}
-MELANGE_TEST_OPTS += --keyring-append ${EXTRAS_KEY}
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
 all: ${KEY} .build-packages
@@ -128,7 +127,7 @@ dev-container:
 	    -v "${PWD}:${PWD}" \
 	    -w "${PWD}" \
 	    -e SOURCE_DATE_EPOCH=0 \
-	    ghcr.io/wolfi-dev/sdk:latest@sha256:64a9b065d9b2caaa70129ba79fc4e7b4831f60b29ff643cf3c650cfae5bd7ed9
+	    ghcr.io/wolfi-dev/sdk:latest@sha256:77da1186e7c2d9796bcaf4fb035e8675cd822d67a1d8a530cc0f1ceb5df80110
 
 PACKAGES_CONTAINER_FOLDER ?= /work/packages
 TMP_REPOSITORIES_DIR := $(shell mktemp -d)
@@ -139,7 +138,7 @@ TMP_REPOSITORIES_FILE := $(TMP_REPOSITORIES_DIR)/repositories
 # test the packages however you see fit.
 local-wolfi: $(KEY)
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
-	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
+	@echo "https://apk.cgr.dev/extra-packages" >> $(TMP_REPOSITORIES_FILE)
 	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 	@mkdir -p ${PWD}/packages
 	docker run --rm -it \
@@ -147,6 +146,6 @@ local-wolfi: $(KEY)
 		--mount type=bind,source="${PWD}/local-melange.rsa.pub",destination="/etc/apk/keys/local-melange.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		cgr.dev/chainguard/wolfi-base:latest
+		cgr.dev/chainguard-private/chainguard-base:latest
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
