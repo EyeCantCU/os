@@ -1,0 +1,115 @@
+# Status: Draft [Tested] Submitted
+# Draft: updates and changes are allowed
+# Tested: upgrades should be done only upon request from AtSec
+# Submitted: freeze build, fork a new source package, no more updates
+package:
+  name: openssl-provider-fips-3.4.0
+  version: 3.4.0
+  epoch: 1
+  description: "the OpenSSL cryptography suite (FIPS provider module)"
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - jitterentropy-library=3.5.0-r0
+      - jitterentropy-library-dev=3.5.0-r0
+      - openssf-compiler-options
+      - perl
+  environment:
+    # Using openssf-compiler-options instead
+    CFLAGS: "-g -ffile-prefix-map=/home/build=/usr/src/${{package.name}}"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/openssl/openssl
+      tag: openssl-${{package.version}}
+      expected-commit: 98acb6b02839c609ef5b837794e08d906d965335
+
+  # Generated patch bundle from https://github.com/chainguard-dev/openssl using
+  # git bundle create ~/chainguard-dev/enterprise-packages/openssl-provider-fips-3.4.0/patch.bundle openssl-3.4.0..3.4.0-r1
+  - runs: |
+      git pull --verbose patch.bundle ${{package.full-version}}
+      git show
+
+  - name: Create dbg sourcecode
+    runs: |
+      SRCDIR=$(mktemp -d)
+      cp -r . $SRCDIR/
+      mkdir -p ${{targets.destdir}}-dbg/usr/src/
+      mv $SRCDIR ${{targets.destdir}}-dbg/usr/src/${{package.name}}
+      # Note that mktemp -d created it as 700, whilst the contents
+      # inside is 644 for files and 755 for dirs, without this gdb
+      # doesn't work for non-root user, fix this up.
+      chmod 755 ${{targets.destdir}}-dbg/usr/src/${{package.name}}
+
+  - name: Configure and build
+    runs: |
+      export CC=${{host.triplet.gnu}}-gcc
+      export CXX=${{host.triplet.gnu}}-g++
+      export CPP=${{host.triplet.gnu}}-cpp
+
+      echo FIPS_VENDOR=Chainguard >> VERSION.dat
+      version=${{package.version}}
+      fullversion=${{package.full-version}}
+      suffix=${fullversion##$version-}
+      sed -i "s|\(PRE_RELEASE_TAG=.*\)|\1$suffix|" VERSION.dat
+
+      perl ./Configure \
+         linux-$(uname -m) \
+         --prefix=/usr \
+         --libdir=lib \
+         --openssldir=/etc/ssl \
+         enable-fips \
+         enable-fips-pedanticonly \
+         disable-fips186-4-ffc \
+         enable-fips-jitter \
+         enable-ktls \
+         enable-jitter \
+         shared \
+         no-dsa \
+         no-des \
+         no-zlib \
+         no-async \
+         no-comp \
+         no-idea \
+         no-mdc2 \
+         no-rc5 \
+         no-ec2m \
+         no-sm2 \
+         no-sm4 \
+         no-ssl3 \
+         no-seed \
+         no-weak-ssl-ciphers \
+         -Wa,--noexecstack --debug
+      perl configdata.pm --dump
+      make -j$(nproc)
+      make tests HARNESS_JOBS=10 || true
+
+  - runs: |
+      make install_fips DESTDIR="${{targets.destdir}}"
+
+subpackages:
+  - name: "${{package.name}}-dbg"
+    description: "${{package.name}} debug symbols"
+    pipeline:
+      - uses: split/debug
+      # Regenerate fipsmodule.cnf last, after strip or split/debug
+      - runs: |
+          rm -f ${{targets.destdir}}/etc/ssl/fipsmodule.cnf
+          ./util/wrap.pl ./apps/openssl fipsinstall \
+          -pedantic \
+          -module ${{targets.destdir}}/usr/lib/ossl-modules/fips.so \
+          -out ${{targets.destdir}}/etc/ssl/fipsmodule.cnf
+
+update:
+  # Can update, until the build is tested and submitted
+  # Flip to frozen, and fork a new source package
+  enabled: false
+  exclude-reason: |
+    Can only upgrade once there is a new submission with atsec.
