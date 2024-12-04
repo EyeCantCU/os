@@ -37,6 +37,5 @@ environment:
 Because of this difference, when validating lint locally you need to override two default rules...
 
 ```sh
-wolfitl lint --skip-rule forbidden-repository-used --skip-rule forbidden-keyring-used
+wolfictl lint --skip-rule forbidden-repository-used --skip-rule forbidden-keyring-used
 ```
-
