@@ -46,43 +46,11 @@ MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --test-package-append wolfi-base
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
-# The list of packages to be built. The order matters.
-# wolfictl determines the list and order
-# set only to be called when needed, so make can be instant to run
-# when it is not
-PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name
-
-all: ${KEY} .build-packages
-
-# this ensures two things:
-# 1. We only generate the graph for the list of commands that requires it
-# 2. If generating the graph fails, we error out; without this, a failure in $(shell) might go unnoticed.
-ifneq ($(findstring $(MAKECMDGOALS),all list list-yaml),)
-  PKGNAMES := $(shell $(PKGLISTCMD) || echo "failed")
-  ifeq ($(PKGNAMES),failed)
-    $(error $(PKGLISTCMD) failed)
-  endif
-  PKGLIST := $(addprefix package/,$(PKGNAMES))
-else
-  PKGLIST :=
-endif
-.build-packages: $(PKGLIST)
-
 ${KEY}:
 	${MELANGE} keygen ${KEY}
 
 clean:
 	rm -rf packages/${ARCH}
-
-.PHONY: list list-yaml
-
-list:
-	$(info $(PKGNAMES))
-	@printf ''
-
-list-yaml:
-	$(info $(addsuffix .yaml,$(PKGNAMES)))
-	@printf ''
 
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
