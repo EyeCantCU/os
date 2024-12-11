@@ -21,6 +21,7 @@ MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard-private
 MELANGE_OPTS += --repository-append https://packages.cgr.dev/extras
 MELANGE_OPTS += --keyring-append https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 MELANGE_OPTS += --arch ${ARCH}
+MELANGE_OPTS += --cache-dir /tmp/melange-cache
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
 MELANGE_BUILD_OPTS += ${MELANGE_OPTS}
@@ -240,3 +241,10 @@ fetch-all-packages:
 	echo "Fetching all packages from GCS..." && \
 		mkdir -p ./packages/ && \
 		gsutil -m cp -r -n 'gs://chainguard-enterprise-registry-destination/os/*' packages/
+
+.PHONY: init-gcp-auth
+init-gcp-auth: ## This is a helper target for placing your GCP credentials into the melange cache for use by a package build that needs to communicate with GCP
+	@echo "Initializing GCP auth..."
+	gcloud auth login
+	mkdir -p /tmp/melange-cache/.config/gcloud
+	cp -r ~/.config/gcloud/* /tmp/melange-cache/.config/gcloud/
