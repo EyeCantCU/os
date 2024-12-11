@@ -27,18 +27,10 @@ ifeq (${LINT}, yes)
 	MELANGE_OPTS += --fail-on-lint-warning
 endif
 
-# The list of packages to be built. The order matters.
-# wolfictl determines the list and order
-# set only to be called when needed, so make can be instant to run
-# when it is not
-PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name --pipeline-dir=./pipelines/
-
 EXTRAS_REPO ?= https://apk.cgr.dev/extra-packages
 
 # Add the extras repository to the list of repositories
 MELANGE_OPTS += -r ${EXTRAS_REPO}
-PKGLISTCMD += -k https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
-PKGLISTCMD += -r ${EXTRAS_REPO} -r https://packages.wolfi.dev/os
 
 # Enter interactive mode on failure for debug
 MELANGE_DEBUG_OPTS += --interactive
@@ -58,28 +50,11 @@ MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signin
 MELANGE_TEST_OPTS += --repository-append ${EXTRAS_REPO}
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
-all: ${KEY} .build-packages
-ifeq ($(MAKECMDGOALS),all)
-  PKGLIST := $(addprefix package/,$(shell $(PKGLISTCMD)))
-else
-  PKGLIST :=
-endif
-.build-packages: $(PKGLIST)
-
 ${KEY}:
 	${MELANGE} keygen ${KEY}
 
 clean:
 	rm -rf packages/${ARCH}
-
-.PHONY: list list-yaml
-list:
-	$(info $(shell $(PKGLISTCMD)))
-	@printf ''
-
-list-yaml:
-	$(info $(addsuffix .yaml,$(shell $(PKGLISTCMD))))
-	@printf ''
 
 package/%:
 	$(eval yamlfile := $*.yaml)
