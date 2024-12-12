@@ -21,6 +21,7 @@ MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard-private
 MELANGE_OPTS += --repository-append https://packages.cgr.dev/extras
 MELANGE_OPTS += --keyring-append https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 MELANGE_OPTS += --arch ${ARCH}
+MELANGE_OPTS += --cache-dir /tmp/melange-cache
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
 MELANGE_BUILD_OPTS += ${MELANGE_OPTS}
@@ -46,43 +47,11 @@ MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --test-package-append wolfi-base
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
-# The list of packages to be built. The order matters.
-# wolfictl determines the list and order
-# set only to be called when needed, so make can be instant to run
-# when it is not
-PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name
-
-all: ${KEY} .build-packages
-
-# this ensures two things:
-# 1. We only generate the graph for the list of commands that requires it
-# 2. If generating the graph fails, we error out; without this, a failure in $(shell) might go unnoticed.
-ifneq ($(findstring $(MAKECMDGOALS),all list list-yaml),)
-  PKGNAMES := $(shell $(PKGLISTCMD) || echo "failed")
-  ifeq ($(PKGNAMES),failed)
-    $(error $(PKGLISTCMD) failed)
-  endif
-  PKGLIST := $(addprefix package/,$(PKGNAMES))
-else
-  PKGLIST :=
-endif
-.build-packages: $(PKGLIST)
-
 ${KEY}:
 	${MELANGE} keygen ${KEY}
 
 clean:
 	rm -rf packages/${ARCH}
-
-.PHONY: list list-yaml
-
-list:
-	$(info $(PKGNAMES))
-	@printf ''
-
-list-yaml:
-	$(info $(addsuffix .yaml,$(PKGNAMES)))
-	@printf ''
 
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
@@ -272,3 +241,10 @@ fetch-all-packages:
 	echo "Fetching all packages from GCS..." && \
 		mkdir -p ./packages/ && \
 		gsutil -m cp -r -n 'gs://chainguard-enterprise-registry-destination/os/*' packages/
+
+.PHONY: init-gcp-auth
+init-gcp-auth: ## This is a helper target for placing your GCP credentials into the melange cache for use by a package build that needs to communicate with GCP
+	@echo "Initializing GCP auth..."
+	gcloud auth login
+	mkdir -p /tmp/melange-cache/.config/gcloud
+	cp -r ~/.config/gcloud/* /tmp/melange-cache/.config/gcloud/
