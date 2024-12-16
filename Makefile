@@ -50,6 +50,7 @@ MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --test-package-append wolfi-base
+MELANGE_TEST_OPTS += --debug
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
 ${KEY}:
