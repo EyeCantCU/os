@@ -4,6 +4,11 @@ ifeq (${ARCH}, arm64)
 else ifeq (${ARCH}, amd64)
 	ARCH = x86_64
 endif
+ifeq (${TMPDIR}, )
+        CACHEDIR = /tmp/melange-cache
+else
+        CACHEDIR = ${TMPDIR}/melange-cache
+endif
 TARGETDIR = packages/${ARCH}
 
 MELANGE ?= $(shell which melange)
@@ -21,6 +26,7 @@ MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard-private
 MELANGE_OPTS += --repository-append https://packages.cgr.dev/extras
 MELANGE_OPTS += --keyring-append https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 MELANGE_OPTS += --arch ${ARCH}
+MELANGE_OPTS += --cache-dir ${CACHEDIR}
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
 MELANGE_BUILD_OPTS += ${MELANGE_OPTS}
@@ -44,45 +50,14 @@ MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --test-package-append wolfi-base
+MELANGE_TEST_OPTS += --debug
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
-
-# The list of packages to be built. The order matters.
-# wolfictl determines the list and order
-# set only to be called when needed, so make can be instant to run
-# when it is not
-PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name
-
-all: ${KEY} .build-packages
-
-# this ensures two things:
-# 1. We only generate the graph for the list of commands that requires it
-# 2. If generating the graph fails, we error out; without this, a failure in $(shell) might go unnoticed.
-ifneq ($(findstring $(MAKECMDGOALS),all list list-yaml),)
-  PKGNAMES := $(shell $(PKGLISTCMD) || echo "failed")
-  ifeq ($(PKGNAMES),failed)
-    $(error $(PKGLISTCMD) failed)
-  endif
-  PKGLIST := $(addprefix package/,$(PKGNAMES))
-else
-  PKGLIST :=
-endif
-.build-packages: $(PKGLIST)
 
 ${KEY}:
 	${MELANGE} keygen ${KEY}
 
 clean:
 	rm -rf packages/${ARCH}
-
-.PHONY: list list-yaml
-
-list:
-	$(info $(PKGNAMES))
-	@printf ''
-
-list-yaml:
-	$(info $(addsuffix .yaml,$(PKGNAMES)))
-	@printf ''
 
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
@@ -100,7 +75,7 @@ fetch-kernel:
 	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
 	export MELANGE_OPTS="--runner=qemu"
 
-package/%: apk-token
+package/%: apk-token gcp-auth
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
 		echo "Error: could not find yaml file for $*"; exit 1; \
@@ -116,7 +91,7 @@ packages/$(ARCH)/%.apk: $(KEY)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
-debug/%: apk-token
+debug/%: apk-token gcp-auth
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
 		echo "Error: could not find yaml file for $*"; exit 1; \
@@ -129,7 +104,7 @@ debug/%: apk-token
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS)  --source-dir ./$(*)/
 
-test/%:
+test/%: apk-token gcp-auth
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
@@ -141,7 +116,7 @@ test/%:
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
-test-debug/%:
+test-debug/%: apk-token gcp-auth
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
@@ -153,13 +128,14 @@ test-debug/%:
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
-dev-container:
+dev-container: apk-token gcp-auth
 	docker run --privileged --rm -it \
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-v "${HOME}/.config/chainctl:/root/.config/chainctl" \
+			-v "${CACHEDIR}:/tmp/melange-cache" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:e0aaf9303112afa815377584d22dce90f26c974a4fa754ea666d01968c9bf2fb
+			ghcr.io/wolfi-dev/sdk:latest@sha256:0d3dd8acaf57c9a4b7fc779305f428220f6847c4ffb76eecd9f54f411e6b1485
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -232,7 +208,7 @@ dev-container-wolfi:
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:e0aaf9303112afa815377584d22dce90f26c974a4fa754ea666d01968c9bf2fb
+		ghcr.io/wolfi-dev/sdk:latest@sha256:0d3dd8acaf57c9a4b7fc779305f428220f6847c4ffb76eecd9f54f411e6b1485
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
@@ -272,3 +248,14 @@ fetch-all-packages:
 	echo "Fetching all packages from GCS..." && \
 		mkdir -p ./packages/ && \
 		gsutil -m cp -r -n 'gs://chainguard-enterprise-registry-destination/os/*' packages/
+
+.PHONY: gcp-auth
+gcp-auth:
+	mkdir -p ${CACHEDIR}/.config/gcloud
+	cp -rf ~/.config/gcloud/* ${CACHEDIR}/.config/gcloud/
+
+.PHONY: init-gcp-auth
+init-gcp-auth: ## This is a helper target for placing your GCP credentials into the melange cache for use by a package build that needs to communicate with GCP
+	@echo "Initializing GCP auth..."
+	gcloud auth login
+	@$(MAKE) gcp-auth

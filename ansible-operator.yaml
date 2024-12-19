@@ -1,0 +1,109 @@
+package:
+  name: ansible-operator
+  version: 1.37.0
+  epoch: 0
+  description: Ansible operator to run in kubernetes environments.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - py3-pip
+      - python3
+
+vars:
+  home: /usr/share/ansible-operator
+
+environment:
+  contents:
+    packages:
+      - python3
+      - py3-pip
+      - py3-pipenv
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/operator-framework/ansible-operator-plugins
+      tag: v${{package.version}}
+      expected-commit: d88e9be02d380e37a35ba340046c92e107452f34
+
+  - uses: go/build
+    with:
+      packages: ./cmd/ansible-operator/main.go
+      output: ansible-operator
+      ldflags: |
+        -X github.com/operator-framework/ansible-operator-plugins/internal/version.Version=${{package.version}}
+        -X github.com/operator-framework/ansible-operator-plugins/internal/version.GitVersion=$(git describe --dirty --tags --always)
+        -X github.com/operator-framework/ansible-operator-plugins/internal/version.GitCommit=$(git rev-parse HEAD)
+
+  - name: Install virtual environment
+    runs: |
+      cp images/ansible-operator/Pipfile* .
+
+      # Create the virtual environment
+      export PIP_NO_CACHE_DIR=1 PIPENV_CLEAR=1
+
+      # Dependency bumps
+      pipenv upgrade ansible-core~=2.17.7
+
+      pipenv install --deploy
+
+      # Set variables
+      venv="${HOME}/.local/share/virtualenvs/$(ls ~/.local/share/virtualenvs)"
+      py_major_minor=$(python -c 'import sys; print(sys.version_info.major,".",sys.version_info.minor,sep="")')
+      install_home=${{targets.contextdir}}${{vars.home}}
+
+      # Configure the installed paths in the virtual environment
+      sed -i "s|$venv|${{vars.home}}|g" $venv/pyvenv.cfg
+      sed -i "s|$venv|${{vars.home}}|g" $venv/bin/*
+
+      # Cleanup
+      find $venv -name "*.pyc" -delete
+      find $venv -name "__pycache__" -exec rm -rf {} +
+
+      # Install the virtual environment
+      mkdir -p $install_home
+      cp -r $venv/* $install_home/
+
+  - name: Install Ansible files
+    runs: |
+      mkdir -p ${{targets.destdir}}/etc/ansible
+      echo "localhost ansible_connection=local" > ${{targets.destdir}}/etc/ansible/hosts
+      echo '[defaults]' > ${{targets.destdir}}/etc/ansible/ansible.cfg
+      echo 'roles_path = /opt/ansible/roles' >> ${{targets.destdir}}/etc/ansible/ansible.cfg
+      echo 'library = /usr/share/ansible/openshift' >> ${{targets.destdir}}/etc/ansible/ansible.cfg
+
+subpackages:
+  - name: ansible-operator-compat
+    description: ansible-operator compat to put binary at expected place by stream
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -sf /usr/bin/ansible-operator ${{targets.subpkgdir}}/usr/local/bin/ansible-operator
+
+update:
+  enabled: true
+  github:
+    identifier: operator-framework/ansible-operator-plugins
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - name: Check version
+      runs: |
+        ansible-operator version | grep -q ${{package.version}}
+    - uses: test/kwok/cluster
+    - name: Smoke test run
+      runs: |
+        py_major_minor=$(python -c 'import sys; print(sys.version_info.major,".",sys.version_info.minor,sep="")')
+        export \
+          PATH="${{vars.home}}/bin:${PATH}" \
+          PYTHONPATH="${{vars.home}}/lib/python${py_major_minor}/site-packages"
+        ansible-operator run --watches-file=/dev/null 2>&1 &
+        sleep 1
+        curl -sf localhost:6789/healthz

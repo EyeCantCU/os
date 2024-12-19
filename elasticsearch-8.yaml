@@ -1,10 +1,10 @@
 package:
   name: elasticsearch-8
-  version: 8.16.0
-  epoch: 0
+  version: 8.16.1
+  epoch: 3
   description:
   copyright:
-    - license: SSPL-1.0
+    - license: SSPL-1.0 AND Elastic-2.0
   resources:
     cpu: 6
     memory: 30Gi
@@ -13,8 +13,7 @@ package:
       - bash # some helper scripts use bash
       - coreutils # eck operator init container runs date with iso format
       - curl # eck operator init container does a health check
-      - elasticsearch-config
-      - openjdk-17-jre
+      - ${{package.name}}-config
       - openjdk-17-default-jvm
     provides:
       - elasticsearch=${{package.full-version}}
@@ -30,12 +29,18 @@ environment:
       - wolfi-base
       - build-base
 
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/elastic/elasticsearch
       tag: v${{package.version}}
-      expected-commit: 12ff76a92922609df4aba61a368e7adf65589749
+      expected-commit: ffe992aa682c1968b5df375b5095b3a21f122bf3
 
   - uses: patch
     with:
@@ -45,7 +50,6 @@ pipeline:
       patches: |
         gradle-verification-metadata.patch
         build-gradle-tools-plugin-cli.patch
-        bump-Netty-to-4.1.115.Final.patch
 
   - runs: |
       export LANG=en_US.UTF-8
@@ -88,12 +92,101 @@ pipeline:
       sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
 
 subpackages:
-  - name: elasticsearch-config
+  - name: ${{package.name}}-config
     description: Creates a usable elasticsearch.yml config
+    dependencies:
+      provides:
+        - elasticsearch-config=${{package.full-version}}
     pipeline:
       - runs: |
-          mkdir -p ${{targets.subpkgdir}}/usr/share/elasticsearch/config
-          install -m644 elasticsearch.yml ${{targets.subpkgdir}}/usr/share/elasticsearch/config/elasticsearch.yml
+          mkdir -p ${{targets.contextdir}}/usr/share/elasticsearch/config
+          install -m644 elasticsearch.yml ${{targets.contextdir}}/usr/share/elasticsearch/config/elasticsearch.yml
+
+  - name: ${{package.name}}-bitnami
+    description: ElasticSearch for Bitnami
+    dependencies:
+      provides:
+        - elasticsearch-bitnami=${{package.full-version}}
+      runtime:
+        - bash # some helper scripts use bash
+        - busybox
+        - coreutils # eck operator init container runs date with iso format
+        - curl # eck operator init container does a health check
+        - openjdk-17-default-jvm
+        - posix-libc-utils # required for helm install
+        - yq
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: elasticsearch
+          version-path: ${{vars.major-version}}/debian-12
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # I know this is awful, but Bitnami doesn't like symlinks
+          cp -r ${{targets.destdir}}/usr/share/elasticsearch/* ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # Install config
+          install -m644 elasticsearch.yml ${{targets.contextdir}}/opt/bitnami/elasticsearch/config/elasticsearch.yml
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default
+          cp -r ${{targets.contextdir}}/opt/bitnami/elasticsearch/config/* \
+            ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default/
+
+          # Use subpackage path while unpacking
+          find . -iname "*.sh" -exec sed 's#/opt/bitnami#${{targets.contextdir}}/opt/bitnami#g' -i {} \;
+            ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/postunpack.sh || true
+          # Restore path
+          find ${{targets.contextdir}}/opt/bitnami -type f -exec sed 's#${{targets.contextdir}}##g' -i {} \;
+
+          # Set java home
+          sed -i 's|export JAVA_HOME=/opt/bitnami/java|export JAVA_HOME=/usr/lib/jvm/java-17-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+          sed -i 's|export ES_JAVA_HOME=/opt/bitnami/java|export ES_JAVA_HOME=/usr/lib/jvm/java-17-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+
+          # Set wide permissions
+          chmod -R 775 ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # Remove non-bitnami entrypoint script
+          rm ${{targets.contextdir}}/opt/bitnami/elasticsearch/bin/docker-entrypoint.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.destdir}}/usr/bin
+          for i in ${{targets.destdir}}/opt/bitnami/elasticsearch/bin/*; do
+            name=$(basename $i)
+            ln -sf /opt/bitnami/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+          done
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/data
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/plugins
+    # TODO: convert tests to make use of "daemon-check-output"
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - busybox
+            - coreutils
+            - openjdk-17-default-jvm
+            - yq
+            - shadow
+            - sudo
+            - wolfi-base
+        environment:
+          ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+          ES_USER: elasticsearch
+      pipeline:
+        - name: "Setup Elasticsearch configuration for Bitnami"
+          runs: |
+            set -x
+
+            useradd $ES_USER
+            chown -R "${ES_USER}:${ES_USER}" /opt/bitnami/elasticsearch
+
+            # Run the bitnami elasticsearch binary
+            sudo -E -u $ES_USER /opt/bitnami/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
 
 update:
   enabled: true
@@ -116,7 +209,6 @@ test:
         - elasticsearch-config
         - shadow
         - sudo
-        - wolfi-base
     environment:
       ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
       ES_USER: elasticsearch

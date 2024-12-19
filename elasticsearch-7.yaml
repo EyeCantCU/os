@@ -1,10 +1,10 @@
 package:
   name: elasticsearch-7
-  version: 7.17.24
-  epoch: 0
+  version: 7.17.26
+  epoch: 1
   description:
   copyright:
-    - license: SSPL-1.0
+    - license: SSPL-1.0 AND Elastic-2.0
   resources:
     cpu: 6
     memory: 30Gi
@@ -28,17 +28,33 @@ environment:
       - openjdk-17
       - openjdk-17-default-jvm
 
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/elastic/elasticsearch
       tag: v${{package.version}}
-      expected-commit: fcf25fff740db6ab3ed5d145c58d70e4c3528ea7
+      expected-commit: f40328375bfa289242f942fb3d992032ab662e14
 
   - uses: patch
     with:
-      # ml-cpp patch is necessary to work around upstream deleting required dependencies. See https://github.com/chainguard-dev/enterprise-packages/pull/7334
-      patches: bump-deps.patch CVE-2024-29857.patch ml-cpp.patch
+      # If you need to re-generate these patches, pull down the elasticsearch repo
+      # (and branch), bump the dependency, then re-generate the verification metadata:
+      # `./gradlew --write-verification-metadata sha256` precommit and add the new patch in `gradle-verification-metadata-xml.patch`
+      #
+      # x-pack-plugin-ml-build-gradle patch is necessary to work around upstream deleting required dependencies. See https://github.com/chainguard-dev/enterprise-packages/pull/7334
+      patches: |
+        build-tools-internal-version_properties.patch
+        x-pack-plugin-identity-provider-build-gradle.patch
+        x-pack-plugin-security-build-gradle.patch
+        x-pack-plugin-ml-build-gradle.patch
+        CVE-2024-29857.patch
+        gradle-verification-metadata-xml.patch
 
   - runs: |
       export LANG=en_US.UTF-8
@@ -63,9 +79,13 @@ pipeline:
       mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/config ${{targets.destdir}}/usr/share/elasticsearch
       mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/modules ${{targets.destdir}}/usr/share/elasticsearch
       mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
+      cp distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
 
       # Grab the docker entrypoint from the source tree
       mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
+      mkdir -p ${{targets.destdir}}/usr/local/bin/
+      ln -sf /usr/share/elasticsearch/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/local/bin/
 
       # Set permissions to read/write the config dir
       chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
@@ -81,6 +101,102 @@ pipeline:
       # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
       sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
 
+      # Copy the elasticsearch license into the image. Note the ECK operator
+      # expects to find this, otherwise it'll fail to deploy:
+      cp licenses/ELASTIC-LICENSE-2.0.txt ${{targets.destdir}}/usr/share/elasticsearch/LICENSE.txt
+
+subpackages:
+  - name: ${{package.name}}-bitnami
+    description: ElasticSearch for Bitnami
+    dependencies:
+      provides:
+        - elasticsearch-bitnami=${{package.full-version}}
+      runtime:
+        - bash # some helper scripts use bash
+        - busybox
+        - coreutils # eck operator init container runs date with iso format
+        - curl # eck operator init container does a health check
+        - openjdk-17-default-jvm
+        - posix-libc-utils # required for helm install
+        - yq
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: elasticsearch
+          version-path: ${{vars.major-version}}/debian-12
+          commit: b818a243c9ca7a9b4d150c1f88cec55378136042
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # I know this is awful, but Bitnami doesn't like symlinks
+          cp -r ${{targets.destdir}}/usr/share/elasticsearch/* ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # Install config
+          cat <<EOF > "elasticsearch.yml"
+            cluster.name: "docker-cluster"
+            network.host: 0.0.0.0
+          EOF
+          install -m644 elasticsearch.yml ${{targets.contextdir}}/opt/bitnami/elasticsearch/config/elasticsearch.yml
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default
+          cp -r ${{targets.contextdir}}/opt/bitnami/elasticsearch/config/* \
+            ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default/
+
+          # Use subpackage path while unpacking
+          find . -iname "*.sh" -exec sed 's#/opt/bitnami#${{targets.contextdir}}/opt/bitnami#g' -i {} \;
+            ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/postunpack.sh || true
+          # Restore path
+          find ${{targets.contextdir}}/opt/bitnami -type f -exec sed 's#${{targets.contextdir}}##g' -i {} \;
+
+          # Set java home
+          sed -i 's|export JAVA_HOME=/opt/bitnami/java|export JAVA_HOME=/usr/lib/jvm/java-17-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+          sed -i 's|export ES_JAVA_HOME=/opt/bitnami/java|export ES_JAVA_HOME=/usr/lib/jvm/java-17-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+
+          # Set wide permissions
+          chmod -R 775 ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # Remove non-bitnami entrypoint script
+          rm ${{targets.contextdir}}/opt/bitnami/elasticsearch/bin/docker-entrypoint.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.destdir}}/usr/bin
+          for i in ${{targets.destdir}}/opt/bitnami/elasticsearch/bin/*; do
+            name=$(basename $i)
+            ln -sf /opt/bitnami/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+          done
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/data
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/plugins
+    # TODO: convert tests to make use of "daemon-check-output"
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - busybox
+            - coreutils
+            - openjdk-17-default-jvm
+            - yq
+            - shadow
+            - sudo
+            - wolfi-base
+        environment:
+          ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+          ES_USER: elasticsearch
+      pipeline:
+        - name: "Setup Elasticsearch configuration for Bitnami"
+          runs: |
+            set -x
+
+            useradd $ES_USER
+            chown -R "${ES_USER}:${ES_USER}" /opt/bitnami/elasticsearch
+
+            # Run the bitnami elasticsearch binary
+            sudo -E -u $ES_USER /opt/bitnami/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+
 update:
   enabled: true
   github:
@@ -89,13 +205,41 @@ update:
     tag-filter: v7.
 
 test:
+  environment:
+    contents:
+      packages:
+        - coreutils
+        - curl
+        - elasticsearch-config
+        - shadow
+        - sudo
+    environment:
+      ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+      ES_USER: elasticsearch
   pipeline:
-    - runs: |
-        elasticsearch-env-from-file --version
-        elasticsearch-env-from-file --help
-        x-pack-env --version
-        x-pack-env --help
-        x-pack-security-env --version
-        x-pack-security-env --help
-        x-pack-watcher-env --version
-        x-pack-watcher-env --help
+    - name: "Check for LICENSE.txt"
+      runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
+    - name: "Setup Elasticsearch configuration"
+      runs: |
+        set -x
+
+        useradd $ES_USER
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        # Ignore the error, vm.max_map_count needs to be increased.
+        sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+
+        # # Reset the password
+        # ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')
+
+        # curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+
+        # curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+        #     {
+        #       "name": "John Doe",
+        #       "age": 30,
+        #       "about": "I love to go rock climbing"
+        #     }' || exit 1
+        # curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+
+        # kill $(cat /tmp/elasticsearch.pid)

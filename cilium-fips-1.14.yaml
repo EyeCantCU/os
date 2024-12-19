@@ -1,7 +1,7 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-fips-1.14
-  version: 1.14.16
+  version: 1.14.17
   epoch: 0
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
@@ -38,25 +38,28 @@ environment:
       - binutils
       # Use the FIPS build of BoringSSL
       - boringssl-fips-static-compat
+      - build-base
+      - busybox
+      - ca-certificates-bundle
       - clang-17
       - clang-17-dev
       - cmake
       - coreutils # for GNU install
-      # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
-      - gcc-12-default
       - git
       - go-fips
       - grep
       - ip6tables
       - iptables # for cilium-iptables
       - libtool
+      - llvm-libcxx-17
+      - llvm-libcxx-17-dev
+      - llvm-libcxxabi-17
       - llvm-lld-17
       - llvm17
       - llvm17-dev
       - oldglibc
       - openjdk-11
       - patch
-      - python3
       - python3-dev
       - samurai
       - wolfi-baselayout
@@ -64,23 +67,23 @@ environment:
       - openssl-config-fipshardened
 
 vars:
-  # https://github.com/cilium/cilium/blob/v1.14.13/images/cilium/Dockerfile
-  CILIUM_PROXY_COMMIT: "0d05e48bfbb8c4737ec40d5781d970a550ed2bbd"
+  # https://github.com/cilium/cilium/blob/v1.14.17/images/cilium/Dockerfile
+  CILIUM_PROXY_COMMIT: "97edc2815e2c6a174d3d12e71731d54f5d32ea16"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: c2fcf1db31b1b408662471cbe1fddd121bd9678a
+      expected-commit: d9124fb4ba95a45d0203c08ad85759610cf228b6
 
   - uses: go/bump
     with:
-      deps: google.golang.org/grpc@v1.64.1
+      deps: google.golang.org/grpc@v1.64.1 golang.org/x/crypto@v0.31.0
 
   - uses: patch
     with:
-      patches: loopback-location.patch
+      patches: loopback-location.patch cilium-version.patch
 
   - runs: |
       # Check the Dockerfile for a SHA and match against the proxy SHA
@@ -128,25 +131,12 @@ pipeline:
       # Branch from https://github.com/cilium/cilium/blob/v1.14.13/images/cilium/Dockerfile
       # Note often the branch is updated with dependencies updates, no tags
       # See CILIUM_PROXY_COMMIT for anchor point
-      branch: v1.28
+      branch: v1.30
       depth: 1000
       destination: envoy
 
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-toolchains-paths.patch
-
-  # Remove when Envoy > 1.29.9 is used.
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-googleurl.patch
-
-  # Use the FIPS build of BoringSSL
-  - uses: patch
-    with:
-      patches: boringssl_fips.genrule_cmd.patch
+  - runs: |
+      git -C envoy reset --hard ${{vars.CILIUM_PROXY_COMMIT}}
 
   - runs: |
       cd /home/build/envoy/proxylib
@@ -158,21 +148,36 @@ pipeline:
 
       # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
       sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
-
       export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
       mkdir -p .cache/bazel/_bazel_root
+      # boringssl_fips.genrule.cmd.diff: patch Envoy to use our boringssl-fips package.
+      sed -i "/0003-listener-add-socket-options.patch/a\\
+         \"//:boringssl_fips.genrule_cmd.diff\"," WORKSPACE
+      # Double check that patch was applied
+      if ! grep -q boringssl_fips.genrule_cmd.diff WORKSPACE; then
+        exit 1
+      fi
+      # The toolchain at cilium/proxy has paths that are specific to their CI.
+      # Unregister to use Wolfi's.
+      sed 's/register_toolchains/#register_toolchains/g' -i WORKSPACE
 
       ./bazel/setup_clang.sh /usr
+      # Use libc++ to be consistent with other Wolfi Envoy packages.
+      echo "build --config=libc++" >> user.bazelrc
 
       mkdir -p ${{targets.destdir}}/usr/bin
-      bazel build --fission=no --config=clang \
-        --discard_analysis_cache \
-        --nokeep_state_after_build \
-        --notrack_incremental_state \
-        --conlyopt="-Wno-strict-prototypes" \
-        --verbose_failures -c opt //:cilium-envoy
 
-      install -m 755  bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
+      for target in cilium-envoy-starter cilium-envoy; do
+        bazel build --fission=no --config=clang \
+          --discard_analysis_cache \
+          --nokeep_state_after_build \
+          --notrack_incremental_state \
+          --conlyopt="-Wno-strict-prototypes" \
+          `# The thread-saftey analysis flagged some issue in upstream code` \
+          --cxxopt="-Wno-thread-safety" \
+          --verbose_failures -c opt //:${target}
+        install -m 755 bazel-bin/${target} ${{targets.destdir}}/usr/bin/${target}
+      done
 
   - uses: strip
 
@@ -267,7 +272,8 @@ subpackages:
 test:
   pipeline:
     - uses: test/go-fips-check
-    - runs: cilium version
+    # Ensure that structured version info is available
+    - runs: cilium version -ojsonpath={.Client.Version} | grep ${{package.version}}
 
 update:
   enabled: true

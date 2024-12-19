@@ -1,0 +1,124 @@
+# This is built as a one-off backwards compatible package for coupang. It is not version streamed.
+# Withdraw this package once its EOL grace-period expires.
+package:
+  name: elasticsearch-7.17.24
+  version: 7.17.24
+  epoch: 1
+  description:
+  copyright:
+    - license: SSPL-1.0 AND Elastic-2.0
+  resources:
+    cpu: 6
+    memory: 30Gi
+  dependencies:
+    runtime:
+      - bash # some helper scripts use bash
+      - coreutils # eck operator init container runs date with iso format
+      - curl # eck operator init container does a health check
+      - elasticsearch-config
+      - openjdk-17-default-jvm
+      - openjdk-17-jre
+    provides:
+      - elasticsearch=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - openjdk-17
+      - openjdk-17-default-jvm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/elasticsearch
+      tag: v${{package.version}}
+      expected-commit: fcf25fff740db6ab3ed5d145c58d70e4c3528ea7
+
+  - uses: patch
+    with:
+      # If you need to re-generate these patches, pull down the elasticsearch repo
+      # (and branch), bump the dependency, then re-generate the verification metadata:
+      # `./gradlew --write-verification-metadata sha256` precommit and add the new patch in `gradle-verification-metadata-xml.patch`
+      #
+      # x-pack-plugin-ml-build-gradle patch is necessary to work around upstream deleting required dependencies. See https://github.com/chainguard-dev/enterprise-packages/pull/7334
+      patches: |
+        build-tools-internal-version_properties.patch
+        x-pack-plugin-identity-provider-build-gradle.patch
+        x-pack-plugin-security-build-gradle.patch
+        x-pack-plugin-ml-build-gradle.patch
+        CVE-2024-29857.patch
+        gradle-verification-metadata-xml.patch
+
+  - runs: |
+      export LANG=en_US.UTF-8
+
+      touch license.key
+
+      ./gradlew -Dbuild.snapshot=false -Dlicense.key=license.key localDistro
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/logs
+
+      # https://github.com/elastic/elasticsearch/blob/d87b93f3174e82a86f4fad0ea8b85ac7b454f96d/plugins/examples/settings.gradle#L59-L76
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        BUILD_DIR="linux-aarch64-tar"
+      else
+        BUILD_DIR="linux-tar"
+      fi
+
+      find distribution/archives
+      install -dm777 ${{targets.destdir}}/usr/share/elasticsearch/
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/bin ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/lib ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/config ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/modules ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
+      cp distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
+
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
+      mkdir -p ${{targets.destdir}}/usr/local/bin/
+      ln -sf /usr/share/elasticsearch/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/local/bin/
+
+      # Set permissions to read/write the config dir
+      chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
+        name=$(basename $i)
+        ln -sf /usr/share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+      done
+
+      # We get this from elasticsearch-config
+      mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
+      sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
+
+      # Copy the elasticsearch license into the image. Note the ECK operator
+      # expects to find this, otherwise it'll fail to deploy:
+      cp licenses/ELASTIC-LICENSE-2.0.txt ${{targets.destdir}}/usr/share/elasticsearch/LICENSE.txt
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/elasticsearch
+    strip-prefix: v
+    tag-filter: v7.17.24
+
+test:
+  pipeline:
+    - name: binary checks
+      runs: |
+        elasticsearch-env-from-file --version
+        elasticsearch-env-from-file --help
+        x-pack-env --version
+        x-pack-env --help
+        x-pack-security-env --version
+        x-pack-security-env --help
+        x-pack-watcher-env --version
+        x-pack-watcher-env --help
+    - name: "Check for LICENSE.txt"
+      runs: ls -alh /usr/share/elasticsearch/LICENSE.txt

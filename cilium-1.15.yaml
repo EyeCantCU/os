@@ -1,7 +1,7 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-1.15
-  version: 1.15.10
+  version: 1.15.12
   epoch: 0
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
@@ -40,8 +40,6 @@ environment:
       - clang-17-dev
       - cmake
       - coreutils # for GNU install
-      # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
-      - gcc-12-default
       - git
       - go
       - grep
@@ -49,6 +47,9 @@ environment:
       - iptables # for cilium-iptables
       - isl-dev
       - libtool
+      - llvm-libcxx-17
+      - llvm-libcxx-17-dev
+      - llvm-libcxxabi-17
       - llvm-lld-17
       - llvm17
       - llvm17-dev
@@ -61,14 +62,14 @@ environment:
 
 vars:
   # https://github.com/cilium/cilium/blob/v1.15.7/images/cilium/Dockerfile
-  CILIUM_PROXY_COMMIT: "0d05e48bfbb8c4737ec40d5781d970a550ed2bbd"
+  CILIUM_PROXY_COMMIT: "eaae5aca0fb988583e5617170a65ac5aa51c0aa8"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: 2fdab41a13d2a3f8abbbb4d3b4ba8cc1624c3935
+      expected-commit: 1f74fa42d94cdb6a57307b70ea2bb91a99379f1f
 
   - uses: patch
     with:
@@ -108,23 +109,12 @@ pipeline:
       # Branch from https://github.com/cilium/cilium/blob/v1.15.5/images/cilium/Dockerfile
       # Note often the branch is updated with dependencies updates, no tags
       # See CILIUM_PROXY_COMMIT for anchor point
-      branch: v1.29
+      branch: v1.30
       depth: 1000
       destination: envoy
 
   - runs: |
       git -C envoy reset --hard ${{vars.CILIUM_PROXY_COMMIT}}
-
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-toolchains-paths.patch
-
-  # Remove when Envoy > 1.29.9 is used.
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-googleurl.patch
 
   - runs: |
       # Bazel errors out on toolchain stanza
@@ -141,10 +131,15 @@ pipeline:
       cd /home/build/envoy
       # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
       sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
+      # The toolchain at cilium/proxy has paths that are specific to their CI.
+      # Unregister to use Wolfi's.
+      sed 's/register_toolchains/#register_toolchains/g' -i WORKSPACE
       export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
       mkdir -p .cache/bazel/_bazel_root
 
       ./bazel/setup_clang.sh /usr
+      # Use libc++ to be consistent with other Wolfi Envoy packages.
+      echo "build --config=libc++" >> user.bazelrc
 
       mkdir -p ${{targets.destdir}}/usr/bin
 
@@ -154,6 +149,8 @@ pipeline:
           --nokeep_state_after_build \
           --notrack_incremental_state \
           --conlyopt="-Wno-strict-prototypes" \
+          `# The thread-saftey analysis flagged some issue in upstream code` \
+          --cxxopt="-Wno-thread-safety" \
           --verbose_failures -c opt //:${target}
         cp -v bazel-bin/${target} ${{targets.destdir}}/usr/bin/${target}
       done
