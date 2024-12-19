@@ -1,0 +1,102 @@
+package:
+  name: py3.10-vllm-cuda-12.6
+  version: 0.6.5
+  epoch: 0
+  description: A high-throughput and memory-efficient inference and serving engine for LLMs
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 16
+    memory: 16Gi
+  target-architecture:
+    - x86_64
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      - python-3.10
+      - py3.10-setuptools
+      - cuda-toolkit-${{vars.cuda-version}}
+      - nvidia-libcuda-${{vars.cuda-version}}
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gcc-12-default
+      - samurai
+      - ninja-build
+      - numactl-dev
+      - tcmalloc-minimal
+      - gperftools-dev
+      - python-3.10-dev
+      - py3.10-pip
+      - sccache
+      - nvidia-driver
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvidia-cudnn-9-cuda-${{vars.cuda-major-version}}-dev
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - nvidia-libnvidia-ml-${{vars.cuda-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/vllm-project/vllm.git
+      tag: v${{package.version}}
+      expected-commit: 2d1b9baa8f57fc59912c7bcd07fd630fb9d72c9d
+
+  - runs: |
+      ln -sf /usr/local/cuda-${{vars.cuda-version}} /usr/local/cuda
+      export PATH=/usr/local/cuda/bin:$PATH
+      export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+      export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+      export MAX_JOBS=16
+
+      pip install -r requirements-cuda.txt
+      pip install build wheel packaging aiohttp>=3.10.2
+      pip install -r requirements-build.txt
+
+      python setup.py bdist_wheel
+      python setup.py build_ext --inplace
+      pip install --verbose \
+        --no-index --no-build-isolation --no-deps \
+        --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/vllm-*.whl
+      sitepkgd=$(python -c 'import site; print(site.getsitepackages()[0])')
+      pip install --verbose \
+        --requirement=requirements-cuda.txt --force-reinstall\
+        --prefix=/usr --root="${{targets.contextdir}}"
+      python -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
+
+  - uses: strip
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - post
+    - test
+    - submission
+  github:
+    identifier: vllm-project/vllm
+    strip-prefix: v
+    use-tag: true
+
+test:
+  pipeline:
+    - name: Verify vllm installation
+      runs: |
+        export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-12.6/lib:/usr/local/cuda-12.6/lib64:/usr/local/cudnn-9/lib64"
+        python -c "import vllm"
