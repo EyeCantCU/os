@@ -1,9 +1,7 @@
-#nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-1.14
-  # NOTE for updates: CILIUM_PROXY_COMMIT may need to be updated in vars: section below.
   version: 1.14.18
-  epoch: 2
+  epoch: 3
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -58,30 +56,12 @@ environment:
       - samurai
       - wolfi-baselayout
 
-vars:
-  # https://github.com/cilium/cilium/blob/v1.14.11/images/cilium/Dockerfile
-  # Example from above link: quay.io/cilium/cilium-envoy:v1.29.7-39a2a56bbd5b3a591f69dbca51d3e30ef97e0e51@sha256:.....
-  # You'd grab '39a2a56bbd5b3a591f69dbca51d3e30ef97e0e51' from the image URL.
-  CILIUM_PROXY_COMMIT: "eaae5aca0fb988583e5617170a65ac5aa51c0aa8"
-
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
       expected-commit: 80e0f9181f49acd085164762aa93d11597a0f3d0
-
-  # We run this step first becaseu it is the most helpful during
-  # package bumps, which is the most frequent PRs.
-  - runs: |
-      # Check the Dockerfile for a SHA and match against the proxy SHA
-      ENVOY_SHA=$(grep 'FROM.*cilium-envoy' ./images/cilium/Dockerfile \
-        | sed "s/^FROM.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
-
-      if [ "$ENVOY_SHA" != "${{vars.CILIUM_PROXY_COMMIT}}" ]; then
-        echo "Expected vars.CILIUM_PROXY_COMMIT to be $ENVOY_SHA. Please update" 1>&2
-        exit 1
-      fi
 
   - uses: go/bump
     with:
@@ -94,8 +74,6 @@ pipeline:
       sed -i 's|^\(go 1\.[0-9]*\)\.[0-9]*|\1|' go.mod
 
   - runs: |
-      sed -Ei 's/(go [0-9]+\.[0-9]+)\.[0-9]+/\1/' go.mod
-
       # Updates the loopback binary location to be /usr/bin
       sed -i 's|/cni/loopback|/usr/bin/loopback|' plugins/cilium-cni/install-plugin.sh
       grep -q 'install_cni /usr/bin/loopback' plugins/cilium-cni/install-plugin.sh
@@ -107,57 +85,6 @@ pipeline:
 
       DESTDIR=${{targets.destdir}} DISABLE_ENVOY_INSTALLATION=1 make build-container
       DESTDIR=${{targets.destdir}} DISABLE_ENVOY_INSTALLATION=1 make install-container
-
-  - uses: git-checkout
-    with:
-      repository: https://github.com/cilium/proxy
-      # Branch from https://github.com/cilium/cilium/blob/v1.14.11/images/cilium/Dockerfile
-      # Note often the branch is updated with dependencies updates, no tags
-      # See CILIUM_PROXY_COMMIT for anchor point
-      branch: v1.30
-      depth: 1000
-      destination: envoy
-
-  - runs: |
-      git -C envoy reset --hard ${{vars.CILIUM_PROXY_COMMIT}}
-
-  - runs: |
-      # Bazel errors out on toolchain stanza
-      sed -i '/$toolchain /d' envoy/go.mod
-      # Bazel errors out on go point release
-      sed -i 's|^\(go 1\.[0-9]*\)\.[0-9]*|\1|' envoy/go.mod
-
-  - runs: |
-      cd /home/build/envoy/proxylib
-      make
-      mkdir -p ${{targets.destdir}}/usr/lib
-      cp -v libcilium.so ${{targets.destdir}}/usr/lib/libcilium.so
-
-      cd /home/build/envoy
-
-      # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
-      sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
-      # The toolchain at cilium/proxy has paths that are specific to their CI.
-      # Unregister to use Wolfi's.
-      sed 's/register_toolchains/#register_toolchains/g' -i WORKSPACE
-      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-      mkdir -p .cache/bazel/_bazel_root
-
-      ./bazel/setup_clang.sh /usr
-      # Use libc++ to be consistent with other Wolfi Envoy packages.
-      echo "build --config=libc++" >> user.bazelrc
-
-      mkdir -p ${{targets.destdir}}/usr/bin
-      bazel build --fission=no --config=clang \
-        --discard_analysis_cache \
-        --nokeep_state_after_build \
-        --notrack_incremental_state \
-        --conlyopt="-Wno-strict-prototypes" \
-        `# The thread-saftey analysis flagged some issue in upstream code` \
-        --cxxopt="-Wno-thread-safety" \
-        --verbose_failures -c opt //:cilium-envoy
-
-      cp -v bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
 
   - uses: strip
 
@@ -253,8 +180,6 @@ test:
         cilium-agent --version
         cilium-agent --help
         cilium-bugtool --help
-        cilium-envoy --version
-        cilium-envoy --help
         cilium-health --help
         cilium-mount --version
         cilium-mount --help
