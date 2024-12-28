@@ -2,7 +2,7 @@
 package:
   name: cilium-envoy-fips-1.14
   version: 1.14.18
-  epoch: 1
+  epoch: 2
   description: Envoy with additional cilium plugins
   copyright:
     - license: Apache-2.0
@@ -16,6 +16,7 @@ package:
 environment:
   contents:
     packages:
+      - apk-tools
       - bash
       - bazel-6
       - binutils
@@ -29,7 +30,7 @@ environment:
       - cmake
       - coreutils # for GNU install
       - git
-      - go
+      - go-fips
       - isl-dev
       - libtool
       - llvm-libcxx-17
@@ -53,11 +54,6 @@ pipeline:
       expected-commit: 80e0f9181f49acd085164762aa93d11597a0f3d0
       destination: cilium
 
-  - uses: go/bump
-    with:
-      deps: golang.org/x/net@v0.33.0
-      modroot: cilium
-
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/proxy
@@ -71,6 +67,7 @@ pipeline:
     runs: |
       ENVOY_SHA=$(grep 'ARG.*cilium-envoy' ./cilium/images/cilium/Dockerfile \
         | sed "s/^ARG.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
+
       git reset --hard $ENVOY_SHA
 
   - uses: go/bump
@@ -83,12 +80,16 @@ pipeline:
       # Bazel errors out on go point release
       sed -i 's|^\(go 1\.[0-9]*\)\.[0-9]*|\1|' go.mod
 
-  - name: Build and Install proxylib
+  - name: Build and Install proxylib then Remove go-fips from the build env
     runs: |
       cd ./proxylib
       make
       mkdir -p ${{targets.destdir}}/usr/lib
       cp -v libcilium.so ${{targets.destdir}}/usr/lib/libcilium.so
+
+      # Remove go-fips, openssl-config-fipshardened and all from the build environment. As it is only required for building proxylib with go-fips.
+      # Reason: https://github.com/chainguard-dev/enterprise-packages/pull/12174#issuecomment-2563993262
+      apk del go-fips go-msft* openssl-config-fipshardened openssl-provider-fips openssl-fips-test binutils-gold
 
   - name: use-precompiled-boringssl-from-build-env patch
     runs: |
@@ -137,6 +138,11 @@ pipeline:
       install -m 755 bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
 
   - uses: strip
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: cilium-envoy --version
 
 update:
   enabled: true
