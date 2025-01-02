@@ -38,6 +38,9 @@ MELANGE_DEBUG_OPTS += --debug
 MELANGE_DEBUG_OPTS += --package-append apk-tools
 MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 
+# Enter interactive mode on test failure for debug
+MELANGE_DEBUG_TEST_OPTS += --interactive
+
 # These are separate from MELANGE_OPTS because for building we need additional
 # ones that are not defined for tests.
 MELANGE_TEST_OPTS += --repository-append ${REPO}
@@ -91,6 +94,17 @@ test/%:
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	$(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
+
+test-debug/%:
+	$(eval yamlfile := $*.yaml)
+	@if [ -z "$(yamlfile)" ]; then \
+		echo "Error: could not find yaml file for $*"; exit 1; \
+	else \
+		echo "yamlfile is $(yamlfile)"; \
+	fi
+	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
+	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
+	$(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
 packages/$(ARCH)/%.apk: $(KEY)
 	@mkdir -p ./$(pkgname)/
