@@ -1,0 +1,118 @@
+package:
+  name: vault-fips-1.18
+  version: 1.18.3
+  epoch: 0
+  description: Tool for encryption as a service, secrets and privileged access management
+  copyright:
+    - license: BUSL-1.1
+  dependencies:
+    provides:
+      - vault=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - libcap-utils
+      # nodejs-23 causes a build error due to removing a necessary function.
+      # Error: (broccoli-persistent-filter:CleanCSSFilter) util.isRegExp is not a function
+      - nodejs-22
+      # Newer versions (tested 10.9) get stuck correcting an old lockfile most of the time, this greatly improves
+      # the odds of success.
+      - npm=10.8.3
+      - python3
+      - yarn
+      - go-fips-md5
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 7ae4eca5403bf574f142cd8f987b8d83bafcd1de
+      repository: https://github.com/hashicorp/vault
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: golang.org/x/crypto@v0.31.0 golang.org/x/net@v0.33.0
+
+  - runs: |
+      # Build plugins
+      grep "^[a-z].*plugin[:]" Makefile | cut -f1 -d: | while IFS= read -r plugin; do
+        echo "--> Building $plugin"
+        make "$plugin"
+      done
+
+      # See: https://github.com/ember-cli/ember-cli/blob/master/docs/build-concurrency.md
+      # Only enable for x86_64 runners as aarch64 appears to be fine
+      if [[ "${{build.arch}}" == "x86_64" ]]; then
+        export JOBS=1
+      fi
+
+      # CI=1 reduces some log spam and more accurately reflects reality anyway
+      CI=1 make static-dist
+
+  - uses: go/build
+    with:
+      packages: .
+      output: vault
+      vendor: true
+      tags: "vault,ui"
+      ldflags: |
+        -X github.com/hashicorp/vault/version.fullVersion=${{package.version}}
+        -X github.com/hashicorp/vault/version.GitCommit=$(git rev-parse HEAD)
+        -X github.com/hashicorp/vault/version.BuildDate=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+      go-package: go-fips-md5
+
+  - runs: |
+      install -m644 -D "./vault.confd" "${{targets.destdir}}/etc/conf.d/vault"
+
+      # Correct Permissions
+      chmod 755 "${{targets.destdir}}/usr/bin/vault"
+
+      # Directory for config. Vault user needs write privileges
+      install -m777 -d "${{targets.destdir}}/etc/vault"
+
+      # Directory for logs. Vault user needs write privileges.
+      install -m777 -d "${{targets.destdir}}/var/lib/vault"
+      install -m777 -d "${{targets.destdir}}/var/log/vault"
+
+  - uses: strip
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Container entrypoint script for vault and required dependencies"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/bin"
+          install -m755 ./docker-entrypoint.sh "${{targets.subpkgdir}}/usr/bin/docker-entrypoint.sh"
+
+          # The upstream helm chart expects the entrypoint in /usr/local/bin
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -s /usr/bin/docker-entrypoint.sh "${{targets.subpkgdir}}/usr/local/bin/docker-entrypoint.sh"
+    dependencies:
+      provides:
+        - vault-entrypoint=${{package.full-version}}
+        - ${{package.name}}-entrypoint=${{package.full-version}}
+      runtime:
+        - dumb-init
+        - busybox
+        - su-exec
+        - libcap-utils
+
+update:
+  enabled: true
+  github:
+    identifier: hashicorp/vault
+    strip-prefix: v
+    strip-suffix: +ent
+    tag-filter-prefix: v1.18.
+  ignore-regex-patterns:
+    - "-rc"
+    - "-beta"
+
+test:
+  pipeline:
+    - runs: |
+        set -o pipefail
+        vault version | grep "${{package.version}}"

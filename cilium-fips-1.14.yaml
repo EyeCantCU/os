@@ -1,8 +1,7 @@
-#nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-fips-1.14
-  version: 1.14.16
-  epoch: 1
+  version: 1.14.18
+  epoch: 0
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -38,59 +37,48 @@ environment:
       - binutils
       # Use the FIPS build of BoringSSL
       - boringssl-fips-static-compat
+      - build-base
+      - busybox
+      - ca-certificates-bundle
       - clang-17
       - clang-17-dev
       - cmake
       - coreutils # for GNU install
-      # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
-      - gcc-12-default
       - git
       - go-fips
       - grep
       - ip6tables
       - iptables # for cilium-iptables
       - libtool
+      - llvm-libcxx-17
+      - llvm-libcxx-17-dev
+      - llvm-libcxxabi-17
       - llvm-lld-17
       - llvm17
       - llvm17-dev
       - oldglibc
       - openjdk-11
       - patch
-      - python3
       - python3-dev
       - samurai
       - wolfi-baselayout
       # for fips config & fips-provider
       - openssl-config-fipshardened
 
-vars:
-  # https://github.com/cilium/cilium/blob/v1.14.13/images/cilium/Dockerfile
-  CILIUM_PROXY_COMMIT: "0d05e48bfbb8c4737ec40d5781d970a550ed2bbd"
-
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: c2fcf1db31b1b408662471cbe1fddd121bd9678a
+      expected-commit: 80e0f9181f49acd085164762aa93d11597a0f3d0
 
   - uses: go/bump
     with:
-      deps: google.golang.org/grpc@v1.64.1
+      deps: google.golang.org/grpc@v1.64.1 golang.org/x/net@v0.33.0
 
   - uses: patch
     with:
       patches: loopback-location.patch cilium-version.patch
-
-  - runs: |
-      # Check the Dockerfile for a SHA and match against the proxy SHA
-      ENVOY_SHA=$(grep 'FROM.*cilium-envoy' ./images/cilium/Dockerfile \
-        | sed "s/^FROM.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
-
-      if [ "$ENVOY_SHA" != "${{vars.CILIUM_PROXY_COMMIT}}" ]; then
-        echo "Expected vars.CILIUM_PROXY_COMMIT to be $ENVOY_SHA. Please update" 1>&2
-        exit 1
-      fi
 
   - runs: |
       sed -Ei 's/(go [0-9]+\.[0-9]+)\.[0-9]+/\1/' go.mod
@@ -121,58 +109,6 @@ pipeline:
           make -C $d clean all
           DESTDIR=${{targets.destdir}} make -C $d install
       done
-
-  - uses: git-checkout
-    with:
-      repository: https://github.com/cilium/proxy
-      # Branch from https://github.com/cilium/cilium/blob/v1.14.13/images/cilium/Dockerfile
-      # Note often the branch is updated with dependencies updates, no tags
-      # See CILIUM_PROXY_COMMIT for anchor point
-      branch: v1.28
-      depth: 1000
-      destination: envoy
-
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-toolchains-paths.patch
-
-  # Remove when Envoy > 1.29.9 is used.
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-googleurl.patch
-
-  # Use the FIPS build of BoringSSL
-  - uses: patch
-    with:
-      patches: boringssl_fips.genrule_cmd.patch
-
-  - runs: |
-      cd /home/build/envoy/proxylib
-      make
-      mkdir -p ${{targets.destdir}}/usr/lib
-      cp -v libcilium.so ${{targets.destdir}}/usr/lib/libcilium.so
-
-      cd /home/build/envoy
-
-      # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
-      sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
-
-      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-      mkdir -p .cache/bazel/_bazel_root
-
-      ./bazel/setup_clang.sh /usr
-
-      mkdir -p ${{targets.destdir}}/usr/bin
-      bazel build --fission=no --config=clang \
-        --discard_analysis_cache \
-        --nokeep_state_after_build \
-        --notrack_incremental_state \
-        --conlyopt="-Wno-strict-prototypes" \
-        --verbose_failures -c opt //:cilium-envoy
-
-      install -m 755  bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
 
   - uses: strip
 

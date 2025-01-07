@@ -1,8 +1,8 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-fips-1.15
-  version: 1.15.10
-  epoch: 1
+  version: 1.15.12
+  epoch: 0
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -45,14 +45,15 @@ environment:
       - clang-17-dev
       - cmake
       - coreutils # for GNU install
-      # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
-      - gcc-12-default
       - git
       - go-fips
       - grep
       - ip6tables
       - iptables # for cilium-iptables
       - libtool
+      - llvm-libcxx-17
+      - llvm-libcxx-17-dev
+      - llvm-libcxxabi-17
       - llvm-lld-17
       - llvm17
       - llvm17-dev
@@ -65,16 +66,12 @@ environment:
       # for fips config & fips-provider
       - openssl-config-fipshardened
 
-vars:
-  # https://github.com/cilium/cilium/blob/v1.15.6/images/cilium/Dockerfile
-  CILIUM_PROXY_COMMIT: "0d05e48bfbb8c4737ec40d5781d970a550ed2bbd"
-
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: 2fdab41a13d2a3f8abbbb4d3b4ba8cc1624c3935
+      expected-commit: 1f74fa42d94cdb6a57307b70ea2bb91a99379f1f
 
   - uses: patch
     with:
@@ -82,17 +79,7 @@ pipeline:
 
   - uses: go/bump
     with:
-      deps: google.golang.org/grpc@v1.64.1
-
-  - runs: |
-      # Check the Dockerfile for a SHA and match against the proxy SHA
-      ENVOY_SHA=$(grep 'FROM.*cilium-envoy' ./images/cilium/Dockerfile \
-        | sed "s/^FROM.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
-
-      if [ "$ENVOY_SHA" != "${{vars.CILIUM_PROXY_COMMIT}}" ]; then
-        echo "Expected vars.CILIUM_PROXY_COMMIT to be $ENVOY_SHA. Please update" 1>&2
-        exit 1
-      fi
+      deps: google.golang.org/grpc@v1.64.1 golang.org/x/net@v0.33.0
 
   - runs: |
       # Bazel errors out on toolchain stanza
@@ -125,62 +112,6 @@ pipeline:
       for d in tools/sysctlfix tools/mount plugins/cilium-cni; do
           make -C $d clean all
           DESTDIR=${{targets.destdir}} make -C $d install
-      done
-
-  - uses: git-checkout
-    with:
-      repository: https://github.com/cilium/proxy
-      # Branch from https://github.com/cilium/cilium/blob/v1.15.5/images/cilium/Dockerfile
-      # Note often the branch is updated with dependencies updates, no tags
-      # See CILIUM_PROXY_COMMIT for anchor point
-      branch: v1.29
-      depth: 1000
-      destination: envoy
-
-  - runs: |
-      git -C envoy reset --hard ${{vars.CILIUM_PROXY_COMMIT}}
-
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-toolchains-paths.patch
-
-  # Remove when Envoy > 1.29.9 is used.
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-googleurl.patch
-
-  # Use the FIPS build of BoringSSL
-  - uses: patch
-    with:
-      patches: boringssl_fips.genrule_cmd.patch
-
-  - runs: |
-      cd /home/build/envoy/proxylib
-      make
-      mkdir -p ${{targets.destdir}}/usr/lib
-      cp -v libcilium.so ${{targets.destdir}}/usr/lib/libcilium.so
-
-      cd /home/build/envoy
-
-      # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
-      sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
-      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-      mkdir -p .cache/bazel/_bazel_root
-
-      ./bazel/setup_clang.sh /usr
-
-      mkdir -p ${{targets.destdir}}/usr/bin
-
-      for target in cilium-envoy-starter cilium-envoy; do
-        bazel build --fission=no --config=clang \
-          --discard_analysis_cache \
-          --nokeep_state_after_build \
-          --notrack_incremental_state \
-          --conlyopt="-Wno-strict-prototypes" \
-          --verbose_failures -c opt //:${target}
-        install -m 755 bazel-bin/${target} ${{targets.destdir}}/usr/bin/${target}
       done
 
   - uses: strip
@@ -241,8 +172,6 @@ test:
         cilium-bugtool --help
         cilium-dbg version
         cilium-dbg --help
-        cilium-envoy --version
-        cilium-envoy --help
         cilium-health --help
         cilium-mount --version
         cilium-mount --help
