@@ -1,0 +1,65 @@
+#!/bin/sh
+# shellcheck disable=SC2162,SC3043
+#
+read_info() {
+    local idd="/sys/class/dmi/id"
+    {
+    read PRODUCT_NAME < "$idd/product_name"
+    read PRODUCT_SERIAL < "$idd/product_serial"
+    read CHASSIS_ASSET < "$idd/chassis_asset_tag"
+    } >/dev/null 2>&1
+}
+
+get_cloud() {
+    local GCE="Google Compute Engine"
+    local azure="7783-7084-3265-9085-8269-3286-77"
+    [ "$PRODUCT_NAME" = "$GCE" ] && { echo "GCE"; return 0; }
+    [ "$CHASSIS_ASSET" = "$azure" ] && { echo "Azure"; return 0; }
+    case "$PRODUCT_SERIAL" in
+        [Ee][Cc]2*) echo "EC2"; return 0;;
+    esac
+    return 0
+}
+
+fail() { echo "FATAL:" "$@"; exit 1; }
+
+keyd="/root/.ssh"
+akeys="$keyd/authorized_keys"
+
+read_info
+cloud=$(get_cloud)
+if [ -z "$cloud" ]; then
+    echo "unknown platform"
+    echo "product=\"$PRODUCT_NAME\" serial=\"$PRODUCT_SERIAL\"" \
+        "asset=\"$CHASSIS_ASSET\""
+    exit 0
+fi
+
+
+mkdir -p "$keyd" || fail "failed to create $keyd"
+chmod 0700 "$keyd" || fail "failed to chmod $keyd"
+touch "$akeys" || fail "failed creating $akeys"
+chmod 0600 "$akeys" || fail "failed to chmod $akeys"
+
+echo "Fetching keys on $cloud"
+case "$cloud" in
+    GCE)
+        url="http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys"
+        out=$(curl --fail -H "Metadata-Flavor: Google" "$url") ||
+            fail "failed retrieving keys on $cloud"
+        printf "%s" "$out" | cut -d':' -f2- > "$akeys"
+        ;;
+    Azure)
+        local url="http://169.254.169.254/metadata/instance/compute/publicKeys?api-version=2021-02-01"
+        out=$(curl --fail -H "Metadata: true" "$url") ||
+            fail "failed retrieving keys on $cloud"
+        printf "%s" "$out" | cut -d':' -f2 | cut -d'"' -f2 > "$akeys"
+        ;;
+    EC2)
+        url="http://169.254.169.254/latest/meta-data/public-keys/0/openssh-key"
+        out=$(curl --fail "$url")
+        fail "failed retrieving keys on $cloud"
+        printf "%s" "$out" > "$akeys"
+        ;;
+    *) fail "unknown cloud \"$cloud\"";;
+esac
