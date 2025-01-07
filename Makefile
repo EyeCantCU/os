@@ -135,7 +135,7 @@ dev-container: apk-token gcp-auth
 			-v "${HOME}/.config/chainctl:/root/.config/chainctl" \
 			-v "${CACHEDIR}:/tmp/melange-cache" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:0d3dd8acaf57c9a4b7fc779305f428220f6847c4ffb76eecd9f54f411e6b1485
+			ghcr.io/wolfi-dev/sdk:latest@sha256:f6c84fdfb12672ca1464f7dc4afde8e8cf470e6c8d54b0effb92b11c54306cd3
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -208,7 +208,7 @@ dev-container-wolfi:
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:0d3dd8acaf57c9a4b7fc779305f428220f6847c4ffb76eecd9f54f411e6b1485
+		ghcr.io/wolfi-dev/sdk:latest@sha256:f6c84fdfb12672ca1464f7dc4afde8e8cf470e6c8d54b0effb92b11c54306cd3
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
