@@ -1,4 +1,6 @@
 .PHONY: all kernel clean aws-image-upload google-image-upload
+TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
 all: disk
 
 wolfi-vm: wolfi-vm-ephemeral
@@ -35,7 +37,7 @@ initrd:
 	# same as .mkinird but we pass a manifest and a cloud provider to behave accordingly
 	ls initrd*gz 2>/dev/null || docker run --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
-		--mount type=bind,source="./",destination="/srv" \
+		--mount type=bind,source="$(TOP_D)",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
 		/srv/.mkinitrd $(shell id -u):$(shell id -g) $(shell uname -m) "/srv/tmp-manifest.json"
 
@@ -44,7 +46,7 @@ disk: initrd
 		docker run --privileged --rm -it \
 			-e DOCKER_IMAGE=${DOCKER_IMAGE} \
 			-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
-			--mount type=bind,source="./",destination="/srv" \
+			--mount type=bind,source="$(TOP_D)",destination="/srv" \
 			cgr.dev/chainguard/wolfi-base:latest \
 			/srv/.mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls vmlinuz* | sort -V | tail -n1) /srv/$(shell ls initrd* | sort -V | tail -n1);\
 		mv disk.raw disk.${DOCKER_IMAGE}.$(shell uname -m).raw;\
