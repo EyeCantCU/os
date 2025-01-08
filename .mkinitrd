@@ -1,8 +1,9 @@
 #!/bin/sh
 
 # This must run within a docker container in order to run mknod and create nodes inside of the cpio tarball
-set -x
+
 set -e
+set -x
 [ "$verbose" = "1" ] && set -x
 
 [ -z "$1" ] && echo "ERROR: please supply your UID:GID as the first argument" 1>&2 && exit 1
@@ -10,142 +11,113 @@ set -e
 
 owner="$1"
 arch="$2"
-mission="$3"
+manifest="$3"
+cloud="$4"
 dir="/tmp"
+
+[ -z "$cloud" ] && cloud="qemu"
 
 # Make an initrd
 apk update
-apk add apko
+apk add apko curl jq
 
-# Start with wolfi-base, add systemd for init and mount for some boot processes
-cat <<EOF >"$dir"/base.yaml
-contents:
-  keyring:
-    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
-  repositories:
-    - https://packages.wolfi.dev/os
-  packages:
-    - dash
-    - dhclient
-    - e2fsprogs
-    - grype
-    - iproute2
-    - kmod
-    - kmod-libs
-    - mount
-    - openssh-server
-    - systemd
-    - umount
-    - util-linux-misc
-    - wolfi-base
-archs:
-  - $arch
-EOF
+curl -o /usr/bin/chainctl "https://dl.enforce.dev/chainctl/latest/chainctl_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/aarch64/arm64/')"
+chmod +x /usr/bin/chainctl
+
+# Appending needed packag4es to image
+jq '.contents.packages |= . + ["linux", "systemd-boot", "umount", "mount", "dhclient", "util-linux-misc", "e2fsprogs", "kmod", "grype", "openssh-server", "dash"]' "$manifest" > "$manifest.updated.json"
 
 # Generate a base wolfi tarball
-apko build-minirootfs $dir/base.yaml $dir/base.tar.gz
+apko build-minirootfs "$manifest.updated.json" $dir/base.tar.gz
 mkdir -p $dir/initrd/rootfs
 
 # Extract that tarball so that we can add some configuration
 tar -C $dir/initrd/rootfs -xf $dir/base.tar.gz || true
 
 # Create an init script in our initrd
-cat <<EOF >"$dir"/initrd/rootfs/init
+rm -f "$dir"/initrd/rootfs/init
+cat << EOF > "$dir"/initrd/rootfs/init
 #!/bin/sh
 
-mkdir -p /proc /sys /dev
+set -e
+set -x
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+mkdir -p /proc /dev /sys /tmp
+
+# mount -t proc proc -o nodev,nosuid,hidepid=2 /proc
+# mount -t devtmpfs -o nosuid,noexec devtmpfs /dev
+# mount -t sysfs sys -o nodev,nosuid,noexec /sys
+#
+mount -t tmpfs -o nodev,nosuid,noexec tmpfs /tmp
 mount -t proc none /proc
 mount -t sysfs none /sys
 mount -t devtmpfs none /dev
 
+ln -sf /proc/self/fd /dev/fd
+
 mkdir -p /root_dir
 uuid=\$(sed -e "s:.*root=::" -e "s: .*::" /proc/cmdline)
-init=\$(sed -e "s:.*init=::" -e "s: .*::" /proc/cmdline)
-if [ -x "\$init" ]; then
-	# Exec init as overriden on the kernel command line
-	exec \$init
-elif mount --uuid \$uuid /root_dir 2>/dev/null; then
-	# Mount specified persistent disk and boot systemd
-	exec switch_root /root_dir /usr/lib/systemd/systemd
+if mount --uuid \$uuid /root_dir 2>/dev/null; then
+	# Mount specified persistent disk and boot
+	exec switch_root /root_dir /entrypoint
 else
-	# Boot systemd in initrd
-	exec /usr/lib/systemd/systemd
+	exec /entrypoint
 fi
 EOF
 chmod 755 "$dir"/initrd/rootfs/init
 
-# Symlink a timezone to avoid boot prompt for timezone
-ln -sf /usr/share/zoneinfo/UTC $dir/initrd/rootfs/etc/localtime
+# Create entrypoint file
+echo '#!/bin/sh' > "$dir"/initrd/rootfs/entrypoint
 
-# Let's make our on login shell or executable runner
-if [ -f "/srv/$mission" ] && [ -x "/srv/$mission" ]; then
-	cp -af /srv/$mission $dir/initrd/rootfs/root/
-	cat <<EOF >$dir/initrd/rootfs/root/$mission.sh
-#!/bin/sh
-/root/$mission
-poweroff >/dev/null 2>&1
+# On systemd systems, we skip this as it's already taken care
+if [ ! -e "$dir"/initrd/rootfs/usr/lib/systemd/systemd ]; then
+
+	# TODO: remove this, when we will have ability to pass env variables excternally
+	echo "export POSTGRES_HOST_AUTH_METHOD=trust" >> "$dir"/initrd/rootfs/entrypoint
+
+	cat << EOF > "$dir"/initrd/rootfs/network
+# Setup tty/pty
+mkdir /dev/pts
+mount -t devpts devpts -o noexec,nosuid,newinstance,ptmxmode=0666,mode=0620,gid=tty /dev/pts/
+mount --bind /dev/pts/ptmx /dev/ptmx
+
+# some basic branding
+hostname wolfi
+
+# Setup default network
+interface_name="\$(ip -o link show | grep '<BROADCAST,MULTICAST>' | head -n 1 | cut -d':' -f2 | tr -d ' ')"
+ip link set lo up
+ip link set "\${interface_name:-"eth0"}" up
+dhclient -v "\${interface_name:-"eth0"}"
+
+##############
+# Entrypoint #
+##############
+# Setting up AcceptEnv
+echo "AcceptEnv *" >> /etc/ssh/sshd_config
+ssh-keygen -A
+nohup /usr/sbin/sshd -D &
 EOF
-	chmod 700 $dir/initrd/rootfs/root/$mission.sh
-	# Boot straight to a wrapper script that executes our "mission"
-	sed -i "s|^ExecStart=.*agetty.*|ExecStart=-/bin/sh -l /root/$mission.sh|" $dir/initrd/rootfs/usr/lib/systemd/system/serial-getty@.service
-else
-	# Boot straight to busybox shell as root (like a container!)
-	sed -i "s|^ExecStart=.*agetty.*|ExecStart=-/bin/sh -l|" $dir/initrd/rootfs/usr/lib/systemd/system/serial-getty@.service
+	chmod +x "$dir"/initrd/rootfs/network
+	echo "/network" >> "$dir"/initrd/rootfs/entrypoint
 fi
 
-# Disable systemd login; boot straight to busybox shell as root (like a container!)
-mkdir -p $dir/initrd/rootfs/etc/systemd/system/
-ln -sf /dev/null $dir/initrd/rootfs/etc/systemd/system/systemd-logind.service
-sed -i 's|^ExecStart=.*|ExecStart=/bin/true|' $dir/initrd/rootfs/usr/lib/systemd/system/systemd-vconsole-setup.service
+# Environment setup
+jq -rM '.environment | to_entries|map("export \(.key)=\(.value|tostring)")|.[]' "$manifest.updated.json" >> "$dir"/initrd/rootfs/entrypoint
+echo "export PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin" >> "$dir"/initrd/rootfs/entrypoint
 
-# Set the hostname to "wolfi" for a little lightweight branding
-echo "wolfi" > $dir/initrd/rootfs/etc/hostname
-sed -i -e "s/\slocalhost\s/ localhost wolfi /" $dir/initrd/rootfs/etc/hosts
-
-cat > $dir/initrd/rootfs/etc/systemd/system/sshd.service <<-EOF
-[Unit]
-Description=OpenBSD Secure Shell server
-After=network.target auditd.service
-ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
-[Service]
-EnvironmentFile=-/etc/default/ssh
-ExecStartPre=/usr/bin/ssh-keygen -A
-ExecStart=/usr/sbin/sshd -D \$SSHD_OPTS
-ExecReload=/bin/kill -HUP \$MAINPID
-KillMode=process
-Restart=on-failure
-RestartPreventExitStatus=255
-Type=notify
-[Install]
-WantedBy=multi-user.target
-Alias=sshd.service
-EOF
-mkdir -p  $dir/initrd/rootfs/etc/systemd/system/multi-user.target.wants
-ln -sf /etc/systemd/system/sshd.service $dir/initrd/rootfs/etc/systemd/system/multi-user.target.wants/sshd.service
-
-# Setup dhcp networking
-cat > $dir/initrd/rootfs/etc/systemd/network/20-wired.network <<- EOF
-[Match]
-Name=eth*
-[Network]
-DHCP=yes
-EOF
-
-# Setup dhcp networking
-cat > $dir/initrd/rootfs/etc/systemd/network/21-wired.network <<- EOF
-[Match]
-Name=enp*
-[Network]
-DHCP=yes
-EOF
-
-mkdir -p /$dir/initrd/rootfs/root/.ssh/
-echo "${SSHKEY}" | base64 -d > /$dir/initrd/rootfs/root/.ssh/authorized_keys
-chmod 0400 /$dir/initrd/rootfs/root/.ssh/authorized_keys
+# Workdir setup
+echo "cd $(jq -rM '."work-dir"' "$manifest.updated.json")" >> "$dir"/initrd/rootfs/entrypoint
+# Entrypoint setup
+echo "exec $(jq -rM .entrypoint.command "$manifest.updated.json")" >> "$dir"/initrd/rootfs/entrypoint
+# echo "/bin/sh -l" >> "$dir"/initrd/rootfs/entrypoint
+chmod +x "$dir"/initrd/rootfs/entrypoint
 
 # Archive and compress this directory structure into a cpio file for initrd
-( cd $dir/initrd/rootfs && find . >../files )
-( cd $dir/initrd/rootfs && cpio --format=newc -o ) <$dir/initrd/files | gzip --to-stdout >/srv/initrd.$arch.cpio.gz
+( cd $dir/initrd/rootfs && find . > ../files)
+( cd $dir/initrd/rootfs && cpio --format=newc -o ) < $dir/initrd/files | gzip --to-stdout > /srv/initrd.$arch.cpio.gz
 
 # Chown this file back to the user who ran the docker command that built this file
 # Otherwise, the user is going to end up with a root-owned file in their directory
