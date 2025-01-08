@@ -13,12 +13,14 @@ kernel:
 	ls vmlinuz* 2>/dev/null || ./.fetch-linux-kernel
 
 docker-runner-image:
+	cp -f docker-runner.json tmp-manifest.json
 	DOCKER_IMAGE=docker-runner make disk
 
 generic-image:
+	cp -f generic.json tmp-manifest.json
 	DOCKER_IMAGE=generic make disk
 
-initrd:
+manifest:
 	rm -f tmp-manifest*.json
 	cosign version >/dev/null || exit 127
 	# jq our way to have a valid apko manifest for input image
@@ -28,12 +30,11 @@ initrd:
 		--certificate-identity https://github.com/chainguard-images/images-private/.github/workflows/release.yaml@refs/heads/main \
 		"cgr.dev/chainguard-private/${DOCKER_IMAGE}"  | jq -r .payload | base64 -d | jq .predicate > tmp-manifest.json || rm -f tmp-manifest.json
 
-	ls tmp-manifest.json ||  cp -f "${DOCKER_IMAGE}".json tmp-manifest.json
-
+initrd:
+	ls tmp-manifest.json || $(MAKE) manifest
 	# same as .mkinird but we pass a manifest and a cloud provider to behave accordingly
 	ls initrd*gz 2>/dev/null || docker run --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
-		-e SSHKEY="$(shell cat "${SSHKEY}" | base64 -w0)" \
 		--mount type=bind,source="./",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
 		/srv/.mkinitrd $(shell id -u):$(shell id -g) $(shell uname -m) "/srv/tmp-manifest.json"
