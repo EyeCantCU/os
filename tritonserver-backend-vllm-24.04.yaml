@@ -1,0 +1,177 @@
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+package:
+  name: tritonserver-backend-vllm-24.04
+  version: 24.04
+  epoch: 0
+  description: NVIDIA Triton Inference Server with vllm backend
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  resources:
+    cpu: 16
+    memory: 16Gi
+  dependencies:
+    runtime:
+      - python-3.10-base
+      - cuda-toolkit-${{vars.cuda-version}}
+      - nvidia-libcuda-${{vars.cuda-version}}
+      - py3.10-aiohttp
+      - py3.10-filelock
+      - py3.10-huggingface-hub
+      - py3.10-importlib-metadata
+      - py3.10-numpy
+      - py3.10-openai
+      - py3.10-pandas
+      - py3.10-pillow
+      - py3.10-prometheus-client
+      - py3.10-protobuf
+      - py3.10-psutil
+      - py3.10-pydantic
+      - py3.10-pyyaml
+      - py3.10-pyzmq
+      - py3.10-requests
+      - py3.10-sentencepiece
+      - py3.10-setuptools
+      - py3.10-six
+      - py3.10-sympy
+      - py3.10-torch-2.4-cuda-${{vars.cuda-version}}
+      - py3.10-torchvision-0.19-cuda-${{vars.cuda-version}}
+      - py3.10-tqdm
+      - py3.10-typing-extensions
+      - python-3.10
+  options:
+    no-depends: true
+
+vars:
+  cuda-version: 12.4
+  cudnn-version: 9
+  tensorrt-version: 8.6.3
+  triton-repo-tag: r24.04
+  vllm-version: 0.6.4
+  torch-version: 2.4
+
+var-transforms:
+  - from: ${{vars.cuda-version}}
+    match: '(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - gcc-11-default
+      - gperftools-dev
+      - ninja-build
+      - numactl-dev
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvidia-cudnn-9-cuda-${{vars.cuda-major-version}}-dev
+      - nvidia-driver
+      - nvidia-libnvidia-ml-${{vars.cuda-version}}
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - py3.10-aiohttp
+      - py3.10-build
+      - py3.10-filelock
+      - py3.10-huggingface-hub
+      - py3.10-importlib-metadata
+      - py3.10-installer
+      - py3.10-jinja2
+      - py3.10-numpy
+      - py3.10-openai
+      - py3.10-pandas
+      - py3.10-pillow
+      - py3.10-pip
+      - py3.10-prometheus-client
+      - py3.10-protobuf
+      - py3.10-psutil
+      - py3.10-pydantic
+      - py3.10-pyyaml
+      - py3.10-pyzmq
+      - py3.10-requests
+      - py3.10-sentencepiece
+      - py3.10-setuptools
+      - py3.10-setuptools-scm
+      - py3.10-six
+      - py3.10-sympy
+      - py3.10-torch-${{vars.torch-version}}-cuda-${{vars.cuda-version}}
+      - py3.10-tqdm
+      - py3.10-typing-extensions
+      - py3.10-wheel
+      - python-3.10-dev
+      - samurai
+      - sccache
+      - tcmalloc-minimal
+      - wolfi-base
+
+pipeline:
+  - uses: git-checkout
+    working-directory: /home/build/vllm_backend
+    with:
+      # Becareful about changing the commit because you need to keep it in sync with the tags for the other repositories it pulls in.
+      # N.B. r24.04 is a branch; there doesn't appear to be specific tags. So I think potentially they could push a change to the
+      # branch and it would end up changing the commit we build but hopefully that's caught by expected commit
+      expected-commit: a01475157290bdf6fd0f50688f69aafea41b04c5
+      repository: https://github.com/triton-inference-server/vllm_backend.git
+      branch: ${{vars.triton-repo-tag}}
+      recurse-submodules: true
+
+  - working-directory: /home/build/vllm_backend
+    runs: |
+      mkdir -p ${{targets.destdir}}/opt/tritonserver/backends/vllm
+      cp -r src/* ${{targets.destdir}}/opt/tritonserver/backends/vllm
+
+  - working-directory: /home/build/vllm
+    pipeline:
+      - uses: git-checkout
+        working-directory: vllm
+        with:
+          repository: https://github.com/vllm-project/vllm.git
+          tag: v${{vars.vllm-version}}
+          expected-commit: 02dbf30e9a4389b41d95dd595bfe1224592dd404
+      - uses: patch
+        with:
+          patches: ../vllm-remove-cmake.patch
+      - runs: |
+          # Build a version of vllm for the cuda version for this version of tritonserver
+          # Setup the virtualenv for vllm
+          python3.10 -m venv venv --system-site-packages
+          source venv/bin/activate
+
+          export PATH=/usr/local/cuda-${{vars.cuda-version}}/bin:$PATH
+          export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cudnn-9/lib64::$LD_LIBRARY_PATH
+          export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+          export MAX_JOBS=16
+
+          python3.10 use_existing_torch.py
+          python3.10 -m build -n
+
+          pip install dist/vllm-*.whl
+          pip install -r requirements-cuda.txt
+
+          # GHSA-27mf-ghqm-j3j8 fix
+          pip install -U aiohttp==3.10.11
+      - runs: |
+          mkdir -p ${{targets.destdir}}/opt/tritonserver/backends/vllm
+          mv venv ${{targets.destdir}}/opt/tritonserver/backends/vllm
+
+          rm -rf ${{targets.destdir}}//opt/tritonserver/backends/vllm/venv/bin/__pycache*
+          sed -i "s|/home/build|/opt/tritonserver/backends/vllm/|g" ${{targets.destdir}}//opt/tritonserver/backends/vllm/venv/bin/*
+          sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.contextdir}}/opt/tritonserver/backends/vllm/venv/pyvenv.cfg
+          python -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/opt/tritonserver/backends/vllm/venv
+
+test:
+  pipeline:
+    - name: Verify vllm installation
+      runs: |
+        export PATH=/opt/tritonserver/backends/vllm/venv/bin:$PATH
+        python -c "import vllm"
+
+update:
+  enabled: false
+  exclude-reason: "Old versions on branches, new on tags no consistent upstream process"
