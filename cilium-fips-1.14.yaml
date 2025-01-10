@@ -1,8 +1,7 @@
-#nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-fips-1.14
-  version: 1.14.17
-  epoch: 1
+  version: 1.14.18
+  epoch: 0
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -66,34 +65,20 @@ environment:
       # for fips config & fips-provider
       - openssl-config-fipshardened
 
-vars:
-  # https://github.com/cilium/cilium/blob/v1.14.17/images/cilium/Dockerfile
-  CILIUM_PROXY_COMMIT: "97edc2815e2c6a174d3d12e71731d54f5d32ea16"
-
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: d9124fb4ba95a45d0203c08ad85759610cf228b6
+      expected-commit: 80e0f9181f49acd085164762aa93d11597a0f3d0
 
   - uses: go/bump
     with:
-      deps: google.golang.org/grpc@v1.64.1 golang.org/x/crypto@v0.31.0 golang.org/x/net@v0.33.0
+      deps: google.golang.org/grpc@v1.64.1 golang.org/x/net@v0.33.0
 
   - uses: patch
     with:
       patches: loopback-location.patch cilium-version.patch
-
-  - runs: |
-      # Check the Dockerfile for a SHA and match against the proxy SHA
-      ENVOY_SHA=$(grep 'FROM.*cilium-envoy' ./images/cilium/Dockerfile \
-        | sed "s/^FROM.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
-
-      if [ "$ENVOY_SHA" != "${{vars.CILIUM_PROXY_COMMIT}}" ]; then
-        echo "Expected vars.CILIUM_PROXY_COMMIT to be $ENVOY_SHA. Please update" 1>&2
-        exit 1
-      fi
 
   - runs: |
       sed -Ei 's/(go [0-9]+\.[0-9]+)\.[0-9]+/\1/' go.mod
@@ -123,60 +108,6 @@ pipeline:
       for d in tools/sysctlfix tools/mount plugins/cilium-cni; do
           make -C $d clean all
           DESTDIR=${{targets.destdir}} make -C $d install
-      done
-
-  - uses: git-checkout
-    with:
-      repository: https://github.com/cilium/proxy
-      # Branch from https://github.com/cilium/cilium/blob/v1.14.13/images/cilium/Dockerfile
-      # Note often the branch is updated with dependencies updates, no tags
-      # See CILIUM_PROXY_COMMIT for anchor point
-      branch: v1.30
-      depth: 1000
-      destination: envoy
-
-  - runs: |
-      git -C envoy reset --hard ${{vars.CILIUM_PROXY_COMMIT}}
-
-  - runs: |
-      cd /home/build/envoy/proxylib
-      make
-      mkdir -p ${{targets.destdir}}/usr/lib
-      cp -v libcilium.so ${{targets.destdir}}/usr/lib/libcilium.so
-
-      cd /home/build/envoy
-
-      # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
-      sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
-      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-      mkdir -p .cache/bazel/_bazel_root
-      # boringssl_fips.genrule.cmd.diff: patch Envoy to use our boringssl-fips package.
-      sed -i "/0003-listener-add-socket-options.patch/a\\
-         \"//:boringssl_fips.genrule_cmd.diff\"," WORKSPACE
-      # Double check that patch was applied
-      if ! grep -q boringssl_fips.genrule_cmd.diff WORKSPACE; then
-        exit 1
-      fi
-      # The toolchain at cilium/proxy has paths that are specific to their CI.
-      # Unregister to use Wolfi's.
-      sed 's/register_toolchains/#register_toolchains/g' -i WORKSPACE
-
-      ./bazel/setup_clang.sh /usr
-      # Use libc++ to be consistent with other Wolfi Envoy packages.
-      echo "build --config=libc++" >> user.bazelrc
-
-      mkdir -p ${{targets.destdir}}/usr/bin
-
-      for target in cilium-envoy-starter cilium-envoy; do
-        bazel build --fission=no --config=clang \
-          --discard_analysis_cache \
-          --nokeep_state_after_build \
-          --notrack_incremental_state \
-          --conlyopt="-Wno-strict-prototypes" \
-          `# The thread-saftey analysis flagged some issue in upstream code` \
-          --cxxopt="-Wno-thread-safety" \
-          --verbose_failures -c opt //:${target}
-        install -m 755 bazel-bin/${target} ${{targets.destdir}}/usr/bin/${target}
       done
 
   - uses: strip
