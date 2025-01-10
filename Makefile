@@ -15,7 +15,6 @@ MELANGE ?= $(shell which melange)
 WOLFICTL ?= $(shell which wolfictl)
 KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
-GCS_FETCH_BUCKET_NAME ?= gs://chainguard-enterprise-registry-destination/os/
 
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
@@ -75,7 +74,7 @@ fetch-kernel:
 	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
 	export MELANGE_OPTS="--runner=qemu"
 
-package/%: apk-token gcp-auth
+package/%: apk-token
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
 		echo "Error: could not find yaml file for $*"; exit 1; \
@@ -91,7 +90,7 @@ packages/$(ARCH)/%.apk: $(KEY)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
-debug/%: apk-token gcp-auth
+debug/%: apk-token
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
 		echo "Error: could not find yaml file for $*"; exit 1; \
@@ -104,7 +103,7 @@ debug/%: apk-token gcp-auth
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS)  --source-dir ./$(*)/
 
-test/%: apk-token gcp-auth
+test/%: apk-token
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
@@ -116,7 +115,7 @@ test/%: apk-token gcp-auth
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
-test-debug/%: apk-token gcp-auth
+test-debug/%: apk-token
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
@@ -128,7 +127,7 @@ test-debug/%: apk-token gcp-auth
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
-dev-container: apk-token gcp-auth
+dev-container: apk-token
 	docker run --privileged --rm -it \
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
@@ -212,50 +211,3 @@ dev-container-wolfi:
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
-.PHONY: fetch-baselayout
-fetch-baselayout:
-	echo "Fetching baselayout from GCS..." && \
-		mkdir -p ./packages/x86_64/ && \
-		mkdir -p ./packages/aarch64/ && \
-		gsutil cp $(GCS_FETCH_BUCKET_NAME)chainguard-enterprise.rsa.pub ./packages/ && \
-        gsutil cp $(GCS_FETCH_BUCKET_NAME)x86_64/APKINDEX.tar.gz ./packages/x86_64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)x86_64/chainguard-baselayout-* ./packages/x86_64/ && \
-        gsutil cp $(GCS_FETCH_BUCKET_NAME)aarch64/APKINDEX.tar.gz ./packages/aarch64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)aarch64/chainguard-baselayout-* ./packages/aarch64/
-
-SINGLE_PACKAGE ?= unknown
-
-.PHONY: fetch-single-package
-fetch-single-package: fetch-baselayout
-	echo "Fetching single package from GCS..." && \
-		mkdir -p ./packages/x86_64/ && \
-		mkdir -p ./packages/aarch64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)x86_64/$(SINGLE_PACKAGE)-* ./packages/x86_64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)aarch64/$(SINGLE_PACKAGE)-* ./packages/aarch64/
-
-# List of package names to fetch, separated by spaces
-PACKAGES ?= unknown
-
-.PHONY: fetch-multiple-packages
-fetch-multiple-packages: $(addprefix fetch-package-,$(PACKAGES))
-
-fetch-package-%:
-	@echo "Fetching package $* from GCS..."
-	@$(MAKE) fetch-single-package SINGLE_PACKAGE=$*
-
-.PHONY: fetch-all-packages
-fetch-all-packages:
-	echo "Fetching all packages from GCS..." && \
-		mkdir -p ./packages/ && \
-		gsutil -m cp -r -n 'gs://chainguard-enterprise-registry-destination/os/*' packages/
-
-.PHONY: gcp-auth
-gcp-auth:
-	mkdir -p ${CACHEDIR}/.config/gcloud
-	cp -rf ~/.config/gcloud/* ${CACHEDIR}/.config/gcloud/
-
-.PHONY: init-gcp-auth
-init-gcp-auth: ## This is a helper target for placing your GCP credentials into the melange cache for use by a package build that needs to communicate with GCP
-	@echo "Initializing GCP auth..."
-	gcloud auth login
-	@$(MAKE) gcp-auth
