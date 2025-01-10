@@ -35,7 +35,7 @@ manifest:
 initrd:
 	ls tmp-manifest.json || $(MAKE) manifest
 	# same as .mkinird but we pass a manifest and a cloud provider to behave accordingly
-	ls initrd*gz 2>/dev/null || docker run --rm -it \
+	ls initrd*gz 2>/dev/null || docker run --rm -i \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 		--mount type=bind,source="$(TOP_D)",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
@@ -43,7 +43,7 @@ initrd:
 
 disk: initrd
 	@if ! ls disk*${DOCKER_IMAGE}* 2>/dev/null; then\
-		docker run --privileged --rm -it \
+		docker run --privileged --rm -i \
 			-e DOCKER_IMAGE=${DOCKER_IMAGE} \
 			-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 			--mount type=bind,source="$(TOP_D)",destination="/srv" \
