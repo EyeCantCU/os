@@ -20,11 +20,25 @@ package:
       - nvidia-nccl-cuda-${{vars.cuda-version}}
       - nvidia-cuda-cudart-${{vars.cuda-version}}
       - nvidia-cuda-cupti-${{vars.cuda-version}} # libtriton_tensorrtllm.so links to libcupti.so, not autodetected
+      - nvidia-cudnn-8-cuda-12 # tensorrt_bindings/tensorrt.so uses cudnn-8
       - py3.10-torch-${{vars.torch-version}}-cuda-${{vars.cuda-version}}
       - numactl
       - tensorrt-${{vars.tensorrt-major-minor-version}}
       - tritonserver-2.45 # libtriton_tensorrtllm.so links to libtritonserver.so, not autodetected
       - c-ares
+      # Manually enumerated python dependencies
+      - py3.10-aiohttp
+      - py3.10-dill
+      - py3.10-huggingface-hub
+      - py3.10-mpi4py
+      - py3.10-numpy
+      - py3.10-onnx
+      - py3.10-pandas
+      - py3.10-psutil
+      - py3.10-pyarrow
+      - py3.10-pybind11
+      - py3.10-regex
+      - py3.10-sentencepiece
   options:
     no-depends: true
 
@@ -102,12 +116,23 @@ environment:
       - rapidjson-dev
       - tensorrt-${{vars.tensorrt-major-minor-version}}
       - tensorrt-${{vars.tensorrt-major-minor-version}}-dev
+      - uv
       - wget
       - zlib-dev
+      # Manually enumerated python dependencies
+      - py3.10-aiohttp
+      - py3.10-dill
+      - py3.10-onnx
+      - py3.10-pandas
+      - py3.10-psutil
+      - py3.10-pyarrow
+      - py3.10-regex
+      - py3.10-sentencepiece
 
 vars:
   cuda-version: 12.4
   cudnn-major-version: 8
+  import: tensorrt_llm
   tensorrt-version: 9.3.0.1
   torch-version: 2.3
 
@@ -137,10 +162,14 @@ pipeline:
       export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-${{vars.cuda-version}}/lib:/usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/lib:/usr/local/cuda-${{vars.cuda-version}}/compat/"
       export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cudnn-${{vars.cudnn-major-version}}/lib64"
       export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/tensorrt_llm/libs:/opt/tritonserver/lib"
-
       export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/tensorrt-${{vars.tensorrt-version}}/bin"
       export SRCDIR=/home/build/backend
       export BUILDDIR=${SRCDIR}/build
+
+      # Build a version of tensorrtllm for the cuda version for this version of tritonserver
+      # Setup the virtualenv for tensortllm to get correct interpreters
+      uv venv -p python3.10 --link-mode copy --system-site-packages /opt/tritonserver/venv
+      source /opt/tritonserver/venv/bin/activate
 
       # The tensorrtllm_backend repository pulls in the tensorrt_llm repository as a submodule.
       # The tensorrt_llm repository uses git lfs to store the precompiled versions of the batch manager
@@ -179,7 +208,29 @@ pipeline:
         -D "USE_CXX11_ABI=1"
 
       # Install the wheel
-      pip install --prefix=${{targets.destdir}}/usr ${SRCDIR}/tensorrt_llm/build/tensorrt_llm-*.whl
+      pip install --verbose \
+        --no-index --no-build-isolation --no-deps \
+        --force-reinstall --no-compile --prefix="/opt/tritonserver/venv" --root=${{targets.contextdir}} \
+        ${SRCDIR}/tensorrt_llm/build/tensorrt_llm-*.whl
+
+      requirements="${SRCDIR}/tensorrt_llm/requirements.txt"
+      requirements_new="requirements.txt.new"
+      cp "$requirements" "$requirements_new"
+      apk_installed="build mpi4py numpy onnx psutil pandas sentencepiece setuptools wheel"
+      for dep in $apk_installed; do
+        sed -i "/^${dep}$/d" "$requirements_new"
+      done
+      # Dependencies discovered by iterating on `import tensorrt_llm'
+      grep '^tensorrt==' "$requirements" | sed 's/^tensorrt/tensorrt_bindings/' >> "$requirements_new"
+      manual_deps="datasets multiprocess pynvml<12 safetensors tokenizers>=0.14,<0.19 transformers xxhash"
+      for dep in $manual_deps; do
+        echo $dep >> "$requirements_new"
+      done
+
+      pip install --verbose \
+        --requirement="$requirements_new" --force-reinstall --no-deps \
+        --prefix=/opt/tritonserver/venv --root="${{targets.contextdir}}"
+      python -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/opt/tritonserver/venv
 
       # Don't be fooled the directory is inflight_batcher_llm but this is really building the
       # library for the triton trt llm backend.
@@ -240,6 +291,7 @@ pipeline:
       # Copy LibTriton artifacts
       #*************************************************
       cp ${BUILDDIR}/libtriton*.so ${BACKENDDIR}
+      deactivate
 
 update:
   enabled: true
@@ -257,6 +309,11 @@ test:
     environment:
       LD_LIBRARY_PATH: /usr/local/tensorrt-${{vars.tensorrt-version}}/lib:/usr/local/cuda-${{vars.cuda-version}}/lib:/usr/local/cuda-${{vars.cuda-version}}/lib64::/usr/local/cuda-${{vars.cuda-version}}/compat:/usr/local/cudnn-${{vars.cudnn-major-version}}/lib64:/usr/local/cudnn-${{vars.cudnn-major-version}}/lib64:/opt/tensorrt_llm/libs:/opt/tritonserver/lib
   pipeline:
+    - name: Verify tensorrtllm installation
+      uses: python/import
+      with:
+        python: /opt/tritonserver/venv/bin/python3.10
+        import: ${{vars.import}}
     - name: Scan .so files for undetected runtime dependencies
       runs: |
         ret=0
