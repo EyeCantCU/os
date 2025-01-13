@@ -33,7 +33,7 @@ manifest:
 		"cgr.dev/chainguard-private/${DOCKER_IMAGE}"  | jq -r .payload | base64 -d | jq .predicate > tmp-manifest.json || rm -f tmp-manifest.json
 
 initrd:
-	[ -z "${HTTP_AUTH}" ] && HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)"
+	[ -z "${HTTP_AUTH}" ] && HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" || echo HTTP_AUTH set
 	ls tmp-manifest.json || $(MAKE) manifest
 	# same as .mkinird but we pass a manifest and a cloud provider to behave accordingly
 	ls initrd*gz 2>/dev/null || docker run --rm -i \
@@ -44,7 +44,7 @@ initrd:
 
 disk: initrd
 	@if ! ls disk*${DOCKER_IMAGE}* 2>/dev/null; then\
-		[ -z "${HTTP_AUTH}" ] && HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)"
+		[ -z "${HTTP_AUTH}" ] && HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" || echo HTTP_AUTH set
 		docker run --privileged --rm -i \
 			-e DOCKER_IMAGE=${DOCKER_IMAGE} \
 			-e HTTP_AUTH="${HTTP_AUTH}" \
