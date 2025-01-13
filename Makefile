@@ -1,5 +1,9 @@
 .PHONY: all kernel clean aws-image-upload google-image-upload
 TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+AUTH := $(shell echo ${HTTP_AUTH})
+ifeq ($(AUTH),)
+	AUTH := $(shell echo basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev))
+endif
 
 all: disk
 
@@ -33,25 +37,22 @@ manifest:
 		"cgr.dev/chainguard-private/${DOCKER_IMAGE}"  | jq -r .payload | base64 -d | jq .predicate > tmp-manifest.json || rm -f tmp-manifest.json
 
 initrd:
-	[ -z "${HTTP_AUTH}" ] && HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" || echo HTTP_AUTH set
 	ls tmp-manifest.json || $(MAKE) manifest
 	# same as .mkinird but we pass a manifest and a cloud provider to behave accordingly
 	ls initrd*gz 2>/dev/null || docker run --rm -i \
-		-e HTTP_AUTH="${HTTP_AUTH}" \
+		-e HTTP_AUTH="$(AUTH)" \
 		--mount type=bind,source="$(TOP_D)",destination="/srv" \
 		cgr.dev/chainguard/wolfi-base:latest \
 		/srv/.mkinitrd $(shell id -u):$(shell id -g) $(shell uname -m) "/srv/tmp-manifest.json"
 
 disk: initrd
 	@if ! ls disk*${DOCKER_IMAGE}* 2>/dev/null; then\
-		[ -z "${HTTP_AUTH}" ] && HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" || echo HTTP_AUTH set
 		docker run --privileged --rm -i \
 			-e DOCKER_IMAGE=${DOCKER_IMAGE} \
-			-e HTTP_AUTH="${HTTP_AUTH}" \
-		--mount type=bind,source="$(TOP_D)",destination="/srv" \
+			-e HTTP_AUTH="$(AUTH)" \
 			--mount type=bind,source="$(TOP_D)",destination="/srv" \
 			cgr.dev/chainguard/wolfi-base:latest \
-			/srv/.mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls vmlinuz* | sort -V | tail -n1) /srv/$(shell ls initrd* | sort -V | tail -n1);\
+			/srv/.mkdiskimg $(shell id -u):$(shell id -g) /srv/$(shell ls initrd* | sort -V | tail -n1);\
 		mv disk.raw disk.${DOCKER_IMAGE}.$(shell uname -m).raw;\
 	fi
 
