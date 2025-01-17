@@ -1,0 +1,124 @@
+package:
+  name: envoy-fips-1.33
+  version: 1.33.0
+  epoch: 0
+  description: Cloud-native high-performance edge/middle/service proxy
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 30
+    memory: 60Gi
+  dependencies:
+    provides:
+      - envoy-fips=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - wolfi-baselayout
+      - binutils
+      - build-base
+      - git
+      - bazel-6
+      - openjdk-11
+      - bash
+      - libtool
+      - cmake
+      - samurai
+      - python3-dev
+      - clang~15
+      - llvm-libcxx-15
+      - llvm-libcxx-15-dev
+      - llvm-libcxxabi-15
+      - llvm15
+      - llvm15-dev
+      - llvm-lld-15
+      - llvm15-tools
+      - llvm15-cmake-default
+      - coreutils
+      - patch
+      # BoringSSL FIPS needs curl.
+      # See https://github.com/envoyproxy/envoy/blob/main/bazel/external/boringssl_fips.genrule_cmd#L66
+      - curl
+      - ncurses~6.4_p20230722
+      # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
+      - gcc-12-default
+      - boringssl-fips-static
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*-(\d+\.\d+).*'
+    replace: '$1'
+    to: envoy-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/envoyproxy/envoy
+      tag: v${{package.version}}
+      expected-commit: b0f43d67aa25c1b03c97186a200cc187f4c22db3
+      destination: envoy
+
+  - runs: |
+      cp -f boringssl_fips.genrule_cmd envoy/bazel/external
+
+      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+      mkdir -p .cache/bazel/_bazel_root
+
+      cd envoy
+      # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
+      sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
+
+      ./bazel/setup_clang.sh /usr
+      echo "build --config=libc++" >> user.bazelrc
+
+      # Choose boringssl-fips
+      # See https://github.com/envoyproxy/envoy/blob/v1.27.0/bazel/BUILD#L475
+      echo "build --define=boringssl=fips" >> user.bazelrc
+
+      bazel build --verbose_failures -c opt envoy
+
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      cp bazel-bin/source/exe/envoy-static ${{targets.destdir}}/usr/bin/envoy
+
+      # We no longer need this cache dir, which has some writable files.
+      rm -rf ../.cache/bazel/_bazel_root
+
+  - uses: strip
+
+subpackages:
+  - name: envoy-fips-oci-entrypoint-${{vars.envoy-version}}
+    description: Entrypoint for using Envoy in OCI containers
+    dependencies:
+      provides:
+        - envoy-fips-oci-entrypoint=${{package.full-version}}
+      runtime:
+        - busybox
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/var/lib/envoy/init
+          cp envoy/ci/docker-entrypoint.sh ${{targets.subpkgdir}}/var/lib/envoy/init/envoy-entrypoint.sh
+          chmod +x ${{targets.subpkgdir}}/var/lib/envoy/init/envoy-entrypoint.sh
+
+  - name: envoy-fips-config-${{vars.envoy-version}}
+    description: Default Envoy configuration
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc/envoy
+          cp envoy/configs/envoyproxy_io_proxy.yaml ${{targets.subpkgdir}}/etc/envoy/envoy.yaml
+    dependencies:
+      provides:
+        - envoy-fips-config=${{package.full-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: envoyproxy/envoy
+    strip-prefix: v
+    tag-filter-prefix: v1.33.
+
+test:
+  pipeline:
+    - runs: envoy --version

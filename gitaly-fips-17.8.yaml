@@ -1,0 +1,111 @@
+package:
+  name: gitaly-fips-17.8
+  version: 17.8.0
+  epoch: 1
+  description:
+  copyright:
+    - license: MIT
+  dependencies:
+    provides:
+      - gitaly-fips=${{package.full-version}}
+    runtime:
+      - gitaly-backup-fips-${{vars.major-minor-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - curl-dev
+      - expat-dev
+      - go-fips-1.22
+      - make
+      - openssl-dev
+      - pcre2-dev
+      - zlib-dev
+  environment:
+    CGO_ENABLED: 1
+    FIPS_MODE: 1
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://gitlab.com/gitlab-org/gitaly.git
+      tag: v${{package.version}}
+      expected-commit: 1d5e5258371189e463e0b727fa28a7c6bf50e867
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-git/go-git/v5@v5.13.0
+        golang.org/x/crypto@v0.31.0
+        golang.org/x/net@v0.33.0
+
+  - runs: |
+      make install DESTDIR="${{targets.destdir}}" PREFIX=/usr
+
+  - uses: strip
+
+subpackages:
+  - name: gitaly-backup-fips-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitaly-backup-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv ${{targets.destdir}}/usr/bin/gitaly-backup ${{targets.contextdir}}/usr/bin/
+
+  - name: gitaly-git-fips-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitaly-git-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv ${{targets.destdir}}/usr/bin/gitaly-git-* ${{targets.contextdir}}/usr/bin
+    test:
+      pipeline:
+        - runs: |
+            gitaly-git-http-backend-v2.47 --version
+            gitaly-git-http-backend-v2.47 --help
+            gitaly-git-v2.47 --version
+            gitaly-git-v2.47 --help
+
+  - name: gitaly-init-cgroups-fips-${{vars.major-minor-version}}
+    # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitaly-init-cgroups/Dockerfile
+    description: gitaly-init-cgroups-fips
+    dependencies:
+      provides:
+        - gitaly-init-cgroups-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: .
+          modroot: ./tools/gitaly-init-cgroups/
+          output: setup_cgroups
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^gitaly-init-cgroups"
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v17.8
+
+test:
+  pipeline:
+    - runs: |
+        gitaly -v | grep "${{package.version}}"
+        gitaly-blackbox -version | grep "${{package.version}}"
+        gitaly-backup -v | grep "${{package.version}}"
+    - uses: test/go-fips-check
