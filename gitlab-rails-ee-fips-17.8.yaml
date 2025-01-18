@@ -1,0 +1,181 @@
+package:
+  name: gitlab-rails-ee-fips-17.8
+  version: 17.8.0
+  epoch: 0
+  description: "GitLab's core webapp, built with Ruby on Rails"
+  resources:
+    cpu: 64
+    memory: 128Gi
+  copyright:
+    # GitLab Enterprise Edition license bundled with package
+    - license: MIT
+  dependencies:
+    provides:
+      - gitlab-rails-ee-fips=${{package.full-version}}
+    runtime:
+      - exiftool
+      - gitlab-rails-ee-assets-fips-${{vars.major-minor-version}}
+      - gitlab-rails-ee-doc-fips-${{vars.major-minor-version}}
+      - graphicsmagick
+      - icu-dev
+      - krb5-dev
+      - libffi-dev
+      - libpq
+      - openssl-config-fipshardened
+      - posix-libc-utils
+      - ruby-3.2
+      - ruby3.2-bundler
+      - tzdata
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang
+      - cmake
+      - git
+      - glibc-dev
+      - go-fips
+      - icu-dev
+      - krb5-dev
+      - libffi-dev
+      - libpq
+      - node-gyp
+      - nodejs-20
+      - posix-libc-utils
+      - postgresql-dev
+      - python3
+      - ruby-3.2
+      - ruby-3.2-dev
+      - ruby3.2-bundler
+      - tzdata
+      - yarn
+      - zlib-dev
+  environment:
+    CGO_ENABLED: 1
+    CC: clang
+    CXX: clang++
+    CXXFLAGS: "-std=c++17 -fPIC"
+    LDSHARED: "clang++-18 -shared"
+    TZINFO_DATA: /usr/share/zoneinfo
+    RAILS_ENV: production
+    NODE_ENV: production
+    USE_DB: false
+    SKIP_STORAGE_VALIDATION: true
+    GITLAB_USER: git
+    RUBY_VERSION: $(ruby -e 'print RUBY_VERSION')
+    NODE_OPTIONS: "--max_old_space_size=16384"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: f03594b9e09b648c839e9c008286a24c93c82373
+      repository: https://gitlab.com/gitlab-org/gitlab.git
+      tag: v${{package.version}}-ee
+      destination: ${{targets.contextdir}}/srv/gitlab
+
+  - working-directory: ${{targets.contextdir}}/srv/gitlab
+    runs: |
+      bundle config set --local path ${{targets.contextdir}}/srv/gitlab/vendor/bundle/
+      bundle config set --local clean 'true'
+      bundle config set --local deployment 'true'
+      bundle config set --local without 'development test mysql aws'
+      bundle config build.static_holmes --with-cflags="-fPIC" --with-cxxflags="-std=c++17 -fPIC" --with-ldflags="-shared -lstdc++"
+      bundle install --jobs 4 --retry 5
+
+      # Create GitLab datadir
+      export DATADIR=${{targets.contextdir}}/var/opt/gitlab
+      mkdir -p ${DATADIR}
+
+      cp config/gitlab.yml.example config/gitlab.yml
+      cp config/resque.yml.example config/resque.yml
+      cp config/secrets.yml.example config/secrets.yml
+      cp config/database.yml.postgresql config/database.yml
+
+      sed --in-place "/host: localhost/d" config/gitlab.yml
+      sed --in-place "/port: 80/d" config/gitlab.yml
+      sed --in-place "s/# user:.*/user: ${GITLAB_USER}/" config/gitlab.yml
+      sed --in-place "s:/home/git/repositories:${DATADIR}/repo:" config/gitlab.yml
+
+      yarn install --production --pure-lockfile
+      bundle exec rake gettext:compile
+      bundle exec rake gitlab:assets:compile
+      mkdir -p ${{targets.contextdir}}/assets/licenses
+      cp LICENSE ${{targets.contextdir}}/assets/licenses/GitLab.txt
+
+      # Some more directories that are needed in image
+      mkdir -p ${{targets.contextdir}}/home/git/gitlab-shell
+      ln -sf /srv/gitlab/GITLAB_SHELL_VERSION ${{targets.contextdir}}/home/git/gitlab-shell/VERSION
+
+      bundle config unset --local path
+
+      # Cleanup
+      rm -rf node_modules/ tmp/ spec/ ee/spec/ qa/ rubocop/ tooling/ .git/ .gitlab/ \
+             .github/ docker/ changelogs/ danger/ Dangerfile
+      # Remove git directories
+      find ${{targets.contextdir}} -name "*.git" -exec rm -rf '{}' +
+      # TODO: Create gitlab-cng-ee-rails-buildscripts package
+
+      # Exclude additional files from specific gems.
+      # These result in detected deps on ld-linux.so.2 which it shouldn't pull in.
+      ruby_dir="vendor/bundle/ruby"
+      rm -rf ${ruby_dir}/*/gems/grpc-*/bin
+
+      # Further Cleanup of gems - don't run, removes critical gems
+      #/home/build/build-scripts/cleanup-gems
+
+      # Rebuild devfile gem with Go FIPS
+      cd ./vendor/bundle/ruby/*/gems/*devfile*/ext
+      # Mitigate CVEs
+      go get golang.org/x/net@v0.33.0 github.com/docker/docker@v26.1.5 github.com/go-git/go-git/v5@v5.13.0
+      go mod tidy
+      rm ../bin/devfile
+      go build \
+        -o ../bin/devfile \
+        -tags "netgo,osusergo" \
+        -ldflags "-w" \
+        -trimpath .
+      cd ${{targets.contextdir}}/srv/gitlab
+
+subpackages:
+  - name: gitlab-rails-ee-assets-fips-${{vars.major-minor-version}}
+    description: GitLab FIPS ${{vars.major-minor-version}} assets
+    dependencies:
+      provides:
+        - gitlab-rails-ee-assets-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/srv/gitlab
+          mv ${{targets.destdir}}/srv/gitlab/public ${{targets.subpkgdir}}/srv/gitlab/
+
+  - name: gitlab-rails-ee-doc-fips-${{vars.major-minor-version}}
+    description: GitLab FIPS ${{vars.major-minor-version}} documentation
+    dependencies:
+      provides:
+        - gitlab-rails-ee-doc-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/srv/gitlab
+          mv ${{targets.destdir}}/srv/gitlab/doc ${{targets.subpkgdir}}/srv/gitlab/
+
+# TODO(jason): Re-enable fips check when this doesn't cause test to hang...
+#test:
+#  pipeline:
+#    - uses: test/go-fips-check
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    strip-suffix: -ee
+    tag-filter-prefix: v17.8
+  ignore-regex-patterns:
+    - '-rc*'
