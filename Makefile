@@ -5,6 +5,9 @@ ifeq ($(AUTH),)
 	AUTH := $(shell echo basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev))
 endif
 
+GCP_PROJECT ?= wolfi-vm
+GCS_BUCKET ?= wolfi-vm-images-workloads
+
 all: disk
 
 wolfi-vm: wolfi-vm-ephemeral
@@ -63,11 +66,11 @@ aws-image-upload:
 google-image-upload:
 	$(eval filename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*.tar.gz | tail -1))
 	$(eval imagename := $(shell ls -1 chainguard-${DOCKER_IMAGE}*.tar.gz | tail -1 | sed 's|\.tar\.gz||g'))
-	gcloud storage cp ${filename} gs://wolfi-vm-images-workloads/
+	gcloud storage cp ${filename} gs://${GCS_BUCKET}/
 	gcloud compute images create \
 		${imagename} \
-		--project=wolfi-vm \
-		--source-uri=https://storage.googleapis.com/wolfi-vm-images-workloads/${filename} \
+		--project=${GCP_PROJECT} \
+		--source-uri=https://storage.googleapis.com/${GCS_BUCKET}/${filename} \
 		--guest-os-features=UEFI_COMPATIBLE,VIRTIO_SCSI_MULTIQUEUE
 
 clean:
