@@ -1,0 +1,218 @@
+package:
+  name: pgadmin4
+  version: "8.14"
+  epoch: 0
+  description: "pgAdmin is the most popular and feature rich Open Source administration and development platform for PostgreSQL, the most advanced Open Source database in the world."
+  copyright:
+    - license: PostgreSQL
+  dependencies:
+    runtime:
+      - libpq-${{vars.latest-pg-version}}
+      - nodejs
+      - postfix
+      - py${{vars.py-version}}-setuptools
+      - python-${{vars.py-version}}
+      - sudo-rs
+
+vars:
+  py-version: 3.13
+  latest-pg-version: 17
+
+data:
+  - name: pg-versions
+    items:
+      12: '12'
+      13: '13'
+      14: '14'
+      15: '15'
+      16: '16'
+      17: '17'
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - glibc-locale-en
+      - krb5-dev
+      - libcap-utils
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - libpq-${{vars.latest-pg-version}}
+      - libtool
+      - make
+      - nasm
+      - nodejs
+      - npm
+      - openssl-dev
+      - pkgconf-dev
+      - postgresql-${{vars.latest-pg-version}}-contrib
+      - postgresql-${{vars.latest-pg-version}}-dev
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-setuptools
+      - python-${{vars.py-version}}-dev
+      - rust
+      - shadow
+      - yarn
+      - yasm
+      - zlib-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '\.'
+    replace: "_"
+    to: mangled-package-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 9e58717321a434519875773707df78c020bcde40
+      repository: https://github.com/pgadmin-org/pgadmin4
+      tag: REL-${{vars.mangled-package-version}}
+
+  - name: Building Web Assests
+    runs: |
+      cd web
+      export CPPFLAGS="$CPPFLAGS -DPNG_ARM_NEON_OPT=0"
+      npm install -g corepack
+      corepack enable
+      yarn set version berry
+      yarn set version 3
+      yarn install
+      yarn run bundle
+
+  - name: Build package
+    runs: |
+      # Setup Python virtual environment
+      python${{vars.py-version}} -m venv venv --system-site-packages
+      source venv/bin/activate
+
+      # Install Python dependencies
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      pip install sphinx sphinxcontrib-youtube
+      pip install --no-cache-dir gunicorn
+      pip install -r web/regression/requirements.txt
+
+      # Build documentation and ignore warnings
+      make -C docs/en_US -f Makefile.sphinx SPHINXOPTS='' html || echo "Documentation warnings ignored"
+
+      # Build Python package
+      make pip
+
+      # Create the /pgadmin4 directory and copy the source into it
+      mkdir -p ${{targets.destdir}}/pgadmin4
+      mkdir -p ${{targets.destdir}}/venv
+      mkdir -p ${{targets.destdir}}/var/lib/pgadmin
+      mkdir -p ${{targets.destdir}}/var/log/pgadmin
+
+      # Add the pgadmin user
+      useradd -r -u 5050 -g root -s /sbin/nologin pgadmin
+
+      # Set permissions for directories and files
+      chown -R pgadmin:root ${{targets.destdir}}/var/lib/pgadmin ${{targets.destdir}}/var/log/pgadmin
+
+      # Copy in the code and docs
+      cp -R web/* ${{targets.destdir}}/pgadmin4
+      cp -R docs/ ${{targets.destdir}}/pgadmin4/
+      cp -R venv/ ${{targets.destdir}}/
+      cp ./pkg/docker/run_pgadmin.py ${{targets.destdir}}/pgadmin4/
+      cp ./pkg/docker/gunicorn_config.py ${{targets.destdir}}/pgadmin4/
+      cp ./pkg/docker/entrypoint.sh ${{targets.destdir}}/entrypoint.sh
+
+      # License files
+      cp -R ./LICENSE ${{targets.destdir}}/pgadmin4/
+      cp -R ./DEPENDENCIES ${{targets.destdir}}/pgadmin4/
+
+      # entrypoint.sh script required files, permissions, and path
+      touch ${{targets.destdir}}/pgadmin4/config_distro.py
+      chown pgadmin:root ${{targets.destdir}}/pgadmin4/config_distro.py
+
+      # Update the gunicorn binary path
+      sed -i '1s|^.*|#!/venv/bin/python|' ${{targets.destdir}}/venv/bin/gunicorn
+
+      # Allow Python to bind to low-numbered ports
+      setcap CAP_NET_BIND_SERVICE=+eip /usr/bin/python${{vars.py-version}}
+
+subpackages:
+  - range: pg-versions
+    name: pgadmin4-pg${{range.key}}
+    description: Postgres${{range.key}} version of ${{package.name}}
+    dependencies:
+      runtime:
+        - postgresql-${{range.key}}-client-base
+    pipeline:
+      - name: "Copy PG Binaries"
+        runs: |
+          # Copy the PG binaries
+          mkdir  -p ${{targets.contextdir}}/usr/local/pgsql-${{range.key}}
+          ln -sf  /usr/libexec/postgresql${{range.key}}/pg_dump ${{targets.contextdir}}/usr/local/pgsql-${{range.key}}/
+          ln -sf  /usr/libexec/postgresql${{range.key}}/pg_dumpall ${{targets.contextdir}}/usr/local/pgsql-${{range.key}}/
+          ln -sf  /usr/libexec/postgresql${{range.key}}/pg_restore ${{targets.contextdir}}/usr/local/pgsql-${{range.key}}/
+          ln -sf  /usr/libexec/postgresql${{range.key}}/psql ${{targets.contextdir}}/usr/local/pgsql-${{range.key}}/
+    test:
+      pipeline:
+        - name: "stat symlink"
+          runs: |
+            stat /usr/local/pgsql-${{range.key}}/pg_dump
+            stat /usr/local/pgsql-${{range.key}}/pg_dumpall
+            stat /usr/local/pgsql-${{range.key}}/pg_restore
+            stat /usr/local/pgsql-${{range.key}}/psql
+
+test:
+  environment:
+    contents:
+      packages:
+        - postgresql-${{vars.latest-pg-version}}
+        - postgresql-${{vars.latest-pg-version}}-client
+        - py${{vars.py-version}}-setuptools
+        - shadow
+        - sudo-rs
+        - curl
+        - glibc-locale-en
+    environment:
+      PYTHONPATH: /pgadmin4
+      PGADMIN_SETUP_EMAIL: admin@gmail.com
+      PGADMIN_SETUP_PASSWORD: admin123
+      PGDATA: /tmp/test_db
+      PGUSER: wolfi
+  pipeline:
+    - name: "Test database creation"
+      runs: |
+        useradd $PGUSER
+        sudo -u $PGUSER initdb -D /tmp/test_db
+        sudo -u $PGUSER pg_ctl -D /tmp/test_db -l /tmp/logfile start
+        createdb testdb
+        psql -lqt | cut -d \| -f 1 | grep -qw testdb
+    - name: "Start pgAdmin4 Server"
+      uses: test/daemon-check-output
+      working-directory: /pgadmin4
+      with:
+        start: |
+          env PATH="/venv/bin:$PATH" \
+           python${{vars.py-version}} pgAdmin4.py
+        expected_output: |
+          Starting pgAdmin 4. Please navigate to http://127.0.0.1:5050 in your browser.
+        error_strings: |
+          "ERROR"
+          "FAIL"
+          "FATAL"
+          "Traceback.*most.recent.call"
+        timeout: 60
+        post: |
+          curl -X POST http://127.0.0.1:5050/login \
+              -d "email=$PGADMIN_SETUP_EMAIL&password=$PGADMIN_SETUP_PASSWORD" \
+              -H "Content-Type: application/x-www-form-urlencoded" || { echo "Failed to log in to pgAdmin4"; exit 1; }
+
+update:
+  version-separator: _
+  enabled: true
+  github:
+    identifier: pgadmin-org/pgadmin4
+    strip-prefix: REL-
+    tag-filter: REL-
+    use-tag: true
