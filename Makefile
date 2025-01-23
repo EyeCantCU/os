@@ -31,7 +31,7 @@ generic-image:
 
 google-image:
 	cp -f google.json tmp-manifest.json
-	DOCKER_IMAGE=generic make disk
+	DOCKER_IMAGE=google make disk
 
 manifest:
 	rm -f tmp-manifest*.json
