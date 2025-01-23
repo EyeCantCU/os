@@ -29,6 +29,10 @@ generic-image:
 	cp -f generic.json tmp-manifest.json
 	DOCKER_IMAGE=generic make disk
 
+google-image:
+	cp -f google.json tmp-manifest.json
+	DOCKER_IMAGE=generic make disk
+
 manifest:
 	rm -f tmp-manifest*.json
 	cosign version >/dev/null || exit 127
