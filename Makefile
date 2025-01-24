@@ -74,6 +74,7 @@ google-image-upload:
 	gcloud compute images create \
 		${imagename} \
 		--project=${GCP_PROJECT} \
+		--family=chainguard \
 		--source-uri=https://storage.googleapis.com/${GCS_BUCKET}/${filename} \
 		--guest-os-features=UEFI_COMPATIBLE,VIRTIO_SCSI_MULTIQUEUE
 
