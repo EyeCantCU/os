@@ -1,0 +1,116 @@
+#!/bin/sh
+
+set -e
+
+usage() {
+	echo "
+$0 [-a|--arch x86_64|aarch64] [-v|--version x.y.z-r*] [-l|--list]
+
+ -a|--arch [x86_64|aarch64]	Linux kernel architecture; defaults to your current system architecture per 'uname -m'
+ -l|--list			List Linux kernel versions available
+ -v|--version [x.y.z-r*]	Linux kernel version
+
+"
+}
+
+error() {
+	echo "ERROR:" "$@" 1>&2
+	exit 1
+}
+
+# Default to current system architecture
+arch=$(uname -m)
+dir=$(dirname "$0")
+output=""
+while [ ! -z "$1" ]; do
+	case "$1" in
+        --output=*) output=${1#*=}; shift 1;;
+		-o|--output) output=$2; shift 2;;
+        --arch=*) arch=${1#*=}; shift 1;;
+		-a|--arch)
+			case "$2" in
+				x86_64|aarch64)
+					arch="$2"
+				;;
+				*)
+					error "Arch must be x86_64 or aarch64"
+				;;
+			esac
+			shift 2
+		;;
+		-l|--list)
+			list=1
+			shift 1
+		;;
+		-v|--version)
+			[ -z "${2}" ] && \
+				{ echo "Version must be specified"; usage; exit 1; }
+			ver="$2"
+			shift 2
+		;;
+		-h|--help)
+			usage
+			exit 0
+		;;
+		*)
+			usage
+			exit 12
+		;;
+	esac
+done
+
+# take HTTP_AUTH="basic:apk.cgr.dev:user:<tok>"
+case "$HTTP_AUTH" in
+	basic:apk.cgr.dev:user:*)
+        tok=${HTTP_AUTH#basic:apk.cgr.dev:}
+        curlauth="--user $tok"
+        ;;
+	*) tok=$(chainctl auth token --audience=apk.cgr.dev) ||
+		error "failed to get token for apk.cgr.dev"
+        curlauth="--user user:$tok"
+        ;;
+esac
+
+apkrepo="https://apk.cgr.dev/chainguard-private/$arch"
+apkindex="$apkrepo/APKINDEX.tar.gz"
+
+# List kernel versions available and exit
+if [ "$list" = "1" ]; then
+	curl -L --silent $curlauth --output - "$apkindex" |
+		zcat |
+		grep -a -A1 "^P:linux" |
+		grep "^V:" |
+		sort -V |
+		sed -e "s/^V://"
+	exit 0
+fi
+
+# Fetch the package list, grep for the linux package, and find the latest version
+if [ -z "$ver" ]; then
+	ver=$(curl -L --silent $curlauth --output - "$apkindex" |
+		zcat |
+		grep -a -A1 "^P:linux" |
+		grep "^V:" |
+		sort -V |
+		tail -n1 | sed -e "s/^V://")
+    [ -n "$ver" ] || error "failed to get linux version from $apkindex"
+fi
+kernel="boot/vmlinuz-$arch-$ver"
+
+apk="linux-$ver.apk"
+if [ -z "$output" ]; then
+    output=$dir/$(basename "$kernel")
+fi
+tmpf="$output.tmp.$$"
+# Fetch the linux apk package, extract a vmlinuz kernel from a package and write it to the local directory
+echo "fetching $kernel from $apk to $output" 1>&2
+curl -L --silent $curlauth "$apkrepo/$apk" |
+	tar -xzO "$kernel" > "$tmpf" 2>/dev/null || {
+		rm -f "$tmpf"
+		error "failed extracting $kernel from $apkrepo/$apk"
+	}
+
+if [ ! -s "$tmpf" ]; then
+	error "empty file created - likely didn't find $kernel in $apkrepo/$apk"
+fi
+mv "$tmpf" "$output" || error "failed renaming $tmpf to $output"
