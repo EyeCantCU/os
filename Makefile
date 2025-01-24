@@ -16,9 +16,9 @@ BUILDER_DEPS = $(KERNEL) $(INITRD) builder/ovmf-$(ARCH).fd
 
 QEMU_CMD := none
 ifeq (${ARCH}, aarch64)
-	QEMU_CMD = qemu-system-${ARCH} -cpu host -machine virt -accel hvf
+	QEMU_CMD = qemu-system-${ARCH} -cpu max -machine virt -accel hvf
 else ifeq (${ARCH}, x86_64)
-	QEMU_CMD = qemu-system-${ARCH} -cpu host -machine q35 -accel kvm
+	QEMU_CMD = qemu-system-${ARCH} -cpu max -machine q35 -accel tcg
 endif
 
 ifeq ($(AUTH_TOK),)
