@@ -1,0 +1,65 @@
+package:
+  name: apm-server
+  version: 8.17.1
+  epoch: 0
+  description: Elastic APM is an application performance monitoring system built on the Elastic Stack
+  copyright:
+    - license: Elastic-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/apm-server
+      tag: v${{package.version}}
+      expected-commit: cff9e464471f4e641164cb38215a18e899784b37
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/usr/share/apm-server
+      install -Dm644 apm-server.yml ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+      # https://github.com/elastic/apm-server/blob/5bab00ed4411b845e90fe821e9bb98a0381a35f5/packaging/docker/Dockerfile#L25-L26
+      sed -i 's/127.0.0.1:8200/0.0.0.0:8200/' ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+      sed -i 's/localhost:9200/elasticsearch:9200/' ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+
+  - uses: go/build
+    with:
+      packages: ./x-pack/apm-server
+      output: apm-server
+      ldflags: |
+        -X github.com/elastic/beats/v7/libbeat/version.commit=$(git rev-parse HEAD)
+        -X github.com/elastic/beats/v7/libbeat/version.buildTime=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+      modroot: .
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binaries in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/share/apm-server
+          ln -sf /usr/bin/apm-server ${{targets.contextdir}}/usr/share/apm-server/apm-server
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/apm-server
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - jq
+        - wait-for-it
+        - curl
+  pipeline:
+    - name: "Test APM server startup"
+      runs: |
+        apm-server -e -c /usr/share/apm-server/apm-server.yml > log.txt 2>&1 &
+        sleep 10
+        # Wait for the server to start
+        wait-for-it localhost:8200 --timeout=60
+
+        # Check the server is running
+        cat log.txt | grep "Listening on"
+
+        curl -s localhost:8200 | jq '.version' | grep "${{package.version}}"
