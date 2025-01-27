@@ -2,6 +2,7 @@ TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 TOOLS_D = $(TOP_D)/tools
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS ?= linux-boot-configuration mattmoor-chainit-init
+ALL_DISKS := generic google docker-runner
 
 ARCH ?= $(shell uname -m)
 ifeq ($(ARCH), arm64)
@@ -94,7 +95,8 @@ checkrc = rcf=$(1); xfail() { echo "$$@"; exit 1; } ; \
  read rc < "$$rcf" || xfail "install failed to create $$rcf"; \
  [ $$rc -eq 0 ] || xfail "install exited $$rc";
 
-all:
+.PHONY: disks
+disks: $(foreach name,$(ALL_DISKS),output/$(name)/disk.raw)
 
 check:
 	@echo "This does not do anything useful, but it passes. Please improve."
