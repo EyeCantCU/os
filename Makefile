@@ -162,6 +162,9 @@ builder/initrd-%: mkvm.yaml
 builder/ovmf-%.fd:
 	$(TOOLS_D)/make-ovmf $@ $*
 
+%.vmdk: %.raw
+	qemu-img convert -O vmdk -o subformat=streamOptimized $< $@
+
 run-initrd-%: output/%/initrd.cpio $(KERNEL)
 	@$(call boot_initrd,$(KERNEL),output/$*/initrd.cpio,) $(QEMU_NETFLAGS)
 
