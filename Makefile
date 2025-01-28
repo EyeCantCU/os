@@ -70,9 +70,10 @@ raw_disk_args = \
  -blockdev driver=raw,node-name=$(notdir $1),file.driver=file,file.filename=$(1) \
  -device virtio-blk-pci,drive=$(notdir $1),serial=$(2),discard=true
 
+
 define qemu-disk
 	$(QEMU_CMD) \
-	  -bios builder/ovmf-$(ARCH).fd \
+	  -drive "if=pflash,format=raw,file=builder/ovmf-$(ARCH).fd,readonly=on" \
 	  $(call raw_disk_args,$1,boot-disk)
 endef
 
