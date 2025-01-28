@@ -2,7 +2,7 @@ TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 TOOLS_D = $(TOP_D)/tools
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS ?= linux-boot-configuration mattmoor-chainit-init
-ALL_DISKS := generic google docker-runner
+ALL_DISKS := generic google docker-runner workstation
 
 ARCH ?= $(shell uname -m)
 ifeq ($(ARCH), arm64)
