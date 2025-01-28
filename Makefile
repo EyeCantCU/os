@@ -61,7 +61,7 @@ clean:
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
 
-fetch-kernel:
+fetch-kernel: apk-token
 	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
 		zcat | \
 		grep -a -A1 "^P:linux" | \
@@ -147,7 +147,7 @@ TMP_REPOSITORIES_FILE := $(TMP_REPOSITORIES_DIR)/repositories
 # changes to the packages. It mounts the local packages folder as a read-only,
 # and sets up the necessary keys for you to run `apk add` commands, and then
 # test the packages however you see fit.
-local-wolfi: ${KEY}
+local-wolfi: ${KEY} apk-token
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	@echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
 	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
