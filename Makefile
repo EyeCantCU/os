@@ -151,16 +151,17 @@ run-builder: $(BUILDER_DEPS)
 .PHONY: builder
 builder: $(BUILDER_DEPS)
 
-builder/kernel-%: $(TOOLS_D)/fetch-linux-kernel
+builder/kernel-%: $(TOOLS_D)/grab-pkg-artifact
 	@mkdir -p $(dir $@)
-	@$(call withauth,$(TOOLS_D)/fetch-linux-kernel --arch="$(ARCH)" --output="$@")
+	@$(call withauth,$(TOOLS_D)/grab-pkg-artifact "--arch=$*" kernel $@)
 
 builder/initrd-%: mkvm.yaml
 	@mkdir -p $(dir $@)
 	@$(call apko_build,cpio,$<,$@)
 
-builder/ovmf-%.fd:
-	$(TOOLS_D)/make-ovmf $@ $*
+builder/ovmf-%.fd: $(TOOLS_D)/grab-pkg-artifact
+	@mkdir -p $(dir $@)
+	$(TOOLS_D)/grab-pkg-artifact "--arch=$*" ovmf $@
 
 %.vmdk: %.raw
 	qemu-img convert -O vmdk -o subformat=streamOptimized $< $@

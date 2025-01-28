@@ -1,0 +1,130 @@
+#!/bin/sh
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043
+# vi: tabstop=4 expandtab
+
+Usage() {
+    cat <<EOF
+${0##*/} [-a|--arch x86_64|aarch64] [-v|--version x.y.z-r*] [-l|--list] op
+
+ -p|--package [linux|qemu-system-<arch>]    Package to download; defaults to 'linux', 'qemu-system-x86_64' or 'qemu-system-aarch64'
+ -a|--arch [x86_64|aarch64]                 Linux kernel architecture; defaults to your current system architecture per 'uname -m'
+ -l|--list                                  List Linux kernel versions available
+ -v|--version [x.y.z-r*]                    Linux kernel version
+EOF
+}
+
+fail() {
+	echo "ERROR:" "$@" 1>&2
+	exit 1
+}
+
+get_curl_auth() {
+	# take HTTP_AUTH="basic:apk.cgr.dev:user:<tok>"
+	case "$HTTP_AUTH" in
+		basic:apk.cgr.dev:user:*)
+	        tok=${HTTP_AUTH#basic:apk.cgr.dev:}
+	        curlauth="--user $tok"
+	        ;;
+		*) tok=$(chainctl auth token --audience=apk.cgr.dev) ||
+			fail "failed to get token for apk.cgr.dev"
+	        curlauth="--user user:$tok"
+	        ;;
+	esac
+	echo "$curlauth"
+}
+
+# Default to current system architecture
+arch=$(uname -m)
+package=""
+output=""
+list=false
+while [ -n "$1" ]; do
+	case "$1" in
+        --output=*) output=${1#*=}; shift 1;;
+		-o|--output) output=$2; shift 2;;
+        --arch=*) arch=${1#*=}; shift 1;;
+		-a|--arch) arch="$2"; shift 2;;
+		-l|--list) list=true; shift 1;;
+		-v|--version)
+			[ -n "$2" ] || { Usage echo "Version must be specified"; exit 1; } 1>&2
+			ver="$2"
+			shift 2
+		;;
+		-h|--help)
+			Usage
+			exit 0
+		;;
+        -*) fail "Unexpected flag '$1'";;
+		*)
+            [ -z "$package" ] ||
+                fail "confused by argument '$1'. expected only one arg (package)"
+            package="$1"
+            shift
+		;;
+	esac
+done
+
+case "$arch" in
+    x86_64|aarch64) :;;
+    *) fail "unknown arch $arch - must be x86_64 or aarch64";;
+esac
+
+case "$package" in
+    chainguard-private/*)
+        apkrepo="https://apk.cgr.dev/chainguard-private/$arch"
+        package=${package##*/}
+        curlauth=$(get_curl_auth) || exit
+        ;;
+    wolfi/*)
+	    apkrepo="https://packages.wolfi.dev/os/$arch";
+        package=${package##*/}
+        curlauth=""
+        ;;
+    */*) fail "unknown name for repo in $package (package has a /)";;
+    *)
+        apkrepo="https://apk.cgr.dev/chainguard-private/$arch"
+        curlauth=$(get_curl_auth) || exit
+        ;;
+esac
+
+apkindex="$apkrepo/APKINDEX.tar.gz"
+
+if [ -z "$version" ]; then
+    # shellcheck disable=SC2086
+    vlist=$(curl -L --silent $curlauth --output - "$apkindex" |
+		    zcat |
+		    grep -a -A1 "^P:$package" |
+		    grep "^V:" |
+		    sort -V |
+		    sed -e "s/^V://"
+    )
+    [ -n "$vlist" ] || fail "unable to get version list for '$package' from $apkindex"
+fi
+
+# List versions available and exit
+if [ "$list" = "true" ]; then
+    echo "$vlist"
+	exit 0
+fi
+
+if [ -z "$ver" ]; then
+    ver=$(echo "$vlist" | tail -n1)
+    [ -n "$ver" ] || fail "failed to get $package version from $apkindex"
+fi
+
+apk="$package-$ver.apk"
+if [ -z "$output" ]; then
+    output="$apk"
+fi
+tmpf="$output.tmp.$$"
+
+# Fetch the apk package, extract a file from a package and write it to the local directory
+echo "fetching $apk to $output" 1>&2
+# shellcheck disable=SC2086
+curl -L --silent $curlauth "$apkrepo/$apk" > "$tmpf" ||
+    fail "curl failed on $apkrepo/$apk"
+if [ ! -s "$tmpf" ]; then
+	fail "empty file created from $apkrepo/$apk"
+fi
+mv "$tmpf" "$output" || fail "failed renaming $tmpf to $output"
+echo "wrote $apk to $output" 1>&2
