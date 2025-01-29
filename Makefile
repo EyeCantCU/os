@@ -153,7 +153,8 @@ run-builder: $(BUILDER_DEPS)
 compute-disk/%:
 	$(eval DISK_NUM := $(shell echo $(SIZE) | sed 's/G//'))
 	$(eval DOUBLE_SIZE := $(shell awk "BEGIN {print int(2 * ($$(stat -c %s output/$*/image.tar ) / 1073741824) + 1)}"))
-	$(if $(shell [ $(DISK_NUM) -lt $(DOUBLE_SIZE) ] && echo 1 || echo 0), $(eval SIZE := $(DOUBLE_SIZE)G))
+	$(if $(shell [ $(DOUBLE_SIZE) -ge $(DISK_NUM) ] && echo "OK"), \
+		$(eval SIZE := $(DOUBLE_SIZE)G))
 
 .PHONY: builder
 builder: $(BUILDER_DEPS)
