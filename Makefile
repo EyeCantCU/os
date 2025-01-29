@@ -3,6 +3,7 @@ TOOLS_D = $(TOP_D)/tools
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS ?= linux-boot-configuration mattmoor-chainit-init
 ALL_DISKS := generic google docker-runner workstation
+SIZE ?= 4G
 
 ARCH ?= $(shell uname -m)
 ifeq ($(ARCH), arm64)
@@ -130,13 +131,13 @@ output/%/initrd.cpio: configs/%.json
 	@$(call apko_build,cpio,$<,$@)
 
 output/%/disk-debug.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk $(TOOLS_D)/install-target-disk-debug
-	$(call create_empty,2G,$@.tmp)
+	$(call create_empty,$(SIZE),$@.tmp)
 	$(call boot_build_withdev,$(TOOLS_D),$(dir $@),install-target-disk-debug,output/$*/image.tar,$@.tmp)
 	@$(call checkrc,$(dir $@)result)
 	mv $@.tmp $@
 
 output/%/disk.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk
-	$(call create_empty,2G,$@.tmp)
+	$(call create_empty,$(SIZE),$@.tmp)
 	$(call boot_build_withdev,$(TOOLS_D),$(dir $@),install-target-disk,output/$*/image.tar,$@.tmp)
 	@$(call checkrc,$(dir $@)result)
 	mv $@.tmp $@
@@ -145,7 +146,7 @@ output/%/disk.tar.gz: output/%/disk.raw
 	$(TOOLS_D)/google-image-upload create-image-tgz output/$*/disk.raw $@
 
 run-builder: $(BUILDER_DEPS)
-	$(call create_empty,2G,$@.tmp)
+	$(call create_empty,$(SIZE),$@.tmp)
 	@[ -f output/builder-debug/image.tar ] || { echo "please set up output/builder-debug/image.tar"; exit 1; }
 	$(call boot_build_withdev,$(TOOLS_D),output/builder-debug,debug-shell,output/builder-debug/image.tar,output/builder-debug/disk.raw)
 
