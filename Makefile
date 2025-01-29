@@ -98,30 +98,25 @@ disks: $(foreach name,$(ALL_DISKS),output/$(name)/disk.raw)
 check:
 	@echo "This does not do anything useful, but it passes. Please improve."
 
-configs/%.json: configs/%-container.json
-	$(TOOLS_D)/config-insert-packages $< $@ $(BOOT_PKGS)
-
-configs/%-container.json: configs/%-attestation.json
-	$(TOOLS_D)/attestation-to-manifest $< $@
-
-configs/%-attestation.json:
+configs/%.yaml:
 	@mkdir -p $(dir $@)
 	cosign verify-attestation \
 		--type=https://apko.dev/image-configuration \
 		--certificate-oidc-issuer=https://token.actions.githubusercontent.com \
 		--certificate-identity=https://github.com/chainguard-images/images-private/.github/workflows/release.yaml@refs/heads/main \
-		"cgr.dev/chainguard-private/$*" > $@.tmp || \
-			{ rm -f $@.tmp; exit 1; }
-	@mv $@.tmp $@
+		"cgr.dev/chainguard-private/$*" > $@.tmp
+	$(TOOLS_D)/config-insert-packages $< $@.tmp $(BOOT_PKGS)
+	yq -P -i '.payload | @base64d | fromjson | .predicate' $@.tmp
+	mv $@.tmp $@
 
-output/%/image.tar: configs/%.json
+output/%/image.tar: configs/%.yaml
 	@mkdir -p $(dir $@)
 	@$(call apko_build,minirootfs,$<,$@.gz.tmp,)
 	t=$@.tmp$$$$; gunzip --to-stdout "$@.gz.tmp" > "$$t" && \
 		mv "$$t" "$@" || { rm -f "$$t"; exit 1; }
 	rm $@.gz.tmp
 
-output/%/initrd.cpio: configs/%.json
+output/%/initrd.cpio: configs/%.yaml
 	@mkdir -p $(dir $@)
 	@$(call apko_build,cpio,$<,$@,,)
 
@@ -173,4 +168,4 @@ clean:
 	rm -Rf output builder
 
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw image.tar initrd.cpio,output/%/$(bname))
-.PRECIOUS: configs/%.json configs/%-attestation.json
+.PRECIOUS: configs/%.yaml

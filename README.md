@@ -12,14 +12,14 @@ After that, the easiest thing to see this working is to run:
     make debug-disk-generic
 
 That will:
-1. build the image described in 'configs/generic.json' into output/configs/disk-debug.raw
+1. build the image described in 'configs/generic.yaml' into output/configs/disk-debug.raw
 2. Boot a qemu guest.  The debug has console output to stdio and a root shell (`systemd.debug-shell`) on ttyS1
 
 
 ## How is the install done?
 To do the install this process will:
 1. create a `output/<name>/initrd.tar` file that has contents of the image.
-   That is done with apko, providing it the file configs/<name>.json
+   That is done with apko, providing it the file configs/<name>.yaml
 2. create a builder initrd from mkvm.yaml
 3. start a qemu guest with the downloaded kernel and created builder/initrd.cpio.
    It will have:
