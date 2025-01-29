@@ -130,13 +130,13 @@ output/%/initrd.cpio: configs/%.json
 	@mkdir -p $(dir $@)
 	@$(call apko_build,cpio,$<,$@)
 
-output/%/disk-debug.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk $(TOOLS_D)/install-target-disk-debug
+output/%/disk-debug.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk $(TOOLS_D)/install-target-disk-debug compute-disk/%
 	$(call create_empty,$(SIZE),$@.tmp)
 	$(call boot_build_withdev,$(TOOLS_D),$(dir $@),install-target-disk-debug,output/$*/image.tar,$@.tmp)
 	@$(call checkrc,$(dir $@)result)
 	mv $@.tmp $@
 
-output/%/disk.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk
+output/%/disk.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk compute-disk/%
 	$(call create_empty,$(SIZE),$@.tmp)
 	$(call boot_build_withdev,$(TOOLS_D),$(dir $@),install-target-disk,output/$*/image.tar,$@.tmp)
 	@$(call checkrc,$(dir $@)result)
@@ -149,6 +149,11 @@ run-builder: $(BUILDER_DEPS)
 	$(call create_empty,$(SIZE),$@.tmp)
 	@[ -f output/builder-debug/image.tar ] || { echo "please set up output/builder-debug/image.tar"; exit 1; }
 	$(call boot_build_withdev,$(TOOLS_D),output/builder-debug,debug-shell,output/builder-debug/image.tar,output/builder-debug/disk.raw)
+
+compute-disk/%:
+	$(eval DISK_NUM := $(shell echo $(SIZE) | sed 's/G//'))
+	$(eval DOUBLE_SIZE := $(shell awk "BEGIN {print int(2 * ($$(stat -c %s output/$*/image.tar ) / 1073741824) + 1)}"))
+	$(if $(shell [ $(DISK_NUM) -lt $(DOUBLE_SIZE) ] && echo 1 || echo 0), $(eval SIZE := $(DOUBLE_SIZE)G))
 
 .PHONY: builder
 builder: $(BUILDER_DEPS)
