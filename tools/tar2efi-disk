@@ -1,0 +1,242 @@
+#!/bin/bash
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043
+VERBOSITY=0
+TEMP_D=""
+DEF_SIZE=auto
+
+stderr() { echo "$@" 1>&2; }
+fail() { local r=$?;  [ $r -eq 0 ] && r=1; failrc "$r" "$@"; }
+failrc() { local r="$1"; shift; [ $# -eq 0 ] || stderr "$@"; exit "$r"; }
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] tarball disk-image
+
+   create efi disk image in 'disk-image' with contents of 'tarball'
+
+   options:
+      --size      SIZE      size to create disk
+                            size can be 'auto' or a size like 2G
+                            auto looks at tarball and guesses
+      --boot-arch ARCH      use qemu-system-ARCH to do the install
+
+      --kernel   KERNEL     boot kernel
+      --initrd   INITRD     use INITRD - expected to execute workload
+      --workload SCRIPT     provide SCRIPT as the workload to execute
+      --env      NAME=VAL   put environment variable NAME into env of script
+
+      --accel               disable acceleration (kvm or hvf)
+EOF
+}
+
+bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+cleanup() {
+    [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
+}
+
+debug() {
+    local level="$1"
+    shift
+    [ "${level}" -gt "${VERBOSITY}" ] && return
+    stderr "${@}"
+}
+
+plan9flags() {
+    local fsid="$1" name="$2" path="$3"
+    _RET=(
+        -device "virtio-9p-pci,id=fs$fsid,fsdev=fsdev$fsid,mount_tag=$name"
+        -fsdev "local,security_model=mapped,id=fsdev$fsid,path=$path"
+    )
+}
+
+fitsize() {
+    local fit="$1" gb=$((1024*1024*1024))
+    # 2*fit but rounded up to GB unit.
+    gbsize=$((((gb-1)+2*fit)/gb))
+    # but at least 2GB
+    [ $gbsize -eq 1 ] && gbsize=2
+    printf "%dG\n" "$gbsize"
+}
+
+getsize() {
+    local tarball="$1" tarballsize=""
+
+    tarballsize=$(stat -c "%s" "$tarball") || {
+        stderr "failed to stat $tarball"
+        return 1
+    }
+    fitsize "$tarballsize" || return 0
+}
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,accel:,boot-arch:,env:,initrd:,kernel:,size:,workload:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_Usage; return; }
+
+    local cur="" next=""
+    local kernel="" initrd="" workload="" size="$DEF_SIZE" bootarch="" envargs="" accel=""
+    local tarball="$1" disk="$2"
+    while [ $# -ne 0 ]; do
+        # shellcheck disable=SC2034
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+               --size) size=$next; shift;;
+               --boot-arch) bootarch=$next; shift;;
+               --kernel) kernel=$next; shift;;
+               --initrd) initrd=$next; shift;;
+               --workload) workload=$next; shift;;
+               --env) envargs="$envargs env=$next"; shift;;
+               --accel) accel=$next; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ $# -eq 2 ] || { bad_Usage "got $# args, expected 2 (args=$*)"; return; }
+
+    local tarball="$1" disk="$2" outd="" tmpdisk=""
+    tarball="$1"
+    disk="$2"
+
+    outd=$(dirname "$disk")
+    [ -d "$outd" ] || mkdir -p "$outd" ||
+        { stderr "failed to create $outd for $disk"; return 1; }
+
+    tmpdisk="$outd/${disk##*/}.$RANDOM.$$"
+
+    if [ -z "$bootarch" ]; then
+        bootarch=$(uname -m) || { stderr "failed to run uname -m"; return 1; }
+    fi
+    case "$bootarch" in
+        x86_64|aarch64) :;;
+        *) stderr "unknown bootarch $bootarch"; return 1;;
+    esac
+    local qemu="qemu-system-$bootarch"
+    command -v "$qemu" >/dev/null 2>&1 ||
+        { stderr "no qemu '$qemu' in PATH"; return 1; }
+
+    local builderd="" toolsd="" myd="" cand=""
+    myd=$(cd "${0%/*}" && pwd) ||
+        { stderr "could not find my dir"; return 1; }
+    builderd="$myd/../builder"
+    toolsd="$myd/../tools"
+
+    if [ -z "$kernel" ]; then
+        cand="$builderd/kernel-$bootarch"
+        if [ ! -f "$cand" ]; then
+            stderr "no kernel in $cand. use --kernel="
+            return 1
+        fi
+        kernel="$cand"
+        debug 1 "using kernel $kernel"
+    fi
+
+    if [ -z "$initrd" ]; then
+        cand="$builderd/initrd-$bootarch"
+        if [ ! -f "$cand" ]; then
+            stderr "no initrd in $cand. use --initrd="
+            return 1
+        fi
+        initrd="$cand"
+        debug 1 "using initrd $initrd"
+    fi
+
+    if [ -z "$workload" ]; then
+        cand="$toolsd/install-target-disk"
+        if [ ! -f "$cand" ]; then
+            stderr "no workloadinitrd in $cand. use --workload="
+            return 1
+        fi
+        workload="$cand"
+        debug 1 "using workload $workload"
+    fi
+
+    tsize="$size"
+    if [ "$size" = "auto" ]; then
+        tsize=$(getsize "$tarball" "$size") ||
+            { stderr "failed to resolve size '$size' for $tarball"; return 1; }
+        debug 0 "computed size $tsize for $tarball"
+    fi
+
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        fail "failed to make tempdir"
+    trap cleanup EXIT
+
+    cp "$workload" "${TEMP_D}/workscript" ||
+        fail "failed to copy workload $workload to temp dir"
+
+    local qflags="" quiet=""
+    qflags=( )
+    case "$bootarch" in
+        aarch64)
+            qflags=( "${qflags[@]}" -cpu cortex-a53 -machine virt )
+            kconsole="console=ttyAMA0"
+            ;;
+        x86_64)
+            qflags=( "${qflags[@]}" -cpu max -machine q35 -accel tcg )
+            kconsole="console=ttyS0"
+            ;;
+    esac
+    qflags=( "${qflags[@]}"
+        -m 3G -display none
+        -serial mon:stdio -echr 0x05
+        -device virtio-rng-pci )
+
+    plan9flags fs100 workload "${TEMP_D}" ||
+        { stderr "failed to get flags for plan9"; return 1; }
+    qflags=( "${qflags[@]}" "${_RET[@]}" )
+
+    qflags=( "${qflags[@]}"
+        -nic none
+        -kernel "$kernel"
+        -initrd "$initrd"
+        -append "${quiet:+$quiet }$kconsole entry=workscript workload=workload $envargs"
+        -blockdev "driver=raw,node-name=${tarball##*/},file.driver=file,file.filename=$tarball"
+        -device "virtio-blk-pci,drive=${tarball##*/},serial=input-tar,discard=true"
+        -blockdev "driver=raw,node-name=${disk##*/},file.driver=file,file.filename=$tmpdisk"
+        -device "virtio-blk-pci,drive=${disk##*/},serial=output-disk,discard=true"
+        )
+
+    echo "failed" > "${TEMP_D}/result"
+
+    # truncate on mac does not support --size, so use -s
+    rm -f "$tmpdisk" && truncate -s "$tsize" "$tmpdisk" ||
+        { stderr "failed to create $tmpdisk of size=$tsize"; return 1; }
+
+    debug 0 "execute:" "$qemu" "${qflags[@]}"
+    "$qemu" "${qflags[@]}" ||
+        { stderr "qemu failed with rc=$?"; return 1; }
+
+    # shellcheck disable=SC2162
+    read result < "${TEMP_D}/result" ||
+        { stderr "failed reading result after qemu execution"; return 1; }
+    local rc=""
+    case "$result" in
+        [0-9]|[1-9][1-9]|[12][0-9][0-9]) rc=$result;;
+        failed) stderr "qemu guest did not write result file"; rc=1;;
+        *) stderr "unexpected value in result '$result'"; rc=1;;
+    esac
+
+    if [ "$rc" -eq 0 ]; then
+        mv "$tmpdisk" "$disk" ||
+            { stderr "failed renaming $tmpdisk to $disk"; return 1; }
+    else
+        rm -f "$tmpdisk" ||
+            { stderr "failed removing tmpdisk $tmpdisk"; return 1; }
+    fi
+    return "$rc"
+}
+
+case "$1" in
+    fitsize) shift; fitsize "$@"; exit;;
+    getsize) shift; getsize "$@"; exit;;
+esac
+
+main "$@"
+# vi: ts=4 expandtab

@@ -3,7 +3,7 @@ TOOLS_D = $(TOP_D)/tools
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS ?= linux-boot-configuration mattmoor-chainit-init
 ALL_DISKS := generic google docker-runner workstation
-SIZE ?= 4G
+SIZE ?= auto
 
 ARCH ?= $(shell uname -m)
 ifeq ($(ARCH), arm64)
@@ -12,9 +12,13 @@ else ifeq ($(ARCH), amd64)
 	ARCH = x86_64
 endif
 
-KERNEL = builder/kernel-$(ARCH)
-INITRD = builder/initrd-$(ARCH)
-BUILDER_DEPS = $(KERNEL) $(INITRD) builder/ovmf-$(ARCH).fd
+BUILDER_ARCH ?= $(shell uname -m)
+BUILDER_KERNEL = builder/kernel-$(BUILDER_ARCH)
+BUILDER_INITRD = builder/initrd-$(BUILDER_ARCH)
+BUILDER_DEPS = $(BUILDER_KERNEL) $(BUILDER_INITRD)
+
+# this needs fixing if running non-native qemu-system
+OVMF_FIRMWARE = builder/ovmf-$(ARCH).fd
 
 QEMU_CMD := none
 ifeq (${ARCH}, aarch64)
@@ -57,13 +61,6 @@ endef
 plan9 = -device "virtio-9p-pci,id=fs$(1),fsdev=fsdev$(1),mount_tag=$(2)" \
  -fsdev "local,security_model=mapped,id=fsdev$(1),path=$(3)"
 
-boot_build_withdev = $(call qemu-initrd,$(KERNEL),$(INITRD)) \
- $(call plan9,fs100,workload,$1) \
- $(call plan9,fs101,output,$2) \
- -append "$(CONSOLE_QUIET) entry=$(3) workload=workload mp=output" \
- $(call raw_disk_args,$4,input-tar) \
- $(call raw_disk_args,$5,install-target-disk)
-
 boot_initrd = $(call qemu-initrd,$1,$2) -append "$(CONSOLE_QUIET) $3"
 boot_disk = $(call qemu-disk,$1)
 
@@ -83,19 +80,17 @@ endef
 withauth = echo $1 && env HTTP_AUTH="basic:apk.cgr.dev:user:$(AUTH_TOK)" $1
 apko_build = $(call withauth,apko build-$(1) \
  --build-repository-append="https://apk.cgr.dev/chainguard-private" \
- $(call add_apk_repos,$(EXTRA_REPO_DIRS)) \
+ $(call add_apk_repos,$(EXTRA_REPO_DIRS)) $(5) \
  --package-append="$4" $(2) $(3))
 
 add_apk_repos = $(foreach dir,$1,\
  --build-repository-append=$(dir)/packages --keyring-append=$(wildcard $(dir)/local-*.pub))
 
-# truncate on mac does not support --size, so use -s
-create_empty = mkdir -p "$(dir $2)" && rm -f "$2" && truncate -s "$1" "$2"
-
-checkrc = rcf=$(1); xfail() { echo "$$@"; exit 1; } ; \
- [ -f "$$rcf" ] || xfail "install failed - no $$rcf"; \
- read rc < "$$rcf" || xfail "install failed to create $$rcf"; \
- [ $$rc -eq 0 ] || xfail "install exited $$rc";
+tar2efi = $(TOOLS_D)/tar2efi-disk \
+ "--kernel=$(BUILDER_KERNEL)" "--initrd=$(BUILDER_INITRD)" \
+ "--workload=$(TOOLS_D)/install-target-disk" \
+ "--boot-arch=$(BUILDER_ARCH)" \
+ "--size=$(3)" $(4) "$(1)" "$(2)"
 
 .PHONY: disks
 disks: $(foreach name,$(ALL_DISKS),output/$(name)/disk.raw)
@@ -121,40 +116,23 @@ configs/%-attestation.json:
 
 output/%/image.tar: configs/%.json
 	@mkdir -p $(dir $@)
-	@$(call apko_build,minirootfs,$<,$@.gz.tmp)
+	@$(call apko_build,minirootfs,$<,$@.gz.tmp,)
 	t=$@.tmp$$$$; gunzip --to-stdout "$@.gz.tmp" > "$$t" && \
 		mv "$$t" "$@" || { rm -f "$$t"; exit 1; }
 	rm $@.gz.tmp
 
 output/%/initrd.cpio: configs/%.json
 	@mkdir -p $(dir $@)
-	@$(call apko_build,cpio,$<,$@)
+	@$(call apko_build,cpio,$<,$@,,)
 
-output/%/disk-debug.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk $(TOOLS_D)/install-target-disk-debug compute-disk/%
-	$(call create_empty,$(SIZE),$@.tmp)
-	$(call boot_build_withdev,$(TOOLS_D),$(dir $@),install-target-disk-debug,output/$*/image.tar,$@.tmp)
-	@$(call checkrc,$(dir $@)result)
-	mv $@.tmp $@
+output/%/disk-debug.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk
+	$(call tar2efi,output/$*/image.tar,$@,$(SIZE),--env=DEBUG=true)
 
-output/%/disk.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk compute-disk/%
-	$(call create_empty,$(SIZE),$@.tmp)
-	$(call boot_build_withdev,$(TOOLS_D),$(dir $@),install-target-disk,output/$*/image.tar,$@.tmp)
-	@$(call checkrc,$(dir $@)result)
-	mv $@.tmp $@
+output/%/disk.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk
+	$(call tar2efi,output/$*/image.tar,$@,$(SIZE))
 
 output/%/disk.tar.gz: output/%/disk.raw
 	$(TOOLS_D)/google-image-upload create-image-tgz output/$*/disk.raw $@
-
-run-builder: $(BUILDER_DEPS)
-	$(call create_empty,$(SIZE),$@.tmp)
-	@[ -f output/builder-debug/image.tar ] || { echo "please set up output/builder-debug/image.tar"; exit 1; }
-	$(call boot_build_withdev,$(TOOLS_D),output/builder-debug,debug-shell,output/builder-debug/image.tar,output/builder-debug/disk.raw)
-
-compute-disk/%:
-	$(eval DISK_NUM := $(shell echo $(SIZE) | sed 's/G//'))
-	$(eval DOUBLE_SIZE := $(shell awk "BEGIN {print int(2 * ($$(stat -c %s output/$*/image.tar ) / 1073741824) + 1)}"))
-	$(if $(shell [ $(DOUBLE_SIZE) -ge $(DISK_NUM) ] && echo "OK"), \
-		$(eval SIZE := $(DOUBLE_SIZE)G))
 
 .PHONY: builder
 builder: $(BUILDER_DEPS)
@@ -165,7 +143,7 @@ builder/kernel-%: $(TOOLS_D)/grab-pkg-artifact
 
 builder/initrd-%: mkvm.yaml
 	@mkdir -p $(dir $@)
-	@$(call apko_build,cpio,$<,$@)
+	@$(call apko_build,cpio,$<,$@,,--build-arch=$*)
 
 builder/ovmf-%.fd: $(TOOLS_D)/grab-pkg-artifact
 	@mkdir -p $(dir $@)
@@ -179,10 +157,10 @@ run-initrd-%: output/%/initrd.cpio $(KERNEL)
 
 # second serial console (ttyS1) will get a systemd.debug-shell
 # connect to it with: socat STDIO,cfmakeraw,isig=1 UNIX:output/generic/.socket.ttyS1
-debug-disk-%: output/%/disk-debug.raw
+debug-disk-%: output/%/disk-debug.raw $(FIRMWARE)
 	$(call boot_disk,$<) $(QEMU_NETFLAGS) -serial unix:$(dir $<)/.socket.ttyS1,wait=off,server=on -snapshot
 
-run-disk-%: output/%/disk.raw
+run-disk-%: output/%/disk.raw $(FIRMWARE)
 	$(call boot_disk,$<) $(QEMU_NETFLAGS)
 
 shell-initrd: run-initrd-chainguard-base
