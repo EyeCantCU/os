@@ -131,6 +131,9 @@ output/%/disk-debug.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-t
 output/%/disk.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk
 	$(call tar2efi,output/$*/image.tar,$@,$(SIZE))
 
+run-builder-%: $(BUILDER_DEPS) output/%/image.tar
+	$(call tar2efi,output/$*/image.tar,$@,$(SIZE),--env=DEBUG=true --workload=$(TOOLS_D)/debug-shell)
+
 output/%/disk.tar.gz: output/%/disk.raw
 	$(TOOLS_D)/google-image-upload create-image-tgz output/$*/disk.raw $@
 

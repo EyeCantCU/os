@@ -42,10 +42,10 @@ debug() {
 }
 
 plan9flags() {
-    local fsid="$1" name="$2" path="$3"
+    local fsid="$1" name="$2" path="$3" fsflags="$4"
     _RET=(
         -device "virtio-9p-pci,id=fs$fsid,fsdev=fsdev$fsid,mount_tag=$name"
-        -fsdev "local,security_model=mapped,id=fsdev$fsid,path=$path"
+        -fsdev "local,security_model=mapped,${fsflags:+${fsflags},}id=fsdev$fsid,path=$path"
     )
 }
 
@@ -168,8 +168,13 @@ main() {
         fail "failed to make tempdir"
     trap cleanup EXIT
 
-    cp "$workload" "${TEMP_D}/workscript" ||
-        fail "failed to copy workload $workload to temp dir"
+    local workload_d result_d="${TEMP_D}/result"
+    workload_d=$(dirname "$workload") ||
+        { stderr "failed to get dirname for $workload"; return 1; }
+    mkdir "$result_d" ||
+        { stderr "failed to create result dir $result_d"; return 1; }
+    echo "failed" > "${result_d}/result" ||
+        { stderr "failed to populate result file with 'failed'"; return 1; }
 
     local qflags="" quiet=""
     qflags=( )
@@ -188,22 +193,24 @@ main() {
         -serial mon:stdio -echr 0x05
         -device virtio-rng-pci )
 
-    plan9flags fs100 workload "${TEMP_D}" ||
+    plan9flags fs100 results "$result_d" ||
         { stderr "failed to get flags for plan9"; return 1; }
+    qflags=( "${qflags[@]}" "${_RET[@]}" )
+
+    plan9flags fs101 workload "$workload_d" readonly=on ||
+        { stderr "failed to get flags for plan9 workload_d"; return 1; }
     qflags=( "${qflags[@]}" "${_RET[@]}" )
 
     qflags=( "${qflags[@]}"
         -nic none
         -kernel "$kernel"
         -initrd "$initrd"
-        -append "${quiet:+$quiet }$kconsole entry=workscript workload=workload $envargs"
+        -append "${quiet:+$quiet }$kconsole entry=${workload##*/} workload=workload $envargs"
         -blockdev "driver=raw,node-name=${tarball##*/},file.driver=file,file.filename=$tarball"
         -device "virtio-blk-pci,drive=${tarball##*/},serial=input-tar,discard=true"
         -blockdev "driver=raw,node-name=${disk##*/},file.driver=file,file.filename=$tmpdisk"
         -device "virtio-blk-pci,drive=${disk##*/},serial=output-disk,discard=true"
         )
-
-    echo "failed" > "${TEMP_D}/result"
 
     # truncate on mac does not support --size, so use -s
     rm -f "$tmpdisk" && truncate -s "$tsize" "$tmpdisk" ||
@@ -214,7 +221,7 @@ main() {
         { stderr "qemu failed with rc=$?"; return 1; }
 
     # shellcheck disable=SC2162
-    read result < "${TEMP_D}/result" ||
+    read result < "$result_d/result" ||
         { stderr "failed reading result after qemu execution"; return 1; }
     local rc=""
     case "$result" in
