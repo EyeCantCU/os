@@ -210,4 +210,3 @@ dev-container-wolfi:
 		ghcr.io/wolfi-dev/sdk:latest
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
-
