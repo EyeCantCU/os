@@ -112,11 +112,11 @@ packages/$(ARCH)/%.apk: $(KEY)
 	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) --source-dir ./$(pkgname)/
 
 dev-container:
-	docker run --privileged --rm -it \
+	docker run --pull=always --privileged --rm -it \
 	    -v "${PWD}:${PWD}" \
 	    -w "${PWD}" \
 	    -e SOURCE_DATE_EPOCH=0 \
-	    ghcr.io/wolfi-dev/sdk:latest@sha256:69dca7d89ff2f7b66c764e643f08395282e4a3e150aea2a3e1dde4a52ff38d3e
+	    ghcr.io/wolfi-dev/sdk:latest
 
 PACKAGES_CONTAINER_FOLDER ?= /work/packages
 TMP_REPOSITORIES_DIR := $(shell mktemp -d)
