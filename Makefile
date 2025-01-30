@@ -5,28 +5,6 @@ BOOT_PKGS ?= linux-boot-configuration mattmoor-chainit-init
 ALL_DISKS := generic google docker-runner workstation
 SIZE ?= auto
 
-ARCH ?= $(shell uname -m)
-ifeq ($(ARCH), arm64)
-	ARCH = aarch64
-else ifeq ($(ARCH), amd64)
-	ARCH = x86_64
-endif
-
-BUILDER_ARCH ?= $(shell uname -m)
-BUILDER_KERNEL = builder/kernel-$(BUILDER_ARCH)
-BUILDER_INITRD = builder/initrd-$(BUILDER_ARCH)
-BUILDER_DEPS = $(BUILDER_KERNEL) $(BUILDER_INITRD)
-
-# this needs fixing if running non-native qemu-system
-OVMF_FIRMWARE = builder/ovmf-$(ARCH).fd
-
-QEMU_CMD := none
-ifeq (${ARCH}, aarch64)
-	QEMU_CMD = qemu-system-${ARCH} -cpu max -machine virt -accel hvf
-else ifeq (${ARCH}, x86_64)
-	QEMU_CMD = qemu-system-${ARCH} -cpu max -machine q35 -accel tcg
-endif
-
 ifeq ($(AUTH_TOK),)
 AUTH_TOK := $(shell chainctl auth token --audience apk.cgr.dev || echo bad-token)
 ifeq ($(AUTH_TOK),$(filter $(AUTH_TOK), "", bad-token))
@@ -34,16 +12,47 @@ $(error "Failed to get an auth token")
 endif
 endif
 
+ARCHES := aarch64 x86_64
+OS := $(shell uname -s)
+BUILDER_ARCH := $(shell uname -m)
+ARCH := $(BUILDER_ARCH)
+
+ifneq ($(filter-out $(ARCHES),$(BUILDER_ARCH)),)
+$(error BUILDER_ARCH '$(BUILDER_ARCH)' not supported. Must be one of $(ARCHES))
+endif
+BUILDER_KERNEL = builder/kernel-$(BUILDER_ARCH)
+BUILDER_INITRD = builder/initrd-$(BUILDER_ARCH)
+BUILDER_DEPS = $(BUILDER_KERNEL) $(BUILDER_INITRD)
+
+ifneq ($(filter-out $(ARCHES),$(ARCH)),)
+$(error ARCH $(ARCH) not supported. Must be one of $(ARCHES))
+endif
+
+ARCH_OUT_D = output/$(ARCH)
+
+# this needs fixing if running non-native qemu-system
+OVMF_FIRMWARE = builder/ovmf-$(ARCH).fd
+
+QEMU_MFLAGS ?= $(shell $(TOOLS_D)/qemu-machine-args $(ARCH))
+QEMU_CMD = qemu-system-$(ARCH) $(QEMU_MFLAGS)
+
 # set to 'vnc:1' to run a vnc server that you can connect to
 QEMU_DISPLAY ?= none
 # Append the several common arguments to the QEMU_CMD
 QEMU_CMD += -m 3G -display $(QEMU_DISPLAY) -serial mon:stdio -echr 0x05 -device virtio-rng-pci
 
-INITRD_CMD := ${QEMU_CMD}
-ifeq (${ARCH}, aarch64)
-	CONSOLE_QUIET = quiet
-else ifeq (${ARCH}, x86_64)
-	CONSOLE_QUIET = console=ttyS0 quiet
+INITRD_CMD := $(QEMU_CMD)
+
+ifeq ($(ARCH), aarch64)
+CONSOLE_QUIET = quiet
+# https://unix.stackexchange.com/questions/479085/
+add-serial-debug = \
+ -chardev socket,path=$(1),server=on,wait=off,id=debugshell \
+ -device pci-serial,id=serial0,chardev=debugshell \
+ -serial chardev:debugshell
+else ifeq ($(ARCH), x86_64)
+CONSOLE_QUIET = console=ttyS0 quiet
+add-serial-debug = -serial unix:$(1),wait=off,server=on
 endif
 
 QEMU_NETFLAGS ?= -device virtio-net-pci,netdev=id1 \
@@ -90,10 +99,11 @@ tar2efi = $(TOOLS_D)/tar2efi-disk \
  "--kernel=$(BUILDER_KERNEL)" "--initrd=$(BUILDER_INITRD)" \
  "--workload=$(TOOLS_D)/install-target-disk" \
  "--boot-arch=$(BUILDER_ARCH)" \
+ "--env=ARCH=$(ARCH)" \
  "--size=$(3)" $(4) "$(1)" "$(2)"
 
 .PHONY: disks
-disks: $(foreach name,$(ALL_DISKS),output/$(name)/disk.raw)
+disks: $(foreach name,$(ALL_DISKS),$(ARCH_OUT_D)/$(name)/disk.raw)
 
 check:
 	@echo "This does not do anything useful, but it passes. Please improve."
@@ -109,28 +119,28 @@ configs/%.yaml:
 	yq -P -i '.payload | @base64d | fromjson | .predicate' $@.tmp
 	mv $@.tmp $@
 
-output/%/image.tar: configs/%.yaml
+$(ARCH_OUT_D)/%/image.tar: configs/%.yaml
 	@mkdir -p $(dir $@)
-	@$(call apko_build,minirootfs,$<,$@.gz.tmp,)
+	@$(call apko_build,minirootfs,$<,$@.gz.tmp,,--build-arch=$(ARCH))
 	t=$@.tmp$$$$; gunzip --to-stdout "$@.gz.tmp" > "$$t" && \
 		mv "$$t" "$@" || { rm -f "$$t"; exit 1; }
 	rm $@.gz.tmp
 
-output/%/initrd.cpio: configs/%.yaml
+$(ARCH_OUT_D)/%/initrd.cpio: configs/%.yaml
 	@mkdir -p $(dir $@)
 	@$(call apko_build,cpio,$<,$@,,)
 
-output/%/disk-debug.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk
-	$(call tar2efi,output/$*/image.tar,$@,$(SIZE),--env=DEBUG=true)
+$(ARCH_OUT_D)/%/disk-debug.raw: $(BUILDER_DEPS) $(ARCH_OUT_D)/%/image.tar $(TOOLS_D)/install-target-disk
+	$(call tar2efi,$(ARCH_OUT_D)/$*/image.tar,$@,$(SIZE),--env=DEBUG=true)
 
-output/%/disk.raw: $(BUILDER_DEPS) output/%/image.tar $(TOOLS_D)/install-target-disk
-	$(call tar2efi,output/$*/image.tar,$@,$(SIZE))
+$(ARCH_OUT_D)/%/disk.raw: $(BUILDER_DEPS) $(ARCH_OUT_D)/%/image.tar $(TOOLS_D)/install-target-disk
+	$(call tar2efi,$(ARCH_OUT_D)/$*/image.tar,$@,$(SIZE))
 
-run-builder-%: $(BUILDER_DEPS) output/%/image.tar
-	$(call tar2efi,output/$*/image.tar,$@,$(SIZE),--env=DEBUG=true --workload=$(TOOLS_D)/debug-shell)
+run-builder-%: $(BUILDER_DEPS) $(ARCH_OUT_D)/%/image.tar
+	$(call tar2efi,$(ARCH_OUT_D)/$*/image.tar,$@,$(SIZE),--env=DEBUG=true --workload=$(TOOLS_D)/debug-shell)
 
-output/%/disk.tar.gz: output/%/disk.raw
-	$(TOOLS_D)/google-image-upload create-image-tgz output/$*/disk.raw $@
+$(ARCH_OUT_D)/%/disk.tar.gz: $(ARCH_OUT_D)/%/disk.raw
+	$(TOOLS_D)/google-image-upload create-image-tgz $(ARCH_OUT_D)/$*/disk.raw $@
 
 .PHONY: builder
 builder: $(BUILDER_DEPS)
@@ -150,15 +160,16 @@ builder/ovmf-%.fd: $(TOOLS_D)/grab-pkg-artifact
 %.vmdk: %.raw
 	qemu-img convert -O vmdk -o subformat=streamOptimized $< $@
 
-run-initrd-%: output/%/initrd.cpio $(KERNEL)
-	@$(call boot_initrd,$(KERNEL),output/$*/initrd.cpio,) $(QEMU_NETFLAGS)
+run-initrd-%: $(ARCH_OUT_D)/%/initrd.cpio $(KERNEL)
+	@$(call boot_initrd,$(KERNEL),$(ARCH_OUT_D)/$*/initrd.cpio,) $(QEMU_NETFLAGS)
 
 # second serial console (ttyS1) will get a systemd.debug-shell
-# connect to it with: socat STDIO,cfmakeraw,isig=1 UNIX:output/generic/.socket.ttyS1
-debug-disk-%: output/%/disk-debug.raw $(FIRMWARE)
-	$(call boot_disk,$<) $(QEMU_NETFLAGS) -serial unix:$(dir $<)/.socket.ttyS1,wait=off,server=on -snapshot
+# connect to it with: socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/generic/.socket.debug-shell
+debug-disk-%: $(ARCH_OUT_D)/%/disk-debug.raw $(OVMF_FIRMWARE)
+	$(call boot_disk,$<) $(QEMU_NETFLAGS) $(call add-serial-debug,$(dir $<)/.socket.debug-shell) -snapshot
 
-run-disk-%: output/%/disk.raw $(FIRMWARE)
+
+run-disk-%: $(ARCH_OUT_D)/%/disk.raw $(OVMF_FIRMWARE)
 	$(call boot_disk,$<) $(QEMU_NETFLAGS)
 
 shell-initrd: run-initrd-chainguard-base
@@ -167,5 +178,5 @@ shell-disk: run-disk-chainguard-base
 clean:
 	rm -Rf output builder
 
-.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw image.tar initrd.cpio,output/%/$(bname))
-.PRECIOUS: configs/%.yaml
+.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw image.tar initrd.cpio,$(ARCH_OUT_D)/%/$(bname))
+.PRECIOUS: configs/%.yaml builder/ovmf-%.fd
