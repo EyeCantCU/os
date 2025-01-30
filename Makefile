@@ -128,13 +128,13 @@ test-debug/%: apk-token
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
 dev-container: apk-token
-	docker run --privileged --rm -it \
+	docker run --pull=always --privileged --rm -it \
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-v "${HOME}/.config/chainctl:/root/.config/chainctl" \
 			-v "${CACHEDIR}:/tmp/melange-cache" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:69dca7d89ff2f7b66c764e643f08395282e4a3e150aea2a3e1dde4a52ff38d3e
+			ghcr.io/wolfi-dev/sdk:latest
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -200,14 +200,14 @@ OS_DIR ?= ${PWD}
 dev-container-wolfi:
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
-	docker run --rm -it \
+	docker run --pull=always --rm -it \
 		--mount type=bind,source="${OUT_DIR}",destination="$(OUT_LOCAL_DIR)" \
 		--mount type=bind,source="${OS_DIR}",destination="$(OS_LOCAL_DIR)",readonly \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:69dca7d89ff2f7b66c764e643f08395282e4a3e150aea2a3e1dde4a52ff38d3e
+		ghcr.io/wolfi-dev/sdk:latest
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
