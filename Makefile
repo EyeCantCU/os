@@ -175,6 +175,11 @@ run-initrd-%: $(ARCH_OUT_D)/%/initrd.cpio $(KERNEL)
 debug-disk-%: $(ARCH_OUT_D)/%/disk-debug.raw $(OVMF_FIRMWARE)
 	$(call boot_disk,$<) $(QEMU_NETFLAGS) $(call add-serial-debug,$(dir $<)/.socket.debug-shell) -snapshot
 
+.PHONY: debug-shell-%
+debug-shell-%:
+	@echo "::: Make sure you have a 'debug-disk-$*' session running or this wont work"
+	@echo "[hit enter]"
+	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$*/.socket.debug-shell
 
 run-disk-%: $(ARCH_OUT_D)/%/disk.raw $(OVMF_FIRMWARE)
 	$(call boot_disk,$<) $(QEMU_NETFLAGS)

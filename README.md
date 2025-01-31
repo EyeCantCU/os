@@ -48,7 +48,7 @@ You can then attempt to build and run that config just as you would one of the e
 
  * qemu-vms are booted with `-display none -serial mon:stdio`, which multi-plexes serial console and qemu-monitor on stdout.  Also booted with `-echr 0x5` (which is 'e').  So to switch back and forth between the qemu-monitor and serial console, you can type 'ctrl-e c'.  If you just want to get out of the qemu vm, type `ctrl-e c` and then `quit`
  * You can change the display to qemu with QEMU_DISPLAY, such as QEMU_DISPLAY=sdl or QEMU_DISPLAY=vnc:1
- * Connect to the debug console with `socat STDIO,cfmakeraw,isig=1 UNIX:output/NAME/.socket.debug-shell`
+ * Connect to the debug console with `make debug-shell-<NAME>`
 
  * You can include extra local repos through the `EXTRA_REPO_DIRS` variable.
    'make EXTRA_REPO_DIRS=$HOME/src/wolfi-os' will then consider packages from
