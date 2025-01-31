@@ -105,6 +105,13 @@ tar2efi = $(TOOLS_D)/tar2efi-disk \
 .PHONY: disks
 disks: $(foreach name,$(ALL_DISKS),$(ARCH_OUT_D)/$(name)/disk.raw)
 
+cfgs = $(wildcard configs/*.yaml)
+disks = $(foreach cfg,$(cfgs),$(subst .yaml,,$(notdir $(cfg))))
+
+disk_targets = $(foreach name,$(disks),disk-$(name))
+.PHONY: $(disk_targets)
+$(disk_targets): disk-%: $(ARCH_OUT_D)/%/disk.raw
+
 check:
 	@echo "This does not do anything useful, but it passes. Please improve."
 
