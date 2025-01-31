@@ -13,8 +13,12 @@ endif
 endif
 
 ARCHES := aarch64 x86_64
-OS := $(shell uname -s)
+# Darwin reports arm64 for 'uname -m'
 BUILDER_ARCH := $(shell uname -m)
+# Darwin reports arm64 for 'uname -m'
+ifeq ($(BUILDER_ARCH),arm64)
+BUILDER_ARCH=aarch64
+endif
 ARCH := $(BUILDER_ARCH)
 
 ifneq ($(filter-out $(ARCHES),$(BUILDER_ARCH)),)
@@ -48,8 +52,7 @@ CONSOLE_QUIET = quiet
 # https://unix.stackexchange.com/questions/479085/
 add-serial-debug = \
  -chardev socket,path=$(1),server=on,wait=off,id=debugshell \
- -device pci-serial,id=serial0,chardev=debugshell \
- -serial chardev:debugshell
+ -device pci-serial,id=serial0,chardev=debugshell
 else ifeq ($(ARCH), x86_64)
 CONSOLE_QUIET = console=ttyS0 quiet
 add-serial-debug = -serial unix:$(1),wait=off,server=on

@@ -56,3 +56,13 @@ You can then attempt to build and run that config just as you would one of the e
 
    Note though, that changes to the packages in those directories will not be
    recognized. You will have to remove image.tar to force rebuild.
+
+
+# MacOS
+
+getopt and stat wfrom macOS won't work correctly for any of Scott's scripts. Use
+gnu-getopt and gnu-stat from homebrew. `brew install gnu-getopt coreutils`
+gnu-getopt provides a getopt bin inside of the Cellar bin directory. coreutils
+installs common commadn with a 'g' in front of them so you'll want to set an
+alias or link it somewhere where it will be used before /usr/bin/
+
