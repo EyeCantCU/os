@@ -1,0 +1,115 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+contents:
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    - https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
+  repositories:
+    - https://packages.wolfi.dev/os
+    - https://packages.cgr.dev/extras
+  packages:
+  # We need an init system to invoke our entrypoint.
+  - mattmoor-chainit-init
+
+  # We need a shell
+  - dash-binsh
+  # We need tar, truncate, and other posix tools.
+  - coreutils
+  # We use tar to unpack the rootfs.
+  - gnutar
+
+  # We use sfdisk to partition disk.
+  - sfdisk
+
+  # We need this for mkfs.fat
+  - dosfstools
+  # We need this for mkfx.xfs
+  - xfsprogs
+
+  # debug editing
+  - sed
+
+  # We mount and unmount the filesystems after we've formatted them.
+  - mount
+  - umount
+
+entrypoint:
+  command: /bin/sh
+cmd: |
+  -c '
+  set -e
+
+  mkdir /output
+  mount -t 9p -otrans=virtio -oversion=9p2000.L output /output
+
+  tarball=/dev/vda
+  disk=/dev/vdb
+
+  GPT_UUID=11111111-1111-1111-11111111111111111
+  PT_UUID_EFI=22222222-2222-2222-2222-222222222222
+  PT_UUID_ROOT=33333333-3333-3333-3333-333333333333
+  FS_UUID_ROOT=44444444-4444-4444-4444-444444444444
+  FS_UUID_EFI=55555555 # 32 bit int
+
+  # https://uapi-group.org/specifications/specs/discoverable_partitions_specification
+  EFI_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+  ROOT_X86_64="4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
+  ROOT_ARM64="b921b045-1df0-41c3-af44-4c6f280d3fae"
+
+  if [ "$(cat /output/buildArch)" = "x86_64" ]; then
+      ROOT_TYPE="${ROOT_X86_64}"
+  elif [ "$(cat /output/buildArch)" = "aarch64" ]; then
+      ROOT_TYPE="${ROOT_ARM64}"
+  fi
+
+  [ -e "$tarball" ]
+  [ -b "$disk" ]
+
+  # Create a GPT parition table on our disk where the
+  # EFI System Partition (ESP) is 100M to hold the kernel,
+  # systemd-boot, and a handful of configuration files.
+  # The root partition will be the remainder of the disk.
+  sfdisk $disk <<EOF
+  label: gpt
+  label-id: $GPT_UUID
+  unit: sectors
+  sector-size: 512
+
+  disk.raw1 : start=  2048, size= 2048000, type=$EFI_TYPE, uuid=$PT_UUID_EFI, name="ESP"
+  disk.raw2 : start=2050048, size=, type=$ROOT_TYPE, uuid=$PT_UUID_ROOT, name="Chainguard", attrs="GUID:59"
+  EOF
+
+  uefi_partition="${disk}1"
+  root_partition="${disk}2"
+
+  # Format our EFP System Partition with FAT32 (required)
+  mkfs.fat -i "$FS_UUID_EFI" -F 32 $uefi_partition
+  # Format our root partition with xfs
+  mkfs.xfs -s size=512 -m "uuid=$FS_UUID_ROOT" -f $root_partition
+
+  # Mount our root partition, and our EFI System Partition
+  root_dir=$(mktemp -d /tmp/root.XXXXXX)
+  mount $root_partition $root_dir
+  mkdir -p $root_dir/boot/efi
+  mount $uefi_partition $root_dir/boot/efi
+
+  # Extract our initrd to our root partition, to be used as our root filesystem
+  tar -xpf "$tarball" --numeric-owner -C $root_dir
+
+  echo -n 0 > /output/result
+
+  umount $root_dir/boot/efi
+  umount $root_dir/
+
+  echo Done.
+  exit 0
+  '
+
+# This isn't particularly relevant for how we use this,
+# but we need to specify the set of architectures here
+# so that the locking done by apko_config doesn't try to
+# do a bunch of unsupported architectures.
+archs:
+- x86_64
+- aarch64
