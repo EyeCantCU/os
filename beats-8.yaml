@@ -1,9 +1,9 @@
 package:
   name: beats-8
   version: "8.17.1"
-  epoch: 0
+  epoch: 1
   description: >
-    The Beats are lightweight data shippers, written in Go, that you install  on your servers to capture all sorts of operational data (logs, metrics,  network data). They send the data to Elasticsearch directly or via Logstash.
+    The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (logs, metrics, network data). They send the data to Elasticsearch directly or via Logstash.
 
   copyright:
     - license: Apache-2.0
@@ -21,6 +21,76 @@ pipeline:
       expected-commit: 424070e87d831d2d66a7514e1c1120ad540a86db
 
 subpackages:
+  - name: auditbeat-8
+    dependencies:
+      provides:
+        - auditbeat=${{package.full-version}}
+    pipeline:
+      - name: Build auditbeat
+        runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/auditbeat \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/data \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/logs
+
+          cp LICENSE.txt NOTICE.txt ${{targets.subpkgdir}}/usr/share/auditbeat/
+
+          cd auditbeat
+          cp auditbeat.yml auditbeat.docker.yml auditbeat.reference.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
+
+          mage build
+
+          mv auditbeat ${{targets.subpkgdir}}/usr/bin/
+          ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
+
+          mv ../x-pack/auditbeat/module/ "${{targets.subpkgdir}}"/usr/share/auditbeat/
+      - uses: strip
+    test:
+      pipeline:
+        - name: Test build
+          runs: auditbeat version | grep ${{package.version}}
+        - name: Test exporting
+          runs: |
+            cd /usr/share/auditbeat
+
+            auditbeat export config
+            auditbeat export ilm-policy
+            auditbeat export index-pattern
+            auditbeat export template
+        - name: Test keystore
+          runs: |
+            cd /usr/share/auditbeat
+
+            auditbeat keystore --help
+
+            auditbeat keystore create | grep "Created auditbeat keystore"
+            echo BAR | auditbeat keystore add FOO --stdin | grep "Successfully updated the keystore"
+            auditbeat keystore list | grep FOO
+            auditbeat keystore remove FOO
+        - name: Test auditbeat setup
+          runs: |
+            auditbeat setup
+
+  - name: auditbeat-8-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd auditbeat
+          sed 's/{{ \.BeatName }}/auditbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
   - name: metricbeat-8
     dependencies:
       provides:
@@ -141,6 +211,9 @@ subpackages:
 
 update:
   enabled: true
+  ignore-regex-patterns:
+    # There are tags such as v8.14.3+build202408141002 that should be ignored
+    - .*\+build[0-9]*$
   github:
     strip-prefix: v
     tag-filter: v8.
