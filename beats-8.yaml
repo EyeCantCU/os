@@ -31,22 +31,43 @@ subpackages:
           mkdir -p \
             ${{targets.subpkgdir}}/usr/bin \
             ${{targets.subpkgdir}}/usr/share/auditbeat \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d \
             ${{targets.subpkgdir}}/usr/share/auditbeat/data \
-            ${{targets.subpkgdir}}/usr/share/auditbeat/logs
+            ${{targets.subpkgdir}}/usr/share/auditbeat/logs \
 
           cp LICENSE.txt NOTICE.txt ${{targets.subpkgdir}}/usr/share/auditbeat/
 
           cd auditbeat
-          cp auditbeat.yml auditbeat.docker.yml auditbeat.reference.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
 
           mage build
+          mage fields
+          mage dashboards
+
+          cp -r auditbeat.docker.yml auditbeat.reference.yml fields.yml build/kibana/ ${{targets.subpkgdir}}/usr/share/auditbeat/
+          cp module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
+          mv ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.docker.yml ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.yml
 
           mv auditbeat ${{targets.subpkgdir}}/usr/bin/
           ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
 
-          mv ../x-pack/auditbeat/module/ "${{targets.subpkgdir}}"/usr/share/auditbeat/
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/auditbeat && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/auditbeat/data "${{targets.subpkgdir}}"/usr/share/auditbeat/logs
       - uses: strip
     test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - curl
+            - jq
+            - shadow
+            - sudo
+        environment:
+          ELASTICSEARCH_HOSTS: localhost:9200
+      # These tests cover all auditbeat commands that do not make external requests to Elasticsearch
       pipeline:
         - name: Test build
           runs: auditbeat version | grep ${{package.version}}
@@ -62,14 +83,41 @@ subpackages:
           runs: |
             cd /usr/share/auditbeat
 
-            auditbeat keystore --help
-
             auditbeat keystore create | grep "Created auditbeat keystore"
             echo BAR | auditbeat keystore add FOO --stdin | grep "Successfully updated the keystore"
             auditbeat keystore list | grep FOO
-            auditbeat keystore remove FOO
+            auditbeat keystore remove FOO | grep "successfully removed key: FOO"
         - name: Test auditbeat setup
           runs: |
+            curl -sL https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${{package.version}}-linux-aarch64.tar.gz \
+              --output elasticsearch-${{package.version}}-linux-aarch64.tar.gz
+            curl -sL https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${{package.version}}-linux-aarch64.tar.gz.sha512 > elasticsearch.sha512
+
+            sha512sum -c elasticsearch.sha512
+
+            mkdir -p elasticsearch
+            tar -xzf elasticsearch-${{package.version}}-linux-aarch64.tar.gz -C elasticsearch --strip-components=1
+
+            useradd elasticsearch
+            chown -R elasticsearch:elasticsearch elasticsearch
+
+            cd elasticsearch
+
+            # Start up Elasticsearch with no username/password
+            sudo -E -u elasticsearch ./bin/elasticsearch -d \
+              -Expack.security.enabled=false \
+              -p /tmp/elasticsearch.pid
+
+            es_status="red"
+
+            while [ $es_status != "green" ]
+            do
+              es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+              echo "Elasticsearch status: $es_status"
+              sleep 2
+            done
+
+            cd /usr/share/auditbeat
             auditbeat setup
 
   - name: auditbeat-8-oci-entrypoint
