@@ -1,0 +1,152 @@
+package:
+  name: py3.10-torchvision-0.21-cuda-11.8
+  version: 0.21.0
+  epoch: 0
+  description: Datasets, Transforms and Models specific to Computer Vision
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  resources:
+    cpu: 16
+    memory: 16Gi
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      # For some reason this isn't detected
+      - libgomp
+      - openmp-17-dev
+      - libjpeg-turbo
+      - libpng
+      - nvidia-cudnn-${{vars.cudnn-version}}-cuda-${{vars.cuda-major-version}}
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+      - cuda-toolkit-${{vars.cuda-version}}
+      - py${{vars.python-version}}-numpy
+      - py${{vars.python-version}}-pyyaml
+      - py${{vars.python-version}}-typing-extensions
+      - py${{vars.python-version}}-torch-${{vars.torch-version}}-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-pillow
+    provides:
+      - py${{vars.python-version}}-torchvision-cuda-${{vars.cuda-version}}
+
+vars:
+  cudnn-version: 9
+  gcc-version: 11
+  torch-version: 2.6
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.(\d+)$'
+    replace: 'cu$1$2'
+    to: cuda-pyvariant
+  - from: ${{package.name}}
+    match: 'py(\d+\.\d+)-.*'
+    replace: '$1'
+    to: python-version
+
+environment:
+  contents:
+    packages:
+      - patchelf
+      - build-base
+      - bash
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - py${{vars.python-version}}-installer
+      - py${{vars.python-version}}-numpy
+      - py${{vars.python-version}}-pip
+      - py${{vars.python-version}}-setuptools
+      - py${{vars.python-version}}-wheel
+      - python-${{vars.python-version}}
+      - python-${{vars.python-version}}-dev
+      - samurai
+      - clang-15-dev
+      - clang-15
+      - libffi-dev
+      - libjpeg-dev
+      - libpng-dev
+      - libpng-utils
+      - libjpeg-turbo-dev
+      - llvm15
+      - llvm15-dev
+      - llvm-lld-15
+      - clang-15-default
+      - openmp-17-dev
+      - posix-libc-utils
+      - gcc-${{vars.gcc-version}}-default
+      - git
+      - coreutils
+      - libgomp
+      - nvidia-driver
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - py${{vars.python-version}}-torch-${{vars.torch-version}}-cuda-${{vars.cuda-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pytorch/vision.git
+      tag: v${{package.version}}
+      expected-commit: 7af698794eded568735f9519593603c1ec889eba
+
+  - name: Python Build
+    runs: |
+      export CUDA_HOME=/usr/local/cuda-${{vars.cuda-version}}
+      export CUDA_NVCC_EXECUTABLE=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc
+      export CUDA_VERSION="${{vars.cuda-version}}"
+      export CUDA_HOME="/usr/local/cuda-${CUDA_VERSION}"
+      export PATH="$PATH:${CUDA_HOME}/bin"
+      export CMAKE_CUDA_ARCHITECTURES=all
+      export USE_CUDA=1
+      export FORCE_CUDA=1
+      export USE_CUDNN=1
+      export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
+      export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
+
+      [ -d "$CUDA_HOME" ] || { echo "CUDA_HOME ($CUDA_HOME) is not a dir"; exit 1; }
+
+      # Disable some warnings
+      export CFLAGS="$CFLAGS -Wno-error=nonnull -Wno-nonnull"
+      export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull"
+
+      export BUILD_VERSION="${{package.version}}+${{vars.cuda-pyvariant}}"
+
+      python setup.py bdist_wheel
+      python${{vars.python-version}} -m pip install --verbose \
+        --no-index --no-build-isolation --no-deps \
+        --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/*.whl
+      sitepkgd=$(python${{vars.python-version}} -c 'import site; print(site.getsitepackages()[0])')
+      python${{vars.python-version}} -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
+
+update:
+  enabled: true
+  github:
+    identifier: pytorch/vision
+    strip-prefix: v
+    tag-filter: v0.21.
+
+test:
+  pipeline:
+    - uses: python/import
+      with:
+        python: python${{vars.python-version}}
+        import: torch
+    - uses: python/import
+      with:
+        python: python${{vars.python-version}}
+        import: torchvision
+    - runs: |
+        python${{vars.python-version}} ./quickstart.py > output.out 2>&1
+        grep -E "ERROR|None" output.out && exit 1
