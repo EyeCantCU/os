@@ -18,7 +18,9 @@ endif
 
 ARCH_OUT_D = output/$(ARCH)
 
-apkoaas: pkg/ main.go
+gosrc := $(shell find main.go pkg/ -name "*.go")
+
+apkoaas: $(gosrc)
 	go build -o apkoaas
 
 test:
