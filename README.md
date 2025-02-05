@@ -3,7 +3,9 @@
 
 ## Compile
 
+```
 go build .
+```
 
 ## Run
 
