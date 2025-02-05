@@ -18,7 +18,7 @@ endif
 
 ARCH_OUT_D = output/$(ARCH)
 
-apkoaas:
+apkoaas: pkg/ main.go
 	go build -o apkoaas
 
 test:

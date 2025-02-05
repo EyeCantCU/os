@@ -104,14 +104,29 @@ func buildCmd() *cobra.Command {
 	return cmd
 }
 
-func createDisk(ctx context.Context, buildTargetPath, builderCpio, builderConfigPath, arch, kernelpath string, inputTar *gzip.Reader) (string, error) {
+func createDisk(ctx context.Context, converter converter.Interface, buildTargetPath, arch string, inputTar *gzip.Reader) (string, error) {
 	var err error
-	var c converter.Interface
 
+	diskDir := filepath.Join("output", arch, strings.Split(filepath.Base(buildTargetPath), ".")[0])
+
+	err = os.MkdirAll(diskDir, os.ModePerm)
+	if err != nil {
+		return "", fmt.Errorf("could not create output dir: %w", err)
+	}
+
+	diskName, err := converter.ConvertToFile(ctx, inputTar, diskDir)
+	if err != nil {
+		return "", fmt.Errorf("c.Convert() failed with %w", err)
+	}
+
+	return diskName, nil
+}
+
+func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPath, arch string) (converter.Interface, error) {
 	if builderCpio == "" {
 		builderConfig, err := os.Open(builderConfigPath)
 		if err != nil {
-			return "", fmt.Errorf("failed to open apko yaml: %w", err)
+			return nil, fmt.Errorf("failed to open apko yaml: %w", err)
 		}
 		defer builderConfig.Close()
 
@@ -119,42 +134,14 @@ func createDisk(ctx context.Context, buildTargetPath, builderCpio, builderConfig
 		dec := yaml.NewDecoder(builderConfig)
 		dec.KnownFields(true)
 		if err := dec.Decode(&ic); err != nil {
-			return "", fmt.Errorf("failed to parse image configuration: %v", err)
+			return nil, fmt.Errorf("failed to parse image configuration: %v", err)
 		}
 
-		c, err = tar2efi.New(ctx, kernelpath, arch, ic)
-		if err != nil {
-			return "", fmt.Errorf("tar2efi.New() failed with %w", err)
-		}
-		// cleanup only if we're using tmpfile cpio
-		defer c.Cleanup()
-	} else {
-		c, err = tar2efi.NewFromCpio(ctx, builderCpio, kernelpath, arch)
-		if err != nil {
-			return "", fmt.Errorf("tar2efi.New() failed with %w", err)
-		}
+		return tar2efi.New(ctx, kernelPath, arch, ic)
 	}
 
-	diskDir := filepath.Join("output", arch, strings.Split(filepath.Base(buildTargetPath), ".")[0])
-	diskName := filepath.Join(diskDir, "disk.raw")
-
-	err = os.MkdirAll(diskDir, os.ModePerm)
-	if err != nil {
-		return "", fmt.Errorf("could not create output dir: %w", err)
-	}
-
-	disk, err := os.Create(diskName)
-	if err != nil {
-		return "", fmt.Errorf("could not create output file: %w", err)
-	}
-	defer disk.Close()
-
-	err = c.Convert(ctx, inputTar, disk)
-	if err != nil {
-		return "", fmt.Errorf("c.Convert() failed with %w", err)
-	}
-
-	return disk.Name(), nil
+	// just convert using the provided cpio
+	return tar2efi.NewFromCpio(ctx, builderCpio, kernelPath, arch)
 }
 
 func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, arch string) error {
@@ -163,6 +150,16 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 		return fmt.Errorf("error creating image.tar: %w", err)
 	}
 	defer os.RemoveAll(apkoTar)
+
+	converter, err := createBuilder(ctx, builderConf, builderCpio, kernelPath, arch)
+	if err != nil {
+		return fmt.Errorf("error creating tar converter: %w", err)
+	}
+
+	// in case it's not a persistent cpio, we want to cleanup
+	if builderCpio == "" {
+		defer converter.Cleanup()
+	}
 
 	tar, err := os.Open(apkoTar)
 	if err != nil {
@@ -176,7 +173,7 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 	}
 	defer gz.Close()
 
-	efiDisk, err := createDisk(ctx, buildFilePath, builderCpio, builderConf, arch, kernelPath, gz)
+	efiDisk, err := createDisk(ctx, converter, buildFilePath, arch, gz)
 	if err != nil {
 		return fmt.Errorf("error converting to disk image: %w", err)
 	}
