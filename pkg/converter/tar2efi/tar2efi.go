@@ -112,6 +112,9 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 	outd := filepath.Dir(output)
 
 	tmpd, err := os.MkdirTemp(outd, "")
+	if err != nil {
+		return fmt.Errorf("os.MkdirTemp() failed with %w", err)
+	}
 	defer os.RemoveAll(tmpd)
 
 	imageTarball, err := os.Create(filepath.Join(tmpd, "image.tar"))
@@ -196,7 +199,7 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 
 			// The console=ttyS0 gets us useful debug output on x86_64
 			// (in the Cloud Run service), but hides test output on aarch64.
-			"-kernel", c.kernel, "-append", "panic=-1 quiet"+q.Console,
+			"-kernel", c.kernel, "-append", "panic=-1 quiet console="+q.Console,
 			"-initrd", c.builder,
 		)...)
 
@@ -204,7 +207,7 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 		cmd.Stdout = buf
 		cmd.Stderr = buf
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("qemu failed with %w", err)
+			return fmt.Errorf("qemu failed with %w: %s", err, buf.String())
 		}
 	}
 

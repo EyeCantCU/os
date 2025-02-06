@@ -16,12 +16,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 
 	"chainguard.dev/apko/pkg/apk/auth"
 	"chainguard.dev/apko/pkg/apk/expandapk"
-	"chainguard.dev/apko/pkg/build/types"
 )
 
 // for the future, to be set with ldflags to freeze versions
@@ -29,8 +27,6 @@ var (
 	qemuSystemVersion = ""
 	kernelVersion     = ""
 )
-
-var targetArch string = types.ParseArchitecture(runtime.GOARCH).ToAPK()
 
 func fetchPackageVersion(repo, pkg, apkArch string) (string, error) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/%s/APKINDEX.tar.gz", repo, apkArch), nil)
