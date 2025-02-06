@@ -29,8 +29,13 @@ import (
 )
 
 func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration) string {
+	// We should comfortably be able to convert all of these images
+	// in under a minute.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+
 	fs := apkfs.DirFS(t.TempDir(), apkfs.WithCreateDir())
-	bc, err := build.New(context.Background(), fs,
+	bc, err := build.New(ctx, fs,
 		build.WithAuthenticator(auth.CGRAuth{}),
 		build.WithArch(TargetArch),
 		build.WithImageConfiguration(ic),
@@ -39,7 +44,7 @@ func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration
 		t.Fatalf("build.New() failed with %v", err)
 	}
 
-	_, layer, err := bc.BuildLayer(context.Background())
+	_, layer, err := bc.BuildLayer(ctx)
 	if err != nil {
 		t.Fatalf("bc.BuildLayer() failed with %v", err)
 	}
@@ -54,7 +59,7 @@ func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration
 		t.Fatalf("os.CreateTemp() failed with %v", err)
 	}
 
-	if err := c.Convert(context.Background(), ucl, disk); err != nil {
+	if err := c.Convert(ctx, ucl, disk); err != nil {
 		t.Fatalf("c.Convert() failed with %v", err)
 	}
 	return disk.Name()

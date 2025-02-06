@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 package tar2efi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -152,6 +153,7 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, tmp string) (s
 	}
 
 	// Convert the image to a raw disk image.
+	buf := bytes.NewBuffer(nil)
 	{
 		// nolint:gosec // We trust the kernel argument here.
 		cmd := exec.CommandContext(ctx, qemuCommand, append(slices.Clone(baseQEMUArgs),
@@ -178,17 +180,17 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, tmp string) (s
 			"-kernel", c.kernel, "-append", "panic=-1 quiet console=ttyS0",
 			"-initrd", c.builder,
 		)...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stdout = buf
+		cmd.Stderr = buf
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("qemu failed with %w", err)
+			return "", fmt.Errorf("qemu failed with %w: %s", err, buf.String())
 		}
 	}
 
 	if b, err := os.ReadFile(filepath.Join(tmp, "result")); err != nil {
 		return "", fmt.Errorf("os.ReadFile() failed with %w", err)
 	} else if string(b) != "0" {
-		return "", ErrDiskConversion
+		return "", fmt.Errorf("%w: %s", ErrDiskConversion, buf.String())
 	}
 
 	return diskFilename.Name(), nil
