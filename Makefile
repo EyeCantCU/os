@@ -2,7 +2,7 @@ TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 TOOLS_D = $(TOP_D)/tools
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS ?= linux-boot-configuration mattmoor-chainit-init
-ALL_DISKS := generic google docker-runner workstation
+ALL_DISKS := generic google docker-runner workstation aws-ec2
 
 ARCHES := aarch64 x86_64
 
@@ -74,6 +74,16 @@ disk-%: apkoaas builder
 
 %.vmdk: %.raw
 	qemu-img convert -O vmdk -o subformat=streamOptimized $< $@
+
+# TODO add awspub installation
+# TODO build arm64
+awspub: disk-aws-ec2 output/x86_64/aws-ec2/disk.vmdk
+	:> .awspub.mapping
+	echo '---' >> .awspub.mapping
+	echo "serial: $$(date +%s)" >> .awspub.mapping
+	echo "employee: $$(id -nu)" >> .awspub.mapping
+	aws sso login
+	awspub create --config-mapping .awspub.mapping tools/awspub-config.yaml
 
 clean:
 	rm -Rf output builder apkoaas *.raw
