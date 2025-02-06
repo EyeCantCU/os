@@ -1,25 +1,30 @@
 TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 TOOLS_D = $(TOP_D)/tools
-# when converting from an existing image, we stuff these in.
-BOOT_PKGS ?= linux-boot-configuration mattmoor-chainit-init
-ALL_DISKS := generic google docker-runner workstation aws-ec2
 
-ARCHES := aarch64 x86_64
+# when converting from an existing image, we stuff these in.
+BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
+ALL_DISKS = generic google docker-runner workstation aws-ec2
 
 # Darwin reports arm64 for 'uname -m'
-ARCH ?= $(shell uname -m)
-ifeq ($(ARCH),arm64)
-ARCH=aarch64
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),arm64)
+UNAME_M = aarch64
 endif
 
-ifneq ($(filter-out $(ARCHES),$(ARCH)),)
-$(error ARCH '$(ARCH)' not supported. Must be one of $(ARCHES))
-endif
+BUILDER_ARCH ?= $(UNAME_M)
+ARCH ?= $(BUILDER_ARCH)
 
 ARCH_OUT_D = output/$(ARCH)
 
-gosrc := $(shell find main.go pkg/ -name "*.go")
+BUILDER_KERNEL := builder/kernel-$(BUILDER_ARCH)
+BUILDER_INITRD := builder/initrd-$(BUILDER_ARCH)
+BUILDER_DEBUG_INITRD := builder/initrd-debug-$(BUILDER_ARCH)
 
+cfgs = $(wildcard configs/*.yaml)
+# names is a list of each basename cfg
+names = $(foreach cfg,$(cfgs),$(subst .yaml,,$(notdir $(cfg))))
+
+gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
 	go build -o apkoaas
 
@@ -28,6 +33,16 @@ test:
 
 .PHONY: disks
 disks: $(foreach name,$(ALL_DISKS),disk-$(name))
+
+# disk-generic depends on ARCH_OUT_D/generic/disk.raw
+disk_targets = $(foreach name,$(names),disk-$(name))
+.PHONY: $(disk_targets)
+$(disk_targets): disk-%: $(ARCH_OUT_D)/%/disk.raw
+
+disk_debug_targets = $(foreach name,$(names),disk-debug-$(name))
+.PHONY: $(disk_debug_targets)
+$(disk_debug_targets): disk-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw
+
 
 .PHONY: debug-shell-%
 debug-shell-%:
@@ -49,28 +64,42 @@ configs/%.yaml:
 	done
 	mv $@.tmp $@
 
-builder: apkoaas
-	@[ -f $(ARCH_OUT_D)/builder/initramfs.cpio ] || ./apkoaas make-builder iac/builder.yaml
 
-builder-debug: apkoaas
-	@[ -f $(ARCH_OUT_D)/builder-debug/initramfs.cpio ] || ./apkoaas make-builder iac/builder-debug.yaml
+.PHONY: builder
+builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 
-debug-disk-%: apkoaas builder-debug
-	@mkdir -p $(ARCH_OUT_D)/$(subst .yaml,,$*)/
+builder/initrd-%: apkoaas iac/builder.yaml
+	@mkdir -p $(dir $@)
+	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder.yaml $@
+
+builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
+	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder-debug.yaml $@
+
+builder/ovmf-%.fd: apkoaas
+	$(TOP_D)/apkoaas fetch --arch=$* ovmf $@
+
+builder/kernel-%: apkoaas
+	$(TOP_D)/apkoaas fetch --arch=$* kernel $@
+
+$(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
+	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
-		--arch $(ARCH) \
-		--builder-cpio $(ARCH_OUT_D)/builder-debug/initramfs.cpio \
-		--kernel $(ARCH_OUT_D)/builder-debug/kernel-$(ARCH) \
-		$(TOP_D)/configs/$*.yaml
-	./apkoaas debug --arch $(ARCH) --ovmf $(ARCH_OUT_D)/builder-debug/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$(subst .yaml,,$*)/disk.raw
+		--arch=$(ARCH) \
+		--build-arch=$(BUILDER_ARCH) \
+		--builder-cpio=$(BUILDER_INITRD) \
+		--kernel=$(BUILDER_KERNEL) \
+		--output=$@ \
+		configs/$*.yaml
 
-disk-%: apkoaas builder
-	@mkdir -p $(ARCH_OUT_D)/$(subst .yaml,,$*)/
+$(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD)
+	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
-		--arch $(ARCH) \
-		--builder-cpio $(ARCH_OUT_D)/builder/initramfs.cpio \
-		--kernel $(ARCH_OUT_D)/builder/kernel-$(ARCH) \
-		$(TOP_D)/configs/$*.yaml
+		--arch=$(ARCH) \
+		--build-arch=$(BUILDER_ARCH) \
+		--builder-cpio=$(BUILDER_DEBUG_INITRD) \
+		--kernel=$(BUILDER_KERNEL) \
+		--output=$@ \
+		configs/$*.yaml "$@"
 
 %.vmdk: %.raw
 	qemu-img convert -O vmdk -o subformat=streamOptimized $< $@
@@ -88,5 +117,23 @@ awspub: disk-aws-ec2 output/x86_64/aws-ec2/disk.vmdk
 clean:
 	rm -Rf output builder apkoaas *.raw
 
+debug:
+	@echo UNAME_M=$(UNAME_M)
+	@echo BUILDER_ARCH=$(BUILDER_ARCH)
+	@echo ARCH=$(ARCH)
+	@echo ARCH_OUT_D=$(ARCH_OUT_D)
+	@echo BUILDER_KERNEL=$(BUILDER_KERNEL)
+	@echo BUILDER_INITRD=$(BUILDER_INITRD)
+	@echo ALL_DISKS=$(ALL_DISKS)
+	@echo names=$(names)
+
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%.yaml builder/ovmf-%.fd
+
+arches = aarch64 x86_64
+ifneq ($(filter-out $(arches),$(BUILDER_ARCH)),)
+$(error BUILDER_ARCH '$(BUILDER_ARCH)' not supported. Must be one of $(arches))
+endif
+ifneq ($(filter-out $(arches),$(ARCH)),)
+$(error ARCH '$(ARCH)' not supported. Must be one of $(arches))
+endif

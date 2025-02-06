@@ -41,7 +41,9 @@ func buildCmd() *cobra.Command {
 	var builderCpioPath string
 	var kernelPath string
 	var arch string
+	var buildArch string
 	var err error
+	var output string
 
 	cmd := &cobra.Command{
 		Use:     "build",
@@ -56,6 +58,18 @@ func buildCmd() *cobra.Command {
 			if len(args) > 0 {
 				buildFilePath = args[0] // e.g. "generic.yaml"
 			}
+
+			if arch == "" {
+				arch = runtime.GOARCH
+			}
+			// standardize everywhere
+			arch := types.ParseArchitecture(arch).ToAPK()
+
+			if buildArch == "" {
+				buildArch = runtime.GOARCH
+			}
+			// standardize everywhere
+			buildArch := types.ParseArchitecture(buildArch).ToAPK()
 
 			if auth, ok := os.LookupEnv("HTTP_AUTH"); !ok {
 				// Fine, no auth.
@@ -80,23 +94,19 @@ func buildCmd() *cobra.Command {
 			if kernelPath == "" {
 				destDir := os.TempDir()
 
-				kernelPath, err = utils.FetchKernel(destDir)
+				kernelPath, err = utils.FetchKernel(destDir, buildArch)
 				if err != nil {
 					return fmt.Errorf("missing kernel path, specify a valid kernel with --kernel")
 				}
 			}
 
-			if arch == "" {
-				arch = runtime.GOARCH
-			}
-			// standardize everywhere
-			arch := types.ParseArchitecture(arch).ToAPK()
-
-			return BuildCmd(ctx, buildFilePath, builderConfFilePath, builderCpioPath, kernelPath, arch)
+			return BuildCmd(ctx, buildFilePath, builderConfFilePath, builderCpioPath, kernelPath, buildArch, arch, output)
 		},
 	}
 
-	cmd.Flags().StringVar(&arch, "arch", "", "arch to build the disk")
+	cmd.Flags().StringVar(&arch, "arch", "", "arch present in disk")
+	cmd.Flags().StringVar(&output, "output", "disk.raw", "write the created disk image here")
+	cmd.Flags().StringVar(&buildArch, "build-arch", "", "arch used to build the disk (qemu-system-<arch>)")
 	cmd.Flags().StringVar(&builderConfFilePath, "builder", "", "path to builder yaml definition")
 	cmd.Flags().StringVar(&builderCpioPath, "builder-cpio", "", "path to premade builder cpio")
 	cmd.Flags().StringVar(&kernelPath, "kernel", "", "path to kernel to use")
@@ -104,22 +114,15 @@ func buildCmd() *cobra.Command {
 	return cmd
 }
 
-func createDisk(ctx context.Context, converter converter.Interface, buildTargetPath, arch string, inputTar *gzip.Reader) (string, error) {
+func createDisk(ctx context.Context, converter converter.Interface, buildTargetPath, arch string, inputTar *gzip.Reader, output string) error {
 	var err error
 
-	diskDir := filepath.Join("output", arch, strings.Split(filepath.Base(buildTargetPath), ".")[0])
-
-	err = os.MkdirAll(diskDir, os.ModePerm)
+	err = os.MkdirAll(filepath.Dir(output), os.ModePerm)
 	if err != nil {
-		return "", fmt.Errorf("could not create output dir: %w", err)
+		return fmt.Errorf("could not create output dir: %w", err)
 	}
 
-	diskName, err := converter.ConvertToFile(ctx, inputTar, diskDir)
-	if err != nil {
-		return "", fmt.Errorf("c.Convert() failed with %w", err)
-	}
-
-	return diskName, nil
+	return converter.ConvertToFile(ctx, inputTar, output, types.ParseArchitecture(arch))
 }
 
 func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPath, arch string) (converter.Interface, error) {
@@ -144,14 +147,14 @@ func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPa
 	return tar2efi.NewFromCpio(ctx, builderCpio, kernelPath, arch)
 }
 
-func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, arch string) error {
+func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, buildArch, arch, output string) error {
 	apkoTar, err := utils.CreateTar(ctx, buildFilePath, arch)
 	if err != nil {
 		return fmt.Errorf("error creating image.tar: %w", err)
 	}
 	defer os.RemoveAll(apkoTar)
 
-	converter, err := createBuilder(ctx, builderConf, builderCpio, kernelPath, arch)
+	converter, err := createBuilder(ctx, builderConf, builderCpio, kernelPath, buildArch)
 	if err != nil {
 		return fmt.Errorf("error creating tar converter: %w", err)
 	}
@@ -173,11 +176,11 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 	}
 	defer gz.Close()
 
-	efiDisk, err := createDisk(ctx, converter, buildFilePath, arch, gz)
+	err = createDisk(ctx, converter, buildFilePath, arch, gz, output)
 	if err != nil {
 		return fmt.Errorf("error converting to disk image: %w", err)
 	}
 
-	fmt.Println(efiDisk)
+	fmt.Println(output)
 	return nil
 }

@@ -32,8 +32,8 @@ var (
 
 var targetArch string = types.ParseArchitecture(runtime.GOARCH).ToAPK()
 
-func fetchPackageVersion(repo, pkg string) (string, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/%s/APKINDEX.tar.gz", repo, targetArch), nil)
+func fetchPackageVersion(repo, pkg, apkArch string) (string, error) {
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/%s/APKINDEX.tar.gz", repo, apkArch), nil)
 	if err != nil {
 		return "", fmt.Errorf("http.NewRequest() failed with %w", err)
 	}
@@ -74,8 +74,8 @@ func fetchPackageVersion(repo, pkg string) (string, error) {
 	return version, nil
 }
 
-func fetchAndUnpack(repo, pkg, version, directory string) error {
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/%s/%s-%s.apk", repo, targetArch, pkg, version), nil)
+func fetchAndUnpack(repo, pkg, apkArch, version, directory string) error {
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/%s/%s-%s.apk", repo, apkArch, pkg, version), nil)
 	if err != nil {
 		return fmt.Errorf("http.NewRequest() failed with %w", err)
 	}
@@ -144,20 +144,20 @@ func fetchAndUnpack(repo, pkg, version, directory string) error {
 	return nil
 }
 
-func FetchKernel(destdir string) (string, error) {
+func FetchKernel(destdir, apkArch string) (string, error) {
 	td, err := os.MkdirTemp(destdir, "kernel")
 	if err != nil {
 		return "", fmt.Errorf("os.MkdirTemp() failed with %w", err)
 	}
 
 	if kernelVersion == "" {
-		kernelVersion, err = fetchPackageVersion("apk.cgr.dev/chainguard-private", "linux")
+		kernelVersion, err = fetchPackageVersion("apk.cgr.dev/chainguard-private", "linux", apkArch)
 		if err != nil {
 			return "", fmt.Errorf("failed to fetch package version: %w", err)
 		}
 	}
 
-	err = fetchAndUnpack("apk.cgr.dev/chainguard-private", "linux", kernelVersion, td)
+	err = fetchAndUnpack("apk.cgr.dev/chainguard-private", "linux", apkArch, kernelVersion, td)
 	if err != nil {
 		return "", fmt.Errorf("fatch failed with %w", err)
 	}
@@ -170,23 +170,23 @@ func FetchKernel(destdir string) (string, error) {
 	return filepath.Join(td, "boot", kernel), nil
 }
 
-func FetchBios(destdir string) (string, error) {
+func FetchBios(destdir, apkArch string) (string, error) {
 	td, err := os.MkdirTemp(destdir, "bios")
 	if err != nil {
 		return "", fmt.Errorf("os.MkdirTemp() failed with %w", err)
 	}
 
 	if qemuSystemVersion == "" {
-		qemuSystemVersion, err = fetchPackageVersion("apk.cgr.dev/chainguard", fmt.Sprintf("qemu-system-%s", targetArch))
+		qemuSystemVersion, err = fetchPackageVersion("apk.cgr.dev/chainguard", fmt.Sprintf("qemu-system-%s", apkArch), apkArch)
 		if err != nil {
 			return "", fmt.Errorf("failed to fetch package version: %w", err)
 		}
 	}
 
-	err = fetchAndUnpack("apk.cgr.dev/chainguard", fmt.Sprintf("qemu-system-%s", targetArch), qemuSystemVersion, td)
+	err = fetchAndUnpack("apk.cgr.dev/chainguard", fmt.Sprintf("qemu-system-%s", apkArch), apkArch, qemuSystemVersion, td)
 	if err != nil {
 		return "", fmt.Errorf("fatch failed with %w", err)
 	}
 
-	return filepath.Join(td, fmt.Sprintf("usr/share/qemu/edk2-%s-code.fd", targetArch)), nil
+	return filepath.Join(td, fmt.Sprintf("usr/share/qemu/edk2-%s-code.fd", apkArch)), nil
 }

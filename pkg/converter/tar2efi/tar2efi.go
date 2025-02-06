@@ -15,11 +15,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/apkoaas/pkg/converter"
 	"chainguard.dev/apkoaas/pkg/utils"
+	"github.com/chainguard-dev/clog"
 )
 
 var ErrDiskConversion = errors.New("disk conversion failed")
@@ -36,7 +38,7 @@ func New(ctx context.Context, kernel string, buildArch string, ic types.ImageCon
 	}
 	if err := utils.CreateCpio(ctx, f.Name(),
 		build.WithImageConfiguration(ic),
-		build.WithArch(TargetArch),
+		build.WithArch(types.ParseArchitecture(buildArch)),
 	); err != nil {
 		return nil, fmt.Errorf("utils.CreateCpio() failed with %w", err)
 	}
@@ -76,7 +78,7 @@ func (c *t2e) Cleanup() error {
 }
 
 // Convert implements converter.Interface
-func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer) error {
+func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer, arch types.Architecture) error {
 	// Create a scratch space for ourselves.
 	tmp, err := os.MkdirTemp("", "")
 	if err != nil {
@@ -84,12 +86,13 @@ func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer) er
 	}
 	defer os.RemoveAll(tmp)
 
-	name, err := c.ConvertToFile(ctx, input, tmp)
+	diskPath := filepath.Join(tmp, "disk.raw")
+	err = c.ConvertToFile(ctx, input, diskPath, arch)
 	if err != nil {
 		return fmt.Errorf("ConvertToFile() failed with %w", err)
 	}
 
-	f, err := os.Open(name)
+	f, err := os.Open(diskPath)
 	if err != nil {
 		return fmt.Errorf("os.Open() failed with %w", err)
 	}
@@ -103,16 +106,23 @@ func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer) er
 }
 
 // ConvertToFile implements converter.Interface
-func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, tmp string) (string, error) {
+func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string, arch types.Architecture) error {
 	// Write the uncompressed filesystem into a tarball for us to mount.
 	var size int64
-	imageTarball, err := os.Create(filepath.Join(tmp, "image.tar"))
+	outd := filepath.Dir(output)
+
+	tmpd, err := os.MkdirTemp(outd, "")
+	defer os.RemoveAll(tmpd)
+
+	imageTarball, err := os.Create(filepath.Join(tmpd, "image.tar"))
 	if err != nil {
-		return "", fmt.Errorf("os.Create() failed with %w", err)
-	} else if size, err = io.Copy(imageTarball, input); err != nil {
-		return "", fmt.Errorf("io.Copy() failed with %w", err)
-	} else if err := imageTarball.Close(); err != nil {
-		return "", fmt.Errorf("f.Close() failed with %w", err)
+		return fmt.Errorf("os.Create() failed with %w", err)
+	}
+	if size, err = io.Copy(imageTarball, input); err != nil {
+		return fmt.Errorf("io.Copy() of input tar failed with %w", err)
+	}
+	if err := imageTarball.Close(); err != nil {
+		return fmt.Errorf("f.Close() failed with %w", err)
 	}
 
 	// Most CSPs require disks to be in 1GB increments.  Compute the size of the
@@ -130,17 +140,25 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, tmp string) (s
 	// TODO(mattmoor): We should experiment with writing the GPT table in Go
 	// vs. with sfdisk.  smoser has used this in the past:
 	//     https://pkg.go.dev/github.com/rekby/gpt
-	diskFilename, err := os.Create(filepath.Join(tmp, "disk.raw"))
+	diskFileName := filepath.Join(tmpd, "disk.raw")
+	diskFile, err := os.Create(diskFileName)
 	if err != nil {
-		return "", fmt.Errorf("os.Create() failed with %w", err)
-	} else if err := diskFilename.Truncate(numGB * oneGB); err != nil {
-		return "", fmt.Errorf("f.Truncate() failed with %w", err)
-	} else if err := diskFilename.Close(); err != nil {
-		return "", fmt.Errorf("f.Close() failed with %w", err)
+		return fmt.Errorf("os.Create() failed with %w", err)
+	} else if err := diskFile.Truncate(numGB * oneGB); err != nil {
+		return fmt.Errorf("f.Truncate() failed with %w", err)
+	} else if err := diskFile.Close(); err != nil {
+		return fmt.Errorf("f.Close() failed with %w", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(tmp, "result"), []byte("1"), 0o600); err != nil {
-		return "", fmt.Errorf("os.WriteFile() failed with %w", err)
+	diskFile.Close()
+
+	workDir := filepath.Join(tmpd, "workDir")
+	if err := os.Mkdir(workDir, 0755); err != nil {
+		return fmt.Errorf("failed to create results tmpdir")
+	}
+
+	if err := os.WriteFile(filepath.Join(workDir, "result"), []byte("1"), 0o600); err != nil {
+		return fmt.Errorf("os.WriteFile() failed with %w", err)
 	}
 
 	// write to /output/buildArch what arch we're building for, x86 or arm
@@ -148,15 +166,16 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, tmp string) (s
 	// in the builder there are some stuff that needs to be different between
 	// arm and amd64:
 	//	- root partition UUID type as specified by: https://uapi-group.org/specifications/specs/discoverable_partitions_specification
-	if err := os.WriteFile(filepath.Join(tmp, "buildArch"), []byte(c.buildArch), 0o600); err != nil {
-		return "", fmt.Errorf("os.WriteFile() failed with %w", err)
+	if err := os.WriteFile(filepath.Join(workDir, "buildArch"), []byte(arch.ToAPK()), 0o600); err != nil {
+		return fmt.Errorf("os.WriteFile() failed with %w", err)
 	}
 
+	q := QemuInfo[types.ParseArchitecture(c.buildArch)]
 	// Convert the image to a raw disk image.
 	buf := bytes.NewBuffer(nil)
 	{
 		// nolint:gosec // We trust the kernel argument here.
-		cmd := exec.CommandContext(ctx, qemuCommand, append(slices.Clone(baseQEMUArgs),
+		cmd := exec.CommandContext(ctx, q.Command, append(slices.Clone(q.MachineArgs),
 			"-m", "4G",
 			"-nographic",
 
@@ -164,34 +183,40 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, tmp string) (s
 			"-nic", "none",
 
 			"-device", "virtio-9p-pci,id=fs101,fsdev=fsdev101,mount_tag=output",
-			"-fsdev", "local,multidevs=remap,security_model=mapped,id=fsdev101,path="+tmp,
+			"-fsdev", "local,multidevs=remap,security_model=mapped,id=fsdev101,path="+workDir,
 
 			"-device", "virtio-blk-pci,drive=image.tar,serial=input-tar,discard=true",
 			"-blockdev", "driver=raw,node-name=image.tar,file.driver=file,file.filename="+imageTarball.Name(),
 
 			"-device", "virtio-blk-pci,drive=disk.raw.tmp,serial=install-target-disk,discard=true",
-			"-blockdev", "driver=raw,node-name=disk.raw.tmp,file.driver=file,file.filename="+diskFilename.Name(),
+			"-blockdev", "driver=raw,node-name=disk.raw.tmp,file.driver=file,file.filename="+diskFileName,
 
 			// Don't reboot on a kernel panic
 			"-no-reboot",
 
 			// The console=ttyS0 gets us useful debug output on x86_64
 			// (in the Cloud Run service), but hides test output on aarch64.
-			"-kernel", c.kernel, "-append", "panic=-1 quiet console=ttyS0",
+			"-kernel", c.kernel, "-append", "panic=-1 quiet"+q.Console,
 			"-initrd", c.builder,
 		)...)
+
+		clog.Infof("executing %s\n", strings.Join(cmd.Args, " "))
 		cmd.Stdout = buf
 		cmd.Stderr = buf
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("qemu failed with %w: %s", err, buf.String())
+			return fmt.Errorf("qemu failed with %w", err)
 		}
 	}
 
-	if b, err := os.ReadFile(filepath.Join(tmp, "result")); err != nil {
-		return "", fmt.Errorf("os.ReadFile() failed with %w", err)
+	if b, err := os.ReadFile(filepath.Join(workDir, "result")); err != nil {
+		return fmt.Errorf("os.ReadFile() failed with %w", err)
 	} else if string(b) != "0" {
-		return "", fmt.Errorf("%w: %s", ErrDiskConversion, buf.String())
+		return fmt.Errorf("%w: %s", ErrDiskConversion, buf.String())
 	}
 
-	return diskFilename.Name(), nil
+	if err := os.Rename(diskFileName, output); err != nil {
+		return fmt.Errorf("failed to rename disk into %s: %w", output, err)
+	}
+
+	return nil
 }

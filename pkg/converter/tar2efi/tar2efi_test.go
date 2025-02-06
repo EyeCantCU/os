@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,9 +36,10 @@ func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration
 	t.Cleanup(cancel)
 
 	fs := apkfs.DirFS(t.TempDir(), apkfs.WithCreateDir())
+	arch := types.ParseArchitecture(runtime.GOARCH)
 	bc, err := build.New(ctx, fs,
 		build.WithAuthenticator(auth.CGRAuth{}),
-		build.WithArch(TargetArch),
+		build.WithArch(arch),
 		build.WithImageConfiguration(ic),
 	)
 	if err != nil {
@@ -59,15 +61,15 @@ func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration
 		t.Fatalf("os.CreateTemp() failed with %v", err)
 	}
 
-	if err := c.Convert(ctx, ucl, disk); err != nil {
+	if err := c.Convert(ctx, ucl, disk, arch); err != nil {
 		t.Fatalf("c.Convert() failed with %v", err)
 	}
 	return disk.Name()
 }
 
-func boot(ctx context.Context, t *testing.T, bios, disk string) string {
+func boot(ctx context.Context, t *testing.T, bios, disk string, arch types.Architecture) string {
 	buf := bytes.NewBuffer(nil)
-	qemuCmd := utils.GenerateQEMUCommand(TargetArch.ToAPK(), disk, bios)
+	qemuCmd := utils.GenerateQEMUCommand(arch.ToAPK(), disk, bios)
 	cmd := exec.CommandContext(ctx, qemuCmd[0], qemuCmd[1:]...)
 	cmd.Stdout = buf
 	cmd.Stderr = buf
@@ -82,19 +84,20 @@ func boot(ctx context.Context, t *testing.T, bios, disk string) string {
 func TestConverter(t *testing.T) {
 	destDir := t.TempDir()
 	defer os.RemoveAll(destDir)
+	arch := types.ParseArchitecture(runtime.GOARCH)
 
-	kernel, err := utils.FetchKernel(destDir)
+	kernel, err := utils.FetchKernel(destDir, arch.ToAPK())
 	if err != nil {
 		t.Fatalf("FetchKernel failed with %v", err)
 	}
 
-	bios, err := utils.FetchBios(destDir)
+	bios, err := utils.FetchBios(destDir, arch.ToAPK())
 	if err != nil {
 		t.Fatalf("FetchBios failed with %v", err)
 	}
 
 	cfg := readBuildConfig(t)
-	c, err := New(context.Background(), kernel, TargetArch.ToAPK(), cfg)
+	c, err := New(context.Background(), kernel, arch.ToAPK(), cfg)
 	if err != nil {
 		t.Fatalf("New() failed with %v", err)
 	}
@@ -111,7 +114,7 @@ func TestConverter(t *testing.T) {
 		testDisk: func(t *testing.T, disk string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			t.Cleanup(cancel)
-			output := boot(ctx, t, bios, disk)
+			output := boot(ctx, t, bios, disk, arch)
 			if !strings.Contains(output, `"cmd":"--fail file:///etc/apko.json"`) {
 				t.Fatalf("unexpected output %q", output)
 			}
@@ -189,7 +192,7 @@ func TestConverter(t *testing.T) {
 			t.Fatalf("os.CreateTemp() failed with %v", err)
 		}
 
-		if err := c.Convert(context.Background(), malformedTarball, disk); err == nil {
+		if err := c.Convert(context.Background(), malformedTarball, disk, arch); err == nil {
 			t.Fatalf("c.Convert() failed with %v", err)
 		} else if !errors.Is(err, ErrDiskConversion) {
 			t.Fatalf("c.Convert() failed with %v", err)

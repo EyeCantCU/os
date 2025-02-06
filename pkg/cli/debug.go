@@ -70,7 +70,7 @@ func DebugCmd(ctx context.Context, efiDisk, arch, ovmf string) error {
 			return fmt.Errorf("os.MkdirTemp() failed with %w", err)
 		}
 
-		ovmf, err = utils.FetchBios(ovmfDir)
+		ovmf, err = utils.FetchBios(ovmfDir, arch)
 		if err != nil {
 			return err
 		}

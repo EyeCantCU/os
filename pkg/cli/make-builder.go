@@ -20,50 +20,53 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/converter/tar2efi"
 	"chainguard.dev/apkoaas/pkg/utils"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
 func makeBuilderCmd() *cobra.Command {
+	var arch string
+	var kernel string
 	cmd := &cobra.Command{
 		Use:     "make-builder",
 		Short:   "Make builder cpio",
-		Example: `  wolfi-vm make-builder [manifest.yaml]`,
-		Args:    cobra.MinimumNArgs(1),
+		Example: `  wolfi-vm make-builder manifest.yaml`,
+		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			var builderConfig string
-			if len(args) > 0 {
-				builderConfig = args[0] // e.g. "disk.raw"
-			}
+			var builderConfig, output string
 
-			if builderConfig == "" {
-				return fmt.Errorf("empty config, specify valid yaml path")
-			}
+			builderConfig = args[0] // e.g. "disk.raw"
+			output = args[1]
 
-			return MakeBuilderCmd(ctx, builderConfig)
+			if arch == "" {
+				arch = runtime.GOARCH
+			}
+			// standardize everywhere
+			arch := types.ParseArchitecture(arch)
+
+			return MakeBuilderCmd(ctx, builderConfig, arch, output, kernel)
 		},
 	}
+
+	cmd.Flags().StringVar(&arch, "arch", "", "runtime arch for builder (qemu-system-<arch>)")
+	cmd.Flags().StringVar(&kernel, "kernel", "", "download a kernel to <path>")
 
 	return cmd
 }
 
-func MakeBuilderCmd(ctx context.Context, builderConfigPath string) error {
-	builderDir := filepath.Join("output", tar2efi.TargetArch.ToAPK(), strings.Split(filepath.Base(builderConfigPath), ".")[0])
-	builderName := filepath.Join(builderDir, "initramfs.cpio")
-	kernelName := "kernel-" + tar2efi.TargetArch.ToAPK()
-	biosName := "ovmf-" + tar2efi.TargetArch.ToAPK() + ".fd"
+func MakeBuilderCmd(ctx context.Context, builderConfigPath string, archType types.Architecture, initrdPath, kernelPath string) error {
+	apkArch := archType.ToAPK()
 
-	err := os.MkdirAll(filepath.Dir(builderName), os.ModePerm)
+	err := os.MkdirAll(filepath.Dir(initrdPath), os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("error building cpio: %w", err)
+		return fmt.Errorf("error creating dir for %s: %w", initrdPath, err)
 	}
 
 	builderConfig, err := os.Open(builderConfigPath)
@@ -79,45 +82,32 @@ func MakeBuilderCmd(ctx context.Context, builderConfigPath string) error {
 		return fmt.Errorf("failed to parse image configuration: %v", err)
 	}
 
-	if err := utils.CreateCpio(ctx, builderName,
+	if err := utils.CreateCpio(ctx, initrdPath,
 		build.WithImageConfiguration(ic),
-		build.WithArch(tar2efi.TargetArch),
+		build.WithArch(archType),
 	); err != nil {
 		return fmt.Errorf("createBuilder() failed with %w", err)
 	}
 
-	// fetch needed deps
-	tmpDir, err := os.MkdirTemp(builderDir, "")
-	if err != nil {
-		return fmt.Errorf("failed to pull dependencies: %v", err)
+	if kernelPath != "" {
+		// fetch needed deps
+		tmpDir, err := os.MkdirTemp(filepath.Dir(kernelPath), "")
+		if err != nil {
+			return fmt.Errorf("failed to create tmpdir: %v", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		log.Println("Fetching dependencies: kernel")
+
+		kpath, err := utils.FetchKernel(tmpDir, apkArch)
+		if err != nil {
+			return fmt.Errorf("failed to pull kernel: %v", err)
+		}
+
+		err = os.Rename(kpath, kernelPath)
+		if err != nil {
+			return fmt.Errorf("failed to copy back kernel: %v", err)
+		}
 	}
-	defer os.RemoveAll(tmpDir)
-
-	log.Println("Fetching dependencies: bios")
-
-	bios, err := utils.FetchBios(tmpDir)
-	if err != nil {
-		return fmt.Errorf("failed to pull bios: %v", err)
-	}
-
-	log.Println("Fetching dependencies: kernel")
-
-	kernel, err := utils.FetchKernel(tmpDir)
-	if err != nil {
-		return fmt.Errorf("failed to pull kernel: %v", err)
-	}
-
-	err = os.Rename(bios,
-		filepath.Join(builderDir, biosName))
-	if err != nil {
-		return fmt.Errorf("failed to copy back bios: %v", err)
-	}
-
-	err = os.Rename(kernel,
-		filepath.Join(builderDir, kernelName))
-	if err != nil {
-		return fmt.Errorf("failed to copy back kernel: %v", err)
-	}
-
 	return err
 }
