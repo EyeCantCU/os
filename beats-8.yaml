@@ -63,8 +63,10 @@ subpackages:
             - bash
             - curl
             - jq
+            - kibana
             - shadow
             - sudo
+            - wait-for-it
         environment:
           ELASTICSEARCH_HOSTS: localhost:9200
       # These tests cover all auditbeat commands that do not make external requests to Elasticsearch
@@ -87,8 +89,9 @@ subpackages:
             echo BAR | auditbeat keystore add FOO --stdin | grep "Successfully updated the keystore"
             auditbeat keystore list | grep FOO
             auditbeat keystore remove FOO | grep "successfully removed key: FOO"
-        - name: Test auditbeat setup
+        - name: Test auditbeat setup and test
           runs: |
+            echo "Getting Elasticsearch..."
             curl -sL https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${{package.version}}-linux-aarch64.tar.gz \
               --output elasticsearch-${{package.version}}-linux-aarch64.tar.gz
             curl -sL https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${{package.version}}-linux-aarch64.tar.gz.sha512 > elasticsearch.sha512
@@ -108,17 +111,43 @@ subpackages:
               -Expack.security.enabled=false \
               -p /tmp/elasticsearch.pid
 
+            # Confirm Elasticsearch status before continuing
             es_status="red"
 
+            timer_start=$(date +%s)
             while [ $es_status != "green" ]
             do
+              timer_now=$(date +%s)
               es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
               echo "Elasticsearch status: $es_status"
+              if [ $(( timer_now - timer_start )) -gt 60 ]
+              then
+                echo "Timed out waiting for Elasticsearch!"
+                exit 1
+              fi
               sleep 2
             done
 
+            # Run Kibana
+            echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+            (
+              /usr/share/kibana/bin/kibana --config kibana.yml --allow-root 2>&1 | tee kibana.log
+            ) &
+            wait-for-it localhost:5601 --timeout=60
+
+            # Test auditbeat setup with default Elasticsearch and Kibana services running
             cd /usr/share/auditbeat
-            auditbeat setup
+            for try in $(seq 1 5)
+            do
+              if ! auditbeat setup
+              then
+                sleep 5
+              else
+                break
+              fi
+            done
+
+            auditbeat test output
 
   - name: auditbeat-8-oci-entrypoint
     dependencies:
