@@ -55,9 +55,9 @@ $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$
 
 .PHONY: debug-shell-%
 debug-shell-%:
-	@echo "::: Make sure you have a 'debug-disk-$*' session running or this wont work"
+	@echo "::: Make sure you have a 'run-debug-$*' session running or this wont work"
 	@echo "[hit enter]"
-	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk.raw.socket
+	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
 
 configs/%.yaml:
 	@mkdir -p $(dir $@)
@@ -77,12 +77,12 @@ configs/%.yaml:
 .PHONY: builder
 builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 
+builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
+	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder-debug.yaml $@
+
 builder/initrd-%: apkoaas iac/builder.yaml
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder.yaml $@
-
-builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
-	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder-debug.yaml $@
 
 builder/ovmf-%.fd: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* ovmf $@
