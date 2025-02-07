@@ -133,10 +133,9 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 	// rounding that up to the nearest GB.
 	const oneGB int64 = 1024 * 1024 * 1024
 	numGB := (2*size + oneGB - 1) / oneGB
-	// we have a 1Gb EFI partition, let's ensure we're using at least 2Gb
-	if numGB < 2 {
-		numGB = 2
-	}
+	// we have a 1Gb EFI partition, let's ensure we're counting it.
+	// refers to iac/builder.yaml line 77
+	numGB++
 
 	// Create a raw disk with the appropriate size, which we will mount as a
 	// block device and write the converted image into.
