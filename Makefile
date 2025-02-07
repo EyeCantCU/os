@@ -64,7 +64,7 @@ apk-token:
 fetch-kernel: apk-token
 	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
 		zcat | \
-		grep -a -A1 "^P:linux" | \
+		grep -a -A1 "^P:linux$$" | \
 		grep "^V:" | \
 		sort -V | \
 		tail -n1 | sed -e "s/^V://"))
