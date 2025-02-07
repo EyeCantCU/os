@@ -43,6 +43,15 @@ disk_debug_targets = $(foreach name,$(names),disk-debug-$(name))
 .PHONY: $(disk_debug_targets)
 $(disk_debug_targets): disk-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw
 
+run_targets = $(foreach name,$(names),run-$(name))
+.PHONY: $(run_targets)
+$(run_targets): run-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
+	$(TOP_D)/apkoaas debug --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk.raw
+
+run_debug_targets = $(foreach name,$(names),run-debug-$(name))
+.PHONY: $(run_debug_targets)
+$(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$(ARCH).fd
+	$(TOP_D)/apkoaas debug --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk-debug.raw
 
 .PHONY: debug-shell-%
 debug-shell-%:
@@ -117,7 +126,7 @@ awspub: disk-aws-ec2 output/x86_64/aws-ec2/disk.vmdk
 clean:
 	rm -Rf output builder apkoaas *.raw
 
-debug:
+show-vars:
 	@echo UNAME_M=$(UNAME_M)
 	@echo BUILDER_ARCH=$(BUILDER_ARCH)
 	@echo ARCH=$(ARCH)
