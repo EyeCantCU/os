@@ -1,6 +1,6 @@
 package:
   name: py3.10-vllm-cuda-12.6
-  version: 0.6.6
+  version: "0.7.2"
   epoch: 0
   description: A high-throughput and memory-efficient inference and serving engine for LLMs
   copyright:
@@ -14,10 +14,15 @@ package:
     no-depends: true
   dependencies:
     runtime:
-      - python-3.10
-      - py3.10-setuptools
+      - python-${{vars.py-version}}-base
+      - py${{vars.py-version}}-setuptools
       - cuda-toolkit-${{vars.cuda-version}}
       - nvidia-libcuda-${{vars.cuda-version}}
+
+vars:
+  cudnn-major-version: 9
+  gcc-major-version: 12
+  import: vllm
 
 var-transforms:
   - from: ${{package.name}}
@@ -28,6 +33,10 @@ var-transforms:
     match: '.*cuda-(\d+)\.\d+$'
     replace: '$1'
     to: cuda-major-version
+  - from: ${{package.name}}
+    match: '^py(\d+\.\d+)-.*'
+    replace: '$1'
+    to: py-version
 
 environment:
   contents:
@@ -35,51 +44,52 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
-      - gcc-12-default
+      - gcc-${{vars.gcc-major-version}}
       - samurai
       - ninja-build
       - numactl-dev
       - tcmalloc-minimal
       - gperftools-dev
-      - python-3.10-dev
-      - py3.10-pip
-      - sccache
+      - py${{vars.py-version}}-build-base-dev
       - nvidia-driver
       - nvidia-cuda-cccl-${{vars.cuda-version}}
       - nvidia-cuda-profiler-api-${{vars.cuda-version}}
-      - nvidia-cudnn-9-cuda-${{vars.cuda-major-version}}-dev
+      - nvidia-cudnn-${{vars.cudnn-major-version}}-cuda-${{vars.cuda-major-version}}-dev
       - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
       - cuda-toolkit-${{vars.cuda-version}}-dev
       - nvidia-libnvidia-ml-${{vars.cuda-version}}
+  environment:
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    LIBRARY_PATH: /usr/local/cuda-${{vars.cuda-version}}/lib64/stubs
+    MAX_JOBS: 16
+    NVCC_APPEND_FLAGS: -ccbin gcc-${{vars.gcc-major-version}}
+    TORCH_CUDA_ARCH_LIST: 7.0 7.5 8.0 8.6 8.9 9.0+PTX
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/vllm-project/vllm.git
       tag: v${{package.version}}
-      expected-commit: f49777ba62b4926d0f8c100ab06edb03c5c10098
+      expected-commit: 0408efc6d0c17fba17b2be38d0d0f02e96d2bf9d
 
   - runs: |
-      ln -sf /usr/local/cuda-${{vars.cuda-version}} /usr/local/cuda
-      export PATH=/usr/local/cuda/bin:$PATH
-      export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-      export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
-      export MAX_JOBS=16
+      export PATH=$CUDA_HOME/bin:$PATH
+      export LD_LIBRARY_PATH="$CUDA_HOME/lib64"
 
-      pip install -r requirements-cuda.txt
-      pip install build wheel packaging aiohttp>=3.10.2
-      pip install -r requirements-build.txt
+      pip${{vars.py-version}} install -r requirements-cuda.txt
+      pip${{vars.py-version}} install build wheel packaging aiohttp>=3.10.2
+      pip${{vars.py-version}} install -r requirements-build.txt
 
-      python setup.py bdist_wheel
-      python setup.py build_ext --inplace
-      pip install --verbose \
+      python${{vars.py-version}} setup.py bdist_wheel
+      python${{vars.py-version}} setup.py build_ext --inplace
+      pip${{vars.py-version}} install --verbose \
         --no-index --no-build-isolation --no-deps \
         --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/vllm-*.whl
-      sitepkgd=$(python -c 'import site; print(site.getsitepackages()[0])')
-      pip install --verbose \
+      sitepkgd=$(python${{vars.py-version}} -c 'import site; print(site.getsitepackages()[0])')
+      pip${{vars.py-version}} install --verbose \
         --requirement=requirements-cuda.txt --force-reinstall\
         --prefix=/usr --root="${{targets.contextdir}}"
-      python -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
+      python${{vars.py-version}} -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
 
   - uses: strip
 
@@ -95,8 +105,12 @@ update:
     use-tag: true
 
 test:
+  environment:
+    environment:
+      LD_LIBRARY_PATH: /usr/local/cuda-${{vars.cuda-version}}/lib:/usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/local/cudnn-${{vars.cudnn-major-version}}/lib64
   pipeline:
     - name: Verify vllm installation
-      runs: |
-        export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-12.6/lib:/usr/local/cuda-12.6/lib64:/usr/local/cudnn-9/lib64"
-        python -c "import vllm"
+      uses: python/import
+      with:
+        python: python${{vars.py-version}}
+        import: ${{vars.import}}
