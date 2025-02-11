@@ -61,10 +61,10 @@ clean:
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
 
-fetch-kernel:
+fetch-kernel: apk-token
 	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
 		zcat | \
-		grep -a -A1 "^P:linux" | \
+		grep -a -A1 "^P:linux$$" | \
 		grep "^V:" | \
 		sort -V | \
 		tail -n1 | sed -e "s/^V://"))
@@ -74,13 +74,11 @@ fetch-kernel:
 	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
 	export MELANGE_OPTS="--runner=qemu"
 
-package/%: apk-token
+yamls := $(wildcard *.yaml)
+pkgs := $(subst .yaml,,$(yamls))
+pkg_targets = $(foreach name,$(pkgs),package/$(name))
+$(pkg_targets): package/%: apk-token
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	$(MAKE) yamlfile=$(yamlfile) pkgname=$* packages/$(ARCH)/$(pkgver).apk
@@ -90,51 +88,39 @@ packages/$(ARCH)/%.apk: $(KEY)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
-debug/%: apk-token
+dbg_targets = $(foreach name,$(pkgs),debug/$(name))
+$(dbg_targets): debug/%: apk-token $(KEY)
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	@mkdir -p ./"$*"/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS)  --source-dir ./$(*)/
 
-test/%: apk-token
+test_targets = $(foreach name,$(pkgs),test/$(name))
+$(test_targets): test/%: apk-token $(KEY)
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
-test-debug/%: apk-token
+testdbg_targets = $(foreach name,$(pkgs),test-debug/$(name))
+$(testdbg_targets): test-debug/%: apk-token $(KEY)
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
 dev-container: apk-token
-	docker run --privileged --rm -it \
+	docker run --pull=always --privileged --rm -it \
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-v "${HOME}/.config/chainctl:/root/.config/chainctl" \
 			-v "${CACHEDIR}:/tmp/melange-cache" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:69dca7d89ff2f7b66c764e643f08395282e4a3e150aea2a3e1dde4a52ff38d3e
+			ghcr.io/wolfi-dev/sdk:latest
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -147,7 +133,7 @@ TMP_REPOSITORIES_FILE := $(TMP_REPOSITORIES_DIR)/repositories
 # changes to the packages. It mounts the local packages folder as a read-only,
 # and sets up the necessary keys for you to run `apk add` commands, and then
 # test the packages however you see fit.
-local-wolfi: ${KEY}
+local-wolfi: ${KEY} apk-token
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	@echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
 	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
@@ -200,14 +186,13 @@ OS_DIR ?= ${PWD}
 dev-container-wolfi:
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
-	docker run --rm -it \
+	docker run --pull=always --rm -it \
 		--mount type=bind,source="${OUT_DIR}",destination="$(OUT_LOCAL_DIR)" \
 		--mount type=bind,source="${OS_DIR}",destination="$(OS_LOCAL_DIR)",readonly \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:69dca7d89ff2f7b66c764e643f08395282e4a3e150aea2a3e1dde4a52ff38d3e
+		ghcr.io/wolfi-dev/sdk:latest
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
-

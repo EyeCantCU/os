@@ -1,0 +1,133 @@
+package:
+  name: amazon-eks-ami
+  version: 20250123
+  epoch: 0
+  description: Packer configuration for building a custom EKS AMI
+  url: https://github.com/awslabs/amazon-eks-ami
+  copyright:
+    - license: MIT-0
+  dependencies:
+    runtime:
+      # Many of these appear to be "nice-to-haves" rather than a must
+      - aws-cli-2
+      - containerd
+      - runc
+      - cloud-provider-aws-1.32-ecr-credential-provider
+      - nerdctl
+      - kubelet
+      #- aws-cfn-bootstrap
+      #- chrony
+      - conntrack-tools
+      - ec2-instance-connect
+      - ethtool
+      - ipvsadm
+      - jq
+      - nfs-utils
+      - socat
+      - unzip
+      - wget
+      #- mdadm
+      - pigz
+      - procps
+      - iptables
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - coreutils
+      - systemd-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/awslabs/amazon-eks-ami
+      tag: v${{package.version}}
+      expected-commit: 64c70247ca8574e9c0efd5b672fa33fff41e76e7
+
+  - uses: go/bump
+    with:
+      modroot: nodeadm
+      deps: golang.org/x/net@v0.33.0
+
+  - runs: |
+      make -C nodeadm generate
+
+  - uses: go/build
+    with:
+      modroot: nodeadm
+      packages: ./cmd/nodeadm/main.go
+      output: nodeadm
+
+  # TODO
+  # cache-pause-container.sh
+  #
+  # Cache containerd image
+  # sudo systemctl start containerd
+  # cache-pause-container -i ${PAUSE_CONTAINER_IMAGE}
+  # sudo systemctl stop containerd
+  #
+  # install-efa.sh
+  # install-neuron-driver
+  # sudo dnf install -y aws-neuronx-dkms aws-neuronx-tools
+  # install-nvidia-driver.sh
+  #
+  # Limiting deeper C-states
+  # intel_idle.max_cstate=1 processor.max_cstate=1
+  #
+  # Configure clock sources
+  # Disable weak ciphers ssh
+  - name: Package packer actions from https://github.com/awslabs/amazon-eks-ami/tree/main/templates/al2023
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/system
+      cp -r templates/al2023/runtime/rootfs/etc/systemd/system ${{targets.destdir}}/usr/lib/systemd/
+
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/preset/
+      cat <<EOF >${{targets.destdir}}/usr/lib/systemd/preset/50-${{package.name}}.preset
+      enable nodeadm-config.service
+      enable nodeadm-run.service
+      enable ebs-initialize-bin@kubelet.service
+      enable cni-cache-reset.service
+      enable containerd.service
+      enable kubelet.service
+      EOF
+
+      mkdir -p ${{targets.destdir}}/etc
+      cp -r templates/al2023/runtime/rootfs/etc/sysctl* ${{targets.destdir}}/etc
+      cp -r templates/al2023/runtime/rootfs/etc/nerdctl/ ${{targets.destdir}}/etc
+      cp -r templates/al2023/runtime/rootfs/etc/logrotate* ${{targets.destdir}}/etc
+
+      mkdir -p ${{targets.destdir}}/etc/udev/rules.d/
+      touch ${{targets.destdir}}/etc/udev/rules.d/99-vpc-policy-routes.rules
+
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/networkd.conf.d
+      cat << EOF >${{targets.destdir}}/usr/lib/systemd/networkd.conf.d/80-release.conf
+      # Do not clobber any routes or rules added by CNI.
+      [Network]
+      ManageForeignRoutes=no
+      ManageForeignRoutingPolicyRules=no
+      EOF
+
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/network/99-default.link.d
+      cat << EOF >${{targets.destdir}}/usr/lib/systemd/network/99-default.link.d/10-${{package.name}}.conf
+      [Link]
+      MACAddressPolicy=none
+      EOF
+
+      mkdir -p ${{targets.destdir}}/etc/kubernetes/manifests
+      mkdir -p ${{targets.destdir}}/var/lib/kubernetes
+      mkdir -p ${{targets.destdir}}/var/lib/kubelet
+      mkdir -p ${{targets.destdir}}/opt/cni/bin
+
+      mkdir -p ${{targets.destdir}}/etc/eks/image-credential-provider
+      ln -s ../../../usr/bin/ecr-credential-provider ${{targets.destdir}}/etc/eks/image-credential-provider/ecr-credential-provider
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      cp templates/shared/runtime/bin/* ${{targets.destdir}}/usr/bin/
+
+update:
+  enabled: true
+  github:
+    identifier: awslabs/amazon-eks-ami
+    strip-prefix: v

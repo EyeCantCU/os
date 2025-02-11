@@ -1,6 +1,6 @@
 package:
   name: keycloak-fips
-  version: "26.1.0"
+  version: "26.1.2"
   epoch: 0
   description: Open Source Identity and Access Management For Modern Applications and Services
   copyright:
@@ -9,7 +9,10 @@ package:
     runtime:
       - ${{package.name}}-policy
       - bash # Keycloak helper scripts require bash, aren't compatible with busybox.
-      - openjdk-17-default-jvm
+      - openjdk-${{vars.java-version}}-default-jvm
+
+vars:
+  java-version: 17
 
 var-transforms:
   - from: ${{package.version}}
@@ -21,31 +24,27 @@ environment:
   contents:
     packages:
       - bash
-      - bouncycastle-fips~2.0
       - build-base
+      - bouncycastle-fips~2.0
       - busybox
-      - ca-certificates-bundle
-      - gcc-13-default
-      - openjdk-17-default-jdk
-      - wolfi-base
-      - wolfi-baselayout
+      - openjdk-${{vars.java-version}}-default-jdk
   environment:
     LANG: en_US.UTF-8
-    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/keycloak/keycloak
       tag: ${{package.version}}
-      expected-commit: 90f25533be7a7fe2f97e9c0d2040343a8e3e8738
+      expected-commit: affa4f9ca42b1eeaa3298c0920942d148dbb1c11
 
   - uses: patch
     with:
       # Disables a redundant FIPS host check in Keycloak which expects the
       # underlying host to be RHEL and running a RHEL patched version of JDK.
       # We use vanilla JDK with bcfips, so this is not applicable.
-      patches: disable-rhel-fips-check.patch
+      # While classpath-script.patch patches kcadm.sh and kcreg.sh to use the CLASSPATH env variable
+      patches: disable-rhel-fips-check.patch classpath-script.patch
 
   - uses: maven/pombump
 
@@ -60,7 +59,7 @@ pipeline:
       # Gross hack to work around broken NAPI ast-grep module that has
       # undefined symbol: static_assert
       export LD_PRELOAD=/tmp/preload.so
-      ./mvnw clean install -DskipTests=true -Pdistribution -q
+      ./mvnw clean install -DskipTests=true -DskipProtoLock=true -Pdistribution -q
       unset LD_PRELOAD
 
       mkdir -p ${{targets.destdir}}/usr/share/java
@@ -75,13 +74,14 @@ pipeline:
         ln -sf /usr/share/java/keycloak/bin/$i ${{targets.destdir}}/usr/bin/$i
       done
 
-  - runs: |
-      mkdir -p ${{targets.destdir}}/usr/share/java/keycloak/providers
-      mkdir -p ${{targets.destdir}}/usr/share/java/keycloak/bin/client/lib
+      # Remove any non-FIPS bcprov JARs dynamically across all possible locations
+      find ${{targets.destdir}} -type f \( \
+          -name "bcprov-jdk*.jar" -o \
+          -name "bcpkix-jdk*.jar" -o \
+          -name "bcutil-jdk*.jar" \) -delete
 
-      # Keycloak requires bcfips jars.
-      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/java/keycloak/providers/
-      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/java/keycloak/bin/client/lib/
+      # Remove any existing providers
+      rm -r ${{targets.contextdir}}/usr/share/java/keycloak/providers/*
 
 subpackages:
   - name: ${{package.name}}-policy-140-2
@@ -91,38 +91,52 @@ subpackages:
         - empty
     dependencies:
       runtime:
-        - bcfips-policy-140-2-j17
+        - bcfips-policy-140-2-j${{vars.java-version}}
       # Lower than 140-3
       provider-priority: 10
       provides:
         - ${{package.name}}-policy=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers
+          for jar in bc-fips.jar bctls-fips.jar bcpkix-fips.jar; do
+            ln -s /usr/share/java/bouncycastle-fips/$jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/$jar
+          done
+
+          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib
+          for jar in bc-fips.jar bctls-fips.jar bcpkix-fips.jar; do
+            ln -s /usr/share/java/bouncycastle-fips/$jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/$jar
+          done
 
   - name: ${{package.name}}-policy-140-3
     description: bcfips 140-3 dependencies
     dependencies:
       runtime:
-        - bcfips-policy-140-3-j17
+        - bcfips-policy-140-3-j${{vars.java-version}}
       # Higher than 140-2
       provider-priority: 15
       provides:
         - ${{package.name}}-policy=${{package.full-version}}
     pipeline:
       - runs: |
-          # Move bcutil-fips.jar to 140-3 subpackage
-          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers/
-          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
-          mkdir -p ${{targets.contextdir}}/opt/bitnami/keycloak/providers
-          mv ${{targets.destdir}}/usr/share/java/keycloak/providers/bcutil-fips.jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/
-          mv ${{targets.destdir}}/usr/share/java/keycloak/bin/client/lib/bcutil-fips.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
-          cp -P ${{targets.contextdir}}/usr/share/java/keycloak/providers/bcutil-fips.jar ${{targets.contextdir}}/opt/bitnami/keycloak/providers/
+          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers
+          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/
+
+          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib
+          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
 
   # NOTE: This is forked from the non-FIPS keycloak-bitnami-compat package so that
   # the steps copying Keycloak binaries to the expected path include the required
   # BC FIPS Jars
-  - name: ${{package.name}}-bitnami-compat
+  - name: keycloak-bitnami-fips
     description: "compat package for using FIPS with bitnami/keycloak image"
     dependencies:
+      # Remove this once the image has moved over
+      provides:
+        - ${{package.name}}-bitnami-compat=${{package.full-version}}
       runtime:
+        - ${{package.name}}-policy
+        - bash # Keycloak helper scripts require bash, aren't compatible with busybox.
         - coreutils # Keycloak Helm Chart scripts require coreutils, aren't compatible with busybox. (i.e., `cp` with `--preserve` option)
         - krb5
         - libaio
@@ -130,6 +144,7 @@ subpackages:
         - zlib
         - wait-for-port
         - net-tools
+        - openjdk-${{vars.java-version}}-default-jvm
         - posix-libc-utils
         - su-exec
     pipeline:
@@ -154,8 +169,8 @@ subpackages:
           cp -r ${{targets.destdir}}/usr/share/java/keycloak/* ${{targets.contextdir}}/opt/bitnami/keycloak
 
           # Replace the incorrect Java paths in the Bitnami scripts
-          sed -i 's/JAVA_HOME="\/opt\/bitnami\/java"/JAVA_HOME="\/usr\/lib\/jvm\/java-17-openjdk"/g' ${{targets.contextdir}}/opt/bitnami/scripts/keycloak-env.sh
-          sed -i 's/\/opt\/bitnami\/java\/lib\/security/\/usr\/lib\/jvm\/java-17-openjdk\/conf\/security/g' ${{targets.contextdir}}/opt/bitnami/scripts/java/postunpack.sh
+          sed -i 's/JAVA_HOME="\/opt\/bitnami\/java"/JAVA_HOME="\/usr\/lib\/jvm\/java-${{vars.java-version}}-openjdk"/g' ${{targets.contextdir}}/opt/bitnami/scripts/keycloak-env.sh
+          sed -i 's/\/opt\/bitnami\/java\/lib\/security/\/usr\/lib\/jvm\/java-${{vars.java-version}}-openjdk\/conf\/security/g' ${{targets.contextdir}}/opt/bitnami/scripts/java/postunpack.sh
 
           # Disable some commands used in Bitnami scripts. These commands more likely fail in this since this image take non root approach
           sed -i 's/chown -R "$KEYCLOAK_DAEMON_USER" "$dir"/# chown -R "$KEYCLOAK_DAEMON_USER" "$dir"/g' ${{targets.contextdir}}/opt/bitnami/scripts/keycloak/postunpack.sh
@@ -176,6 +191,14 @@ subpackages:
           # Link binaries used by Bitnami config
           ln -sf /opt/bitnami/scripts/keycloak/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
           ln -sf /opt/bitnami/scripts/keycloak/run.sh ${{targets.contextdir}}/run.sh
+
+          # Symlink BCFIPS JARs to providers
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/keycloak/providers
+          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/opt/bitnami/keycloak/providers/
+
+          # Symlink BCFIPS JARs to client library
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/keycloak/bin/client/lib
+          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/opt/bitnami/keycloak/bin/client/lib/
     test:
       environment:
         contents:
@@ -186,14 +209,12 @@ subpackages:
             - shadow
             - sudo-rs
             - jq
-            - keycloak-fips
-            - keycloak-fips-bitnami-compat
         accounts:
           groups:
-            - groupname: nonroot
+            - groupname: bn_keycloak
               gid: 65532
           users:
-            - username: nonroot
+            - username: bn_keycloak
               gid: 65532
               uid: 65532
           run-as: 0
@@ -203,28 +224,16 @@ subpackages:
           PGDB: bitnami_keycloak
           ALLOW_EMPTY_PASS: true
       pipeline:
-        - working-directory: /opt/bitnami/keycloak
-          pipeline:
-            - name: "Check for BouncyCastle symlinks"
-              runs: |
-                stat providers/bc-fips.jar
-                stat providers/bctls-fips.jar
-                stat providers/bcpkix-fips.jar
-                stat bin/client/lib/bc-fips.jar
-                stat bin/client/lib/bctls-fips.jar
-                stat bin/client/lib/bcpkix-fips.jar
         - working-directory: /tmp
           pipeline:
             - name: "Test database creation"
               with:
                 setup: echo "127.0.0.1 postgresql" >> /etc/hosts
               runs: |
-                useradd $PGUSER
                 sudo -u $PGUSER initdb -D $PGDATA
                 sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
                 sudo -u $PGUSER createdb $PGDB
                 sudo -u $PGUSER psql -lqt | cut -d \| -f 1 | grep -qw $PGDB
-            - name: "Set up crypto"
             - name: "start daemon on localhost"
               uses: test/daemon-check-output
               with:
@@ -275,7 +284,7 @@ test:
   pipeline:
     - uses: java-fips/algorithms
       with:
-        java-version: 17
+        java-version: ${{vars.java-version}}
         fips-compliance-version: 140-3
         classpath: /usr/share/java/keycloak/providers/*:.
 
