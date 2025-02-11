@@ -53,8 +53,9 @@ run_debug_targets = $(foreach name,$(names),run-debug-$(name))
 $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$(ARCH).fd
 	$(TOP_D)/apkoaas debug --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk-debug.raw
 
-.PHONY: debug-shell-%
-debug-shell-%:
+debug_shell_targets = $(foreach name,$(names),debug-shell-$(name))
+.PHONY: $(debug_shell_targets)
+$(debug_shell_targets): debug-shell-%
 	@echo "::: Make sure you have a 'run-debug-$*' session running or this wont work"
 	@echo "[hit enter]"
 	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
