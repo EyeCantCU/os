@@ -55,7 +55,7 @@ $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$
 
 debug_shell_targets = $(foreach name,$(names),debug-shell-$(name))
 .PHONY: $(debug_shell_targets)
-$(debug_shell_targets): debug-shell-%
+$(debug_shell_targets): debug-shell-%:
 	@echo "::: Make sure you have a 'run-debug-$*' session running or this wont work"
 	@echo "[hit enter]"
 	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
