@@ -64,7 +64,7 @@ apk-token:
 fetch-kernel: apk-token
 	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
 		zcat | \
-		grep -a -A1 "^P:linux" | \
+		grep -a -A1 "^P:linux$$" | \
 		grep "^V:" | \
 		sort -V | \
 		tail -n1 | sed -e "s/^V://"))
@@ -90,7 +90,7 @@ packages/$(ARCH)/%.apk: $(KEY)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
-debug/%: apk-token
+debug/%: apk-token $(KEY)
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
 		echo "Error: could not find yaml file for $*"; exit 1; \
@@ -103,7 +103,7 @@ debug/%: apk-token
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS)  --source-dir ./$(*)/
 
-test/%: apk-token
+test/%: apk-token $(KEY)
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
@@ -115,7 +115,7 @@ test/%: apk-token
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
-test-debug/%: apk-token
+test-debug/%: apk-token $(KEY)
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	@if [ -z "$(yamlfile)" ]; then \
