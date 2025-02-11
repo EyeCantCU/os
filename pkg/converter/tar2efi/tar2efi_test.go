@@ -153,7 +153,7 @@ func TestConverter(t *testing.T) {
 		},
 	}, {
 		filename:     "testdata/workstation.yaml",
-		expectedSize: 7 * GiB,
+		expectedSize: 8 * GiB,
 		// TODO(mattmoor): How do we want to test the workstation image?
 	}}
 
