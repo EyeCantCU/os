@@ -5,14 +5,13 @@
 # and address customer needs.
 package:
   name: airflow-core
-  version: 2.10.4
+  version: "2.10.5"
   epoch: 0
   description: Minimal Airflow core - Platform to programmatically author, schedule, and monitor workflows
   dependencies:
     runtime:
       - bash
       - busybox
-      - coreutils
       - curl
       - cyrus-sasl
       - findutils
@@ -22,7 +21,6 @@ package:
       - gzip
       - mariadb
       - openssl
-      - postgresql
       - postgresql-client
       - python-${{vars.py-version}}
   copyright:
@@ -37,6 +35,7 @@ environment:
   contents:
     packages:
       - busybox
+      - patch
       - py${{vars.py-version}}-build-bin
       - py${{vars.py-version}}-pip
       - python-${{vars.py-version}}
@@ -47,7 +46,7 @@ pipeline:
     with:
       repository: https://github.com/apache/airflow
       tag: ${{package.version}}
-      expected-commit: c083e456fa02c6cb32cdbe0c9ed3c3b2380beccd
+      expected-commit: b93c3db6b1641b0840bd15ac7d05bc58ff2cccbf
 
   - runs: |
       # Install airflow core, the upstream sets this as directory
@@ -57,6 +56,12 @@ pipeline:
       #GHSA-8w49-h785-mj3c/GHSA-8495-4g3g-x7pr/GHSA-27mf-ghqm-j3j8 fixes
       pip install --no-cache-dir --user aiohttp>=3.10.11 tornado>=6.4.2
       pip install --no-cache-dir --user --force-reinstall packaging statsd
+
+      # Patch to effectively handle instances of md5 used for non-security purposes in airflow
+      # by adding usedforsecurity=False in hashlib wrapper.
+      # We can't use patch pipeline as we use pip install method
+      # which makes us patch after installation in site-packages
+      patch -p1 -d "${{targets.destdir}}/home/airflow/.local/lib/python3.12/site-packages" < handle-md5.patch
 
       # CVE-2024-6345 GHSA-cx63-2mw6-8hw5
       # setuptools comes from airflow/providers/google/provider.yaml having
@@ -72,14 +77,26 @@ pipeline:
 
       find . -name '__pycache__' -exec rm -rf {} +
 
-# We re-use airflow-compat subpackage from airflow package in wolfi/os to symlink libstdc++ from usr/lib to /usr/lib/$(uname -m)-linux-gnu/
-# And create this oci-entrypoint subpackage to have it compliant with upstream.
+# We can't re-use airflow-compat subpackage from airflow package in wolfi/os because it invoke full airflow and hence bloats size
 subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Symlink libstdc++ from usr/lib to /usr/lib/$(uname -m)-linux-gnu/
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/$(uname -m)-linux-gnu
+          ln -sf /usr/lib/libstdc++.so.6 ${{targets.subpkgdir}}/usr/lib/$(uname -m)-linux-gnu/
+    test:
+      pipeline:
+        - runs: stat /usr/lib/$(uname -m)-linux-gnu/libstdc++.so.6
   - name: ${{package.name}}-oci-entrypoint
     description: Entrypoint for using airflow-core in OCI containers
     dependencies:
       runtime:
         - ${{package.name}}
+        - netcat-openbsd
     pipeline:
       - runs: |
           mkdir -p ${{targets.contextdir}}/opt/airflow/dags

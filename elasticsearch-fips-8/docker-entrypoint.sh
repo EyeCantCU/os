@@ -1,6 +1,17 @@
 #!/bin/bash
 set -e
 
+# --- NEW BLOCK: check vm.max_map_count ---
+REQUIRED=262144
+CURRENT="$(cat /proc/sys/vm/max_map_count 2>/dev/null || echo 0)"
+if [ "$CURRENT" -lt "$REQUIRED" ]; then
+  echo "ERROR: vm.max_map_count ($CURRENT) is below $REQUIRED."
+  echo "Elasticsearch requires vm.max_map_count >= $REQUIRED to run properly."
+  echo "Please run 'sudo sysctl -w vm.max_map_count=262144' on the host, then restart."
+  exit 1
+fi
+# --- END NEW BLOCK ---
+
 # Files created by Elasticsearch should always be group writable too
 umask 0002
 

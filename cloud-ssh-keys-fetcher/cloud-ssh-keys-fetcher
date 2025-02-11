@@ -1,5 +1,11 @@
 #!/bin/sh
 # shellcheck disable=SC2162,SC3043
+CR="
+"
+
+# the PATH here will not include /bin or /sbin
+# until we're usr merged, we have programs in /bin we need (mktemp)
+PATH=$PATH:/bin:/sbin
 
 read_info() {
     local idd="/sys/class/dmi/id" fails=""
@@ -25,6 +31,7 @@ get_cloud() {
     [ "$CHASSIS_ASSET" = "$azure" ] && { echo "Azure"; return 0; }
     case "$PRODUCT_SERIAL" in
         [Ee][Cc]2*) echo "EC2"; return 0;;
+        chainguard-*) echo "Chainguard"; return 0;;
     esac
     return 0
 }
@@ -80,6 +87,51 @@ ec2dump_keys() {
     return 0
 }
 
+get_cmdline_keys() {
+    local cmdline
+    [ -r /proc/cmdline ] || return 0
+    read cmdline < /proc/cmdline || {
+        stderr "failed reading /proc/cmdline"
+        return 1
+    }
+    local keys="" out="" tok=""
+    for tok in $cmdline; do
+        case "$tok" in
+            sshkey=*)
+                out=$(echo "${tok#*=}" | base64 -d) || {
+                    stderr "failed decoding base64 content in $tok"
+                    return 1
+                }
+                keys="$keys${out%"${CR}"}$CR"
+        esac
+    done
+    printf "%s" "$keys"
+}
+
+get_oemstring_keys() {
+    if ! command -v dmidecode >/dev/null 2>&1; then
+        stderr "dmidecode is not available, cannot read chainguard keys"
+        return 0
+    fi
+    local out="" n=1
+    while out=$(dmidecode "--oem-string=$n" 2>/dev/null) && [ -n "$out" ]; do
+        n=$((n+1))
+        case "$out" in
+            chainguard.dev/v1/ssh-pubkey=*)
+                echo "${out#*=}"
+                return 0
+                ;;
+        esac
+    done
+}
+
+chainguard_dump_keys() {
+    local cmdline="" oemstrings=""
+    cmdline=$(get_cmdline_keys) || return
+    oemstrings=$(get_oemstring_keys) || return
+    printf "%s" "${cmdline}${oemstrings}"
+}
+
 Usage() {
     cat <<EOF
 Usage: ${0#*/} [outfile]
@@ -109,7 +161,21 @@ fi
 
 akeys="$1"
 if [ -z "$akeys" ]; then
-    akeys=$(echo ~/.ssh/authorized_keys)
+    # systemd may not have HOME set and that is sometimes required
+    # for expanding ~.  So do it ourselves.
+    p=$(echo ~/.ssh)
+    if [ "$p" = "~/.ssh" ]; then
+        id=$(id -u)
+        name=$(id -un)
+        if [ "$id" = "0" ]; then
+            p="/root/.ssh"
+            echo "HOME was not set. Using /root as home for id 0"
+        elif [ -d "/home/$name" ]; then
+            echo "HOME was not set. Using /home/$name for user '$name'"
+            p="/home/$name/.ssh"
+        fi
+    fi
+    akeys="$p/authorized_keys"
 fi
 
 keyd="."
@@ -143,6 +209,10 @@ case "$cloud" in
         ;;
     EC2)
         ec2dump_keys > "$tmpf"
+        ;;
+    Chainguard)
+        chainguard_dump_keys > "$tmpf" ||
+            fail "failed reading chainguard keys"
         ;;
     *) fail "unsupported cloud \"$cloud\"";;
 esac

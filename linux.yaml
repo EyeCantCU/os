@@ -1,13 +1,17 @@
 package:
   name: linux
-  version: "6.12.10"
-  epoch: 1
+  version: "6.13.2"
+  epoch: 0
   description: "the linux kernel"
   copyright:
     - license: GPL-2.0
   resources:
     cpu: 8
     memory: 24Gi
+  dependencies:
+    runtime:
+      # Ensure we get Chainguard branding in our VMs.
+      - chainguard-baselayout
 
 environment:
   contents:
@@ -33,16 +37,17 @@ environment:
       - mpfr
       - mpfr-dev
       - zstd
+  environment:
+    KBUILD_BUILD_USER: noreply
+    KBUILD_BUILD_HOST: chainguard.dev
+    KBUILD_BUILD_VERSION: Chainguard
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/gregkh/linux
       tag: v${{package.version}}
-      expected-commit: a6ad5510dbb5f55cd2d1b44b11a18120bf79a5a3
-      # Remove after 6.12.y as the patch should be released
-      cherry-picks: |
-        master/7a4ffec9fd54ea27395e24dff726dbf58e2fe06b: libsubcmd: Silence compiler warning
+      expected-commit: 0da4b4b84ffe5efe12f5fd96dd294aa9d20ba2de
 
   - runs: |
       set -x
@@ -53,6 +58,13 @@ pipeline:
       make hardening.config
       make kvm_guest.config
       make xen.config
+
+      # Branding
+      cat .config-branding >> .config
+      version=${{package.version}}
+      fullversion=${{package.full-version}}
+      suffix=${fullversion##$version}
+      echo "LOCALVERSION=$suffix-generic" >> .config
 
       # Enable fuse and overlayfs stuff for dockerd to work
       cat .config-fuse >> .config
@@ -65,6 +77,15 @@ pipeline:
 
       # Enable XFS
       cat .config-xfs >> .config
+
+      # Enable NVME block devices as boot (AWS)
+      cat .config-nvme >> .config
+
+      # Enable accelerated networking (AWS)
+      cat .config-ena >> .config
+
+      # Google Compute Engine items
+      cat .config-gce >> .config
 
       # Remove early warnings for missing /etc/target
       sed -i 's|CONFIG_TARGET_CORE=y|# CONFIG_TARGET_CORE is not set|g' .config
@@ -88,6 +109,10 @@ vars:
 subpackages:
   - name: "linux-boot-installed"
     description: "Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - chainguard-baselayout
     pipeline:
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/boot/efi/chainguard/${{package.version}}/
@@ -120,7 +145,7 @@ subpackages:
           sort-key   chainguard
           # The root argument must match the form documented (only) here:
           # https://github.com/torvalds/linux/blob/3022e9d0/block/early-lookup.c#L217
-          options    root=PARTUUID=${{vars.root-partition-uuid}} console=ttyS0 net.ifnames=0 biosdevname=0
+          options    root=PARTUUID=${{vars.root-partition-uuid}} console=ttyS0 rw
           linux      /chainguard/${{package.version}}/linux
           EOF
 
@@ -130,44 +155,19 @@ subpackages:
 
 test:
   environment:
-    contents:
-      packages:
-        - qemu
   pipeline:
     - name: Test Basic Boot
-      runs: |
-        set -x
-        # Just a dumb test for now...see if we have a file at /boot/vmlinuz
-        [ -e /boot/vmlinuz ]
-        # Launch qemu, point to our kernel, put kernel boot console on standard out, exit on panic,
-        # don't reboot, and make sure we get to the step where we're trying to mount a rootfs
-        # TODO: we could go even further if we built an initrd and maybe ran the LTP...
-        arch=$(uname -m)
-        case "$arch" in
-          x86_64)
-            qemu-system-x86_64 -kernel /boot/vmlinuz -m 1G -nographic -append "console=ttyS0 panic=1" -no-reboot | grep -q "Unable to mount root fs"
-          ;;
-          aarch64)
-            qemu-system-aarch64 -kernel /boot/vmlinuz -m 1G -cpu max -machine virt -nographic -no-reboot -append "panic=1" | grep -q "Unable to mount root fs"
-          ;;
-        esac
+      uses: kernel/test/console_grep
+      with:
+        string: "Unable to mount root fs"
     - name: Test for XFS
-      runs: |
-        set -x
-        # Just a dumb test for now...see if we have a file at /boot/vmlinuz
-        [ -e /boot/vmlinuz ]
-        # Launch qemu, point to our kernel, put kernel boot console on standard out, exit on panic,
-        # don't reboot, and make sure we get to the step where we're trying to mount a rootfs
-        # TODO: we could go even further if we built an initrd and maybe ran the LTP...
-        arch=$(uname -m)
-        case "$arch" in
-          x86_64)
-            qemu-system-x86_64 -kernel /boot/vmlinuz -m 1G -nographic -append "console=ttyS0 panic=1" -no-reboot |  grep -q "xfs"
-          ;;
-          aarch64)
-            qemu-system-aarch64 -kernel /boot/vmlinuz -m 1G -cpu max -machine virt -nographic -no-reboot -append "panic=1" | grep -q "xfs"
-          ;;
-        esac
+      uses: kernel/test/console_grep
+      with:
+        string: "xfs"
+    - name: Test for NVME
+      uses: kernel/test/console_grep
+      with:
+        string: "nvme nvme0: pci function"
 
 update:
   enabled: true
