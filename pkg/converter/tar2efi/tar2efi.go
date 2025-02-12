@@ -202,12 +202,15 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 			"-initrd", c.builder,
 		)...)
 
-		clog.Infof("executing %s\n", strings.Join(cmd.Args, " "))
+		clog.Info("launching disk conversion")
+		clog.Debugf("executing %s\n", strings.Join(cmd.Args, " "))
 		cmd.Stdout = buf
 		cmd.Stderr = buf
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("qemu failed with %w: %s", err, buf.String())
 		}
+
+		clog.Debug(buf.String())
 	}
 
 	if b, err := os.ReadFile(filepath.Join(workDir, "result")); err != nil {

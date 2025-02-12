@@ -79,7 +79,7 @@ configs/%.yaml:
 builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 
 builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
-	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder-debug.yaml $@
+	$(TOP_D)/apkoaas --log-level=debug make-builder --arch=$* iac/builder-debug.yaml $@
 
 builder/initrd-%: apkoaas iac/builder.yaml
 	@mkdir -p $(dir $@)
@@ -104,6 +104,7 @@ $(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INI
 $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD)
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
+		--log-level=debug \
 		--arch=$(ARCH) \
 		--build-arch=$(BUILDER_ARCH) \
 		--builder-cpio=$(BUILDER_DEBUG_INITRD) \
