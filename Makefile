@@ -59,24 +59,18 @@ ${KEY}:
 clean:
 	rm -rf packages/${ARCH}
 
-package/%:
+yamls := $(wildcard *.yaml)
+pkgs := $(subst .yaml,,$(yamls))
+pkg_targets = $(foreach name,$(pkgs),package/$(name))
+$(pkg_targets): package/%: $(KEY)
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	$(MAKE) yamlfile=$(yamlfile) pkgname=$* packages/$(ARCH)/$(pkgver).apk
 
-debug/%:
+dbg_targets = $(foreach name,$(pkgs),debug/$(name))
+$(dbg_targets): debug/%: $(KEY)
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Building package $* with version $(pkgver) from file $(yamlfile)\n"
 	@mkdir -p ./"$*"/
@@ -84,24 +78,16 @@ debug/%:
 	$(info @SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS))
 	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS)  --source-dir ./$(*)/
 
-test/%:
+test_targets = $(foreach name,$(pkgs),test/$(name))
+$(test_targets): test/%: $(KEY)
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	$(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
-test-debug/%:
+testdbg_targets = $(foreach name,$(pkgs),test-debug/$(name))
+$(testdbg_targets): test-debug/%: $(KEY)
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	$(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
