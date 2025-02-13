@@ -1,7 +1,7 @@
 package:
   name: elasticsearch-8
   version: "8.17.2"
-  epoch: 1
+  epoch: 2
   description:
   copyright:
     - license: SSPL-1.0 AND Elastic-2.0
@@ -168,7 +168,6 @@ subpackages:
             - bash
             - busybox
             - coreutils
-            - openjdk-17-default-jvm
             - yq
             - shadow
             - sudo
@@ -176,6 +175,8 @@ subpackages:
         environment:
           ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
           ES_USER: elasticsearch
+          SHELL: /bin/bash
+          KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
       pipeline:
         - name: "Setup Elasticsearch configuration for Bitnami"
           runs: |
@@ -184,8 +185,23 @@ subpackages:
             useradd $ES_USER
             chown -R "${ES_USER}:${ES_USER}" /opt/bitnami/elasticsearch
 
+            keytool -v -keystore /opt/bitnami/elasticsearch/config/server.keystore \
+            -alias "localhost" \
+            -genkeypair \
+            -sigalg SHA512withRSA -keyalg RSA \
+            -dname CN="localhost" \
+            -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
+
+            cat >/opt/bitnami/elasticsearch/config/elasticsearch.yml <<EOF
+            cluster.name: "docker-cluster"
+            network.host: 0.0.0.0
+            node.store.allow_mmap: false
+            EOF
+
             # Run the bitnami elasticsearch binary
-            sudo -E -u $ES_USER /opt/bitnami/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+            sudo -E -u $ES_USER /opt/bitnami/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid
+
+            kill $(cat /tmp/elasticsearch.pid)
 
 update:
   enabled: true
@@ -194,11 +210,6 @@ update:
     strip-prefix: v
     tag-filter: v8.
 
-# This test is mostly commented out because elasticsearch requires changing kernel
-# settings to run properly. The host must run this command first:
-# ```
-# sysctl -w vm.max_map_count=262144
-# ```
 test:
   environment:
     contents:
@@ -208,9 +219,12 @@ test:
         - elasticsearch-config
         - shadow
         - sudo
+        - bash
     environment:
       ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
       ES_USER: elasticsearch
+      SHELL: /bin/bash
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
   pipeline:
     - name: "Check for LICENSE.txt"
       runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
@@ -221,20 +235,33 @@ test:
         useradd $ES_USER
         chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
 
+        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
+        -alias "localhost" \
+        -genkeypair \
+        -sigalg SHA512withRSA -keyalg RSA \
+        -dname CN="localhost" \
+        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
+
+        cat >/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
+        cluster.name: "docker-cluster"
+        network.host: 0.0.0.0
+        node.store.allow_mmap: false
+        EOF
+
         # Ignore the error, vm.max_map_count needs to be increased.
-        sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+        sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid
 
         # # Reset the password
-        # ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')
+        ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')
 
-        # curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+        curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
 
-        # curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
-        #     {
-        #       "name": "John Doe",
-        #       "age": 30,
-        #       "about": "I love to go rock climbing"
-        #     }' || exit 1
-        # curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+        curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+            {
+              "name": "John Doe",
+              "age": 30,
+              "about": "I love to go rock climbing"
+            }' || exit 1
+        curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
 
-        # kill $(cat /tmp/elasticsearch.pid)
+        kill $(cat /tmp/elasticsearch.pid)
