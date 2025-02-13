@@ -74,13 +74,11 @@ fetch-kernel: apk-token
 	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
 	export MELANGE_OPTS="--runner=qemu"
 
-package/%: apk-token
+yamls := $(wildcard *.yaml)
+pkgs := $(subst .yaml,,$(yamls))
+pkg_targets = $(foreach name,$(pkgs),package/$(name))
+$(pkg_targets): package/%: apk-token
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	$(MAKE) yamlfile=$(yamlfile) pkgname=$* packages/$(ARCH)/$(pkgver).apk
@@ -90,39 +88,27 @@ packages/$(ARCH)/%.apk: $(KEY)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
-debug/%: apk-token
+dbg_targets = $(foreach name,$(pkgs),debug/$(name))
+$(dbg_targets): debug/%: apk-token $(KEY)
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	@mkdir -p ./"$*"/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS)  --source-dir ./$(*)/
 
-test/%: apk-token
+test_targets = $(foreach name,$(pkgs),test/$(name))
+$(test_targets): test/%: apk-token $(KEY)
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
-test-debug/%: apk-token
+testdbg_targets = $(foreach name,$(pkgs),test-debug/$(name))
+$(testdbg_targets): test-debug/%: apk-token $(KEY)
 	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
