@@ -37,6 +37,20 @@ or
 
 This will test the builder logic, builder entrypoint script and the tar2efi functions
 
+## Converting existing OCI images
+
+[convert.txt](./convert.txt) contains an allowlist of files
+which will convert some of our images into VMs.
+
+This is done by downloading the apko attestation and injecting a few extra apks, then building with `apko build-minirootfs`
+
+Then, to build them, you can run
+```
+make convert
+```
+
+Then checkout the `converted/` directory.
+
 ## TODO
 
 - a way to validate a created image

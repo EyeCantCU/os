@@ -148,3 +148,7 @@ endif
 ifneq ($(filter-out $(arches),$(ARCH)),)
 $(error ARCH '$(ARCH)' not supported. Must be one of $(arches))
 endif
+
+.PHONY: convert
+convert:
+	./hack/convert.sh
