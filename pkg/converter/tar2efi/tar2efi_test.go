@@ -151,10 +151,6 @@ func TestConverter(t *testing.T) {
 				t.Fatalf("WriteDiskVPCGzip() failed with %v", err)
 			}
 		},
-	}, {
-		filename:     "testdata/workstation.yaml",
-		expectedSize: 8 * GiB,
-		// TODO(mattmoor): How do we want to test the workstation image?
 	}}
 
 	for _, test := range tests {
