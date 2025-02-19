@@ -1,10 +1,19 @@
 package:
   name: beats-fips-8
   version: "8.17.2"
-  epoch: 0
+  epoch: 1
   description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
   copyright:
     - license: Apache-2.0
+      license-path: licenses/APACHE-LICENSE-2.0.txt
+    - license: Elastic-2.0
+      license-path: licenses/ELASTIC-LICENSE-2.0.txt
+
+var-transforms:
+  - from: ${{package.name}}
+    match: ^beats-fips-(\d).*
+    replace: $1
+    to: beats_version
 
 environment:
   contents:
@@ -20,7 +29,139 @@ pipeline:
       expected-commit: cf5c18e080581711e9189290187fbd721e962fac
 
 subpackages:
-  - name: metricbeat-fips-8
+  - name: auditbeat-fips-${{vars.beats_version}}
+    dependencies:
+      provides:
+        - auditbeat-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          go-package: go-fips-md5
+          ldflags: |
+            -X github.com/elastic/beats/v7/libbeat/version.commit=$(git rev-parse HEAD)
+            -X github.com/elastic/beats/v7/libbeat/version.buildTime=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+          output: auditbeat
+          packages: ./auditbeat
+      - runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/auditbeat \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/data \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/logs \
+
+          cd auditbeat
+          mage fields
+
+          cp -r auditbeat.docker.yml auditbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
+          cp module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
+          mv ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.docker.yml ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.yml
+
+          ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
+
+          # Match the dashboards on the counterpart image
+          cd ../x-pack/auditbeat
+          mage dashboards
+          cp -r build/kibana/ ${{targets.subpkgdir}}/usr/share/auditbeat/
+
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/auditbeat && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/auditbeat/data "${{targets.subpkgdir}}"/usr/share/auditbeat/logs
+      - uses: strip
+    test:
+      environment:
+        accounts:
+          users:
+            - username: elasticsearch
+              uid: 1000
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - bash
+            - curl
+            - elasticsearch-${{vars.beats_version}}
+            - jq
+            - kibana-${{vars.beats_version}}
+            - sudo
+            - wait-for-it
+        environment:
+          ELASTICSEARCH_HOSTS: localhost:9200
+          ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "auditbeat-fips-${{vars.beats_version}}"
+        - name: Test build
+          runs: auditbeat version | grep ${{package.version}}
+        - name: Test exporting
+          working-directory: /usr/share/auditbeat
+          runs: |
+            auditbeat export config
+            auditbeat export ilm-policy
+            auditbeat export index-pattern
+            auditbeat export template
+        - name: Test keystore
+          working-directory: /usr/share/auditbeat
+          runs: |
+            auditbeat keystore create | grep "Created auditbeat keystore"
+            echo BAR | auditbeat keystore add FOO --stdin | grep "Successfully updated the keystore"
+            auditbeat keystore list | grep FOO
+            auditbeat keystore remove FOO | grep "successfully removed key: FOO"
+        - name: Test auditbeat setup and test
+          working-directory: /usr/share/auditbeat
+          runs: |
+            chown -R elasticsearch:root /usr/share/elasticsearch
+
+            # Start up Elasticsearch with no username/password
+            sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+              -Ediscovery.type=single-node \
+              -Expack.security.enabled=false \
+              -p /tmp/elasticsearch.pid
+
+            wait-for-it localhost:9200 --timeout=60
+
+            # Confirm Elasticsearch status before continuing
+            es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+            echo "Elasticsearch status: $es_status"
+
+            timer_start=$(date +%s)
+            while [ $es_status != "green" ]
+            do
+              timer_now=$(date +%s)
+              es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+              echo "Elasticsearch status: $es_status"
+              if [ $(( timer_now - timer_start )) -gt 60 ]
+              then
+                echo "Timed out waiting for Elasticsearch!"
+                exit 1
+              fi
+              sleep 2
+            done
+
+            # Run Kibana
+            echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+            (
+              /usr/share/kibana/bin/kibana --config kibana.yml --allow-root 2>&1 | tee kibana.log
+            ) &
+            wait-for-it localhost:5601 --timeout=60
+
+            # Test auditbeat setup with default Elasticsearch and Kibana services running
+            for try in $(seq 1 5)
+            do
+              if ! auditbeat setup
+              then
+                sleep 5
+              else
+                break
+              fi
+            done
+
+            auditbeat test output
+
+  - name: metricbeat-fips-${{vars.beats_version}}
     dependencies:
       runtime:
         - bash
@@ -67,14 +208,14 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
           with:
-            package-match: "metricbeat-fips-8"
+            package-match: "metricbeat-fips-${{vars.beats_version}}"
         - runs: |
             metricbeat version
             cd /usr/share/metricbeat
             metricbeat modules list
             metricbeat --help
 
-  - name: filebeat-fips-8
+  - name: filebeat-fips-${{vars.beats_version}}
     dependencies:
       runtime:
         - bash
@@ -118,7 +259,7 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
           with:
-            package-match: "filebeat-fips-8"
+            package-match: "filebeat-fips-${{vars.beats_version}}"
         - runs: |
             filebeat version
             cd /usr/share/filebeat
@@ -127,6 +268,11 @@ subpackages:
 
 update:
   enabled: true
+  ignore-regex-patterns:
+    - .*-rc.*
+    - .*-alpha.*
+    - .*-beta.*
+    - .*\+build[0-9]*$
   github:
     strip-prefix: v
     tag-filter: v8.
