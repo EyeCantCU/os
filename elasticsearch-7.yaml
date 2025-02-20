@@ -25,6 +25,7 @@ environment:
       - ca-certificates-bundle
       - curl
       - openjdk-17-default-jdk
+      - libudev
 
 var-transforms:
   - from: ${{package.version}}
@@ -39,8 +40,6 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: 0f88dde84795b30ca0d2c0c4796643ec5938aeb5
 
-  - uses: maven/pombump
-
   - uses: patch
     with:
       # If you need to re-generate these patches, pull down the elasticsearch repo
@@ -48,16 +47,15 @@ pipeline:
       # `./gradlew --write-verification-metadata sha256` precommit and add the new patch in `gradle-verification-metadata-xml.patch`
       #
       # x-pack-plugin-ml-build-gradle patch is necessary to work around upstream deleting required dependencies. See https://github.com/chainguard-dev/enterprise-packages/pull/7334
+      # note that because of the 30 day
       patches: |
-        build-tools-internal-version_properties.patch
-        x-pack-plugin-identity-provider-build-gradle.patch
-        x-pack-plugin-security-build-gradle.patch
-        x-pack-plugin-ml-build-gradle.patch
-        CVE-2024-29857.patch
-        gradle-verification-metadata-xml.patch
+        2025-02-20-CVEs.patch
 
   - runs: |
       export LANG=en_US.UTF-8
+      rm -rf /gradle/verification-metadata.xml
+      ./gradlew clean
+      ./gradlew --write-verification-metadata sha256
 
       touch license.key
 
@@ -180,16 +178,35 @@ subpackages:
         environment:
           ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
           ES_USER: elasticsearch
+          KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+        accounts:
+          groups:
+            - groupname: elasticsearch
+              gid: 65532
+          users:
+            - username: elasticsearch
+              gid: 65532
+              uid: 65532
+          run-as: 65532
       pipeline:
         - name: "Setup Elasticsearch configuration for Bitnami"
           runs: |
             set -x
 
-            useradd $ES_USER
             chown -R "${ES_USER}:${ES_USER}" /opt/bitnami/elasticsearch
 
+            cat >/opt/bitnami/elasticsearch/config/elasticsearch.yml <<EOF
+            cluster.name: "docker-cluster"
+            network.host: 127.0.0.1
+            node.store.allow_mmap: false
+            EOF
+
             # Run the bitnami elasticsearch binary
-            sudo -E -u $ES_USER /opt/bitnami/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+            /opt/bitnami/elasticsearch/bin/elasticsearch -p /tmp/elasticsearch.pid &
+
+            sleep 37
+
+            kill $(cat /tmp/elasticsearch.pid)
 
 update:
   enabled: true
@@ -210,6 +227,16 @@ test:
     environment:
       ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
       ES_USER: elasticsearch
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+    accounts:
+      groups:
+        - groupname: elasticsearch
+          gid: 65532
+      users:
+        - username: elasticsearch
+          gid: 65532
+          uid: 65532
+      run-as: 65532
   pipeline:
     - name: "Check for LICENSE.txt"
       runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
@@ -217,23 +244,33 @@ test:
       runs: |
         set -x
 
-        useradd $ES_USER
         chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
 
+        cat >/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
+        cluster.name: "docker-cluster"
+        network.host: 127.0.0.1
+        node.store.allow_mmap: false
+
+        # this disables security authentication since elasticsearch7 doesn't have an easy way to reset the password.
+        # this should only used during testing.
+        xpack.security.enabled: false
+        EOF
+
         # Ignore the error, vm.max_map_count needs to be increased.
-        sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+        elasticsearch -p /tmp/elasticsearch.pid &
 
-        # # Reset the password
-        # ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')
+        sleep 30
 
-        # curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+        curl -s http://localhost:9200/_cluster/health
 
-        # curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
-        #     {
-        #       "name": "John Doe",
-        #       "age": 30,
-        #       "about": "I love to go rock climbing"
-        #     }' || exit 1
-        # curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+        curl -s -X PUT http://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -d'
+            {
+              "name": "John Doe",
+              "age": 30,
+              "about": "I love to go rock climbing"
+            }' || exit 1
 
-        # kill $(cat /tmp/elasticsearch.pid)
+        curl -s -X GET http://localhost:9200/test-index/_doc/1 | grep 'John Doe' || exit 1
+
+        sleep 2;
+        kill $(cat /tmp/elasticsearch.pid)
