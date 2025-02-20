@@ -1,0 +1,68 @@
+#!/bin/sh
+
+set -e
+
+if [ -e "../linux.yaml" ]; then
+	echo "ERROR: Please run ./linux/wolfi-vm from the enterprise-packages root directory above" 1>&2
+	echo "ERROR:   cd .." 1>&2
+	exit 1
+fi
+
+dir=$(dirname $0)/
+kernel=$(dirname "$0")/vmlinuz-$(uname -m)
+initrd=$(dirname "$0")/initramfs.$(uname -m).cpio.gz
+
+# Build a new ramfs if one doesn't exist, or we need to copy an executable into it
+# First argument is an optional executable to run on vmboot
+if [ ! -e "$initrd" ] || [ -f "$1" ]; then
+	if [ -x "$1" ]; then
+		mission=$(mktemp $dir/mission-XXXXXXXX)
+		cp -af "$1" $mission
+		m=$(basename $mission)
+	fi
+	# We need to build a ramfs
+	docker run --rm -it \
+		--mount type=bind,source="$dir",destination="/srv" \
+		cgr.dev/chainguard/wolfi-base:latest \
+		/srv/mkinitramfs $(id -u):$(id -g) $m
+	rm -f $mission
+fi
+
+if [ ! -e "$kernel" ]; then
+	# We need to build and/or extract a kernel
+	# Build the linux package
+	make package/linux
+	# Extract the kernel from locally built package
+	# TODO: Once linux is in the package archive, we could just pull a pre-built pre-packaged kernel
+	pkg=$(find packages -type f -name 'linux-*' | sort -n -r | head -n1 | sed "s/.* //")
+	tmpdir=$(mktemp -d /tmp/$(basename $0)-XXXXXXXX)
+	tar -C "$tmpdir" -xf "$pkg"
+	k=$(find "$tmpdir"/boot -type f -name 'vmlinuz-*' | sort -n -r | head -n1 | sed "s/.* //")
+	cp -f "$k" $(dirname "$0")/vmlinuz-$(uname -m)
+	rm -rf "$tmpdir"
+fi
+
+# Run the VM in qemu-kvm
+# Use "poweroff" to shutdown from within the VM, or "killall qemu-system-x86_64" from outside the VM
+
+# You will need to add more memory if you want to do things like adding apk's in this VM
+mem=16000
+
+arch=$(uname -m)
+case "$arch" in
+	x86_64|amd64)
+		if [ -w /dev/kvm ]; then
+			# Run x86_64/amd64 with acceleration:
+			qemu-system-x86_64 -cpu host -enable-kvm -m $mem -smp $(nproc) -nographic -kernel $kernel -initrd $initrd -append "console=ttyS0 quiet" 2>/dev/null
+		else
+			# Run x86_64/amd64 without acceleration:
+			qemu-system-x86_64 -cpu SandyBridge -m $mem -nographic -kernel $kernel -initrd $initrd -append "console=ttyS0 quiet"
+		fi
+	;;
+	aarch64|arm64)
+		# Run aarch64/arm64 with acceleration:
+		qemu-system-aarch64 -kernel $kernel -initrd $initrd -m $mem -smp $(nproc) -cpu host -accel hvf -nographic -machine virt -append "quiet"
+		# Run aarch64/arm64 without acceleration:
+		#qemu-system-aarch64 -kernel $kernel -initrd $initrd -m $mem -smp $(nproc) -cpu cortex-a72 -nographic -machine virt
+	;;
+esac
