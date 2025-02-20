@@ -3,7 +3,7 @@ TOOLS_D = $(TOP_D)/tools
 
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
-ALL_DISKS = generic google docker-runner workstation aws-ec2 aws-base
+ALL_DISKS = generic google generic-docker workstation aws-ec2 aws-base
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
