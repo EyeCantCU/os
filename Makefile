@@ -61,7 +61,7 @@ clean:
 	rm -rf packages/${ARCH}
 
 apk-token:
-	chainctl auth login --audience apk.cgr.dev 
+	chainctl auth login --audience apk.cgr.dev
 
 fetch-kernel: apk-token
 	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
