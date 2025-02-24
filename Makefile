@@ -23,9 +23,7 @@ MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard-private
 MELANGE_OPTS += --repository-append https://packages.cgr.dev/extras
-MELANGE_OPTS += --repository-append /home/user/utieyin/os/packages
 MELANGE_OPTS += --keyring-append https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
-MELANGE_OPTS += --keyring-append /home/user/utieyin/os/local-melange.rsa.pub
 MELANGE_OPTS += --arch ${ARCH}
 MELANGE_OPTS += --cache-dir ${CACHEDIR}
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
@@ -139,7 +137,6 @@ local-wolfi: ${KEY} apk-token
 	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	@echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
 	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
-	@echo "/home/utieyin/os/packages" >> $(TMP_REPOSITORIES_FILE)
 	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 	@mkdir -p ${PWD}/packages
 	docker run --rm -it \
