@@ -1,0 +1,184 @@
+name: "Build and push generic images"
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+      actions: read
+    strategy:
+      matrix:
+        arch: [ x86_64, aarch64 ]
+        cloud: [ aws, azure, gcp, qemu ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # use public chainguard provider.
+      - uses: chainguard-dev/setup-chainctl@8d93dcbef466d3cf3533f67084f52eb74ef9d262 # v0.2.4
+        with:
+            identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+
+      - name: Get apk.cgr.dev token
+        run: |
+          chainctl auth login --identity "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20" --audience apk.cgr.dev
+          cred=$(chainctl auth token --audience apk.cgr.dev)
+          echo "HTTP_AUTH=basic:apk.cgr.dev:user:$cred" >> $GITHUB_ENV
+
+      - name: configure PATH
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version: stable
+
+      - name: Install deps
+        run: |
+          # install deps
+          sudo apt-get --quiet --assume-yes \
+            --option=Dpkg::Options::=--force-confold \
+            --option=Dpkg::options::=--force-unsafe-io \
+            install \
+            qemu-system-x86 python3-venv
+
+      - name: make clean
+        run: |
+          make clean
+
+      - name: make apkoaas
+        run: |
+          make apkoaas
+
+      - name: make builder
+        run: |
+          make builder
+
+      - name: make disks
+        run: |
+          make ARCH=${{ matrix.arch }} disks-${{ matrix.cloud }}
+
+      ## AWS
+      - name: "[AWS] Setup Creds"
+        if: matrix.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/wolfi-vms-github-postsubmit-role
+          aws-region: us-east-1
+
+      - name: "[AWS] Install Deps"
+        if: matrix.cloud == 'aws'
+        run: |
+          if out=$(command -v aws); then
+              echo "already had aws: $out"
+          else
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip
+              ./aws/install --install-dir $HOME/aws-cli --bin-dir $HOME/bin
+          fi
+          aws --version
+
+          if ! dpkg-query --show | grep python3-venv ; then
+              sudo apt-get install --assume-yes python3-venv
+          fi
+          mkdir -p $HOME/venvs
+          python3 -m venv $HOME/venvs/awspub
+
+          $HOME/venvs/awspub/bin/pip install awspub
+          $HOME/venvs/awspub/bin/pip show awspub
+
+          ln -s $HOME/venvs/awspub/bin/awspub $HOME/bin/
+
+      - name: "[AWS] Publish images"
+        if: matrix.cloud == 'aws'
+        run: |
+          now=$(date --utc "+%Y%m%d-%H%M")
+          arch=${{ matrix.arch }}
+          bucket=chainguard-publish-vms
+          export REGIONS="us-east-1 us-west-1 us-central-1"
+          names=$(make list-aws)
+          [ -n "$names" ] || { echo "make list-aws produced empty output"; exit 1; }
+
+          [ "$arch" = "x86_64" ] && awsarch=amd64 || awsarch=arm64
+
+          echo "publishing $names to aws. arch=$arch awsarch=$awsarch now=$now"
+          for name in $names; do
+            ./tools/aws-image-upload \
+              --name="chainguard-${name#aws-}-$awsarch-$now" \
+              --arch="$awsarch" \
+              output/$arch/$name/disk.raw "$bucket"
+            done
+
+      ## AZURE
+      - name: "[AZURE] Publish images"
+        if: matrix.cloud == 'azure'
+        run: |
+          now=$(date --utc "+%Y%m%d-%H%M")
+          arch="${{ matrix.arch }}"
+          names=$(make list-azure)
+          [ -n "$names" ] || { echo "make list-azure produced empty output"; exit 1; }
+
+          echo "publishing $names to azure. arch=$arch now=$now"
+          find output/$arch/ -type f | xargs ls -l
+          exit 0
+            done
+
+      ## GCP
+      - name: "[GCP] Setup Creds"
+        if: matrix.cloud == 'gcp'
+        id: 'auth'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          workload_identity_provider: 'projects/212178706475/locations/global/workloadIdentityPools/ci-pool/providers/ci-provider'
+          service_account: 'github-ci@wolfi-vm.iam.gserviceaccount.com'
+
+      - name: "[GCP] configure gcloud"
+        if: matrix.cloud == 'gcp'
+        run: |
+          gcloud config set storage/parallel_composite_upload_enabled True
+
+      - name: "[GCP] Publish images"
+        if: matrix.cloud == 'gcp'
+        run: |
+          now=$(date --utc "+%Y%m%d-%H%M")
+          arch="${{ matrix.arch }}"
+          export GCP_PROJECT=wolfi-vm
+          names=$(make list-gcp)
+          [ -n "$names" ] || { echo "make list-gcp produced empty output"; exit 1; }
+
+          [ "$arch" = "x86_64" ] && garch=amd64 || garch=arm64
+
+          echo "publishing $names to gcp. arch=$arch garch=$garch now=$now"
+          for name in $names; do
+              ./tools/google-image-upload --family="chainguard-$name-$garch" \
+                --name="chainguard-$name-$garch-$now" \
+                output/$arch/$name/disk.raw wolfi-vm-images-workloads
+          done
+
+      ## QEMU
+      - name: "[QEMU] Publish images"
+        if: matrix.cloud == 'qemu'
+        run: |
+          now=$(date --utc "+%Y%m%d-%H%M")
+          arch="${{ matrix.arch }}"
+          names=$(make list-qemu)
+          [ -n "$names" ] || { echo "make list-qemu produced empty output"; exit 1; }
+
+          echo "publishing $names to qemu. arch=$arch now=$now"
+          find output/$arch/ -type f | xargs ls -l
+          exit 0

@@ -1,8 +1,8 @@
-name: "Build and push generic images"
+name: "Build images"
 
 on:
-  schedule:
-    - cron: "0 0 * * *"
+  pull_request_target:
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions: {}
@@ -14,14 +14,12 @@ jobs:
       issues: write
       id-token: write
       actions: read
-    runs-on: ubuntu-latest-16-cores
+    strategy:
+      matrix:
+        arch: [ x86_64, aarch64 ]
+        cloud: [ aws, azure, gcp, qemu ]
+    runs-on: ubuntu-latest
     steps:
-      - name: Clean up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          sudo docker builder prune -a
-
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # use public chainguard provider.
@@ -29,95 +27,48 @@ jobs:
         with:
             identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
 
-      - run: |
+      - name: Get apk.cgr.dev token
+        run: |
           chainctl auth login --identity "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20" --audience apk.cgr.dev
-          echo "HTTP_AUTH=basic:apk.cgr.dev:user:$(chainctl auth token --audience apk.cgr.dev)" >> $GITHUB_ENV
+          cred=$(chainctl auth token --audience apk.cgr.dev)
+          echo "HTTP_AUTH=basic:apk.cgr.dev:user:$cred" >> $GITHUB_ENV
 
-      # TODO: Define this and any other required resources in Terraform.
-      # gcloud iam service-accounts create github-ci --project=wolfi-vm --display-name="GitHub Actions Service Account" --description="Service account for GitHub Actions workflows"
-      # gcloud projects add-iam-policy-binding wolfi-vm --member=serviceAccount:github-ci@wolfi-vm.iam.gserviceaccount.com --role=roles/storage.objectAdmin
-      # gcloud projects add-iam-policy-binding wolfi-vm --member=serviceAccount:github-ci@wolfi-vm.iam.gserviceaccount.com --role=roles/iam.serviceAccountTokenCreator
-      # gcloud projects add-iam-policy-binding wolfi-vm --member=serviceAccount:github-ci@wolfi-vm.iam.gserviceaccount.com --role=roles/compute.storageAdmin
-      # gcloud iam workload-identity-pools create "ci-pool"   --project="wolfi-vm"   --location="global"   --display-name="Github pool"
-      # gcloud iam workload-identity-pools providers create-oidc "ci-provider"   --project="wolfi-vm"   --location="global"   --workload-identity-pool="ci-pool"   --display-name="Github provider"   --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.aud=assertion.aud"   --issuer-uri="https://token.actions.githubusercontent.com" --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" --attribute-condition="assertion.repository_owner=='chainguard-dev' && assertion.ref=='refs/heads/main'"
-      # gcloud iam service-accounts add-iam-policy-binding github-ci@wolfi-vm.iam.gserviceaccount.com  --role=roles/iam.workloadIdentityUser   --member="principalSet://iam.googleapis.com/projects/212178706475/locations/global/workloadIdentityPools/ci-pool/attribute.repository/chainguard-dev/wolfi-vm"
-      # gcloud storage buckets add-iam-policy-binding  gs://wolfi-vm-images-workloads     --role=roles/storage.objectCreator     --member="principal://iam.googleapis.com/projects/212178706475/locations/global/workloadIdentityPools/ci-pool/subject/ci-provider"
-      - id: 'auth'
-        uses: 'google-github-actions/auth@v2'
-        with:
-          workload_identity_provider: 'projects/212178706475/locations/global/workloadIdentityPools/ci-pool/providers/ci-provider'
-          service_account: 'github-ci@wolfi-vm.iam.gserviceaccount.com'
+      - name: configure PATH
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
           go-version: stable
-      - run: go install chainguard.dev/apko@latest
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/wolfi-vms-github-postsubmit-role
-          aws-region: us-east-1
 
       - name: Install deps
         run: |
-          sudo apt-get install -y qemu-system-x86
+          # install deps
+          sudo apt-get --quiet --assume-yes \
+            --option=Dpkg::Options::=--force-confold \
+            --option=Dpkg::options::=--force-unsafe-io \
+            install \
+            qemu-system-x86 python3-venv
 
-      - name: "Install AWS Publishing Deps"
-        run: |
-          if out=$(command -v aws); then
-              echo "already had aws: $out"
-          else
-              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-              unzip awscliv2.zip
-              sudo ./aws/install
-          fi
-          aws --version
-
-          sudo apt-get install -y python3-venv
-          mkdir -p $HOME/venvs
-          python3 -m venv $HOME/venvs/awspub
-          $HOME/venvs/awspub/bin/pip install awspub
-          $HOME/venvs/awspub/bin/pip show awspub
-
-          sudo ln -s $HOME/venvs/awspub/bin/awspub /usr/local/bin/
-
-      - name: Build disks
+      - name: make clean
         run: |
           make clean
 
-      - name: Disks x86_64
+      - name: make apkoaas
         run: |
-          make ARCH=x86_64 disks
+          make apkoaas
 
-      - name: Disks aarch64
+      - name: make builder
         run: |
-          make ARCH=aarch64 disks
+          make builder
 
-      - name: "Publish AWS images"
+      - name: make disks
         run: |
-          bucket=chainguard-publish-vms
-          export REGIONS="us-east-1"
-          now=$(date --utc "+%Y%m%d-%H%M")
-          for name in aws-base aws-ec2; do
-            for arch in x86_64 aarch64; do
-              [ "$arch" = "x86_64" ] && namearch=amd64 || namearch=arm64
-              ./tools/aws-image-upload \
-                --name="chainguard-${name#aws-}-$namearch-$now" \
-                --arch="$namearch" \
-                output/$arch/$name/disk.raw "$bucket"
-            done
-          done
-
-      - name: Publish Google images
-        run: |
-          export GCP_PROJECT=wolfi-vm
-          now=$(date --utc "+%Y%m%d-%H%M")
-          for name in generic google workstation generic-docker; do
-            for arch in x86_64 aarch64; do
-              [ "$arch" = "x86_64" ] && garch=amd64 || garch=arm64
-              ./tools/google-image-upload --family="chainguard-$name-$garch" \
-                --name="chainguard-$name-$garch-$now" \
-                output/$arch/$name/disk.raw wolfi-vm-images-workloads
-            done
-          done
+          make ARCH=${{ matrix.arch }} disks-${{ matrix.cloud }}

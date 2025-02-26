@@ -3,7 +3,11 @@ TOOLS_D = $(TOP_D)/tools
 
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
-ALL_DISKS = generic google generic-docker workstation aws-ec2 aws-base
+
+disks_aws = aws-base aws-ec2
+disks_gcp = generic generic-docker google workstation
+disks_qemu = crane curl generic
+disks_azure = azure
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
@@ -31,8 +35,26 @@ apkoaas: $(gosrc)
 test:
 	go test -v -tags withauth ./...
 
+.PHONY: disks-aws disks-gcp disks-qemu
+disks-aws: $(foreach name,$(disks_aws),disk-$(name))
+disks-azure: $(foreach name,$(disks_azure),disk-$(name))
+disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
+disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
+
+.PHONY: list-aws list-gcp list-qemu
+list-all:
+	@for n in $(names); do echo $$n; done
+list-aws:
+	@for n in $(disks_aws); do echo $$n; done
+list-azure:
+	@for n in $(disks_aws); do echo $$n; done
+list-gcp:
+	@for n in $(disks_gcp); do echo $$n; done
+list-qemu:
+	@for n in $(disks_qemu); do echo $$n; done
+
 .PHONY: disks
-disks: $(foreach name,$(ALL_DISKS),disk-$(name))
+disks: $(foreach name,$(names),disk-$(name))
 
 # disk-generic depends on ARCH_OUT_D/generic/disk.raw
 disk_targets = $(foreach name,$(names),disk-$(name))
