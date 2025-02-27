@@ -150,6 +150,13 @@ awspub: disk-aws-ec2 output/x86_64/aws-ec2/disk.vmdk
 clean:
 	rm -Rf output builder apkoaas *.raw
 
+install-deps:
+	sudo apt-get --quiet --assume-yes \
+	  --option=Dpkg::Options::=--force-confold \
+	  --option=Dpkg::options::=--force-unsafe-io \
+	  install \
+	    qemu-system-x86 python3-venv
+
 show-vars:
 	@echo UNAME_M=$(UNAME_M)
 	@echo BUILDER_ARCH=$(BUILDER_ARCH)
