@@ -47,7 +47,7 @@ list-all:
 list-aws:
 	@for n in $(disks_aws); do echo $$n; done
 list-azure:
-	@for n in $(disks_aws); do echo $$n; done
+	@for n in $(disks_azure); do echo $$n; done
 list-gcp:
 	@for n in $(disks_gcp); do echo $$n; done
 list-qemu:
