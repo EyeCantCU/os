@@ -155,7 +155,7 @@ install-deps:
 	  --option=Dpkg::Options::=--force-confold \
 	  --option=Dpkg::options::=--force-unsafe-io \
 	  install --no-install-recommends \
-	    cpu-checker python3-venv qemu-system-x86
+	    cpu-checker python3-venv qemu-system-x86 qemu-utils
 	kvm-ok
 
 show-vars:
