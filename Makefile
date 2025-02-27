@@ -154,8 +154,9 @@ install-deps:
 	sudo apt-get --quiet --assume-yes \
 	  --option=Dpkg::Options::=--force-confold \
 	  --option=Dpkg::options::=--force-unsafe-io \
-	  install \
-	    qemu-system-x86 python3-venv
+	  install --no-install-recommends \
+	    cpu-checker python3-venv qemu-system-x86
+	kvm-ok
 
 show-vars:
 	@echo UNAME_M=$(UNAME_M)
