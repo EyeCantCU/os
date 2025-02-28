@@ -151,11 +151,12 @@ clean:
 	rm -Rf output builder apkoaas *.raw
 
 install-deps:
-	sudo apt-get --quiet --assume-yes \
-	  --option=Dpkg::Options::=--force-confold \
-	  --option=Dpkg::options::=--force-unsafe-io \
-	  install --no-install-recommends \
-	    cpu-checker python3-venv qemu-system-x86 qemu-utils
+	sudo sh -c 'apt-get --quiet update && \
+	  apt-get --quiet --assume-yes \
+	    --option=Dpkg::Options::=--force-confold \
+	    --option=Dpkg::options::=--force-unsafe-io \
+	    install --no-install-recommends \
+	      cpu-checker python3-venv qemu-system-x86 qemu-utils'
 	kvm-ok
 
 show-vars:
