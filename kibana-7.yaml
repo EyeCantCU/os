@@ -1,7 +1,7 @@
 package:
   name: kibana-7
   version: "7.17.28"
-  epoch: 0
+  epoch: 1
   description: Your window into the Elastic Stack
   copyright:
     - license: Apache-2.0
@@ -16,6 +16,12 @@ package:
       # needed for the @kbn/screenshotting-plugin/chromium package
       - libnss
 
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
+
 environment:
   contents:
     packages:
@@ -25,6 +31,7 @@ environment:
       - ca-certificates-bundle
       - coreutils
       - jq
+      - yq
       - node-gyp
       - nvm
       - python3
@@ -87,6 +94,72 @@ pipeline:
 # ones provided by upstream - node and headless_shell browser ; it's better that our binaries
 # match upstream content ; also, for headless_shell, modifying it causes kibana to report an
 # error about SHA256 mismatch
+subpackages:
+  - name: ${{package.name}}-bitnami
+    description: Your window into the Elastic Stack
+    dependencies:
+      provides:
+        - kibana-bitnami=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox
+        - coreutils
+        - curl
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: kibana
+          version-path: ${{vars.major-version}}/debian-12
+          commit: ee900648cd546c3ba4c794020f09ae6a304fe7c3
+      - runs: |
+          # copied from https://github.com/bitnami/containers/blob/main/bitnami/kibana/8/debian-12/rootfs/opt/bitnami/scripts/kibana-env.sh#L79-L109
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/kibana
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/kibana/config.default
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/kibana/tmp
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/kibana/plugins.default
+          mkdir -p ${{targets.contextdir}}/bitnami/kibana/data
+          mkdir -p ${{targets.contextdir}}/bitnami/kibana/conf
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+
+          cp -r ${{targets.destdir}}/usr/share/kibana/* ${{targets.subpkgdir}}/opt/bitnami/kibana
+
+          # install necessary config
+          install -m644 config/kibana.yml ${{targets.contextdir}}/opt/bitnami/kibana/config/kibana.yml
+          cp -r config/* ${{targets.contextdir}}/opt/bitnami/kibana/config.default
+
+          # sed all the scripts to use absolute path in the build environment
+          find . -iname "*.sh" -exec sed 's#/opt/bitnami#${{targets.contextdir}}/opt/bitnami#g' -i {} \;
+
+          # this script does some magic with env vars, templates, etc. etc.
+          # it is easier to run it than figure out everything that it touches
+
+          ${{targets.contextdir}}/opt/bitnami/scripts/kibana/postunpack.sh
+
+          # un-sed everything back to absolute /opt/bitnami prefix
+          find ${{targets.contextdir}}/opt/bitnami -type f -exec sed 's#${{targets.contextdir}}##g' -i {} \;
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for i in ${{targets.contextdir}}/opt/bitnami/kibana/bin/*; do
+            name=$(basename $i)
+            ln -sf /opt/bitnami/kibana/bin/$name ${{targets.contextdir}}/usr/bin/$name
+          done
+    test:
+      environment:
+        environment:
+          BITNAMI_APP_NAME: kibana
+        contents:
+          packages:
+            - yq
+      pipeline:
+        - name: run kibana entrypoint script
+          uses: test/daemon-check-output
+          with:
+            start: /opt/bitnami/scripts/kibana/entrypoint.sh /opt/bitnami/scripts/kibana/run.sh
+            timeout: 30
+            expected_output: |
+              Starting Kibana setup
+
 update:
   enabled: true
   github:
