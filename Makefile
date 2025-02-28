@@ -35,7 +35,7 @@ apkoaas: $(gosrc)
 test:
 	go test -v -tags withauth ./...
 
-.PHONY: disks-aws disks-gcp disks-qemu
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
