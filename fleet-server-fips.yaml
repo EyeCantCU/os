@@ -1,0 +1,119 @@
+package:
+  name: fleet-server-fips
+  version: 8.17.2
+  epoch: 0
+  description: The Fleet server allows managing a fleet of Elastic Agents.
+  copyright:
+    - license: Elastic-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/fleet-server
+      tag: v${{package.version}}
+      expected-commit: 65cfce520ccb7d8884b8c31df883dab1b6ae0e79
+
+  - uses: go/build
+    with:
+      packages: ./
+      output: fleet-server
+      ldflags: -X 'github.com/elastic/fleet-server/build.Version=${{package.version}}' -X 'github.com/elastic/fleet-server/build.CommitSHA=$(git rev-parse HEAD)'
+      go-package: go-fips
+
+  - uses: strip
+
+  - name: copy fleet-server.yml
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/fleet-server
+      cp fleet-server.yml ${{targets.destdir}}/usr/share/fleet-server/fleet-server.yml
+
+update:
+  enabled: true
+  github:
+    strip-prefix: v
+    identifier: elastic/fleet-server
+    use-tag: true
+
+test:
+  environment:
+    accounts:
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 0
+      run-as: 0
+    contents:
+      packages:
+        - bash
+        - curl
+        - elasticsearch
+        - jq
+        - kibana
+        - sudo
+        - wait-for-it
+    environment:
+      ELASTICSEARCH_HOSTS: localhost:9200
+      ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+  pipeline:
+    - name: Test fleet-server setup
+      runs: |
+        chown -R elasticsearch:root /usr/share/elasticsearch
+        sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+              -Ediscovery.type=single-node \
+              -Expack.security.enabled=false \
+              -p /tmp/elasticsearch.pid
+        wait-for-it localhost:9200 --timeout=60
+        # Confirm Elasticsearch status before continuing
+        es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+        echo "Elasticsearch status: $es_status"
+        timer_start=$(date +%s)
+        while [ $es_status != "green" ]
+        do
+          timer_now=$(date +%s)
+          es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+          echo "Elasticsearch status: $es_status"
+          if [ $(( timer_now - timer_start )) -gt 60 ]
+          then
+            echo "Timed out waiting for Elasticsearch!"
+            exit 1
+          fi
+          sleep 2
+        done
+        # Run Kibana
+        echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+        (
+          /usr/share/kibana/bin/kibana --config kibana.yml --allow-root 2>&1 | tee kibana.log
+        ) &
+        wait-for-it localhost:5601 --timeout=60
+
+        # Test fleet-server setup with default Elasticsearch and Kibana services running
+        cat <<EOF > fleet-server.yml
+        output:
+          elasticsearch:
+            hosts: '\${ELASTICSEARCH_HOSTS:https://localhost:9200}'
+            ssl.verification_mode: none  # Disable SSL ver
+
+        fleet:
+          agent:
+            id: '\${FLEET_SERVER_AGENT_ID:dev-fleet-server}'
+
+        inputs:
+          - type: fleet-server
+            policy.id: '\${FLEET_SERVER_POLICY_ID:fleet-server-policy}'
+
+        logging:
+          to_stderr: true
+          pretty: true
+          level: '\${LOG_LEVEL:DEBUG}'
+
+        http.enabled: true
+        EOF
+        fleet-server -c fleet-server.yml &
+    - uses: test/go-fips-check

@@ -1,0 +1,129 @@
+package:
+  name: agentbeat-fips
+  version: 8.17.2
+  epoch: 0
+  description: Agentbeat is a lightweight, real-time monitoring tool for AI agents, tracking performance, logs, and system health with minimal overhead.
+  copyright:
+    - license: Elastic-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - libpcap-dev
+      - rpm-dev
+      - mage
+      - python3
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/beats
+      tag: v${{package.version}}
+      expected-commit: cf5c18e080581711e9189290187fbd721e962fac
+
+  - uses: go/bump
+    with:
+      deps: github.com/golang-jwt/jwt/v4@v4.5.1
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./x-pack/agentbeat
+      output: agentbeat
+      tags: agentbeat
+      ldflags: -X 'github.com/elastic/agentbeat/build.Version=${{package.version}}' -X 'github.com/elastic/agentbeat/build.CommitSHA=$(git rev-parse HEAD)'
+
+  - name: get modules
+    runs: |
+      cd x-pack/agentbeat/
+      mage PrepareLightModules
+
+  - name: copy agentbeat.yml
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/agentbeat
+      cp /home/build/x-pack/agentbeat/agentbeat.spec.yml ${{targets.destdir}}/usr/share/agentbeat/agentbeat.spec.yml
+
+  - name: copy module
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/agentbeat/module
+      cp -r /home/build/x-pack/agentbeat/build/package/module/* ${{targets.destdir}}/usr/share/agentbeat/module
+
+update:
+  enabled: true
+  github:
+    strip-prefix: v
+    identifier: elastic/beats
+    use-tag: true
+
+test:
+  environment:
+    accounts:
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 0
+      run-as: 0
+    contents:
+      packages:
+        - bash
+        - curl
+        - elasticsearch-8
+        - jq
+        - kibana-8
+        - sudo
+        - wait-for-it
+    environment:
+      ELASTICSEARCH_HOSTS: localhost:9200
+      ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+  pipeline:
+    - name: Test agentbeat setup
+      runs: |
+        chown -R elasticsearch:root /usr/share/elasticsearch
+        sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+          -Ediscovery.type=single-node \
+          -Expack.security.enabled=false \
+          -p /tmp/elasticsearch.pid
+        wait-for-it localhost:9200 --timeout=60
+
+        # Confirm Elasticsearch status before continuing
+        es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+        echo "Elasticsearch status: $es_status"
+        timer_start=$(date +%s)
+
+        while [ "$es_status" != "green" ]; do
+          timer_now=$(date +%s)
+          es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+          echo "Elasticsearch status: $es_status"
+          if [ $(( timer_now - timer_start )) -gt 60 ]; then
+            echo "Timed out waiting for Elasticsearch!"
+            exit 1
+          fi
+          sleep 2
+        done
+
+        # Run Kibana
+        echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+        (
+          /usr/share/kibana/bin/kibana --config kibana.yml --allow-root 2>&1 | tee kibana.log
+        ) &
+        wait-for-it localhost:5601 --timeout=60
+
+        export KUBERNETES_MASTER="https://127.0.0.1:32764"
+        export NODE_NAME="node-000000"
+        export KUBECONFIG="/root/.kube/config"
+
+        curl -o metricbeat.yml https://raw.githubusercontent.com/elastic/beats/refs/heads/main/metricbeat/metricbeat.docker.yml
+        curl -o auditbeat.yml https://raw.githubusercontent.com/elastic/beats/refs/heads/main/auditbeat/auditbeat.docker.yml
+        curl -o filebeat.yml https://raw.githubusercontent.com/elastic/beats/refs/heads/main/x-pack/filebeat/filebeat.docker.yml
+        curl -o heartbeat.yml https://raw.githubusercontent.com/elastic/beats/refs/heads/main/heartbeat/heartbeat.docker.yml
+
+        sleep 1
+
+        agentbeat auditbeat test output
+        agentbeat filebeat test output
+        agentbeat heartbeat test output
+        agentbeat metricbeat test output
+    - uses: test/go-fips-check
