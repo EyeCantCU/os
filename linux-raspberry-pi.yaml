@@ -1,0 +1,99 @@
+package:
+  name: linux-raspberry-pi
+  version: "20250127"
+  epoch: 0
+  description: "the linux kernel for raspberry pi 5"
+  copyright:
+    - license: GPL-2.0
+  resources:
+    cpu: 8
+    memory: 24Gi
+  dependencies:
+    runtime:
+      # Ensure we get Chainguard branding in our VMs.
+      - chainguard-baselayout
+  target-architecture:
+    - aarch64 # This kernel is specific to the raspberry pi hardware
+
+environment:
+  contents:
+    packages:
+      - bison
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - diffutils
+      - elfutils
+      - elfutils-dev
+      - findutils
+      - flex
+      - gawk
+      - openssl-dev
+      - perl
+      - python3
+      - wolfi-base
+      - gmp
+      - gmp-dev
+      - mpc
+      - mpc-dev
+      - mpfr
+      - mpfr-dev
+      - zstd
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/raspberrypi/linux
+      tag: stable_${{package.version}}
+      expected-commit: a18d9ced4965462cb7b3b4252ada440395105308
+
+  - runs: |
+      set -x
+      # Make a kernel
+      # TODO: Much work to be done, tailoring a kernel config (or, more likely, a set of kernel configs)
+      KERNEL=kernel_2712
+      make bcm2712_defconfig
+
+      # Enable fuse and overlayfs stuff for dockerd to work
+      cat .config-fuse >> .config
+
+      # Enable iptables stuff for dockerd to work
+      cat .config-iptables >> .config
+
+      # Enable XFS
+      cat .config-xfs >> .config
+
+      # Remove early warnings for missing /etc/target
+      sed -i 's|CONFIG_TARGET_CORE=y|# CONFIG_TARGET_CORE is not set|g' .config
+
+      # Enable modules by default
+      sed -i 's|=m|=y|g' .config
+
+      #echo CONFIG_VERSION_SIGNATURE=\"Chainguard Wolfi Linux $(uname -m)-${{package.full-version}}\" >> .config
+      # Build the Linux Kernel
+      make -j $(nproc) Image.gz modules dtbs
+      mkdir -p ${{targets.destdir}}/boot/firmware/overlays
+      cp -a arch/arm64/boot/dts/broadcom/*.dtb ${{targets.destdir}}/boot/firmware/
+      cp -a arch/arm64/boot/dts/overlays/*.dtb* ${{targets.destdir}}/boot/firmware/overlays/
+      cp -a arch/arm64/boot/dts/overlays/README ${{targets.destdir}}/boot/firmware/overlays/
+      cp -a .config ${{targets.destdir}}/boot/config-$(uname -m)-${{package.full-version}}
+      chmod 644 ${{targets.destdir}}/boot/config-$(uname -m)-${{package.full-version}}
+      cp -a $(find . -type f \( -name bzImage -or -name Image.gz \) -print -quit) ${{targets.destdir}}/boot/vmlinuz
+      chmod 644 ${{targets.destdir}}/boot/vmlinuz
+      ( cd ${{targets.destdir}}/boot && ln -sf vmlinuz vmlinuz-$(uname -m)-${{package.full-version}} )
+
+test:
+  pipeline:
+    - name: vmlinuz existence
+      runs: |
+        # Just a dumb test for now...see if we have a file at /boot/vmlinuz
+        [ -e /boot/vmlinuz ]
+
+update:
+  enabled: true
+  github:
+    identifier: raspberrypi/linux
+    use-tag: true
+    strip-prefix: stable_
+    tag-filter: stable_
