@@ -20,6 +20,7 @@ Usage: ${0##*/} [--name=name] image bucket
                             default is to use the basename of 'image' with
                             extensions removed.
            --arch    ARCH   register image as architecture ARCH
+           --ssm     SSM    ssm paramemter prefix
 
     Environment:
 
@@ -66,8 +67,16 @@ region_blob() {
 }
 
 write_tmpl() {
+    local OPTIND
     local debug=false
-    [ "$1" = "--debug" ] && debug=true
+    local ssm=false
+    while true; do
+        case "$1" in
+            --debug) debug=true; shift ;;
+            --ssm) ssm=true; shift ;;
+            *) break ;;
+        esac
+    done
 
     cat <<"EOF"
 awspub:
@@ -89,6 +98,16 @@ awspub:
         # kim_chainguard for marketplace
         - "607334848609"
 EOF
+    if [ "$ssm" = "true" ]; then
+        cat <<"EOF"
+      ssm_parameter:
+        - name: "$ssm_name/$ssm_version"
+          description: $description
+        - name: "$ssm_name/latest"
+          allow_overwrite: true
+          description: Latest image of $description
+EOF
+    fi
     region_blob
     if [ "$debug" = "true" ]; then
         cat <<"EOF"
@@ -105,26 +124,37 @@ EOF
         # kim_chainguard for marketplace
         - "607334848609"
 EOF
-    region_blob
+    if [ "$ssm" = "true" ]; then
+        cat <<"EOF"
+      ssm_parameter:
+        - name: "$ssm_name/$ssm_version/debug"
+          description: $description-debug
+        - name: "$ssm_name/latest/debug"
+          allow_overwrite: true
+          description: Latest debug image of $description
+EOF
+    fi
+        region_blob
     fi
 }
 
 main() {
     local short_opts="a:hv"
-    local long_opts="help,debug-efi-vars:,arch:,name:,verbose"
+    local long_opts="help,debug-efi-vars:,arch:,name:,ssm:,verbose"
     local getopt_out=""
     getopt_out=$(getopt --name "${0##*/}" \
         --options "${short_opts}" --long "${long_opts}" -- "$@") &&
         eval set -- "${getopt_out}" ||
         { Usage 1>&2; return 1; }
 
-    local name="" out="" arch="" archin="" name="" awsarch="" debug_efi_vars=""
+    local name="" out="" arch="" archin="" name="" awsarch="" debug_efi_vars="" ssm=""
     while [ $# -ne 0 ]; do
         { cur="$1"; next="$2"; }
         case "$cur" in
             -h|--help) Usage ; exit 0;;
             -a|--arch) archin="$next"; shift;;
                --name) name="$next"; shift;;
+               --ssm) ssm="$next"; shift;;
                --debug-efi-vars)
                    debug_efi_vars=$(fullpath "$next") ||
                        { stderr "bad value for --debug-efi-vars"; return 1; };;
@@ -196,13 +226,18 @@ main() {
         name=$defname
     fi
 
+    if [ -n "$ssm" ]; then
+        ssm_name="$(echo /$ssm | tr - /)"
+        ssm_version=${name#"$ssm-"}
+    fi
+
     stderr "publishing $vmdk to $name via $bucket"
     local fpvmdk=""
     local description="$name"
     fpvmdk=$(fullpath "$vmdk") || { stderr "failed getting path to $vmdk"; return 1; }
 
     local tmpl="${TEMP_D}/awspub.yaml" mapping="${TEMP_D}/mapping.yaml"
-    write_tmpl ${debug_efi_vars:+--debug} > "$tmpl" ||
+    write_tmpl ${debug_efi_vars:+--debug} ${ssm:+--ssm} > "$tmpl" ||
         { stderr "failed writing tmpl to $tmpl"; return 1; }
     cat > "$mapping" <<EOF
 diskimg: "$fpvmdk"
@@ -211,6 +246,8 @@ name: "$name"
 description: "$description"
 bucket: "$bucket"
 debug_efi_vars: "$debug_efi_vars"
+ssm_name: "$ssm_name"
+ssm_version: "$ssm_version"
 EOF
 
     echo "===== awspub.yaml ====" ;
@@ -221,6 +258,11 @@ EOF
     stderr "execute:" "awspub create --config=mapping=\"$mapping\" \"$tmpl\""
     awspub create "--config-mapping=$mapping" "$tmpl" ||
         { stderr "that failed. sad face"; return 1; }
+    if [ -n "$ssm" ]; then
+        stderr "execute:" "awspub publish --config=mapping=\"$mapping\" \"$tmpl\""
+        awspub publish "--config-mapping=$mapping" "$tmpl" ||
+            { stderr "that failed. sad face"; return 1; }
+    fi
 
     return 0
 }
