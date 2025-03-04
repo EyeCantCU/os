@@ -1,0 +1,116 @@
+package:
+  name: node-problem-detector-fips-0.8
+  version: 0.8.20
+  epoch: 0
+  description: node-problem-detector aims to make various node problems visible to the upstream layers in the cluster management stack.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - busybox
+      - systemd-dev
+    provides:
+      - node-problem-detector-fips=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - systemd-dev
+      - wolfi-baselayout
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes/node-problem-detector
+      tag: v${{package.version}}
+      expected-commit: 53e0152f6476ed8ea23ce800407627e8d5dcb013
+
+  - uses: go/bump
+    with:
+      deps: golang.org/x/crypto@v0.31.0 golang.org/x/net@v0.33.0
+
+  - uses: go/build
+    with:
+      modroot: .
+      go-package: go-fips
+      output: node-problem-detector
+      packages: ./cmd/nodeproblemdetector
+      ldflags: -X k8s.io/node-problem-detector/pkg/version.version=v${{package.version}}
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/config
+      cp -a ./config/* "${{targets.destdir}}"/config
+
+subpackages:
+  - name: ${{package.name}}-health-checker-fips
+    description: A health checker for node-problem-detector to check kubelet and container runtime health
+    pipeline:
+      - uses: go/build
+        with:
+          modroot: .
+          go-package: go-fips
+          output: health-checker
+          packages: ./cmd/healthchecker
+          ldflags: -X k8s.io/node-problem-detector/pkg/version.version=v${{package.version}}
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - name: "Basic tests"
+          runs: |
+            health-checker 2>&1 | grep systemctl
+            health-checker --help 2>&1 | grep kubelet
+
+  - name: ${{package.name}}-log-counter-fips
+    description: A log couter for journald to count the number of logs in a time window
+    pipeline:
+      - uses: go/build
+        with:
+          modroot: .
+          go-package: go-fips
+          output: log-counter
+          packages: ./cmd/logcounter
+          ldflags: -X k8s.io/node-problem-detector/pkg/version.version=v${{package.version}}
+          tags: journald
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - name: "Basic tests"
+          runs: |
+            log-counter --help 2>&1 | grep kubelet
+
+  - name: ${{package.name}}-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}
+          ln -sf /usr/bin/node-problem-detector ${{targets.subpkgdir}}/node-problem-detector
+    dependencies:
+      provides:
+        - node-problem-detector-fips-compat=${{package.full-version}}
+    test:
+      pipeline:
+        - runs: |
+            stat /node-problem-detector
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes/node-problem-detector
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v0.8.
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        node-problem-detector --version | grep -q "${{package.version}}"
+        node-problem-detector --help 2>&1 | grep prometheus
