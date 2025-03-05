@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	charmlog "github.com/charmbracelet/log"
 
 	"chainguard.dev/apko/pkg/apk/auth"
 	apkfs "chainguard.dev/apko/pkg/apk/fs"
@@ -82,6 +85,15 @@ func boot(ctx context.Context, t *testing.T, bios, disk string, arch types.Archi
 }
 
 func TestConverter(t *testing.T) {
+	// set debug output, so we can see problems when failing
+	slog.SetDefault(
+		slog.New(charmlog.NewWithOptions(
+			os.Stderr, charmlog.Options{
+				ReportTimestamp: true, Level: charmlog.Level(charmlog.DebugLevel),
+			}),
+		),
+	)
+
 	destDir := t.TempDir()
 	defer os.RemoveAll(destDir)
 	arch := types.ParseArchitecture(runtime.GOARCH)
