@@ -28,9 +28,6 @@ import (
 	"chainguard.dev/apkoaas/pkg/converter"
 	"chainguard.dev/apkoaas/pkg/converter/tar2efi"
 	"chainguard.dev/apkoaas/pkg/utils"
-	"github.com/anchore/syft/syft"
-	"github.com/anchore/syft/syft/format/syftjson"
-	"github.com/anchore/syft/syft/source/filesource"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -151,45 +148,6 @@ func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPa
 	return tar2efi.NewFromCpio(ctx, builderCpio, kernelPath, arch)
 }
 
-func createAttestation(ctx context.Context, input string) (string, error) {
-	// Create a source from the tar file
-	src, err := filesource.NewFromPath(input)
-	if err != nil {
-		return "", fmt.Errorf("failed to create SBOM: %w", err)
-	}
-
-	// Generate the SBOM
-	sbom, err := syft.CreateSBOM(context.Background(), src, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create SBOM: %w", err)
-	}
-
-	// Encode the SBOM to Syft JSON format
-	enc := syftjson.NewFormatEncoder()
-	if enc == nil {
-		return "", fmt.Errorf("failed to get JSON encoder")
-	}
-
-	outputPath := filepath.Join(
-		filepath.Dir(input),
-		"syft.sbom.json",
-	)
-
-	outputFile, err := os.Create(outputPath)
-	if err != nil {
-		return "", err
-	}
-	defer outputFile.Close()
-
-	// Write the SBOM JSON to a file
-	err = enc.Encode(outputFile, *sbom)
-	if err != nil {
-		return "", fmt.Errorf("failed to encode SBOM: %w", err)
-	}
-
-	return outputPath, nil
-}
-
 func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, buildArch, arch, output string) error {
 	apkoTar, err := utils.CreateTar(ctx, buildFilePath, arch)
 	if err != nil {
@@ -248,7 +206,7 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 		return err
 	}
 
-	attestation, err := createAttestation(ctx, outputTar.Name())
+	attestation, err := utils.CreateAttestation(ctx, outputTar.Name())
 	if err != nil {
 		return err
 	}
