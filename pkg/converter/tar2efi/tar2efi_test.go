@@ -140,7 +140,7 @@ func TestConverter(t *testing.T) {
 		expectedSize: 3 * GiB,
 		// TODO(mattmoor): How do we want to test the generic-docker image?
 	}, {
-		filename:     "testdata/google.yaml",
+		filename:     "testdata/google-base.yaml",
 		expectedSize: 2 * GiB,
 		testDisk: func(t *testing.T, disk string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
