@@ -18,6 +18,7 @@ import (
 	"github.com/anchore/syft/syft/cataloging/filecataloging"
 	"github.com/anchore/syft/syft/cataloging/pkgcataloging"
 	"github.com/anchore/syft/syft/format/syftjson"
+	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
 	"github.com/chainguard-dev/clog"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -124,7 +125,25 @@ func CreateAttestation(ctx context.Context, input string) (string, error) {
 	}
 	// remove tmp path from metadata
 	sbom.Source.Name = "wolfi-vm"
-	sbom.Source.Metadata = ""
+	sbom.Source.Metadata = source.FileMetadata{}
+
+	// Normalize owner/group IDs, by default syft will
+	// detect current UID/GID ownage for system files
+	// this will normalize it back to root.
+	// This will only do for files owned by the user
+	// doing the scan, so others are not touched.
+	uid := os.Getuid()
+	gid := os.Getgid()
+	for i := range sbom.Artifacts.FileMetadata {
+		metadata := sbom.Artifacts.FileMetadata[i]
+		if metadata.UserID == uid {
+			metadata.UserID = 0
+		}
+		if metadata.GroupID == gid {
+			metadata.GroupID = 0
+		}
+		sbom.Artifacts.FileMetadata[i] = metadata
+	}
 
 	// Encode the SBOM to Syft JSON format
 	enc := syftjson.NewFormatEncoder()
