@@ -197,7 +197,7 @@ docker_init_database_dir() {
 	# "Other options are passed to mysqld." (so we pass all "mysqld" arguments directly here)
 	# Set basedir before user specified args to allow others to override
 	mysql_install_db --basedir=/usr \
-	        "${installArgs[@]}" "${@:2}"
+		"${installArgs[@]}" "${@:2}" \
 		--skip-test-db \
 		--old-mode='UTF8_IS_UTF8MB3' \
 		--default-time-zone=SYSTEM --enforce-storage-engine= \
