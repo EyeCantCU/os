@@ -152,8 +152,8 @@ func TestConverter(t *testing.T) {
 			}
 		},
 	}, {
-		filename:     "testdata/aws-ec2.yaml",
-		expectedSize: 3 * GiB,
+		filename:     "testdata/aws-base.yaml",
+		expectedSize: 2 * GiB,
 		testDisk: func(t *testing.T, disk string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			t.Cleanup(cancel)
