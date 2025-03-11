@@ -5,8 +5,8 @@ TOOLS_D = $(TOP_D)/tools
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
 disks_aws = aws-base aws-ec2 aws-eks
-disks_gcp = generic generic-docker google-base google-agents workstation
-disks_qemu = crane curl generic
+disks_gcp = google-base google-agents workstation
+disks_qemu = crane curl generic generic-docker
 disks_azure = azure-base azure-agents
 
 # Darwin reports arm64 for 'uname -m'
