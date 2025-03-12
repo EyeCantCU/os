@@ -195,7 +195,9 @@ docker_init_database_dir() {
 	mysql_note "Initializing database files"
 	installArgs=( --datadir="$DATADIR" --rpm --auth-root-authentication-method=normal )
 	# "Other options are passed to mariadbd." (so we pass all "mysqld" arguments directly here)
-	mariadb-install-db "${installArgs[@]}" "${@:2}" \
+	# Set basedir before user specified args to allow others to override
+	mariadb-install-db --basedir=/usr \
+	        "${installArgs[@]}" "${mariadbdArgs[@]}" \
 		--skip-test-db \
 		--old-mode='UTF8_IS_UTF8MB3' \
 		--default-time-zone=SYSTEM --enforce-storage-engine= \
