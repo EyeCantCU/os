@@ -136,7 +136,7 @@ func TestConverter(t *testing.T) {
 		expectedSize: 2 * GiB,
 		// TODO(mattmoor): How do we want to test the generic image?
 	}, {
-		filename:     "testdata/generic-docker.yaml",
+		filename:     "testdata/google-docker.yaml",
 		expectedSize: 3 * GiB,
 		// TODO(mattmoor): How do we want to test the generic-docker image?
 	}, {

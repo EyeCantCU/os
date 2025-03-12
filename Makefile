@@ -4,10 +4,10 @@ TOOLS_D = $(TOP_D)/tools
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
-disks_aws = aws-base aws-agents aws-eks
-disks_gcp = google-base google-agents workstation
-disks_qemu = crane curl generic generic-docker
-disks_azure = azure-base azure-agents
+disks_aws = aws-base aws-agents aws-docker aws-eks
+disks_gcp = google-base google-agents google-docker workstation
+disks_qemu = crane curl generic
+disks_azure = azure-base azure-agents azure-docker
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
