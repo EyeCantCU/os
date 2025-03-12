@@ -5,7 +5,7 @@ TOOLS_D = $(TOP_D)/tools
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
 disks_aws = aws-base aws-agents aws-docker aws-eks
-disks_gcp = google-base google-agents google-docker workstation
+disks_gcp = gcp-base gcp-agents gcp-docker workstation
 disks_qemu = crane curl generic
 disks_azure = azure-base azure-agents azure-docker
 
