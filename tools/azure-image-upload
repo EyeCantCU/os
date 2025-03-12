@@ -4,9 +4,26 @@
 # Docs:
 # - https://learn.microsoft.com/en-us/azure/virtual-machines/linux/create-upload-generic
 # - https://learn.microsoft.com/en-us/azure/virtual-machines/linux/disks-upload-vhd-to-managed-disk-cli
+# Create Vm with something like this:
+# az vm create --name jvreeland-test-cli-2
+# --image /subscriptions/ad60e736-b0ce-432e-b77c-4b8218f452ae/resourceGroups/chainguard-vms/providers/Microsoft.Compute/galleries/vmtesting/images/jvreeland-azure-no-sb-1/versions/0.0.2
+# --admin-username azureuser --generate-ssh-keys --resource-group chainguard-vms --size Standard_E4pds_v6 --admin-password PassWord1!!
+# The image can be pulled from the JSON output from the VM image version create
+#
+# Example to generate an entirely new disk, image definition and image version:
+# ./tools/azure-image-upload -v --name jvreeland-azure-no-sb --arch Arm64 ./output/aarch64/azure-agents/disk-debug.raw
+# Example to generate a new disk and add it to an existing definition as a new version:
+# ./tools/azure-image-upload -v --name jvreeland-azure-no-sb-1 --arch Arm64 --image-version 0.0.2 ./output/aarch64/azure-agents/disk-debug.raw
+#
+
 TEMP_D=""
 VERBOSITY=1
 DEF_RESOURCE_GROUP="chainguard-vms"
+DEF_GALLERY="vmtesting"
+DEF_PUBLISHER="TestingPublisher"
+DEF_OFFER="TestingOffer"
+DEF_VERSION="0.0.1"
+MAKE_DEFINITION=0
 
 Usage() {
     cat <<EOF
@@ -22,6 +39,10 @@ Usage: ${0##*/} [--name=name] image
                             extensions removed.
            --arch    ARCH   register image as architecture ARCH
       --resource-group GRP  use resource-group for publishing. [$DEF_RESOURCE_GROUP]
+      --gallery GAL         publish to gallery. [$DEF_GALLERY]
+      --image-definition    use this image definition
+      --make-definition     atempt to make the definition before using
+      --image-version       image version to create
 
 
   Publish raw disk image 'image' to azure using 'az' and 'azcopy' cli.
@@ -69,7 +90,7 @@ vr() {
 
 main() {
     local short_opts="hv"
-    local long_opts="help,arch:,name:,resource-group:,verbose"
+    local long_opts="help,arch:,name:,resource-group:,gallery:,image-version:,definition-name:,make-definition,verbose"
     local getopt_out=""
     getopt_out=$(getopt --name "${0##*/}" \
         --options "${short_opts}" --long "${long_opts}" -- "$@") &&
@@ -78,13 +99,22 @@ main() {
 
     local name="" out="" arch="" file="" name="" defname=""
     local resource_group="${DEF_RESOURCE_GROUP}"
+    local gallery="${DEF_GALLERY}"
+    local image_version="${DEF_VERSION}"
+    local make_definition=0
+    local definition_name=""
+
     while [ $# -ne 0 ]; do
         { cur="$1"; next="$2"; }
         case "$cur" in
             -h|--help) Usage ; exit 0;;
-               --arch) arch="$next"; shift;;
-               --name) name=$2; shift;;
-               --resource-group) resource_group=$2; shift;;
+            --arch) arch="$next"; shift;;
+            --name) name=$2; shift;;
+            --resource-group) resource_group=$2; shift;;
+            --gallery) gallery=$2; shift;;
+            --image-version) image_version=$2; shift;;
+            --make-definition) make_definition=1 ;;
+            --definition-name) definition_name=$2; shift;;
             -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
             --) shift; break;;
         esac
@@ -95,6 +125,10 @@ main() {
         Usage 1>&2
         stderr "Got $# args, expected 1"
         return 1
+    fi
+
+    if [ -z "$definition_name" ] && [ -z "$make_definition" ]; then
+        definition_name="${name}"
     fi
 
     assert_cmds az azcopy jq wc || return
@@ -112,6 +146,7 @@ main() {
     if [ -z "$archin" ]; then
         arch=$(uname -m)
     fi
+
 
     case "$arch" in
         aarch64|arm64) azarch="arm64";;
@@ -166,7 +201,8 @@ main() {
         "sparse=$((sparse_size/1024/1024))MiB) to azure"
 
     # Create disk
-    vr "create disk" az disk create \
+    local out="" diskid=""
+    out=$(vr "create disk" az disk create \
         --resource-group="${resource_group}" \
         --name="$name" \
         --os-type=Linux \
@@ -174,13 +210,18 @@ main() {
         --upload-size-bytes="$disk_size" \
         --sku=standard_lrs \
         --hyper-v-generation=V2 \
-        --architecture="$azarch" || {
+        --architecture="$azarch") || {
             stderr "publishing $file failed"
             return 1
         }
 
+    diskid=$(printf "%s" "$out" | jq -r .id) && [ -n "$diskid" ] || {
+        stderr "failed parsing jq output of az disk create"
+        return 1
+    }
+
     # Enable Write access on disk 86400 (1 day) pulled from docs
-    local out="" duration=$((60*60*24)) aurl=""
+    local duration=$((60*60*24)) aurl=""
     out=$(vr enable-disk-write az disk grant-access \
         --resource-group="$resource_group" --name="$name" \
         --access-level=Write --duration-in-seconds="$duration") || {
@@ -206,6 +247,35 @@ main() {
     vr "revoke-access" az disk revoke-access \
         --name="$name" --resource-group="$resource_group" || {
         stderr "failed revoking access to $name"
+        return 1
+    }
+
+    if [ -n "$MAKE_DEFINITION" ]; then
+       # TODO add publisher information
+        vr "create image definition in gallery" az sig image-definition create \
+            --resource-group "$resource_group" \
+            --gallery-name "$gallery" \
+            --gallery-image-definition "$name" \
+            --publisher "$DEF_PUBLISHER" \
+            --offer "$DEF_OFFER" \
+            --sku "$name" \
+            --os-type Linux \
+            --os-state generalized \
+            --architecture "$azarch" \
+            --features 'SecurityType=Standard' || {
+            stderr "failed creating Image definition"
+            return 1
+        }
+    fi
+
+    vr "create image version" az sig image-version create \
+       --gallery-image-definition "$name" \
+       --gallery-image-version "$image_version" \
+       --gallery-name "$gallery" \
+       --resource-group "$resource_group" \
+       --os-snapshot "$diskid" || {
+       stderr "failed creating image version"
+
         return 1
     }
 
