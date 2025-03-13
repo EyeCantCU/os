@@ -6,7 +6,8 @@ require (
 	chainguard.dev/apko v0.25.2
 	github.com/anchore/syft v1.20.0
 	github.com/chainguard-dev/clog v1.7.0
-	github.com/charmbracelet/log v0.4.1-0.20241125144537-1e6353e3ca79
+	github.com/charmbracelet/log v0.4.1
+	github.com/google/go-cmp v0.7.0
 	github.com/google/go-containerregistry v0.20.4-0.20250225234217-098045d5e61f
 	github.com/spf13/cobra v1.9.1
 	github.com/wolfi-dev/wolfictl v0.31.0
@@ -130,7 +131,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/licensecheck v0.3.1 // indirect
 	github.com/google/pprof v0.0.0-20241029153458-d1b30febd7db // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
