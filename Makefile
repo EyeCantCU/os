@@ -113,6 +113,25 @@ builder/ovmf-%.fd: apkoaas
 builder/kernel-%: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* kernel $@
 
+%.vmdk: %.raw
+	./tools/aws-image-upload create-vmdk $< $@
+
+PREFIX ?= $(shell id -un)
+BUILD_TIMESTAMP ?= $(shell date --utc "+%Y%m%d-%H%M")
+ifeq ($(BUILDER_ARCH),aarch64)
+AWSARCH = arm64
+else
+AWSARCH = x86_64
+endif
+awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
+awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
+awspub-%: AWSSSM=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)
+awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
+	./tools/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
+
+.PHONY: awspub
+awspub: $(foreach name,$(disks_aws),awspub-$(name))
+
 $(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
