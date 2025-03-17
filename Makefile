@@ -6,7 +6,7 @@ BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
 disks_aws = aws-base aws-agents aws-docker aws-docker-dev aws-eks
 disks_gcp = gcp-base gcp-agents gcp-docker gcp-docker-dev workstation
-disks_qemu = crane curl generic
+disks_qemu = generic
 disks_azure = azure-base azure-agents azure-docker azure-docker-dev
 
 # Darwin reports arm64 for 'uname -m'
