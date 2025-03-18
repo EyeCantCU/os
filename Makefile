@@ -118,7 +118,7 @@ builder/kernel-%: apkoaas
 
 PREFIX ?= $(shell id -un)
 BUILD_TIMESTAMP ?= $(shell date --utc "+%Y%m%d-%H%M")
-ifeq ($(BUILDER_ARCH),aarch64)
+ifeq ($(ARCH),aarch64)
 AWSARCH = arm64
 else
 AWSARCH = x86_64
