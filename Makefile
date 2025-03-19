@@ -196,3 +196,14 @@ dev-container-wolfi:
 		ghcr.io/wolfi-dev/sdk:latest
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
+
+.PHONY: gcp-auth
+gcp-auth: ## This is a helper target for placing your GCP credentials into the melange cache for use by a package build that needs to communicate with GCP
+	mkdir -p ${CACHEDIR}/.config/gcloud
+	cp -rf ~/.config/gcloud/* ${CACHEDIR}/.config/gcloud/
+
+.PHONY: init-gcp-auth
+init-gcp-auth:
+	@echo "Initializing GCP auth..."
+	gcloud auth login
+	@$(MAKE) gcp-auth
