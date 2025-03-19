@@ -1,13 +1,16 @@
 package:
   name: calico-fips-3.27
   version: 3.27.5
-  epoch: 6
+  epoch: 35
   description: "Cloud native networking and network security"
   copyright:
     - license: Apache-2.0
   dependencies:
     provides:
       - calico-fips=${{package.full-version}}
+    runtime:
+      - merged-bin
+      - wolfi-baselayout
   resources:
     cpu: 4
     memory: 12Gi
@@ -47,7 +50,7 @@ environment:
       - libpcap-dev
       - linux-headers
       - llvm16
-      - oldglibc
+      - oldglibc~2.28
       - zlib-dev
       - zstd-dev
 
@@ -68,7 +71,10 @@ pipeline:
       expected-commit: 62ef945dc95c54663d19d0b64d22a6d7117fcd04
   - uses: go/bump
     with:
-      deps: golang.org/x/net@v0.33.0
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/net@v0.36.0
   - working-directory: felix
     pipeline:
       # Equivalent to target: "build-bpf"
@@ -143,26 +149,28 @@ subpackages:
         - calico-node-fips=${{package.full-version}}
         - calico-fips-node-${{vars.short-package-version}}
       runtime:
-        - runit
         - bash # required for logging functionality to work since `start_runit` logging script uses #!/bin/bash
-        - iptables
+        - conntrack-tools
+        - glibc
         - ip6tables
+        - iproute2
         - ipset
-        - libpcap
-        - libelf
-        - zlib
+        - iptables
         - libbpf
         # listed in Dockerfile, but not sure if they're build dependencies (for iptables) or runtime
+        - libelf
         - libmnl
-        - libnfnetlink
         - libnetfilter_conntrack
-        - iproute2
-        - procps
-        - conntrack-tools
         - libnetfilter_cthelper
         - libnetfilter_cttimeout
         - libnetfilter_queue
-        - glibc
+        - libnfnetlink
+        - libpcap
+        - merged-bin
+        - procps
+        - runit
+        - wolfi-baselayout
+        - zlib
     pipeline:
       - assertions:
           required-steps: 2
@@ -184,17 +192,12 @@ subpackages:
               LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
               LDFLAGS="$LDFLAGS -X node/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
 
-              # Mitigate GHSA-v778-237x-gjrc
-              go mod edit -replace=golang.org/x/crypto=golang.org/x/crypto@v0.31.0
-
-              go mod tidy
-
               CGO_ENABLED=1 \
                 CGO_LDFLAGS="$CGO_LDFLAGS" \
                 CGO_CFLAGS="$CGO_CFLAGS" \
                 go build -v -tags cgo,fipsstrict -v -buildvcs=false \
                 -ldflags "$LDFLAGS" \
-                -o "${{targets.subpkgdir}}"/bin/calico-node \
+                -o "${{targets.subpkgdir}}"/usr/bin/calico-node \
                 ./node/cmd/calico-node
           # Equivalent to target: "$(TOOLS_MOUNTNS_BINARY)"
           - runs: |
@@ -209,7 +212,7 @@ subpackages:
                 CGO_LDFLAGS="$CGO_LDFLAGS" \
                 CGO_CFLAGS="$CGO_CFLAGS" \
                 go build -v -tags cgo -v -buildvcs=false \
-                -o "${{targets.subpkgdir}}"/bin/mountns \
+                -o "${{targets.subpkgdir}}"/usr/bin/mountns \
                 ./node/cmd/mountns
       # Equivalent to target: "$(FELIX_GPL_SOURCE)"
       - working-directory: node
@@ -223,11 +226,8 @@ subpackages:
           touch $_target
       # Filesystem prep
       - runs: |
-          # BIRD needs to run with root permissions, so put them in /bin/ to remember
-          mkdir -p "${{targets.subpkgdir}}"/bin "${{targets.subpkgdir}}"/usr/bin
-          find bird/dist -type f -name 'bird*' -exec cp {} "${{targets.subpkgdir}}"/bin \;
-          # calico-node also uses the hardcoded path /usr/bin/bird, so link it
-          for exe in $(find bird/dist -type f -name 'bird*') ; do ln -s /bin/$(basename $exe) "${{targets.subpkgdir}}"/usr/bin/$(basename $exe) ; done
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          find bird/dist -type f -name 'bird*' -exec cp {} "${{targets.subpkgdir}}"/usr/bin \;
 
           mkdir -p "${{targets.subpkgdir}}"/etc \
                    "${{targets.subpkgdir}}"/included-source \
@@ -255,11 +255,13 @@ subpackages:
         - calico-felix-fips=${{package.full-version}}
         - calico-fips-felix-${{vars.short-package-version}}
       runtime:
-        - iproute2
-        - libelf
-        - zlib
-        - libbpf
         - glibc
+        - iproute2
+        - libbpf
+        - libelf
+        - merged-bin
+        - wolfi-baselayout
+        - zlib
     pipeline:
       - working-directory: felix
       - runs: |
@@ -336,12 +338,14 @@ subpackages:
         - calico-cni-fips=${{package.full-version}}
         - calico-fips-cni-${{vars.short-package-version}}
       runtime:
-        - flannel-cni-plugin
-        - cni-plugins-fips-loopback
+        - cni-plugins-fips-bandwidth
         - cni-plugins-fips-host-local
+        - cni-plugins-fips-loopback
         - cni-plugins-fips-portmap
         - cni-plugins-fips-tuning
-        - cni-plugins-fips-bandwidth
+        - flannel-cni-plugin
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       # NOTE: cni is a multicall binary: https://github.com/projectcalico/calico/blob/master/cni-plugin/cmd/calico/calico.go
       # install is not a part of that multicall binary anymore (as of calico 3.27.1)
@@ -385,12 +389,14 @@ subpackages:
         - calico-cni-fips-compat-${{vars.short-package-version}}
       runtime:
         - calico-cni-fips-${{vars.short-package-version}}
-        - flannel-cni-plugin-compat
-        - cni-plugins-fips-loopback-compat
+        - cni-plugins-fips-bandwidth-compat
         - cni-plugins-fips-host-local-compat
+        - cni-plugins-fips-loopback-compat
         - cni-plugins-fips-portmap-compat
         - cni-plugins-fips-tuning-compat
-        - cni-plugins-fips-bandwidth-compat
+        - flannel-cni-plugin-compat
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/opt/cni/bin
@@ -410,6 +416,8 @@ subpackages:
         - calico-fips-apiserver-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -434,6 +442,9 @@ subpackages:
     dependencies:
       provides:
         - calico-apiserver-compat-fips-=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/code
@@ -452,6 +463,8 @@ subpackages:
         - calico-fips-app-policy-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -481,6 +494,8 @@ subpackages:
         - calico-fips-kube-controllers-${{vars.short-package-version}}
       runtime:
         - glibc-dev
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -511,6 +526,8 @@ subpackages:
         - calico-fips-pod2daemon-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -539,6 +556,9 @@ subpackages:
     dependencies:
       provides:
         - calico-pod2daemon-flexvol-compat=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
@@ -554,6 +574,9 @@ subpackages:
     dependencies:
       provides:
         - calicoctl-fips=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -577,6 +600,8 @@ subpackages:
         - calico-fips-typhad-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       # TODO: I'm not sure yet if this actually needs CGO, or is just enabled upstream because of go-fips
       - runs: |
@@ -610,6 +635,8 @@ subpackages:
         - calico-typha-client-fips=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       # TODO: I'm not sure yet if this actually needs CGO, or is just enabled upstream because of go-fips
       - runs: |

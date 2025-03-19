@@ -2,7 +2,7 @@
 package:
   name: tritonserver-backend-vllm-24.04
   version: 24.04
-  epoch: 3
+  epoch: 5
   description: NVIDIA Triton Inference Server with vllm backend
   copyright:
     - license: BSD-3-Clause
@@ -13,7 +13,15 @@ package:
     memory: 16Gi
   dependencies:
     runtime:
-      - python-${{vars.py-version}}-base
+      # vllm now requires a toolchain, but this requirement may go away:
+      # https://github.com/vllm-project/vllm/issues/2997#issuecomment-2708902557
+      # Until then, we need to ship py3.x-build-base-dev, which will bring
+      # the default gcc along with it. Today that is gcc-14, and that seems
+      # to work. It does not appear to require a gcc compatible with our
+      # nvcc which, for CUDA 12.4, would be gcc-12. If we find this is a
+      # requirement, we'll need to make sure images get
+      # `NVCC_APPEND_FLAGS: -ccbin gcc-12` set in their environment.
+      - py${{vars.py-version}}-build-base-dev
       - cuda-toolkit-${{vars.cuda-version}}
       - nvidia-libcuda-${{vars.cuda-version}}
       - py${{vars.py-version}}-aiohttp
@@ -43,14 +51,16 @@ package:
       - py${{vars.py-version}}-tqdm
       - py${{vars.py-version}}-typing-extensions
       - py${{vars.py-version}}-xformers-torch-${{vars.torch-version}}-cuda-${{vars.cuda-version}}
-      - python-${{vars.py-version}}
       - tritonserver-2.45
   options:
+    # https://github.com/chainguard-dev/internal-dev/issues/7609
     no-depends: true
 
 vars:
   cuda-version: 12.4
   cudnn-version: 9
+  gcc-version: 12
+  import: vllm
   py-version: 3.10
   tensorrt-version: 8.6.3
   triton-repo-tag: r24.04
@@ -72,28 +82,26 @@ environment:
       - ca-certificates-bundle
       - cmake
       - cuda-toolkit-${{vars.cuda-version}}-dev
-      - gcc-11-default
+      - gcc-${{vars.gcc-version}}
       - gperftools-dev
       - ninja-build
       - numactl-dev
       - nvidia-cuda-cccl-${{vars.cuda-version}}
       - nvidia-cuda-profiler-api-${{vars.cuda-version}}
-      - nvidia-cudnn-9-cuda-${{vars.cuda-major-version}}-dev
+      - nvidia-cudnn-${{vars.cudnn-version}}-cuda-${{vars.cuda-major-version}}-dev
       - nvidia-driver
       - nvidia-libnvidia-ml-${{vars.cuda-version}}
       - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
       - py${{vars.py-version}}-aiohttp
-      - py${{vars.py-version}}-build
+      - py${{vars.py-version}}-build-base-dev
       - py${{vars.py-version}}-filelock
       - py${{vars.py-version}}-huggingface-hub
       - py${{vars.py-version}}-importlib-metadata
-      - py${{vars.py-version}}-installer
       - py${{vars.py-version}}-jinja2
       - py${{vars.py-version}}-numpy
       - py${{vars.py-version}}-openai
       - py${{vars.py-version}}-pandas
       - py${{vars.py-version}}-pillow
-      - py${{vars.py-version}}-pip
       - py${{vars.py-version}}-prometheus-client
       - py${{vars.py-version}}-protobuf
       - py${{vars.py-version}}-psutil
@@ -109,8 +117,6 @@ environment:
       - py${{vars.py-version}}-torch-${{vars.torch-version}}-cuda-${{vars.cuda-version}}
       - py${{vars.py-version}}-tqdm
       - py${{vars.py-version}}-typing-extensions
-      - py${{vars.py-version}}-wheel
-      - python-${{vars.py-version}}-dev
       - samurai
       - sccache
       - tcmalloc-minimal
@@ -118,6 +124,9 @@ environment:
       - wolfi-base
   environment:
     LIBRARY_PATH: /usr/local/cuda-${{vars.cuda-version}}/lib64/stubs
+    MAX_JOBS: 16
+    NVCC_APPEND_FLAGS: -ccbin gcc-${{vars.gcc-version}}
+    TORCH_CUDA_ARCH_LIST: '7.0 7.5 8.0 8.6 8.9 9.0+PTX'
 
 pipeline:
   - uses: git-checkout
@@ -154,9 +163,6 @@ pipeline:
           source /opt/tritonserver/venv/bin/activate
 
           export PATH=/usr/local/cuda-${{vars.cuda-version}}/bin:$PATH
-          export LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cudnn-9/lib64::$LD_LIBRARY_PATH
-          export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
-          export MAX_JOBS=16
 
           python${{vars.py-version}} use_existing_torch.py
           python${{vars.py-version}} -m build -n
@@ -166,26 +172,33 @@ pipeline:
           source /opt/tritonserver/venv/bin/activate
           mkdir -p ${{targets.destdir}}/opt/tritonserver/venv
 
-          pip install --verbose \
+          pip${{vars.py-version}} install --verbose \
             --no-index --no-build-isolation --no-deps \
             --force-reinstall --no-compile --prefix="/opt/tritonserver/venv" --root=${{targets.contextdir}} dist/vllm-*.whl
-          pip install --verbose \
+          pip${{vars.py-version}} install --verbose \
             --requirement=requirements-cuda.txt --force-reinstall --no-deps \
             --prefix=/opt/tritonserver/venv --root="${{targets.contextdir}}"
           # Addt'l deps found by iterating on the `python -c "import vllm"` test
-          pip install --verbose --no-deps --force-reinstall \
+          pip${{vars.py-version}} install --verbose --no-deps --force-reinstall \
             --prefix=/opt/tritonserver/venv --root="${{targets.contextdir}}" \
             safetensors triton
 
-          python -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/opt/tritonserver/venv
+          python${{vars.py-version}} -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/opt/tritonserver/venv
           deactivate
+      - name: Remove psutil test code that triggers malware scan failures
+        runs: |
+          dir="${{targets.contextdir}}/opt/tritonserver/venv/lib/python${{vars.py-version}}/site-packages/psutil/tests"
+          # Confirm it is still present
+          test -d "$dir"
+          rm -rf "$dir"
 
 test:
   pipeline:
     - name: Verify vllm installation
-      runs: |
-        export PATH=/opt/tritonserver/venv/bin:$PATH
-        python -c "import vllm"
+      uses: python/import
+      with:
+        python: /opt/tritonserver/venv/bin/python${{vars.py-version}}
+        import: ${{vars.import}}
 
 update:
   enabled: false
