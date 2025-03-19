@@ -13,18 +13,6 @@ package:
     runtime:
       - python-3.11-base
 
-
-vars:
-  cuda-version: '12.8'
-  cudnn-version: '9'
-  py-version: '3.11'
-  CAUSAL_CONV_TAG: 'v1.2.2.post1'
-  NEMO_RUN_TAG: "34259bd3e752fef94045a9a019e4aaf62bd11ce2"
-  TE_TAG: "7d576ed25266a17a7b651f2c12e8498f67e0baea"
-  MODELOPT_VERSION: "0.19.0"
-  MCORE_TAG: "core_r0.10.0"
-  APEX_TAG: "810ffae374a2b9cb4b5c5e28eaeca7d7998fca0c"
-
 environment:
   environment:
     cuda-version: '12.6'
@@ -36,6 +24,12 @@ environment:
     MODELOPT_VERSION: "0.19.0"
     MCORE_TAG: "core_r0.10.0"
     APEX_TAG: "810ffae374a2b9cb4b5c5e28eaeca7d7998fca0c"
+    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-12.6/bin:/usr/local/cudnn-9/bin
+    LD_LIBRARY_PATH: /usr/local/cuda-12.6/lib64:/usr/local/cudnn-9/lib64
+    CUDNN_INCLUDE_DIR: /usr/local/cudnn-9/include/
+    CUDA_HOME: /usr/local/cuda-12.6
+    CUDNN_HOME: /usr/local/cudnn-9
+
 
   contents:
     packages:
@@ -68,6 +62,10 @@ environment:
       - uv
       - nvidia-cuda-toolkit-12.6-dev
       - nvidia-nccl-cuda-12.6
+      - nvidia-cuda-cccl-12.6
+      - apk add ninja-build
+      - nvidia-cuda-cupti-12.6-dev
+      - nvidia-cudnn-9-cuda-12-dev
 
 pipeline:
   - working-directory: /home/build/nemo.git
@@ -93,24 +91,33 @@ pipeline:
       uv pip install torch torchvision
 
   - runs:
+      # Within venv
       source /usr/share/nemo/.venv/bin/activate
+
       git clone --depth 1 --branch ${CAUSAL_CONV_TAG} https://github.com/Dao-AILab/causal-conv1d 
       cd causal-conv1d 
-      python setup.py install
+      uv pip install --no-build-isolation .
 
       uv pip install hatchling
       uv pip install nemo_run@git+https://github.com/NVIDIA/NeMo-Run.git@${NEMO_RUN_TAG}
 
-      uv pip install --no-cache-dir --no-build-isolation --extra-index-url https://pypi.nvidia.com \
-        "transformer-engine @ git+https://github.com/NVIDIA/TransformerEngine.git@${TE_TAG}" \
-        "megatron_core @ git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_TAG}" \
-        "nvidia-modelopt[torch]~=${MODELOPT_VERSION}" \
-        "apex @ git+https://github.com/NVIDIA/apex.git@${APEX_TAG}" \
-        "unstructured==0.14.9" \
-        "llama-index==0.10.43" \
-        "onnxscript @ git+https://github.com/microsoft/onnxscript" \
-        -r tools/ctc_segmentation/requirements.txt \
-        ".[all]"
+      uv pip install --no-cache-dir --no-build-isolation --extra-index-url https://pypi.nvidia.com transformer-engine
+      uv pip install --no-cache-dir --no-build-isolation --extra-index-url https://pypi.nvidia.com megatron_core@git+https://github.com/NVIDIA/Megatron-LM.git@${MCORE_TAG}
+      uv pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com nvidia-modelopt[torch]~=${MODELOPT_VERSION}
+      uv pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com apex @ git+https://github.com/NVIDIA/apex.git@${APEX_TAG}
+      uv pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com  unstructured==0.14.9
+      uv pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com llama-index==0.10.43
+      uv pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com onnxscript@git+https://github.com/microsoft/onnxscript
+
+      cd nemo.git
+      uv pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com num2words
+      uv pip install  --extra-index-url https://pypi.nvidia.com pip setuptools wheel
+      uv pip install  --extra-index-url https://pypi.nvidia.com numpy pybind11
+
+      pip install "numpy<1.24"
+      pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com ctc_segmentation==1.7.1
+
+      uv pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com ".[all]"
 
 
   - working-directory: /home/build/megatron-lm
@@ -118,29 +125,27 @@ pipeline:
       - uses: git-checkout
         with:
           repository: https://github.com/NVIDIA/Megatron-LM.git
-      - runs: |
-          export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin"
-        
+      - runs: |        
           git checkout ${MCORE_TAG}
           cd megatron/core/datasets
+          export CXXFLAGS="${CXXFLAGS} -Wno-maybe-uninitialized"
           make
           
-          
-          export PYTHONPATH="${PYTHONPATH}:/workspace/Megatron-LM"
+  - runs: |
+      source /usr/share/nemo/.venv/bin/activate
 
-  - runs: pip install --no-cache-dir "git+https://github.com/NVIDIA/nvidia-resiliency-ext.git@97aad77609d2e25ed38ac5c99f0c13f93c48464e"
+      uv pip install --no-cache-dir nvidia-resiliency-ext
 
   - runs: |
       mkdir -p ${{targets.destdir}}/usr/share/nemo
       mv .venv ${{targets.destdir}}/usr/share/nemo
-      # sed command causes errors trying to edit .pyc files in pycache
       rm -rf ${{targets.destdir}}/usr/share/nemo/.venv/bin/__pycache*
-      sed -i "s|/home/build|/usr/share/nemo|g" ${{targets.destdir}}/usr/share/nemo/.venv/bin/*
       # allow site-packages
       sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/usr/share/nemo/.venv/pyvenv.cfg
 
 update:
   enabled: true
+
   github:
     identifier: NVIDIA/NeMo
     tag-filter: v
