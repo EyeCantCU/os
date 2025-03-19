@@ -1,0 +1,347 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: spark-fips-3.5
+  version: "3.5.4"
+  epoch: 0
+  description: Unified engine for large-scale data analytics
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  grpc-version: "1.56.0"
+  hadoop-version: "3.3.6"
+  java-version: "8"
+  test-java-version: "11"
+  py-version: "3.11"
+
+environment:
+  contents:
+    packages:
+      - R
+      - R-dev
+      - bash
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - glibc-iconv
+      - glibc-locale-en
+      - grep
+      - grpc-java-fips-${{vars.grpc-version}}-m2
+      - hadoop-fips-${{vars.hadoop-version}}-m2
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - perl-utils
+      - procps
+      - protobuf-dev
+      - py${{vars.py-version}}-setuptools
+      - py${{vars.py-version}}-pip
+      - python-${{vars.py-version}}
+      - yaml-dev
+  environment:
+    APACHE_MIRROR: "https://repo.maven.apache.org/maven2/org"
+    MAVEN_OPTS: "-Dmaven.wagon.httpconnectionManager.ttlSeconds=25 -Daether.connector.http.connectionMaxTtl=25"
+    JAVA_OPTS: "-Xms4g -Xmx4g"
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+    LANG: en_US.UTF-8
+
+pipeline:
+  - uses: ecosystems/auth
+    with:
+      repo: chainguard-dev/ecosystems-spark
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/chainguard-dev/ecosystems-spark.git
+      expected-commit: 01414b0ceba9905263165ce19c72747fb3ee4f0a
+      branch: fips-${{package.version}}
+
+subpackages:
+  - name: ${{package.name}}-scala-2.12
+    dependencies:
+      # Both `python` and `openjdk-{11,17}-default-jvm` are required for running Spark,
+      # but will be added in the image, since upstream supports different Python versions
+      # and Java versions. So we don't need to specify them here to avoid conflicts.
+      runtime:
+        - bash
+        - busybox
+        - procps
+        - posix-libc-utils
+        - tini
+        - net-tools
+        - linux-pam
+        - libnss
+        - openssl-config-fipshardened
+        - openssl
+    pipeline:
+      - uses: patch
+        with:
+          patches: make-distribution.patch internal-access.patch mvn.patch
+      - uses: maven/pombump
+      - runs: |
+          ./dev/make-distribution.sh --name custom-spark --pip \
+            -Psparkr -Phive -Phive-thriftserver -Pmesos -Pyarn -Pkubernetes \
+            -Dmaven.repo.local=/usr/share/m2/repository -Daether.syncContext.named.time=10
+
+          patch dist/bin/load-spark-env.sh load-spark-env.sh.diff
+          patch dist/sbin/spark-daemon.sh spark-daemon.sh.diff
+
+          mkdir -p ${{targets.contextdir}}/usr/lib/spark/work-dir
+          mv dist/kubernetes/dockerfiles/spark/entrypoint.sh ${{targets.contextdir}}/usr/lib/spark
+          mv dist/* ${{targets.contextdir}}/usr/lib/spark/
+          mv ${{targets.contextdir}}/usr/lib/spark/examples/jars/spark-examples_2.12-${{package.version}}.jar ${{targets.contextdir}}/usr/lib/spark/examples/jars/spark-examples.jar
+    test:
+      environment:
+        contents:
+          packages:
+            - R
+            - bcfips-policy-140-3-j${{vars.test-java-version}}
+            - openjdk-${{vars.test-java-version}}-default-jvm
+            - python3
+        environment:
+          LANG: en_US.UTF-8
+          JAVA_HOME: /usr/lib/jvm/default-jvm
+          SPARK_LOCAL_IP: 127.0.0.1
+          SPARK_LOCAL_HOSTNAME: localhost
+          SPARK_HOME: /usr/lib/spark
+          SPARK_USER: test
+          JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS --module-path=/usr/share/java/bouncycastle-fips -Djavax.net.ssl.trustStoreType=FIPS -Djava.security.properties=/usr/lib/jvm/default-jvm/conf/security/java.security -Dorg.bouncycastle.fips.approved.only=true --add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED"
+      pipeline:
+        - name: Test ${{package.name}}
+          pipeline:
+            - name: Check spark-shell --version
+              runs: /usr/lib/spark/bin/spark-shell --version
+            - name: Check spark-submit --version
+              runs: /usr/lib/spark/bin/spark-submit --version
+            - name: Check pyspark --version
+              runs: /usr/lib/spark/bin/pyspark --version
+            - name: Check spark-sql --version
+              runs: /usr/lib/spark/bin/spark-sql --version
+            - name: Test entrypoint
+              runs: timeout 10 /opt/entrypoint.sh /opt/spark/bin/spark-shell > spark_log.txt 2>&1 || [ $? -eq 143 ] && grep "Spark session available" spark_log.txt && exit_code=0 || exit_code=$? && echo $exit_code
+            - name: Run a simple Scala test script
+              runs: |
+                cat <<EOF > SimpleJob.scala
+                val data = Seq(1, 2, 3, 4, 5)
+                val rdd = spark.sparkContext.parallelize(data)
+                val sum = rdd.reduce(_ + _)
+                assert(sum == 15)
+                EOF
+                cat SimpleJob.scala | /usr/lib/spark/bin/spark-shell --conf spark.jars.ivy=/tmp/.ivy --master local[*]
+            - name: Run a simple Spark job in Python
+              runs: |
+                cat <<EOF > simple_job.py
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.appName("SimpleJob").getOrCreate()
+                data = [1, 2, 3, 4, 5]
+                rdd = spark.sparkContext.parallelize(data)
+                sum = rdd.reduce(lambda x, y: x + y)
+                assert sum == 15
+                EOF
+                /usr/lib/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy --master local[*] simple_job.py --jars /usr/lib/spark/jars/guava-32.0.1-jre.jar
+            - name: Perform SQL query on DataFrame in Scala
+              runs: |
+                cat <<EOF > SQLTest.scala
+                import org.apache.spark.sql.SparkSession
+                val spark = SparkSession.builder.appName("SQLTest").getOrCreate()
+                import spark.implicits._
+                val df = Seq((1, "Alice"), (2, "Bob")).toDF("id", "name")
+                df.createOrReplaceTempView("people")
+                val result = spark.sql("SELECT name FROM people WHERE id = 2")
+                assert(result.count() == 1 && result.first().getString(0) == "Bob")
+                EOF
+                cat SQLTest.scala | /usr/lib/spark/bin/spark-shell --conf spark.jars.ivy=/tmp/.ivy --master local[*]
+            - name: Run basic SQL query with spark-sql
+              runs: |
+                # Ensure the user environment is properly configured
+                if ! whoami &>/dev/null; then
+                  echo "sparkuser:x:$(id -u):$(id -g):Spark User:/home/sparkuser:/bin/bash" >> /etc/passwd
+                  mkdir -p /home/sparkuser
+                  chown $(id -u):$(id -g) /home/sparkuser
+                fi
+
+                # Export necessary environment variables
+                export USER=$(whoami)
+                export LOGNAME=$(whoami)
+                export HADOOP_USER_NAME=$(whoami)
+
+                # Create a basic SQL query
+                echo 'CREATE OR REPLACE TEMP VIEW test AS SELECT 1 AS id;' > test.sql
+                echo 'SELECT * FROM test;' >> test.sql
+
+                # Run the Spark SQL query
+                /usr/lib/spark/bin/spark-sql -f test.sql --master local[*] --conf spark.jars.ivy=/tmp/.ivy
+            - name: Run SparkR script
+              runs: |
+                cat <<EOF > sparkr_test.R
+                library(SparkR)
+                sparkR.session()
+                df <- as.DataFrame(data.frame(id = c(1, 2), name = c("Alice", "Bob")))
+                createOrReplaceTempView(df, "people")
+                df2 <- sql("SELECT * FROM people WHERE id > 1")
+                stopifnot(count(df2) == 1)
+                EOF
+                /usr/lib/spark/bin/spark-submit sparkr_test.R
+        - name: "Python job with ssl"
+          uses: test/daemon-check-output
+          with:
+            start: /usr/lib/spark/bin/spark-submit --conf spark.ssl.enabled=true --conf spark.ssl.protocol=TLSv1.3 --conf spark.ui.port=4440 --master local[*] ./salaries.py
+            timeout: "20"
+            expected_output: |
+              Successfully started service
+              SparkUI (HTTPS)
+              on port 4840
+              Finished processing stats for write job
+
+  - name: ${{package.name}}-scala-2.12-compat
+    description: "Compatibility package to place binaries in the location expected by upstream image"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/bin
+          mkdir -p "${{targets.contextdir}}"/opt
+          cp -av "${{targets.outdir}}/${{package.name}}-scala-2.12"/usr/lib/spark/entrypoint.sh ${{targets.contextdir}}/opt/entrypoint.sh
+          ln -s /usr/lib/spark/kubernetes/dockerfiles/spark/decom.sh ${{targets.contextdir}}/opt/decom.sh
+          ln -s /usr/lib/spark/bin/spark-submit ${{targets.contextdir}}/usr/bin/spark-submit
+          ln -s /usr/lib/spark/bin/spark-shell ${{targets.contextdir}}/usr/bin/spark-shell
+          ln -s /usr/lib/spark/bin/pyspark ${{targets.contextdir}}/usr/bin/pyspark
+          ln -s /usr/lib/spark/bin/spark-class ${{targets.contextdir}}/usr/bin/spark-class
+          ln -s /usr/lib/spark/bin/spark-sql ${{targets.contextdir}}/usr/bin/spark-sql
+          ln -s /usr/lib/spark/bin/sparkR ${{targets.contextdir}}/usr/bin/spark
+          ln -s /usr/lib/spark ${{targets.contextdir}}/opt/spark
+
+  - name: ${{package.name}}-scala-2.13
+    dependencies:
+      runtime:
+        - bash
+        - busybox
+        - procps
+        - posix-libc-utils
+        - tini
+        - net-tools
+        - linux-pam
+        - libnss
+        - openssl-config-fipshardened
+        - openssl
+    pipeline:
+      - runs: |
+          git stash
+          mvn clean
+      - uses: patch
+        with:
+          patches: make-2.13-distribution.patch internal-access.patch mvn.patch
+      - runs: |
+          ./dev/change-scala-version.sh 2.13
+      - uses: maven/pombump
+        with:
+          properties-file: pombump-properties-2.13.yaml
+      - uses: maven/pombump
+        with:
+          patch-file: pombump-deps.yaml
+      - runs: |
+          ./dev/make-distribution.sh --name pyspark-2.13 \
+            --pip --tgz -Pscala-2.13 -Phive -Phive-thriftserver -Pkubernetes -Pyarn \
+            -Dmaven.repo.local=/usr/share/m2/repository -Daether.syncContext.named.time=10
+
+          mkdir -p ${{targets.contextdir}}/usr/lib/spark
+          mv dist/kubernetes/dockerfiles/spark/entrypoint.sh ${{targets.contextdir}}/usr/lib/spark
+          mv dist/* ${{targets.contextdir}}/usr/lib/spark/
+          mv ${{targets.contextdir}}/usr/lib/spark/examples/jars/spark-examples_2.13-${{package.version}}.jar ${{targets.contextdir}}/usr/lib/spark/examples/jars/spark-examples.jar
+    test:
+      environment:
+        contents:
+          packages:
+            - bcfips-policy-140-3-j${{vars.test-java-version}}
+            - openjdk-${{vars.test-java-version}}-default-jvm
+            - bash
+            - python-${{vars.py-version}}
+            - ${{package.name}}-scala-2.13-compat
+            - curl
+        environment:
+          LANG: en_US.UTF-8
+          SCALA_VERSION: 2.13
+          JAVA_HOME: /usr/lib/jvm/default-jvm
+          SPARK_LOCAL_IP: 127.0.0.1
+          SPARK_LOCAL_HOSTNAME: localhost
+          SPARK_HOME: /usr/lib/spark
+          SPARK_USER: test
+          JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS --module-path=/usr/share/java/bouncycastle-fips -Djavax.net.ssl.trustStoreType=FIPS -Djava.security.properties=/usr/lib/jvm/default-jvm/conf/security/java.security -Dorg.bouncycastle.fips.approved.only=true --add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED"
+      pipeline:
+        - name: Test ${{package.name}} with different versions of OpenJDK
+          pipeline:
+            - name: Test if the Scala versions are correct
+              runs: ls /usr/lib/spark/jars/scala-* | grep -q $SCALA_VERSION
+            - name: Check spark-shell --version
+              runs: /usr/lib/spark/bin/spark-shell --version
+            - name: Check spark-submit --version
+              runs: /usr/lib/spark/bin/spark-submit --version
+            - name: Check pyspark --version
+              runs: /usr/lib/spark/bin/pyspark --version
+            - name: Check spark-sql --version
+              runs: /usr/lib/spark/bin/spark-sql --version
+            - name: Test entrypoint
+              runs: timeout 10 /opt/entrypoint.sh /opt/spark/bin/spark-shell > spark_log.txt 2>&1 || [ $? -eq 143 ] && grep "Spark session available" spark_log.txt && exit_code=0 || exit_code=$? && echo $exit_code
+            - name: Run a simple Scala test script
+              runs: |
+                cat <<EOF > SimpleJob.scala
+                val data = Seq(1, 2, 3, 4, 5)
+                val rdd = spark.sparkContext.parallelize(data)
+                val sum = rdd.reduce(_ + _)
+                assert(sum == 15)
+                EOF
+                cat SimpleJob.scala | /usr/lib/spark/bin/spark-shell --conf spark.jars.ivy=/tmp/.ivy --master local[*]
+        - name: Perform SQL query on DataFrame in Scala
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              cat <<EOF > SQLTest.scala
+              import org.apache.spark.sql.SparkSession
+              val spark = SparkSession.builder.appName("SQLTest").getOrCreate()
+              import spark.implicits._
+              val df = Seq((1, "Alice"), (2, "Bob")).toDF("id", "name")
+              df.createOrReplaceTempView("people")
+              val result = spark.sql("SELECT name FROM people WHERE id = 2")
+              assert(result.count() == 1 && result.first().getString(0) == "Bob")
+              EOF
+            start: cat SQLTest.scala | /usr/lib/spark/bin/spark-shell --conf spark.jars.ivy=/tmp/.ivy --master local[*]
+            expected_output: |
+              Web UI available at http://localhost:4040
+        - name: Run a simple Spark job in Python
+          runs: |
+            cat <<EOF > /tmp/simple_job.py
+            from pyspark.sql import SparkSession
+            spark = SparkSession.builder.appName("SimpleJob").config("spark.driver.bindAddress", "localhost").getOrCreate()
+            data = [1, 2, 3, 4, 5]
+            rdd = spark.sparkContext.parallelize(data)
+            sum = rdd.reduce(lambda x, y: x + y)
+            assert sum == 15
+            EOF
+            /usr/lib/spark/bin/spark-submit --jars /usr/lib/spark/jars/guava-14.0.1.jar --conf spark.jars.ivy=/tmp/.ivy --conf spark.ssl.enabled=true --master local[*] /tmp/simple_job.py
+        - name: "Python job with ssl"
+          uses: test/daemon-check-output
+          with:
+            start: /usr/lib/spark/bin/spark-submit --conf spark.ssl.enabled=true --conf spark.ssl.protocol=TLSv1.3 --conf spark.ui.port=4440 --master local[*] ./salaries.py
+            timeout: "20"
+            expected_output: |
+              Successfully started service
+              SparkUI (HTTPS)
+              on port 4840
+              Finished processing stats for write job
+
+  - name: ${{package.name}}-scala-2.13-compat
+    description: "Compatibility package to place binaries in the location expected by upstream image"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/bin
+          mkdir -p "${{targets.contextdir}}"/opt
+          ln -s /usr/lib/spark/bin/spark-submit ${{targets.contextdir}}/usr/bin/spark-submit
+          ln -s /usr/lib/spark/bin/spark-shell ${{targets.contextdir}}/usr/bin/spark-shell
+          ln -s /usr/lib/spark/bin/spark-class ${{targets.contextdir}}/usr/bin/spark-class
+          ln -s /usr/lib/spark/bin/spark-sql ${{targets.contextdir}}/usr/bin/spark-sql
+          ln -s /usr/lib/spark ${{targets.contextdir}}/opt/spark
+          ln -s /usr/lib/spark/kubernetes/dockerfiles/spark/decom.sh ${{targets.contextdir}}/opt/decom.sh
+
+          cp -av ${{targets.outdir}}/${{package.name}}-scala-2.13/usr/lib/spark/entrypoint.sh ${{targets.contextdir}}/opt/entrypoint.sh
+
+update:
+  enabled: false
+  manual: true
+  exclude-reason: FIPS & Starts project maintained by ecosystems
