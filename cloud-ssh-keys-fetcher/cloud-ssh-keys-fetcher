@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2162,SC3043
+# shellcheck disable=SC2162,SC2166,SC2295,SC3043
 Usage() {
     cat <<EOF
 Usage: ${0##*/} user [fingerprint]
@@ -60,6 +60,36 @@ ec2dump_keys() {
     return 0
 }
 
+gce_dump_keys() {
+    local url="http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys"
+    local out="" line=""
+    out=$(curl --silent --fail -H "Metadata-Flavor: Google" "$url") ||
+        { stderr "failed retrieving keys on google"; return 1; }
+    # ssh-keys is formatted as
+    # "user1:ssh-rsa mypublickey user1@host.com\nuser2:ssh-rsa mypublickey user2@host.com"
+    # use printf to convert '\n' to carriage return, and
+    # then strip the 'user:' off..
+    # shellcheck disable=SC2059
+    printf "$out\n" |
+        while read line; do printf "%s\n" "${line#*:}"; done
+}
+
+azure_dump_keys() {
+    local url="http://169.254.169.254/metadata/instance/compute/publicKeys?api-version=2021-02-01"
+    local out="" pubkey="" quote='"'
+    out=$(curl --silent --fail -H "Metadata: true" "$url") ||
+        { stderr "failed retrieving keys on azure"; return 1; }
+    if command -v jq >/dev/null 2>&1 ; then
+        printf "%s\n" "$out" | jq -r '.[].keyData'
+        return
+    fi
+    # assuming it looks like this
+    # [{"keyData":"ssh-ed25519 A...BAkh user@sys\n","path","/home/user"...}]
+    pubkey=${out#*keyData${quote}:${quote}}
+    pubkey=${pubkey%%${quote}*}
+    printf "%s" "$pubkey"
+}
+
 if [ "$1" = "-h" -o "$1" = "--help" ]; then
     Usage
     exit 0
@@ -68,25 +98,17 @@ elif [ $# -lt 1 -o $# -gt 2 ]; then
     exit 1
 fi
 
+# shellcheck disable=SC2034
 user="$1"
-fp=$2
-
+fp="$2"
 
 cloud="$(systemd-detect-virt)"
 stderr "Fetching keys on $cloud"
 case $cloud in
-    google)
-        url="http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys"
-        out=$(curl --fail -H "Metadata-Flavor: Google" "$url") ||
-            fail "failed retrieving keys on $cloud"
-        printf "%s" "$out" | cut -d':' -f2-
-        ;;
-    microsoft)
-        url="http://169.254.169.254/metadata/instance/compute/publicKeys?api-version=2021-02-01"
-        out=$(curl --fail -H "Metadata: true" "$url") ||
-            fail "failed retrieving keys on $cloud"
-        printf "%s" "$out" | cut -d':' -f2 | cut -d'"' -f2
-        ;;
+    google) gce_dump_keys ||
+        fail "failed retrieving keys on google";;
+    microsoft) azure_dump_keys ||
+        fail "failed retrieving keys on azure";;
     amazon)
         # Should check the passed in $2 arg for the key fingerprint.
         # If it is found in ec2dump_keys we can choose not to execute
