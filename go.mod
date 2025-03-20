@@ -3,7 +3,7 @@ module chainguard.dev/apkoaas
 go 1.24.0
 
 require (
-	chainguard.dev/apko v0.25.4
+	chainguard.dev/apko v0.25.5
 	github.com/anchore/syft v1.20.0
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/charmbracelet/log v0.4.1
