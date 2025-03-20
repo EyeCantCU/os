@@ -9,10 +9,7 @@ package utils
 
 import (
 	"context"
-	"io"
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -24,6 +21,7 @@ import (
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 var ic types.ImageConfiguration = types.ImageConfiguration{
@@ -90,14 +88,14 @@ var ic types.ImageConfiguration = types.ImageConfiguration{
 	Cmd: "--fail file:///etc/apko.json",
 }
 
-func buildImage(t *testing.T, destDir string) string {
+func buildImage(t *testing.T) v1.Layer {
 	// We should comfortably be able to convert all of these images
 	// in under a minute.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
 
 	fs := apkfs.DirFS(t.TempDir(), apkfs.WithCreateDir())
-	arch := types.ParseArchitecture(runtime.GOARCH)
+	arch := types.ParseArchitecture("amd64")
 	bc, err := build.New(ctx, fs,
 		build.WithAuthenticator(auth.CGRAuth{}),
 		build.WithArch(arch),
@@ -112,38 +110,15 @@ func buildImage(t *testing.T, destDir string) string {
 		t.Fatalf("bc.BuildLayer() failed with %v", err)
 	}
 
-	ucl, err := layer.Compressed()
-	if err != nil {
-		t.Fatalf("layer.Uncompressed() failed with %v", err)
-	}
-
-	outFile, err := os.Create(filepath.Join(destDir, "apko.tar.gz"))
-	if err != nil {
-		t.Fatalf("os.Create() failed with %v", err)
-	}
-
-	_, err = io.Copy(outFile, ucl)
-	if err != nil {
-		t.Fatalf("io.Copy() failed with %v", err)
-	}
-
-	return outFile.Name()
+	return layer
 }
 
 func TestCreateAttestation(t *testing.T) {
-	destDir := t.TempDir()
-	defer os.RemoveAll(destDir)
+	layer := buildImage(t)
 
-	apkoTar := buildImage(t, destDir)
-
-	output, err := CreateAttestation(context.Background(), apkoTar)
+	sbomdata, err := CreateAttestationFromLayer(context.Background(), layer)
 	if err != nil {
 		t.Fatalf("CreateAttestation() failed with %v", err)
-	}
-
-	_, err = os.Stat(output)
-	if err != nil {
-		t.Fatalf("CreateAttestation() did not create sbom file with %v", err)
 	}
 
 	testdata, err := os.Open("testdata/syft.sbom.json")
@@ -151,12 +126,6 @@ func TestCreateAttestation(t *testing.T) {
 		t.Fatalf("failed to open file: %v", err)
 	}
 	defer testdata.Close()
-
-	sbomdata, err := os.Open(output)
-	if err != nil {
-		t.Fatalf("failed to open file: %v", err)
-	}
-	defer sbomdata.Close()
 
 	decoder := syftjson.NewFormatDecoder()
 	expect, _, _, err := decoder.Decode(testdata)

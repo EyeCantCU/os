@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 
 	"github.com/anchore/syft/syft"
@@ -26,53 +25,27 @@ import (
 	"github.com/wolfi-dev/wolfictl/pkg/tar"
 )
 
-func CreateAttestationFromLayer(ctx context.Context, layer v1.Layer) (*bytes.Buffer, error) {
-	input, err := os.CreateTemp("", "layer-*.tar.gz")
+func CreateAttestationFromLayer(ctx context.Context, layer v1.Layer) (io.Reader, error) {
+	r, err := layer.Compressed()
 	if err != nil {
 		return nil, err
 	}
-	defer input.Close()
+	defer r.Close()
 
-	defer os.Remove(input.Name())
-
-	ul, err := layer.Compressed()
+	result, err := CreateAttestation(ctx, r)
 	if err != nil {
 		return nil, err
 	}
-	defer ul.Close()
 
-	_, err = io.Copy(input, ul)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read layer: %w", err)
-	}
-
-	sbom, err := CreateAttestation(ctx, input.Name())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create sbom: %w", err)
-	}
-
-	sbomFile, err := os.Open(sbom)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read sbom file: %w", err)
-	}
-	defer sbomFile.Close()
-
-	var buf bytes.Buffer
-
-	_, err = io.Copy(&buf, sbomFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to copy sbom file: %w", err)
-	}
-
-	return &buf, nil
+	return result, nil
 }
 
-func CreateAttestation(ctx context.Context, input string) (string, error) {
+func CreateAttestation(ctx context.Context, layer io.Reader) (io.Reader, error) {
 	clog.Info("creating syft attestation")
 
 	tempDir, err := os.MkdirTemp("", "wolfictl-sbom-*")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp directory: %w", err)
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer func() {
 		clog.Debug("cleaning up temp directory", "path", tempDir)
@@ -81,15 +54,10 @@ func CreateAttestation(ctx context.Context, input string) (string, error) {
 
 	clog.Debug("created temp directory to unpack apko tar", "path", tempDir)
 
-	file, err := os.Open(input)
-	if err != nil {
-		return "", fmt.Errorf("failed to create unpack apko tar: %w", err)
-	}
-
 	clog.Debug("unpacking apko tar", "path", tempDir)
 	// Unpack tar to temp directory
-	if err := tar.Untar(file, tempDir); err != nil {
-		return "", fmt.Errorf("failed to unpack tar file: %w", err)
+	if err := tar.Untar(layer, tempDir); err != nil {
+		return nil, fmt.Errorf("failed to unpack tar file: %w", err)
 	}
 
 	src, err := directorysource.New(
@@ -98,7 +66,7 @@ func CreateAttestation(ctx context.Context, input string) (string, error) {
 		},
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to create source from directory: %w", err)
+		return nil, fmt.Errorf("failed to create source from directory: %w", err)
 	}
 	clog.Debug("created Syft source from directory", "description", src.Describe())
 
@@ -121,7 +89,7 @@ func CreateAttestation(ctx context.Context, input string) (string, error) {
 	// Generate the SBOM
 	sbom, err := syft.CreateSBOM(ctx, src, cfg)
 	if err != nil {
-		return "", fmt.Errorf("failed to create SBOM: %w", err)
+		return nil, fmt.Errorf("failed to create SBOM: %w", err)
 	}
 	// remove tmp path from metadata
 	sbom.Source.Name = "wolfi-vm"
@@ -148,25 +116,15 @@ func CreateAttestation(ctx context.Context, input string) (string, error) {
 	// Encode the SBOM to Syft JSON format
 	enc := syftjson.NewFormatEncoder()
 	if enc == nil {
-		return "", fmt.Errorf("failed to get JSON encoder")
+		return nil, fmt.Errorf("failed to get JSON encoder")
 	}
 
-	outputPath := filepath.Join(
-		filepath.Dir(input),
-		"syft.sbom.json",
-	)
-
-	outputFile, err := os.Create(outputPath)
-	if err != nil {
-		return "", err
-	}
-	defer outputFile.Close()
-
+	var buf bytes.Buffer
 	// Write the SBOM JSON to a file
-	err = enc.Encode(outputFile, *sbom)
+	err = enc.Encode(&buf, *sbom)
 	if err != nil {
-		return "", fmt.Errorf("failed to encode SBOM: %w", err)
+		return nil, fmt.Errorf("failed to encode SBOM: %w", err)
 	}
 
-	return outputPath, nil
+	return &buf, nil
 }

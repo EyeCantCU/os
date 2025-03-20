@@ -206,7 +206,13 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 		return err
 	}
 
-	attestation, err := utils.CreateAttestation(ctx, outputTar.Name())
+	reopenedTar, err := os.Open(outputTar.Name())
+	if err != nil {
+		return err
+	}
+	defer reopenedTar.Close()
+
+	attestation, err := utils.CreateAttestation(ctx, reopenedTar)
 	if err != nil {
 		return err
 	}
