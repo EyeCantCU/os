@@ -1,8 +1,11 @@
 package:
   name: beats-fips-7
   version: "7.17.28"
-  epoch: 4
+  epoch: 5
   description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
+  resources:
+    cpu: 16
+    memory: 32Gi
   copyright:
     - license: Apache-2.0
     - license: Elastic-2.0
@@ -273,6 +276,116 @@ subpackages:
             cd /usr/share/filebeat
             filebeat modules list
             filebeat --help
+
+  - name: heartbeat-fips-${{vars.beats_version}}
+    dependencies:
+      runtime:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
+      provides:
+        - heartbeat-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./x-pack/heartbeat
+          output: heartbeat
+          go-package: go-fips
+      - name: Build heartbeat
+        runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/heartbeat
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/NOTICE.txt
+
+          cd heartbeat
+
+          mage fields
+          ln -sf /usr/bin/heartbeat "${{targets.subpkgdir}}"/usr/share/heartbeat/heartbeat
+
+          cp -r heartbeat.docker.yml heartbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/heartbeat/
+          cp -r monitors.d ${{targets.subpkgdir}}/usr/share/heartbeat/
+          mv ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.docker.yml ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.yml
+          cp README.md "${{targets.subpkgdir}}"/usr/share/heartbeat/README.md
+
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/heartbeat && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type d -exec chmod 0755 {} \; && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type f -exec chmod 0644 {} \; && \
+          chmod 0755 "${{targets.subpkgdir}}"/usr/share/heartbeat/fiheartbeatlebeat && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/modules.d && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+      - uses: strip
+    test:
+      environment:
+        accounts:
+          users:
+            - username: nonroot
+              uid: 65532
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - nginx
+            - sudo
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "heartbeat-fips-${{vars.beats_version}}"
+        - runs: |
+            cd /usr/share/heartbeat
+            heartbeat export config >/dev/null
+            heartbeat test config
+            heartbeat --help
+        - name: "Test http monitor"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              echo TEST >/var/lib/nginx/html/test.html
+              mkdir -p /var/lib/nginx/tmp /run/nginx
+              chown nonroot -fR /var/lib/nginx /run/nginx
+
+              # patch nginx conf to allow writing to log file that can be grepped later
+              sed -E -i "s|access_log.*;|access_log /tmp/nginx.log;|;s|error_log.*;|error_log /tmp/nginx.err;|" /etc/nginx/nginx.conf
+              sudo -u nonroot nginx -c /etc/nginx/nginx.conf
+
+              cp test-heartbeat.yml /usr/share/heartbeat/heartbeat.yml
+            start: /usr/share/heartbeat/heartbeat run -e -c /usr/share/heartbeat/heartbeat.yml
+            expected_output: |
+              Setup Beat
+              heartbeat start running
+              scheduler/scheduler.go
+            post: |
+              # kill the nginx processes
+              pkill nginx
+              if ! grep "/test\\.html" /tmp/nginx.log ; then
+                echo "Heartbeat request not found in nginx log"
+                exit 1
+              fi
+
+  - name: heartbeat-fips-${{vars.beats_version}}-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd heartbeat
+          sed 's/{{ \.BeatName }}/heartbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
 
 update:
   enabled: true
