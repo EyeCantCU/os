@@ -132,6 +132,19 @@ awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
 .PHONY: awspub
 awspub: $(foreach name,$(disks_aws),awspub-$(name))
 
+
+output/awspub.mapping:
+	mkdir -p output
+	echo "---" > $@
+	echo "BUILD_TIMESTAMP: $(BUILD_TIMESTAMP)" >> $@
+
+prodawspub-%: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
+	awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml
+	awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml
+
+prodawspub: $(foreach name,$(disks_aws),prodawspub-$(name))
+
+
 $(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
