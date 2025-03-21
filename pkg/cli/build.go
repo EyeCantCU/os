@@ -217,7 +217,21 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 		return err
 	}
 
-	fmt.Println(attestation)
+	attestationFile, err := os.Create(filepath.Join(
+		filepath.Dir(outputTar.Name()),
+		"syft.sbom.json",
+	))
+	if err != nil {
+		return err
+	}
+	defer attestationFile.Close()
+
+	_, err = io.Copy(attestationFile, attestation)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(attestationFile.Name())
 	fmt.Println(newName)
 	fmt.Println(output)
 	return nil
