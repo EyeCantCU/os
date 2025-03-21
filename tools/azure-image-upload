@@ -19,11 +19,13 @@
 TEMP_D=""
 VERBOSITY=1
 DEF_RESOURCE_GROUP="chainguard-vms"
+# Galleries need to be unique per subscription
 DEF_GALLERY="vmtesting"
 DEF_PUBLISHER="TestingPublisher"
 DEF_OFFER="TestingOffer"
 DEF_VERSION="0.0.1"
 MAKE_DEFINITION=0
+DEFAULT_REGIONS="eastus westus2"
 
 Usage() {
     cat <<EOF
@@ -38,12 +40,15 @@ Usage: ${0##*/} [--name=name] image
                             default is to use the basename of 'image' with
                             extensions removed.
            --arch    ARCH   register image as architecture ARCH
-      --resource-group GRP  use resource-group for publishing. [$DEF_RESOURCE_GROUP]
-      --gallery GAL         publish to gallery. [$DEF_GALLERY]
-      --image-definition    use this image definition
-      --make-definition     atempt to make the definition before using
-      --image-version       image version to create
-
+           --resource-group GRP  use resource-group for publishing. [$DEF_RESOURCE_GROUP]
+           --gallery        GAL  publish to gallery. [$DEF_GALLERY]
+           --image-definition    use this image definition
+           --make-definition     atempt to make the definition before using
+           --image-version       image version to create
+           --existing-disk       use and existing disk
+           --disk-name           use this name for the disk [NAME]
+           --regions             Specify regions to deploy. [$DEFAULT_REGIONS]
+           --upload-only         Only upload this provide image as a disk
 
   Publish raw disk image 'image' to azure using 'az' and 'azcopy' cli.
   If image ends in .vhd it is assumed to be in the right format
@@ -88,76 +93,9 @@ vr() {
     return "$rc"
 }
 
-main() {
-    local short_opts="hv"
-    local long_opts="help,arch:,name:,resource-group:,gallery:,image-version:,definition-name:,make-definition,verbose"
-    local getopt_out=""
-    getopt_out=$(getopt --name "${0##*/}" \
-        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
-        eval set -- "${getopt_out}" ||
-        { Usage 1>&2; return 1; }
-
-    local name="" out="" arch="" file="" name="" defname=""
-    local resource_group="${DEF_RESOURCE_GROUP}"
-    local gallery="${DEF_GALLERY}"
-    local image_version="${DEF_VERSION}"
-    local make_definition=0
-    local definition_name=""
-
-    while [ $# -ne 0 ]; do
-        { cur="$1"; next="$2"; }
-        case "$cur" in
-            -h|--help) Usage ; exit 0;;
-            --arch) arch="$next"; shift;;
-            --name) name=$2; shift;;
-            --resource-group) resource_group=$2; shift;;
-            --gallery) gallery=$2; shift;;
-            --image-version) image_version=$2; shift;;
-            --make-definition) make_definition=1 ;;
-            --definition-name) definition_name=$2; shift;;
-            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
-            --) shift; break;;
-        esac
-        shift;
-    done
-
-    if [ $# -ne 1 ]; then
-        Usage 1>&2
-        stderr "Got $# args, expected 1"
-        return 1
-    fi
-
-    if [ -z "$definition_name" ] && [ -z "$make_definition" ]; then
-        definition_name="${name}"
-    fi
-
-    assert_cmds az azcopy jq wc || return
-
-    file="$1"
-    defname=$(basename "$file")
-    defname=${defname%.vhd}
-
-    if [ ! -f "$file" ]; then
-        stderr "$file: not a file"
-        return 1
-    fi
-
-    local archin="" azarch=""
-    if [ -z "$archin" ]; then
-        arch=$(uname -m)
-    fi
-
-
-    case "$arch" in
-        aarch64|arm64) azarch="arm64";;
-        x86_64|amd64|x64) azarch="x64";;
-        *) stderr "unknown arch $arch"; return 1;;
-    esac
-
-    if [ -z "$archin" ]; then
-        stderr "arbitrarily decided that $file is arch '$azarch' [use --arch=$azarch]"
-    fi
-
+# Takes file, name, resource_group
+create_and_upload_disk() {
+    local file="$1" name="$2" resource_group="$3"
     TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
         { stderr "failed to create tempdir"; return 1; }
     trap cleanup EXIT
@@ -169,15 +107,11 @@ main() {
             stderr "Assuming $file is a suitably prepared vhd image"
             ;;
         *)
-            vhd="${TEMP_D}/$defname.vhd"
+            vhd="${TEMP_D}/$name.vhd"
             create_vhd "$file" "$vhd" ||
                 { stderr "failed creating a vhd image from $file"; return 1; }
-           ;;
+        ;;
     esac
-
-    if [ -z "$name" ]; then
-        name=$defname
-    fi
 
     local infojs="" disk_size="" sparse_size=""
     infojs=$(qemu-img info --format=vpc --output=json "$vhd")
@@ -250,6 +184,112 @@ main() {
         return 1
     }
 
+    echo "$diskid"
+
+    return 0
+}
+
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,arch:,name:,resource-group:,gallery:,image-version:,definition-name:,make-definition,verbose,existing-disk,upload-only,disk-name:,regions:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local name="" out="" arch="" file="" name="" defname=""
+    local resource_group="${DEF_RESOURCE_GROUP}"
+    local gallery="${DEF_GALLERY}"
+    local image_version="${DEF_VERSION}"
+    local disk_name="" definition_name=""
+    local make_definition="" existing_disk="" upload_only=""
+    local regions="${DEFAULT_REGIONS}"
+
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            --arch) arch="$next"; shift;;
+            --name) name=$2; shift;;
+            --resource-group) resource_group=$2; shift;;
+            --gallery) gallery=$2; shift;;
+            --image-version) image_version=$2; shift;;
+            --make-definition) make_definition=1 ;;
+            --definition-name) definition_name=$2; shift;;
+            --existing-disk) existing_disk=1 ;;
+            --disk-name) disk_name=$2; shift;;
+            --upload-only) upload_only=1 ;;
+            --regions) regions=$2; shift;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    if [ $# -ne 1 ]; then
+        Usage 1>&2
+        stderr "Got $# args, expected 1"
+        return 1
+    fi
+    assert_cmds az azcopy jq wc || return
+
+    if [ -z "$definition_name" ] && [ -z "$make_definition" ]; then
+        definition_name="${name}"
+    fi
+
+    file="$1"
+    defname=$(basename "$file")
+    defname=${defname%.vhd}
+
+    if [ -z "$name" ]; then
+        name=$defname
+    fi
+
+    if [ -z "$disk_name" ]; then
+        disk_name="$name"
+    fi
+
+    if [ ! -f "$file" ]; then
+        stderr "$file: not a file"
+        return 1
+    fi
+
+    local archin="" azarch=""
+    if [ -z "$archin" ]; then
+        arch=$(uname -m)
+    fi
+
+    case "$arch" in
+        aarch64|arm64) azarch="arm64";;
+        x86_64|amd64|x64) azarch="x64";;
+        *) stderr "unknown arch $arch"; return 1;;
+    esac
+
+    if [ -z "$archin" ]; then
+        stderr "arbitrarily decided that $file is arch '$azarch' [use --arch=$azarch]"
+    fi
+
+    if [ -z "$existing_disk" ]; then
+        diskid=$(vr "create and upload disk" create_and_upload_disk "$file" "$disk_name" "$resource_group" || {
+        stderr "failed to create and upload disk"
+        return 1
+        } )
+        if [ -n "${upload_only}" ]; then
+           return 0
+        fi
+    fi
+
+    disk_json=$(az disk list)
+    diskid=$(printf "%s" "$disk_json" | jq -r "map(select(.name | test(\"${disk_name}\$\"))).[0].id")
+
+    if [ -z "$diskid" ]; then
+        stderr "Could not retrieve disk id for ${disk_name}"
+        return 1
+    fi
+
     if [ -n "$MAKE_DEFINITION" ]; then
        # TODO add publisher information
         vr "create image definition in gallery" az sig image-definition create \
@@ -268,15 +308,18 @@ main() {
         }
     fi
 
+    # shellcheck disable=SC2086
+    #     --target-regions                                : Space-separated list of regions and their
+    #     --target-regions eastus2 ukwest=3 southindia=standard_lrs \
     vr "create image version" az sig image-version create \
        --gallery-image-definition "$name" \
        --gallery-image-version "$image_version" \
        --gallery-name "$gallery" \
        --resource-group "$resource_group" \
-       --os-snapshot "$diskid" || {
+       --os-snapshot "$diskid" \
+       --target-regions $regions || {
        stderr "failed creating image version"
-
-        return 1
+       return 1
     }
 
     return 0
