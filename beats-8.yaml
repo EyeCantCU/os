@@ -1,10 +1,13 @@
 package:
   name: beats-8
   version: "8.17.3"
-  epoch: 2
+  epoch: 6
   description: >
     The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (logs, metrics, network data). They send the data to Elasticsearch directly or via Logstash.
 
+  resources:
+    cpu: 16
+    memory: 32Gi
   copyright:
     - license: Apache-2.0
     - license: Elastic-2.0
@@ -32,6 +35,8 @@ pipeline:
       deps: |-
         golang.org/x/crypto@v0.35.0
         golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.36.0
+        github.com/golang-jwt/jwt/v5@v5.2.2
 
 subpackages:
   - name: auditbeat-${{vars.beats_version}}
@@ -322,6 +327,124 @@ subpackages:
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           cd filebeat
           sed 's/{{ \.BeatName }}/filebeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
+  - name: heartbeat-${{vars.beats_version}}
+    dependencies:
+      provides:
+        - heartbeat=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./x-pack/heartbeat
+          output: heartbeat
+      - name: Build heartbeat
+        runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/heartbeat
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/NOTICE.txt
+
+          cd heartbeat
+
+          mage fields
+
+          ln -sf /usr/bin/heartbeat "${{targets.subpkgdir}}"/usr/share/heartbeat/heartbeat
+
+          cp -r heartbeat.docker.yml heartbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/heartbeat/
+          cp -r monitors.d ${{targets.subpkgdir}}/usr/share/heartbeat/
+          mv ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.docker.yml ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.yml
+          cp README.md "${{targets.subpkgdir}}"/usr/share/heartbeat/README.md
+
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/heartbeat && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type d -exec chmod 0755 {} \; && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type f -exec chmod 0644 {} \; && \
+          chmod 0755 "${{targets.subpkgdir}}"/usr/share/heartbeat/fiheartbeatlebeat && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/modules.d && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+      - uses: strip
+    test:
+      environment:
+        accounts:
+          users:
+            - username: nonroot
+              uid: 65532
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - nginx
+            - sudo
+            - openssl
+      pipeline:
+        - runs: |
+            cd /usr/share/heartbeat
+            heartbeat export config >/dev/null
+            heartbeat test config
+            heartbeat --help
+        - name: "Test http monitor"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # setup is not running with error handling
+              set -eu -o pipefail -x
+              certs_dir=/etc/nginx/certs
+              # Generate root CA (FIPS-compliant: 4096-bit RSA key)
+              mkdir -p $certs_dir
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $certs_dir/ca.key
+              openssl req -x509 -new -nodes -key $certs_dir/ca.key -sha256 -days 1024 -out $certs_dir/ca.crt -subj "/CN=localhost"
+
+              # Generate SSL certificates for server (FIPS-compliant: 4096-bit RSA key)
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $certs_dir/server.key
+              openssl req -new -key $certs_dir/server.key -out $certs_dir/server.csr -subj "/CN=localhost"
+              openssl x509 -req -in $certs_dir/server.csr -CA $certs_dir/ca.crt -CAkey $certs_dir/ca.key -CAcreateserial -out $certs_dir/server.crt -days 365
+              chown nonroot: -fR /etc/nginx/certs
+
+              echo TEST >/var/lib/nginx/html/test.html
+              echo TEST >/var/lib/nginx/html/test-tls.html
+              mkdir -p /var/lib/nginx/tmp /run/nginx
+              chown nonroot -fR /var/lib/nginx /run/nginx
+
+              cp test-nginx.conf /etc/nginx/nginx.conf
+              sudo -u nonroot nginx -c /etc/nginx/nginx.conf
+
+              cp test-heartbeat.yml /usr/share/heartbeat/heartbeat.yml
+            start: /usr/share/heartbeat/heartbeat run -e -c /usr/share/heartbeat/heartbeat.yml
+            expected_output: |
+              Setup Beat
+              heartbeat start running
+              scheduler/scheduler.go
+            post: |
+              # kill the nginx processes
+              pkill nginx
+              if ! grep "/test\\.html" /tmp/nginx.log ; then
+                echo "Heartbeat http request not found in nginx log"
+                exit 1
+              fi
+              if ! grep "/test-tls\\.html" /tmp/nginx.log ; then
+                echo "Heartbeat https request not found in nginx log"
+                exit 1
+              fi
+
+  - name: heartbeat-${{vars.beats_version}}-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd heartbeat
+          sed 's/{{ \.BeatName }}/heartbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
           chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
           mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
           ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
