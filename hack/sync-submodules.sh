@@ -8,12 +8,12 @@ if [[ -n $(git status --porcelain) ]]; then
     git commit -asm "update submodules"
     git push origin sync-submodules --force
 
-    # If PR exists for this branch, update it
     # Get PR number for this branch
     pr_number=$(gh pr list --state open --base main --head sync-submodules | grep sync-submodules | awk '{print $1}')
     if [[ -n $pr_number ]]; then
-        gh pr update $pr_number
+        echo "Updated branch for PR #$pr_number"
     else
+        echo "Creating new PR"
         gh pr create --title "update submodules" --body "update submodules" --base main
     fi
     git checkout -
