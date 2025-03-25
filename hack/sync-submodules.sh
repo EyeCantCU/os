@@ -14,8 +14,8 @@ if [[ -n $(git status --porcelain) ]]; then
     else
         gh pr create --title "update submodules" --body "update submodules" --base main
     fi
+    git checkout -
 else
     echo "No changes to submodules, nothing to do"
 fi
 
-git checkout -
