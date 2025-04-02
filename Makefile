@@ -118,6 +118,7 @@ dev-container: apk-token
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-v "${HOME}/.config/chainctl:/root/.config/chainctl" \
+			-v "${HOME}/.config/gcloud:/root/.config/gcloud" \
 			-v "${CACHEDIR}:/tmp/melange-cache" \
 			-w "${PWD}" \
 			ghcr.io/wolfi-dev/sdk:latest
@@ -198,12 +199,10 @@ dev-container-wolfi:
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
 
 .PHONY: gcp-auth
-gcp-auth: ## This is a helper target for placing your GCP credentials into the melange cache for use by a package build that needs to communicate with GCP
+gcp-auth:
+	@if ! [ -d ${HOME}/.config/gcloud ]; then \
+		echo "Initializing GCP auth..."; \
+		gcloud auth login; \
+	fi
 	mkdir -p ${CACHEDIR}/.config/gcloud
 	cp -rf ~/.config/gcloud/* ${CACHEDIR}/.config/gcloud/
-
-.PHONY: init-gcp-auth
-init-gcp-auth:
-	@echo "Initializing GCP auth..."
-	gcloud auth login
-	@$(MAKE) gcp-auth
