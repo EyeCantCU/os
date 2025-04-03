@@ -11,83 +11,140 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var teardownCmd = &cobra.Command{
-	Use:   "teardown",
-	Short: "Delete VPC, subnet, and security group associated with a tag",
-	Run: func(cmd *cobra.Command, args []string) {
-		cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
-		if err != nil {
-			log.Fatalf("failed to load AWS config: %v", err)
-		}
-		client := ec2.NewFromConfig(cfg)
+func teardownCmd() *cobra.Command {
+	var region, tagName string
 
-		// Find and delete security groups
-		sgOut, err := client.DescribeSecurityGroups(context.TODO(), &ec2.DescribeSecurityGroupsInput{
-			Filters: []ec2types.Filter{
-				{Name: aws.String("tag:Name"), Values: []string{tagName}},
-			},
-		})
-		if err != nil {
-			log.Fatalf("failed to describe security groups: %v", err)
-		}
-		for _, sg := range sgOut.SecurityGroups {
-			_, err := client.DeleteSecurityGroup(context.TODO(), &ec2.DeleteSecurityGroupInput{
-				GroupId: sg.GroupId,
+	cmd := &cobra.Command{
+		Use:   "teardown",
+		Short: "Delete VPC, subnet, and security group associated with a tag",
+		Run: func(cmd *cobra.Command, args []string) {
+			cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+			if err != nil {
+				log.Fatalf("failed to load AWS config: %v", err)
+			}
+			client := ec2.NewFromConfig(cfg)
+
+			// Detach and delete Internet Gateways
+			igwOut, err := client.DescribeInternetGateways(context.TODO(), &ec2.DescribeInternetGatewaysInput{
+				Filters: []ec2types.Filter{
+					{Name: aws.String("tag:Name"), Values: []string{tagName}},
+				},
 			})
 			if err != nil {
-				log.Printf("failed to delete security group %s: %v", *sg.GroupId, err)
-			} else {
-				log.Printf("Deleted security group: %s", *sg.GroupId)
+				log.Fatalf("failed to describe IGWs: %v", err)
 			}
-		}
+			for _, igw := range igwOut.InternetGateways {
+				for _, attachment := range igw.Attachments {
+					if attachment.VpcId != nil {
+						_, err = client.DetachInternetGateway(context.TODO(), &ec2.DetachInternetGatewayInput{
+							InternetGatewayId: igw.InternetGatewayId,
+							VpcId:             attachment.VpcId,
+						})
+						if err != nil {
+							log.Printf("failed to detach IGW %s from VPC %s: %v", *igw.InternetGatewayId, *attachment.VpcId, err)
+						} else {
+							log.Printf("Detached IGW %s from VPC %s", *igw.InternetGatewayId, *attachment.VpcId)
+						}
+					}
+				}
+				_, err := client.DeleteInternetGateway(context.TODO(), &ec2.DeleteInternetGatewayInput{
+					InternetGatewayId: igw.InternetGatewayId,
+				})
+				if err != nil {
+					log.Printf("failed to delete IGW %s: %v", *igw.InternetGatewayId, err)
+				} else {
+					log.Printf("Deleted IGW: %s", *igw.InternetGatewayId)
+				}
+			}
 
-		// Find and delete subnets
-		subnetOut, err := client.DescribeSubnets(context.TODO(), &ec2.DescribeSubnetsInput{
-			Filters: []ec2types.Filter{
-				{Name: aws.String("tag:Name"), Values: []string{tagName}},
-			},
-		})
-		if err != nil {
-			log.Fatalf("failed to describe subnets: %v", err)
-		}
-		for _, subnet := range subnetOut.Subnets {
-			_, err := client.DeleteSubnet(context.TODO(), &ec2.DeleteSubnetInput{
-				SubnetId: subnet.SubnetId,
+			// Delete Route Tables
+			rtOut, err := client.DescribeRouteTables(context.TODO(), &ec2.DescribeRouteTablesInput{
+				Filters: []ec2types.Filter{
+					{Name: aws.String("tag:Name"), Values: []string{tagName}},
+				},
 			})
 			if err != nil {
-				log.Printf("failed to delete subnet %s: %v", *subnet.SubnetId, err)
-			} else {
-				log.Printf("Deleted subnet: %s", *subnet.SubnetId)
+				log.Fatalf("failed to describe route tables: %v", err)
 			}
-		}
+			for _, rt := range rtOut.RouteTables {
+				_, err = client.DeleteRouteTable(context.TODO(), &ec2.DeleteRouteTableInput{
+					RouteTableId: rt.RouteTableId,
+				})
+				if err != nil {
+					log.Printf("failed to delete route table %s: %v", *rt.RouteTableId, err)
+				} else {
+					log.Printf("Deleted route table: %s", *rt.RouteTableId)
+				}
+			}
 
-		// Find and delete VPCs
-		vpcOut, err := client.DescribeVpcs(context.TODO(), &ec2.DescribeVpcsInput{
-			Filters: []ec2types.Filter{
-				{Name: aws.String("tag:Name"), Values: []string{tagName}},
-			},
-		})
-		if err != nil {
-			log.Fatalf("failed to describe VPCs: %v", err)
-		}
-		for _, vpc := range vpcOut.Vpcs {
-			_, err := client.DeleteVpc(context.TODO(), &ec2.DeleteVpcInput{
-				VpcId: vpc.VpcId,
+			// Find and delete security groups
+			sgOut, err := client.DescribeSecurityGroups(context.TODO(), &ec2.DescribeSecurityGroupsInput{
+				Filters: []ec2types.Filter{
+					{Name: aws.String("tag:Name"), Values: []string{tagName}},
+				},
 			})
 			if err != nil {
-				log.Printf("failed to delete VPC %s: %v", *vpc.VpcId, err)
-			} else {
-				log.Printf("Deleted VPC: %s", *vpc.VpcId)
+				log.Fatalf("failed to describe security groups: %v", err)
 			}
-		}
+			for _, sg := range sgOut.SecurityGroups {
+				_, err := client.DeleteSecurityGroup(context.TODO(), &ec2.DeleteSecurityGroupInput{
+					GroupId: sg.GroupId,
+				})
+				if err != nil {
+					log.Printf("failed to delete security group %s: %v", *sg.GroupId, err)
+				} else {
+					log.Printf("Deleted security group: %s", *sg.GroupId)
+				}
+			}
 
-		log.Println("Teardown complete.")
-	},
-}
+			// Find and delete subnets
+			subnetOut, err := client.DescribeSubnets(context.TODO(), &ec2.DescribeSubnetsInput{
+				Filters: []ec2types.Filter{
+					{Name: aws.String("tag:Name"), Values: []string{tagName}},
+				},
+			})
+			if err != nil {
+				log.Fatalf("failed to describe subnets: %v", err)
+			}
+			for _, subnet := range subnetOut.Subnets {
+				_, err := client.DeleteSubnet(context.TODO(), &ec2.DeleteSubnetInput{
+					SubnetId: subnet.SubnetId,
+				})
+				if err != nil {
+					log.Printf("failed to delete subnet %s: %v", *subnet.SubnetId, err)
+				} else {
+					log.Printf("Deleted subnet: %s", *subnet.SubnetId)
+				}
+			}
 
-func init() {
-	teardownCmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
-	teardownCmd.Flags().StringVar(&tagName, "tag", "", "Tag name to identify resources for deletion (required)")
-	teardownCmd.MarkFlagRequired("region")
-	teardownCmd.MarkFlagRequired("tag")
+			// Find and delete VPCs
+			vpcOut, err := client.DescribeVpcs(context.TODO(), &ec2.DescribeVpcsInput{
+				Filters: []ec2types.Filter{
+					{Name: aws.String("tag:Name"), Values: []string{tagName}},
+				},
+			})
+			if err != nil {
+				log.Fatalf("failed to describe VPCs: %v", err)
+			}
+			for _, vpc := range vpcOut.Vpcs {
+				_, err := client.DeleteVpc(context.TODO(), &ec2.DeleteVpcInput{
+					VpcId: vpc.VpcId,
+				})
+				if err != nil {
+					log.Printf("failed to delete VPC %s: %v", *vpc.VpcId, err)
+				} else {
+					log.Printf("Deleted VPC: %s", *vpc.VpcId)
+				}
+			}
+
+			log.Println("Teardown complete.")
+		},
+	}
+
+	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
+	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name to identify resources for deletion (required)")
+	cmd.MarkFlagRequired("region")
+	cmd.MarkFlagRequired("tag")
+
+	return cmd
 }
