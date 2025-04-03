@@ -67,6 +67,19 @@ func teardownCmd() *cobra.Command {
 				log.Fatalf("failed to describe route tables: %v", err)
 			}
 			for _, rt := range rtOut.RouteTables {
+				for _, route := range rt.Routes {
+					if route.GatewayId != nil && *route.GatewayId != "local" && route.DestinationCidrBlock != nil {
+						_, err = client.DeleteRoute(context.TODO(), &ec2.DeleteRouteInput{
+							RouteTableId:         rt.RouteTableId,
+							DestinationCidrBlock: route.DestinationCidrBlock,
+						})
+						if err != nil {
+							log.Printf("failed to delete route %s in route table %s: %v", *route.DestinationCidrBlock, *rt.RouteTableId, err)
+						} else {
+							log.Printf("Deleted route %s in route table %s", *route.DestinationCidrBlock, *rt.RouteTableId)
+						}
+					}
+				}
 				_, err = client.DeleteRouteTable(context.TODO(), &ec2.DeleteRouteTableInput{
 					RouteTableId: rt.RouteTableId,
 				})
