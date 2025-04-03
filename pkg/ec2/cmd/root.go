@@ -17,4 +17,6 @@ func init() {
 	rootCmd.AddCommand(launchCmd)
 	rootCmd.AddCommand(terminateCmd)
 	rootCmd.AddCommand(sshCmd)
+	rootCmd.AddCommand(setupCmd)
+	rootCmd.AddCommand(teardownCmd)
 }
