@@ -48,5 +48,5 @@ func init() {
 	rootCmd.AddCommand(launchCmd())
 	rootCmd.AddCommand(sshCmd())
 	rootCmd.AddCommand(terminateCmd())
-//	rootCmd.AddCommand(teardownCmd())
+	rootCmd.AddCommand(teardownCmd())
 }
