@@ -1,6 +1,11 @@
 # vms-test
 This repository houses a test harness for Chainguard vms.
 
+# Build test runners
+
+```
+make runner/ec2
+```
 
 ## AWS
 Example of using aws.
@@ -20,7 +25,7 @@ Example of using aws.
  * Setup necessary resources (one time setup)
 
       ```
-      $ ./out/ec2  setup --region=us-west-2 --tag=smoser-test
+      $ ./runner/ec2  setup --region=us-west-2 --tag=smoser-test
       2025/04/03 15:24:49 Created VPC: vpc-07fa6bb7b6a4d1ec2
       2025/04/03 15:24:49 Created Subnet: subnet-0f9ec4068399fa4bf
       2025/04/03 15:24:49 Created Security Group: sg-09e97361cc8c787db
@@ -35,7 +40,7 @@ Example of using aws.
  * Launch an instance
 
      ```
-     $ ./out/ec2 launch --region=us-west-2 --tag=smoser-dev1 --public-key=./id_ed25519.pub \
+     $ ./runner/ec2 launch --region=us-west-2 --tag=smoser-dev1 --public-key=./id_ed25519.pub \
          --subnet-id=subnet-0f9ec4068399fa4bf \
          --vpc-id=vpc-07fa6bb7b6a4d1ec2 \
          --security-group-id=sg-09e97361cc8c787db \
@@ -47,7 +52,7 @@ Example of using aws.
  * ssh 
 
      ```
-     $ ./out/ec2 ssh --region=us-west-2 --tag=smoser-dev1
+     $ ./runner/ec2 ssh --region=us-west-2 --tag=smoser-dev1
      ip-10-0-0-50:~$ ls         
      ls
      ip-10-0-0-50:~$ ls /     
@@ -60,7 +65,7 @@ Example of using aws.
  * terminate
 
     ```
-    $ ./out/ec2 terminate --region=us-west-2 --tag=smoser-dev1
+    $ ./runner/ec2 terminate --region=us-west-2 --tag=smoser-dev1
     2025/04/03 15:30:51 Requested termination for instances: [i-05ce463388c21c51a]
     2025/04/03 15:30:51 Deleted key pair: key-smoser-dev1
     ```
