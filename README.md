@@ -65,5 +65,101 @@ Example of using aws.
     2025/04/03 15:30:51 Deleted key pair: key-smoser-dev1
     ```
 
+## Azure
+
+Example of using azure.
+
+
+ * Find an image id.
+
+      You will need to provide the gallery name and image name at a minimum. If
+      the resource group of the gallery is different from the one you will run the
+      tests in, you will need to provide that as well. If the subscription ID is
+      different from `az account show | jq -r .id` you will need to provide that as well.
+
+      ```
+      $ az sig list | jq '[.[] | {name,resourceGroup}]' # Find a gallery
+      [
+        {
+          "name": "vmtesting",
+          "resourceGroup": "CHAINGUARD-VMS",
+          "id": "/subscriptions/ad60e736-b0ce-432e-b77c-4b8218f452ae/resourceGroups/CHAINGUARD-VMS/providers/Microsoft.Compute/galleries/vmtesting"
+        }
+      ]
+      $ az sig image-definition list -g chainguard-vms -r vmtesting | jq '[.[] | {name} ] | unique'
+      [
+        {
+          "name": "chainguard-agents-arm64"
+        },
+        {
+          "name": "chainguard-agents-x64"
+        }
+      ]
+      ```
+
+ * Setup necessary resources (one time setup)
+
+      ```
+      $ ./runner/azure setup --nsg-name acrate-testrunner-nsg --region eastus \
+          --resource-group chainguard-vms --subscription-id $(az account show | jq -r .id) \
+          --tag acrate-testrunner --vnet-name acrate-testrunner-vnet --route-table-name acrate-testrunner-routetable \
+          --subnet-name acrate-testrunner-subnet
+      2025/04/07 15:38:52 Using existing resource group: chainguard-vms
+      2025/04/07 15:38:53 Created NSG: /subscriptions/ad60e736-b0ce-432e-b77c-4b8218f452ae/resourceGroups/chainguard-vms/providers/Microsoft.Network/networkSecurityGroups/acrate-testrunner-nsg
+      2025/04/07 15:38:54 Created Route Table: /subscriptions/ad60e736-b0ce-432e-b77c-4b8218f452ae/resourceGroups/chainguard-vms/providers/Microsoft.Network/routeTables/acrate-testrunner-routetable
+      2025/04/07 15:39:00 Created VNet: /subscriptions/ad60e736-b0ce-432e-b77c-4b8218f452ae/resourceGroups/chainguard-vms/providers/Microsoft.Network/virtualNetworks/acrate-testrunner-vnet
+      2025/04/07 15:39:05 Created Subnet with NSG and Route Table association: /subscriptions/ad60e736-b0ce-432e-b77c-4b8218f452ae/resourceGroups/chainguard-vms/providers/Microsoft.Network/virtualNetworks/acrate-testrunner-vnet/subnets/acrate-testrunner-subnet
+      2025/04/07 15:39:05 Azure network setup complete.
+      ```
+
+ * Launch an instance
+
+     ```
+     $ ./runner/azure launch --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner \
+         --resource-group chainguard-vms --name acrate-testrunner-vm-3 --location eastus --public-key ~/.ssh/azure.pub \
+         --subnet acrate-testrunner-subnet --vnet acrate-testrunner-vnet --image-gallery vmtesting --image-name chainguard-agents-x64 \
+         --image-version latest
+     2025/04/08 12:07:17 Creating public IP: ip-acrate-testrunner-vm-3
+     2025/04/08 12:07:31 Launched Azure VM: acrate-testrunner-vm-3
+     ```
+
+ * ssh 
+
+     ```
+     $ ./runner/azure ssh --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner --resource-group chainguard-vms \
+         --private-key ~/.ssh/azure
+     2025/04/08 12:10:39 Connecting to VM at 172.190.50.229
+     acrate-testrunner-vm-3:~$ uname -a
+     uname -a
+     Linux acrate-testrunner-vm-3 6.14.0-r4-azure-generic #Chainguard SMP Thu Mar 27 17:26:34 UTC 2025 x86_64 GNU/Linux
+     acrate-testrunner-vm-3:~$ exit
+     ```
+
+ * terminate
+
+    ```
+    $ ./runner/azure terminate --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner --resource-group chainguard-vms
+    2025/04/08 12:12:28 Deleting VM: acrate-testrunner-vm-3
+    2025/04/08 12:13:13 Deleted VM: acrate-testrunner-vm-3
+    2025/04/08 12:13:14 Deleting disk: acrate-testrunner-vm-3_OsDisk_1_d23070c08c1a481e8b039ef913b15d4f
+    2025/04/08 12:13:16 Deleted disk: acrate-testrunner-vm-3_OsDisk_1_d23070c08c1a481e8b039ef913b15d4f
+    2025/04/08 12:13:19 Deleting NIC: nic-acrate-testrunner-vm-3
+    2025/04/08 12:13:25 Deleted NIC: nic-acrate-testrunner-vm-3
+    2025/04/08 12:13:27 Deleting public IP: ip-acrate-testrunner-vm-3
+    2025/04/08 12:14:00 Deleted public IP: ip-acrate-testrunner-vm-3
+    ```
+
+ * teardown
+
+    ```
+    $ ./runner/azure teardown --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner --resource-group chainguard-vms
+    2025/04/08 12:15:47 Deleting vNet: acrate-testrunner-vnet
+    2025/04/08 12:16:02 Deleted vNet: acrate-testrunner-vnet
+    2025/04/08 12:16:02 Deleting NSG: acrate-testrunner-nsg
+    2025/04/08 12:16:06 Deleted NSG: acrate-testrunner-nsg
+    2025/04/08 12:16:06 Deleting route table: acrate-testrunner-routetable
+    2025/04/08 12:16:12 Deleted route table: acrate-testrunner-routetable
+    ```
+
 
 
