@@ -80,6 +80,7 @@ $(dbg_targets): debug/%: $(KEY)
 
 test_targets = $(foreach name,$(pkgs),test/$(name))
 $(test_targets): test/%: $(KEY)
+	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
@@ -87,6 +88,7 @@ $(test_targets): test/%: $(KEY)
 
 testdbg_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(testdbg_targets): test-debug/%: $(KEY)
+	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
