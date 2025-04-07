@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -93,14 +92,15 @@ var sshCmd = &cobra.Command{
 	Use:   "ssh",
 	Short: "SSH into an EC2 instance by tag",
 	Run: func(cmd *cobra.Command, args []string) {
-		cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+		ctx := cmd.Context()
+		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 		if err != nil {
 			log.Fatalf("failed to load AWS config: %v", err)
 		}
 		client := ec2.NewFromConfig(cfg)
 
 		// Find instance by tag
-		out, err := client.DescribeInstances(context.TODO(), &ec2.DescribeInstancesInput{
+		out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 			Filters: []ec2types.Filter{
 				{Name: aws.String("tag:Name"), Values: []string{tagName}},
 				{Name: aws.String("instance-state-name"), Values: []string{"running"}},

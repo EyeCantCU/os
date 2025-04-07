@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -28,7 +27,7 @@ var launchCmd = &cobra.Command{
 	Use:   "launch",
 	Short: "Launch an EC2 instance",
 	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.Background()
+		ctx := cmd.Context()
 		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 		if err != nil {
 			log.Fatalf("failed to load AWS config: %v", err)

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"log"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,14 +17,15 @@ func teardownCmd() *cobra.Command {
 		Use:   "teardown",
 		Short: "Delete VPC, subnet, and security group associated with a tag",
 		Run: func(cmd *cobra.Command, args []string) {
-			cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+			ctx := cmd.Context()
+			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 			if err != nil {
 				log.Fatalf("failed to load AWS config: %v", err)
 			}
 			client := ec2.NewFromConfig(cfg)
 
 			// Detach and delete Internet Gateways
-			igwOut, err := client.DescribeInternetGateways(context.TODO(), &ec2.DescribeInternetGatewaysInput{
+			igwOut, err := client.DescribeInternetGateways(ctx, &ec2.DescribeInternetGatewaysInput{
 				Filters: []ec2types.Filter{
 					{Name: aws.String("tag:Name"), Values: []string{tagName}},
 				},
@@ -36,7 +36,7 @@ func teardownCmd() *cobra.Command {
 			for _, igw := range igwOut.InternetGateways {
 				for _, attachment := range igw.Attachments {
 					if attachment.VpcId != nil {
-						_, err = client.DetachInternetGateway(context.TODO(), &ec2.DetachInternetGatewayInput{
+						_, err = client.DetachInternetGateway(ctx, &ec2.DetachInternetGatewayInput{
 							InternetGatewayId: igw.InternetGatewayId,
 							VpcId:             attachment.VpcId,
 						})
@@ -47,7 +47,7 @@ func teardownCmd() *cobra.Command {
 						}
 					}
 				}
-				_, err := client.DeleteInternetGateway(context.TODO(), &ec2.DeleteInternetGatewayInput{
+				_, err := client.DeleteInternetGateway(ctx, &ec2.DeleteInternetGatewayInput{
 					InternetGatewayId: igw.InternetGatewayId,
 				})
 				if err != nil {
@@ -58,7 +58,7 @@ func teardownCmd() *cobra.Command {
 			}
 
 			// Delete Route Tables
-			rtOut, err := client.DescribeRouteTables(context.TODO(), &ec2.DescribeRouteTablesInput{
+			rtOut, err := client.DescribeRouteTables(ctx, &ec2.DescribeRouteTablesInput{
 				Filters: []ec2types.Filter{
 					{Name: aws.String("tag:Name"), Values: []string{tagName}},
 				},
@@ -69,7 +69,7 @@ func teardownCmd() *cobra.Command {
 			for _, rt := range rtOut.RouteTables {
 				for _, route := range rt.Routes {
 					if route.GatewayId != nil && *route.GatewayId != "local" && route.DestinationCidrBlock != nil {
-						_, err = client.DeleteRoute(context.TODO(), &ec2.DeleteRouteInput{
+						_, err = client.DeleteRoute(ctx, &ec2.DeleteRouteInput{
 							RouteTableId:         rt.RouteTableId,
 							DestinationCidrBlock: route.DestinationCidrBlock,
 						})
@@ -80,7 +80,7 @@ func teardownCmd() *cobra.Command {
 						}
 					}
 				}
-				_, err = client.DeleteRouteTable(context.TODO(), &ec2.DeleteRouteTableInput{
+				_, err = client.DeleteRouteTable(ctx, &ec2.DeleteRouteTableInput{
 					RouteTableId: rt.RouteTableId,
 				})
 				if err != nil {
@@ -91,7 +91,7 @@ func teardownCmd() *cobra.Command {
 			}
 
 			// Find and delete security groups
-			sgOut, err := client.DescribeSecurityGroups(context.TODO(), &ec2.DescribeSecurityGroupsInput{
+			sgOut, err := client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
 				Filters: []ec2types.Filter{
 					{Name: aws.String("tag:Name"), Values: []string{tagName}},
 				},
@@ -100,7 +100,7 @@ func teardownCmd() *cobra.Command {
 				log.Fatalf("failed to describe security groups: %v", err)
 			}
 			for _, sg := range sgOut.SecurityGroups {
-				_, err := client.DeleteSecurityGroup(context.TODO(), &ec2.DeleteSecurityGroupInput{
+				_, err := client.DeleteSecurityGroup(ctx, &ec2.DeleteSecurityGroupInput{
 					GroupId: sg.GroupId,
 				})
 				if err != nil {
@@ -111,7 +111,7 @@ func teardownCmd() *cobra.Command {
 			}
 
 			// Find and delete subnets
-			subnetOut, err := client.DescribeSubnets(context.TODO(), &ec2.DescribeSubnetsInput{
+			subnetOut, err := client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 				Filters: []ec2types.Filter{
 					{Name: aws.String("tag:Name"), Values: []string{tagName}},
 				},
@@ -120,7 +120,7 @@ func teardownCmd() *cobra.Command {
 				log.Fatalf("failed to describe subnets: %v", err)
 			}
 			for _, subnet := range subnetOut.Subnets {
-				_, err := client.DeleteSubnet(context.TODO(), &ec2.DeleteSubnetInput{
+				_, err := client.DeleteSubnet(ctx, &ec2.DeleteSubnetInput{
 					SubnetId: subnet.SubnetId,
 				})
 				if err != nil {
@@ -131,7 +131,7 @@ func teardownCmd() *cobra.Command {
 			}
 
 			// Find and delete VPCs
-			vpcOut, err := client.DescribeVpcs(context.TODO(), &ec2.DescribeVpcsInput{
+			vpcOut, err := client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
 				Filters: []ec2types.Filter{
 					{Name: aws.String("tag:Name"), Values: []string{tagName}},
 				},
@@ -140,7 +140,7 @@ func teardownCmd() *cobra.Command {
 				log.Fatalf("failed to describe VPCs: %v", err)
 			}
 			for _, vpc := range vpcOut.Vpcs {
-				_, err := client.DeleteVpc(context.TODO(), &ec2.DeleteVpcInput{
+				_, err := client.DeleteVpc(ctx, &ec2.DeleteVpcInput{
 					VpcId: vpc.VpcId,
 				})
 				if err != nil {

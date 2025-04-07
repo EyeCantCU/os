@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"log"
 
@@ -19,14 +18,16 @@ func setupCmd() *cobra.Command {
 		Use:   "setup",
 		Short: "Create a VPC, subnet, security group, internet gateway, and route",
 		Run: func(cmd *cobra.Command, args []string) {
-			cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+			ctx := cmd.Context()
+
+			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 			if err != nil {
 				log.Fatalf("failed to load AWS config: %v", err)
 			}
 			client := ec2.NewFromConfig(cfg)
 
 			// Create VPC
-			vpcOut, err := client.CreateVpc(context.TODO(), &ec2.CreateVpcInput{
+			vpcOut, err := client.CreateVpc(ctx, &ec2.CreateVpcInput{
 				CidrBlock: aws.String("10.0.0.0/24"),
 				TagSpecifications: []ec2types.TagSpecification{
 					{
@@ -44,7 +45,7 @@ func setupCmd() *cobra.Command {
 			log.Printf("Created VPC: %s", vpcID)
 
 			// Create Subnet
-			subnetOut, err := client.CreateSubnet(context.TODO(), &ec2.CreateSubnetInput{
+			subnetOut, err := client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
 				VpcId:     aws.String(vpcID),
 				CidrBlock: aws.String("10.0.0.0/24"),
 				TagSpecifications: []ec2types.TagSpecification{
@@ -63,7 +64,7 @@ func setupCmd() *cobra.Command {
 			log.Printf("Created Subnet: %s", subnetID)
 
 			// Create Security Group
-			sgOut, err := client.CreateSecurityGroup(context.TODO(), &ec2.CreateSecurityGroupInput{
+			sgOut, err := client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
 				GroupName:   aws.String(fmt.Sprintf(tagName)),
 				Description: aws.String("SSH access and all egress"),
 				VpcId:       aws.String(vpcID),
@@ -83,7 +84,7 @@ func setupCmd() *cobra.Command {
 			log.Printf("Created Security Group: %s", sgID)
 
 			// Authorize SSH
-			_, err = client.AuthorizeSecurityGroupIngress(context.TODO(), &ec2.AuthorizeSecurityGroupIngressInput{
+			_, err = client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 				GroupId: aws.String(sgID),
 				IpPermissions: []ec2types.IpPermission{
 					{
@@ -104,7 +105,7 @@ func setupCmd() *cobra.Command {
 			}
 
 			// Create Internet Gateway
-			igwOut, err := client.CreateInternetGateway(context.TODO(), &ec2.CreateInternetGatewayInput{
+			igwOut, err := client.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{
 				TagSpecifications: []ec2types.TagSpecification{
 					{
 						ResourceType: ec2types.ResourceTypeInternetGateway,
@@ -120,7 +121,7 @@ func setupCmd() *cobra.Command {
 			igwID := *igwOut.InternetGateway.InternetGatewayId
 			log.Printf("Created Internet Gateway: %s", igwID)
 
-			_, err = client.AttachInternetGateway(context.TODO(), &ec2.AttachInternetGatewayInput{
+			_, err = client.AttachInternetGateway(ctx, &ec2.AttachInternetGatewayInput{
 				InternetGatewayId: aws.String(igwID),
 				VpcId:             aws.String(vpcID),
 			})
@@ -130,7 +131,7 @@ func setupCmd() *cobra.Command {
 			log.Printf("Attached IGW to VPC")
 
 			// Create Route Table
-			rtOut, err := client.CreateRouteTable(context.TODO(), &ec2.CreateRouteTableInput{
+			rtOut, err := client.CreateRouteTable(ctx, &ec2.CreateRouteTableInput{
 				VpcId: aws.String(vpcID),
 				TagSpecifications: []ec2types.TagSpecification{
 					{
@@ -147,7 +148,7 @@ func setupCmd() *cobra.Command {
 			rtID := *rtOut.RouteTable.RouteTableId
 			log.Printf("Created Route Table: %s", rtID)
 
-			_, err = client.CreateRoute(context.TODO(), &ec2.CreateRouteInput{
+			_, err = client.CreateRoute(ctx, &ec2.CreateRouteInput{
 				RouteTableId:         aws.String(rtID),
 				DestinationCidrBlock: aws.String("0.0.0.0/0"),
 				GatewayId:            aws.String(igwID),
@@ -156,7 +157,7 @@ func setupCmd() *cobra.Command {
 				log.Fatalf("failed to create route: %v", err)
 			}
 
-			_, err = client.CreateRoute(context.TODO(), &ec2.CreateRouteInput{
+			_, err = client.CreateRoute(ctx, &ec2.CreateRouteInput{
 				RouteTableId:             aws.String(rtID),
 				DestinationIpv6CidrBlock: aws.String("::0/0"),
 				GatewayId:                aws.String(igwID),
@@ -166,7 +167,7 @@ func setupCmd() *cobra.Command {
 			}
 			log.Printf("Added default route through IGW")
 
-			_, err = client.AssociateRouteTable(context.TODO(), &ec2.AssociateRouteTableInput{
+			_, err = client.AssociateRouteTable(ctx, &ec2.AssociateRouteTableInput{
 				SubnetId:     aws.String(subnetID),
 				RouteTableId: aws.String(rtID),
 			})

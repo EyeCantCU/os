@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"log"
 
@@ -18,14 +17,15 @@ var terminateCmd = &cobra.Command{
 	Use:   "terminate",
 	Short: "Terminate EC2 instances and delete key pair by tag",
 	Run: func(cmd *cobra.Command, args []string) {
-		cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+		ctx := cmd.Context()
+		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 		if err != nil {
 			log.Fatalf("failed to load config: %v", err)
 		}
 		client := ec2.NewFromConfig(cfg)
 
 		// Describe instances with tag
-		desc, err := client.DescribeInstances(context.TODO(), &ec2.DescribeInstancesInput{
+		desc, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 			Filters: []ec2types.Filter{
 				{Name: aws.String("tag:Name"), Values: []string{tagName}},
 				{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
@@ -43,7 +43,7 @@ var terminateCmd = &cobra.Command{
 		}
 
 		if len(instanceIDs) > 0 {
-			_, err = client.TerminateInstances(context.TODO(), &ec2.TerminateInstancesInput{
+			_, err = client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
 				InstanceIds: instanceIDs,
 			})
 			if err != nil {
@@ -55,7 +55,7 @@ var terminateCmd = &cobra.Command{
 		}
 
 		keyName := fmt.Sprintf("key-%s", tagName)
-		_, err = client.DeleteKeyPair(context.TODO(), &ec2.DeleteKeyPairInput{
+		_, err = client.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{
 			KeyName: &keyName,
 		})
 		if err != nil {
