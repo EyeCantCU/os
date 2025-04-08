@@ -47,10 +47,11 @@ MELANGE_TEST_OPTS += --repository-append ${REPO}
 MELANGE_TEST_OPTS += --keyring-append ${KEY}.pub
 MELANGE_TEST_OPTS += --arch ${ARCH}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
-MELANGE_TEST_OPTS += --test-package-append wolfi-base
 MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
-MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_TEST_OPTS += --repository-append ${EXTRAS_REPO}
+MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+MELANGE_TEST_OPTS += --test-package-append wolfi-base
+MELANGE_TEST_OPTS += --debug
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 
 ${KEY}:
@@ -80,6 +81,7 @@ $(dbg_targets): debug/%: $(KEY)
 
 test_targets = $(foreach name,$(pkgs),test/$(name))
 $(test_targets): test/%: $(KEY)
+	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
@@ -87,6 +89,7 @@ $(test_targets): test/%: $(KEY)
 
 testdbg_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(testdbg_targets): test-debug/%: $(KEY)
+	@mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
