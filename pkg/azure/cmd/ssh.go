@@ -94,7 +94,7 @@ func sshCmd() *cobra.Command {
 		Use:   "ssh",
 		Short: "SSH into an Azure VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
-			ctx := context.Background()
+			ctx := cmd.Context()
 
 			cred, err := azidentity.NewDefaultAzureCredential(nil)
 			if err != nil {
