@@ -2,8 +2,10 @@
 package boot
 
 import (
+	"fmt"
 	"testing"
 
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/metrics"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/vmtest"
 )
 
@@ -18,4 +20,5 @@ func TestSSHStartTime(t *testing.T) {
 	if timeToSSHD > 20 {
 		t.Logf("timeToSSHD = %d seconds, want < 20", timeToSSHD)
 	}
+	metrics.Log(t, metrics.SSHDStartTime, fmt.Sprintf("%d", timeToSSHD), nil)
 }
