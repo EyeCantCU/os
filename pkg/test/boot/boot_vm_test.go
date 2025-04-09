@@ -1,0 +1,21 @@
+//go:build vmtest
+package boot
+
+import (
+	"testing"
+
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/vmtest"
+)
+
+func TestSSHStartTime(t *testing.T) {
+	ctx := vmtest.Context(t)
+	vmStartTime, err := findVMStartTime(ctx)
+	if err != nil {
+		t.Fatalf("findVMStartTime(ctx) = err %v want nil", err)
+	}
+	sshdStartTime, err := findServiceStartTime(ctx, "sshd.service")
+	timeToSSHD := int(sshdStartTime.Sub(vmStartTime).Seconds())
+	if timeToSSHD > 20 {
+		t.Logf("timeToSSHD = %d seconds, want < 20", timeToSSHD)
+	}
+}
