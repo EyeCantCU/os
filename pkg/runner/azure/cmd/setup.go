@@ -3,6 +3,7 @@ package cmd
 import (
 	"log"
 
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
@@ -20,7 +21,7 @@ func setupCmd() *cobra.Command {
 			ctx := cmd.Context()
 
 			resourceTags := map[string]*string {
-    				tagName: toPtr(""),
+    				tagName: utils.ToPtr(""),
 			}
 
 			cred, err := azidentity.NewDefaultAzureCredential(nil)
@@ -60,16 +61,16 @@ func setupCmd() *cobra.Command {
 				Properties: &armnetwork.SecurityGroupPropertiesFormat{
 					SecurityRules: []*armnetwork.SecurityRule{
 						{
-							Name: toPtr("AllowSSH"),
+							Name: utils.ToPtr("AllowSSH"),
 							Properties: &armnetwork.SecurityRulePropertiesFormat{
-								Access:                   toPtr(armnetwork.SecurityRuleAccessAllow),
-								Direction:                toPtr(armnetwork.SecurityRuleDirectionInbound),
-								Priority:                 toPtr(int32(100)),
-								Protocol:                 toPtr(armnetwork.SecurityRuleProtocolTCP),
-								SourceAddressPrefix:      toPtr("*"),
-								DestinationAddressPrefix: toPtr("*"),
-								SourcePortRange:          toPtr("*"),
-								DestinationPortRange:     toPtr("22"),
+								Access:                   utils.ToPtr(armnetwork.SecurityRuleAccessAllow),
+								Direction:                utils.ToPtr(armnetwork.SecurityRuleDirectionInbound),
+								Priority:                 utils.ToPtr(int32(100)),
+								Protocol:                 utils.ToPtr(armnetwork.SecurityRuleProtocolTCP),
+								SourceAddressPrefix:      utils.ToPtr("*"),
+								DestinationAddressPrefix: utils.ToPtr("*"),
+								SourcePortRange:          utils.ToPtr("*"),
+								DestinationPortRange:     utils.ToPtr("22"),
 							},
 						},
 					},
@@ -89,10 +90,10 @@ func setupCmd() *cobra.Command {
 				Properties: &armnetwork.RouteTablePropertiesFormat{
 					Routes: []*armnetwork.Route{
 						{
-							Name: toPtr("default-route"),
+							Name: utils.ToPtr("default-route"),
 							Properties: &armnetwork.RoutePropertiesFormat{
-								AddressPrefix: toPtr("0.0.0.0/0"),
-								NextHopType:   toPtr(armnetwork.RouteNextHopTypeInternet),
+								AddressPrefix: utils.ToPtr("0.0.0.0/0"),
+								NextHopType:   utils.ToPtr(armnetwork.RouteNextHopTypeInternet),
 							},
 						},
 					},
@@ -108,7 +109,7 @@ func setupCmd() *cobra.Command {
 				Tags: resourceTags,
 				Properties: &armnetwork.VirtualNetworkPropertiesFormat{
 					AddressSpace: &armnetwork.AddressSpace{
-						AddressPrefixes: []*string{toPtr("10.0.0.0/24")},
+						AddressPrefixes: []*string{utils.ToPtr("10.0.0.0/24")},
 					},
 				},
 			}, nil)
@@ -120,7 +121,7 @@ func setupCmd() *cobra.Command {
 			subnetPoller, err := subnetClient.BeginCreateOrUpdate(ctx, resourceGroupName, vnetName, subnetName, armnetwork.Subnet{
 				// Subnets don't support tags but they also get deleted automatically with the vNet so not a big deal.
 				Properties: &armnetwork.SubnetPropertiesFormat{
-					AddressPrefix:        toPtr("10.0.0.0/24"),
+					AddressPrefix:        utils.ToPtr("10.0.0.0/24"),
 					NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: nsgResp.ID},
 					RouteTable:           &armnetwork.RouteTable{ID: rtResp.ID},
 				},

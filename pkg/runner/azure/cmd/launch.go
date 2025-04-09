@@ -5,6 +5,8 @@ import (
 	"io/ioutil"
 	"log"
 
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
@@ -35,7 +37,7 @@ func launchCmd() *cobra.Command {
 			ctx := cmd.Context()
 
 			resourceTags := map[string]*string{
-				tagName: toPtr(""),
+				tagName: utils.ToPtr(""),
 			}
 
 			cred, err := azidentity.NewDefaultAzureCredential(nil)
@@ -60,7 +62,7 @@ func launchCmd() *cobra.Command {
 				Location: &location,
 				Tags: resourceTags,
 				Properties: &armnetwork.PublicIPAddressPropertiesFormat{
-					PublicIPAllocationMethod: toPtr(armnetwork.IPAllocationMethodDynamic),
+					PublicIPAllocationMethod: utils.ToPtr(armnetwork.IPAllocationMethodDynamic),
 				},
 			}, nil)
 			if err != nil {
@@ -90,11 +92,11 @@ func launchCmd() *cobra.Command {
 				Properties: &armnetwork.InterfacePropertiesFormat{
 					IPConfigurations: []*armnetwork.InterfaceIPConfiguration{
 						{
-							Name: toPtr(fmt.Sprintf("ipconfig-%s", vmName)),
+							Name: utils.ToPtr(fmt.Sprintf("ipconfig-%s", vmName)),
 							Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
-								PrivateIPAllocationMethod: toPtr(armnetwork.IPAllocationMethodDynamic),
+								PrivateIPAllocationMethod: utils.ToPtr(armnetwork.IPAllocationMethodDynamic),
 								PublicIPAddress: &armnetwork.PublicIPAddress{
-									ID: toPtr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/publicIPAddresses/%s", subscriptionID, resourceGroup, publicIPName)),
+									ID: utils.ToPtr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/publicIPAddresses/%s", subscriptionID, resourceGroup, publicIPName)),
 								},
 								Subnet: &armnetwork.Subnet{
 									ID: &subnetID,
@@ -127,7 +129,7 @@ func launchCmd() *cobra.Command {
 				Tags: resourceTags,
 				Properties: &armcompute.VirtualMachineProperties{
 					HardwareProfile: &armcompute.HardwareProfile{
-						VMSize: toPtr(armcompute.VirtualMachineSizeTypes(vmSize)),
+						VMSize: utils.ToPtr(armcompute.VirtualMachineSizeTypes(vmSize)),
 					},
 					StorageProfile: &armcompute.StorageProfile{
 						ImageReference: &armcompute.ImageReference{
@@ -138,12 +140,12 @@ func launchCmd() *cobra.Command {
 						ComputerName:  &vmName,
 						AdminUsername: &adminUsername,
 						LinuxConfiguration: &armcompute.LinuxConfiguration{
-							DisablePasswordAuthentication: toPtr(true),
+							DisablePasswordAuthentication: utils.ToPtr(true),
 							SSH: &armcompute.SSHConfiguration{
 								PublicKeys: []*armcompute.SSHPublicKey{
 									{
-										Path:    toPtr(getSSHPath(adminUsername)),
-										KeyData: toPtr(string(pubKey)),
+										Path:    utils.ToPtr(sshutils.GetAuthorizedKeysPath(adminUsername)),
+										KeyData: utils.ToPtr(string(pubKey)),
 									},
 								},
 							},
@@ -154,7 +156,7 @@ func launchCmd() *cobra.Command {
 							{
 								ID: &nicID,
 								Properties: &armcompute.NetworkInterfaceReferenceProperties{
-									Primary: toPtr(true),
+									Primary: utils.ToPtr(true),
 								},
 							},
 						},
