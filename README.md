@@ -100,8 +100,12 @@ Example of using azure.
  * Setup necessary resources (one time setup)
 
       ```
+      $ AZ_ACCOUNT_ID=$(az account show | jq -r .id)
+      $ echo $AZ_ACCOUNT_ID
+      ad60e736-b0ce-432e-b77c-4b8218f452ae
+
       $ ./runner/azure setup --nsg-name acrate-testrunner-nsg --region eastus \
-          --resource-group chainguard-vms --subscription-id $(az account show | jq -r .id) \
+          --resource-group chainguard-vms --subscription-id=${AZ_ACCOUNT_ID} \
           --tag acrate-testrunner --vnet-name acrate-testrunner-vnet --route-table-name acrate-testrunner-routetable \
           --subnet-name acrate-testrunner-subnet
       2025/04/07 15:38:52 Using existing resource group: chainguard-vms
@@ -115,7 +119,7 @@ Example of using azure.
  * Launch an instance
 
      ```
-     $ ./runner/azure launch --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner \
+     $ ./runner/azure launch --subscription-id=${AZ_ACCOUNT_ID} --tag acrate-testrunner \
          --resource-group chainguard-vms --name acrate-testrunner-vm-3 --location eastus --public-key ~/.ssh/azure.pub \
          --subnet acrate-testrunner-subnet --vnet acrate-testrunner-vnet --image-gallery vmtesting --image-name chainguard-agents-x64 \
          --image-version latest
@@ -126,7 +130,7 @@ Example of using azure.
  * ssh 
 
      ```
-     $ ./runner/azure ssh --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner --resource-group chainguard-vms \
+     $ ./runner/azure ssh --subscription-id=${AZ_ACCOUNT_ID} --tag acrate-testrunner --resource-group chainguard-vms \
          --private-key ~/.ssh/azure
      2025/04/08 12:10:39 Connecting to VM at 172.190.50.229
      acrate-testrunner-vm-3:~$ uname -a
@@ -138,7 +142,7 @@ Example of using azure.
  * terminate
 
     ```
-    $ ./runner/azure terminate --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner --resource-group chainguard-vms
+    $ ./runner/azure terminate --subscription-id=${AZ_ACCOUNT_ID} --tag acrate-testrunner --resource-group chainguard-vms
     2025/04/08 12:12:28 Deleting VM: acrate-testrunner-vm-3
     2025/04/08 12:13:13 Deleted VM: acrate-testrunner-vm-3
     2025/04/08 12:13:14 Deleting disk: acrate-testrunner-vm-3_OsDisk_1_d23070c08c1a481e8b039ef913b15d4f
@@ -152,7 +156,7 @@ Example of using azure.
  * teardown
 
     ```
-    $ ./runner/azure teardown --subscription-id $(az account show | jq -r .id) --tag acrate-testrunner --resource-group chainguard-vms
+    $ ./runner/azure teardown --subscription-id=${AZ_ACCOUNT_ID} --tag acrate-testrunner --resource-group chainguard-vms
     2025/04/08 12:15:47 Deleting vNet: acrate-testrunner-vnet
     2025/04/08 12:16:02 Deleted vNet: acrate-testrunner-vnet
     2025/04/08 12:16:02 Deleting NSG: acrate-testrunner-nsg
