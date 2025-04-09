@@ -1,39 +1,12 @@
 #!/bin/sh
-# shellcheck disable=SC2162,SC3043
-CR="
-"
+# shellcheck disable=SC2162,SC2166,SC2295,SC3043
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} user [fingerprint]
 
-# the PATH here will not include /bin or /sbin
-# until we're usr merged, we have programs in /bin we need (mktemp)
-PATH=$PATH:/bin:/sbin
-
-read_info() {
-    local idd="/sys/class/dmi/id" fails=""
-
-    # this is redirected to silence errors
-    {
-    read PRODUCT_NAME < "$idd/product_name" ||
-        fails="$fails $idd/product_name"
-    read PRODUCT_SERIAL < "$idd/product_serial" ||
-        fails="$fails $idd/product_serial"
-    read CHASSIS_ASSET < "$idd/chassis_asset_tag" ||
-        fails="$fails $idd/chassis_asset_tag"
-    } >/dev/null 2>&1
-    [ -z "$fails" ] && return 0
-    stderr "failed reading info from ${fails# }"
-    return 1
-}
-
-get_cloud() {
-    local GCE="Google Compute Engine"
-    local azure="7783-7084-3265-9085-8269-3286-77"
-    [ "$PRODUCT_NAME" = "$GCE" ] && { echo "GCE"; return 0; }
-    [ "$CHASSIS_ASSET" = "$azure" ] && { echo "Azure"; return 0; }
-    case "$PRODUCT_SERIAL" in
-        [Ee][Cc]2*) echo "EC2"; return 0;;
-        chainguard-*) echo "Chainguard"; return 0;;
-    esac
-    return 0
+write ssh keys to stdout for user.
+fingerprint is the fingerprint of the key or certificate.
+EOF
 }
 
 stderr() { echo "$@" 1>&2; }
@@ -87,143 +60,66 @@ ec2dump_keys() {
     return 0
 }
 
-get_cmdline_keys() {
-    local cmdline
-    [ -r /proc/cmdline ] || return 0
-    read cmdline < /proc/cmdline || {
-        stderr "failed reading /proc/cmdline"
-        return 1
-    }
-    local keys="" out="" tok=""
-    for tok in $cmdline; do
-        case "$tok" in
-            sshkey=*)
-                out=$(echo "${tok#*=}" | base64 -d) || {
-                    stderr "failed decoding base64 content in $tok"
-                    return 1
-                }
-                keys="$keys${out%"${CR}"}$CR"
-        esac
-    done
-    printf "%s" "$keys"
+gce_dump_keys() {
+    local url="http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys"
+    local out="" line=""
+    out=$(curl --silent --fail -H "Metadata-Flavor: Google" "$url") ||
+        { stderr "failed retrieving keys on google"; return 1; }
+    # ssh-keys is formatted as
+    # "user1:ssh-rsa mypublickey user1@host.com\nuser2:ssh-rsa mypublickey user2@host.com"
+    # use printf to convert '\n' to carriage return, and
+    # then strip the 'user:' off..
+    # shellcheck disable=SC2059
+    printf "$out\n" |
+        while read line; do printf "%s\n" "${line#*:}"; done
 }
 
-get_oemstring_keys() {
-    if ! command -v dmidecode >/dev/null 2>&1; then
-        stderr "dmidecode is not available, cannot read chainguard keys"
-        return 0
+azure_dump_keys() {
+    local url="http://169.254.169.254/metadata/instance/compute/publicKeys?api-version=2021-02-01"
+    local out="" pubkey="" quote='"'
+    out=$(curl --silent --fail -H "Metadata: true" "$url") ||
+        { stderr "failed retrieving keys on azure"; return 1; }
+    if command -v jq >/dev/null 2>&1 ; then
+        printf "%s\n" "$out" | jq -r '.[].keyData'
+        return
     fi
-    local out="" n=1
-    while out=$(dmidecode "--oem-string=$n" 2>/dev/null) && [ -n "$out" ]; do
-        n=$((n+1))
-        case "$out" in
-            chainguard.dev/v1/ssh-pubkey=*)
-                echo "${out#*=}"
-                return 0
-                ;;
-        esac
-    done
-}
-
-chainguard_dump_keys() {
-    local cmdline="" oemstrings=""
-    cmdline=$(get_cmdline_keys) || return
-    oemstrings=$(get_oemstring_keys) || return
-    printf "%s" "${cmdline}${oemstrings}"
-}
-
-Usage() {
-    cat <<EOF
-Usage: ${0#*/} [outfile]
-
-    pull keys from cloud platform and write to outfile.
-    outfile defaults to /root/.ssh/authorized_keys
-EOF
+    # assuming it looks like this
+    # [{"keyData":"ssh-ed25519 A...BAkh user@sys\n","path","/home/user"...}]
+    pubkey=${out#*keyData${quote}:${quote}}
+    pubkey=${pubkey%%${quote}*}
+    printf "%s" "$pubkey"
 }
 
 if [ "$1" = "-h" -o "$1" = "--help" ]; then
     Usage
     exit 0
+elif [ $# -lt 1 -o $# -gt 2 ]; then
+    stderr "$0 received $# args ($*), expected 1 or 2"
+    exit 1
 fi
 
-if [ -n "$CLOUD_PLATFORM" ]; then
-    cloud="$CLOUD_PLATFORM"
-else
-    read_info || fail "reading platform failed (sudo?)"
-    cloud=$(get_cloud)
-    if [ -z "$cloud" ]; then
-        echo "unknown platform"
-        echo "product=\"$PRODUCT_NAME\" serial=\"$PRODUCT_SERIAL\"" \
-            "asset=\"$CHASSIS_ASSET\""
-        exit 0
-    fi
-fi
+# shellcheck disable=SC2034
+user="$1"
+fp="$2"
 
-akeys="$1"
-if [ -z "$akeys" ]; then
-    # systemd may not have HOME set and that is sometimes required
-    # for expanding ~.  So do it ourselves.
-    p=$(echo ~/.ssh)
-    if [ "$p" = "~/.ssh" ]; then
-        id=$(id -u)
-        name=$(id -un)
-        if [ "$id" = "0" ]; then
-            p="/root/.ssh"
-            echo "HOME was not set. Using /root as home for id 0"
-        elif [ -d "/home/$name" ]; then
-            echo "HOME was not set. Using /home/$name for user '$name'"
-            p="/home/$name/.ssh"
-        fi
-    fi
-    akeys="$p/authorized_keys"
-fi
-
-keyd="."
-if [ "$akeys" != "-" ]; then
-    keyd=$(dirname "$akeys") || fail "failed getting dirname for '$akeys'"
-fi
-
-umask 077 || fail "failed setting umask"
-
-tmpf=$(mktemp) || fail "failed to create tmpfile"
-trap "rm -f '$tmpf'" EXIT
-
-if [ ! -d "$keyd" ]; then
-    mkdir "$keyd" || fail "failed to create directory '$keyd'"
-fi
-
-
+cloud="$(systemd-detect-virt)"
 stderr "Fetching keys on $cloud"
-case "$cloud" in
-    GCE)
-        url="http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys"
-        out=$(curl --fail -H "Metadata-Flavor: Google" "$url") ||
-            fail "failed retrieving keys on $cloud"
-        printf "%s" "$out" | cut -d':' -f2- > "$tmpf"
-        ;;
-    Azure)
-        url="http://169.254.169.254/metadata/instance/compute/publicKeys?api-version=2021-02-01"
-        out=$(curl --fail -H "Metadata: true" "$url") ||
-            fail "failed retrieving keys on $cloud"
-        printf "%s" "$out" | cut -d':' -f2 | cut -d'"' -f2 > "$tmpf"
-        ;;
-    EC2)
-        ec2dump_keys > "$tmpf"
-        ;;
-    Chainguard)
-        chainguard_dump_keys > "$tmpf" ||
-            fail "failed reading chainguard keys"
+case $cloud in
+    google) gce_dump_keys ||
+        fail "failed retrieving keys on google";;
+    microsoft) azure_dump_keys ||
+        fail "failed retrieving keys on azure";;
+    amazon)
+        # Should check the passed in $2 arg for the key fingerprint.
+        # If it is found in ec2dump_keys we can choose not to execute
+        # eic binary at all. Because eic connect binary will return
+        # error when no keys are found, which then makes sshd not
+        # trust the already printed ec2dump_keys. sshd really needs to
+        # gain support for multiple authorized_keys commands.
+        ec2dump_keys
+        if [ -x /opt/aws/bin/eic_run_authorized_keys ]; then
+            /opt/aws/bin/eic_run_authorized_keys "$@" || :
+        fi
         ;;
     *) fail "unsupported cloud \"$cloud\"";;
 esac
-
-if [ "$akeys" != "-" ]; then
-    exec > "$akeys" || fail "failed writing to $akeys"
-fi
-
-num=0
-while read line; do
-    printf "%s\n" "$line"
-    num=$((num+1))
-done < "$tmpf"
-stderr "Wrote $num keys from $cloud to $akeys"

@@ -118,6 +118,7 @@ dev-container: apk-token
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-v "${HOME}/.config/chainctl:/root/.config/chainctl" \
+			-v "${HOME}/.config/gcloud:/root/.config/gcloud" \
 			-v "${CACHEDIR}:/tmp/melange-cache" \
 			-w "${PWD}" \
 			ghcr.io/wolfi-dev/sdk:latest
@@ -196,3 +197,12 @@ dev-container-wolfi:
 		ghcr.io/wolfi-dev/sdk:latest
 	@rm "$(TMP_REPOSITORIES_FILE)"
 	@rmdir "$(TMP_REPOSITORIES_DIR)"
+
+.PHONY: gcp-auth
+gcp-auth:
+	@if ! [ -d ${HOME}/.config/gcloud ]; then \
+		echo "Initializing GCP auth..."; \
+		gcloud auth login; \
+	fi
+	mkdir -p ${CACHEDIR}/.config/gcloud
+	cp -rf ~/.config/gcloud/* ${CACHEDIR}/.config/gcloud/
