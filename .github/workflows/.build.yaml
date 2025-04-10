@@ -1,82 +1,88 @@
-# Copyright 2025 Chainguard, Inc.
+# Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-name: "Build and push vm images"
+name: Reusable Build Workflow
 
 on:
-  schedule:
-    - cron: "0 0 * * *"
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        required: false
+        type: string
+        description: 'Commit ref (sha, branch, or tag) to run at. Empty will get head/main.'
+      cg_identity:
+        type: string
+        required: false
+        description: "The identity to assume when interacting with chainguard."
+      cloud_provider:
+        required: false
+        type: string
+        default: "gcp"
+        description: "Which cloud provider we will build the vm"
+      arch:
+        required: false
+        type: string
+        default: "x86_64"
+        description: "Which acrchitecture we will build the vm"
+      push_vms:
+        required: false
+        type: boolean
+        default: false
+        description: "Push the vms to the cloud provider"
+
+    secrets:
+      # TODO: cpanato
+      # These will be dropped in a follow up as we cannot rotate them
+      AWS_ACCOUNT_ID:
+        required: false
+        description: "The AWS account id to use for the marketplace role"
+      # TODO: cpanato
+      # This will be refactor using OIDC and not credentials
+      AZURE_CREDENTIALS:
+        required: false
+        description: "The credentials to use for the azure login"
 
 permissions: {}
 
-# awspub locks marketplace listings, thus can only have one of them
-# running at a given time.
-#
-# also last one, gets marked as latest in SSM parameteres, thus best
-# to wait for previous run to finish (or get cancelled) before
-# starting a new one. To avoid earlier build, finishing later, and
-# getting marked as latest.
-#
-# Allow only one workflow run at a time
-concurrency:
-  group: 'release'
-  cancel-in-progress: false
-
 jobs:
-  init:
+  presubmit:
     runs-on: ubuntu-latest
-    outputs:
-      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
-    steps:
-      - id: timestamp
-        run: |
-          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
-
-  build:
-    runs-on: ubuntu-latest-16-cores
-    needs: init
-    env:
-      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
 
     permissions:
-      contents: read
-      issues: write
-      id-token: write
-      actions: read
+      contents: read # read the repo
+      id-token: write # to get a token for the chainguard identity
 
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - x86_64
-          - aarch64
-        cloud:
-          - aws
-          - azure
-          - gcp
-          - qemu
+    env:
+      VM_ARCH: ${{ inputs.arch }}
+      VM_CLOUD: ${{ inputs.cloud_provider }}
+      BUILD_TIMESTAMP: $(date --utc "+%Y%m%d-%H%M")
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
 
       # use public chainguard provider.
       - uses: chainguard-dev/setup-chainctl@2302a56a61228140753b428d1018cb0d0addbec6 # v0.3.0
         with:
-            identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          identity: ${{ inputs.cg_identity }}
 
       - name: Get apk.cgr.dev token
         run: |
-          chainctl auth login --identity "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20" --audience apk.cgr.dev
-          cred=$(chainctl auth token --audience apk.cgr.dev)
+          chainctl auth login --identity=${CG_IDENTITY} --audience=apk.cgr.dev
+          cred=$(chainctl auth token --audience=apk.cgr.dev)
           echo "HTTP_AUTH=basic:apk.cgr.dev:user:$cred" >> $GITHUB_ENV
+        env:
+          CG_IDENTITY: ${{ inputs.cg_identity }}
 
       - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
         with:
           go-version: stable
+          check-latest: true
 
       # Add a block like this in a separate PR *before* landing tests in a new module.
       - name: Install grype
+        if: ${{ inputs.push_vms == true }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
@@ -98,30 +104,34 @@ jobs:
 
       - name: make disks
         run: |
-          make ARCH=${{ matrix.arch }} disks-${{ matrix.cloud }}
+          make ARCH="${{ env.VM_ARCH }}" "disks-${{ env.VM_CLOUD }}"
 
       - name: scan disks
+        if: ${{ inputs.push_vms == true }}
         run: |
-          echo "scanning ${{ matrix.arch }} disks-${{ matrix.cloud }}"
+          echo "scanning ${{ env.VM_ARCH }} disks-${{ env.VM_CLOUD }}"
           # Scan for CVEs, fail early
-          for disk in output/${{ matrix.arch }}/*; do
-            grype sbom:${disk}/syft.sbom.json > ${disk}/$(basename $disk)-${{ matrix.arch }}-${{ matrix.cloud }}-${{ env.BUILD_TIMESTAMP }}-grype.output || true
-            mv ${disk}/syft.sbom.json ${disk}/$(basename $disk)-${{ matrix.arch }}-${{ matrix.cloud }}-${{ env.BUILD_TIMESTAMP }}-syft.sbom.json
+          for disk in output/"${{ env.VM_ARCH }}"/*; do
+            grype sbom:${disk}/syft.sbom.json > ${disk}/$(basename $disk)-${{ env.VM_ARCH }}-${{ env.VM_CLOUD }}-${{ env.BUILD_TIMESTAMP }}-grype.output || true
+            mv ${disk}/syft.sbom.json ${disk}/$(basename $disk)-${{ env.VM_ARCH }}-${{ env.VM_CLOUD }}-${{ env.BUILD_TIMESTAMP }}-syft.sbom.json
           done
 
       - name: upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        if: ${{ inputs.push_vms == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sbom-${{ matrix.cloud }}-${{ matrix.arch }}-${{ env.BUILD_TIMESTAMP }}
-          path: output/${{ matrix.arch }}/*/*-${{ matrix.arch }}-${{ matrix.cloud }}-${{ env.BUILD_TIMESTAMP }}-syft.sbom.json
+          name: sbom-${{ env.VM_CLOUD }}-${{ env.VM_ARCH }}-${{ env.BUILD_TIMESTAMP }}
+          path: output/${{ env.VM_ARCH }}/*/*-${{ env.VM_ARCH }}-${{ env.VM_CLOUD }}-${{ env.BUILD_TIMESTAMP }}-syft.sbom.json
 
       - name: upload grype scan output artifact
-        uses: actions/upload-artifact@v4
+        if: ${{ inputs.push_vms == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: grype-${{ matrix.cloud }}-${{ matrix.arch }}-${{ env.BUILD_TIMESTAMP }}
-          path: output/${{ matrix.arch }}/*/*-${{ matrix.arch }}-${{ matrix.cloud }}-${{ env.BUILD_TIMESTAMP }}-grype.output
+          name: grype-${{ env.VM_CLOUD }}-${{ env.VM_ARCH }}-${{ env.BUILD_TIMESTAMP }}
+          path: output/${{ env.VM_ARCH }}/*/*-${{ env.VM_ARCH }}-${{ env.VM_CLOUD }}-${{ env.BUILD_TIMESTAMP }}-grype.output
 
       - name: add HOME/bin to PATH
+        if: ${{ inputs.push_vms == true }}
         run: |
           # ensure HOME/bin is in PATH
           d="$HOME/bin"
@@ -134,7 +144,7 @@ jobs:
 
       ## AWS
       - name: "[AWS] Setup Creds"
-        if: matrix.cloud == 'aws'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'aws' }}
         uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
         with:
           # the secret used is the marketplace AWS account id
@@ -142,7 +152,7 @@ jobs:
           aws-region: us-east-1
 
       - name: "[AWS] Install Deps"
-        if: matrix.cloud == 'aws'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'aws' }}
         run: |
           if out=$(command -v aws); then
               echo "already had aws: $out"
@@ -165,13 +175,13 @@ jobs:
           ln -s $HOME/venvs/awspub/bin/awspub $HOME/bin/
 
       - name: "[AWS] Publish images"
-        if: matrix.cloud == 'aws'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'aws' }}
         run: |
-          make -j`nproc` --output-sync=recurse prodawspub BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ matrix.arch }}
+          make -j`nproc` --output-sync=recurse prodawspub BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
 
       ## AZURE
       - name: "[AZURE] Install Deps"
-        if: matrix.cloud == 'azure'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'azure' }}
         run: |
           # Install the azure cli
           # The script sets up the key, repos and then installs the package
@@ -179,7 +189,7 @@ jobs:
           curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
       - name: "[AZURE] Login"
-        if: matrix.cloud == 'azure'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'azure' }}
         uses: azure/login@v2
         with:
           # These credentials were generated on March 20 2025
@@ -187,9 +197,9 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: "[AZURE] Publish images"
-        if: matrix.cloud == 'azure'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'azure' }}
         run: |
-          arch="${{ matrix.arch }}"
+          arch="${{ env.VM_ARCH }}"
           names=$(make list-azure)
           [ -n "$names" ] || { echo "make list-azure produced empty output"; exit 1; }
           [ "$arch" = "x86_64" ] && az_arch=x64 || az_arch=arm64
@@ -219,28 +229,29 @@ jobs:
 
       ## GCP
       - name: "[GCP] Install Deps"
-        if: matrix.cloud == 'gcp'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'gcp' }}
         uses: google-github-actions/setup-gcloud@77e7a554d41e2ee56fc945c52dfd3f33d12def9a # v2.1.4
         with:
           project_id: wolfi-vm
 
       - name: "[GCP] Setup Creds"
-        if: matrix.cloud == 'gcp'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'gcp' }}
         id: 'auth'
         uses: google-github-actions/auth@71f986410dfbc7added4569d411d040a91dc6935 # v2.1.8
         with:
+          # No configuration for now as we dont need
           workload_identity_provider: 'projects/212178706475/locations/global/workloadIdentityPools/ci-pool/providers/ci-provider'
           service_account: 'github-ci@wolfi-vm.iam.gserviceaccount.com'
 
       - name: "[GCP] configure gcloud"
-        if: matrix.cloud == 'gcp'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'gcp' }}
         run: |
           gcloud config set storage/parallel_composite_upload_enabled True
 
       - name: "[GCP] Publish images"
-        if: matrix.cloud == 'gcp'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'gcp' }}
         run: |
-          arch="${{ matrix.arch }}"
+          arch="${{ env.VM_ARCH }}"
           names=$(make list-gcp)
           [ -n "$names" ] || { echo "make list-gcp produced empty output"; exit 1; }
 
@@ -268,9 +279,9 @@ jobs:
 
       ## QEMU
       - name: "[QEMU] Publish images"
-        if: matrix.cloud == 'qemu'
+        if: ${{ (inputs.push_vms == true) && inputs.cloud_provider == 'qemu' }}
         run: |
-          arch="${{ matrix.arch }}"
+          arch="${{ env.VM_ARCH }}"
           names=$(make list-qemu)
           [ -n "$names" ] || { echo "make list-qemu produced empty output"; exit 1; }
 
