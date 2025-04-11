@@ -1,0 +1,133 @@
+package:
+  name: netplan
+  version: 1.1.2
+  epoch: 0
+  description: Declarative network configuration for various backends
+  copyright:
+    - license: GPL-3.0
+  dependencies:
+    runtime:
+      - py${{vars.py-version}}-${{package.name}}
+
+vars:
+  py-version: 3.13 # App python
+
+data:
+  - name: py-versions # Bindings
+    items:
+      3.10: "310"
+      3.11: "311"
+      3.12: "312"
+      3.13: "313"
+
+environment:
+  contents:
+    packages:
+      - bash-completion
+      - build-base
+      - busybox
+      - cmake
+      - coreutils
+      - glib-dev
+      - libsystemd
+      - py3-supported-build-base
+      - py3-supported-cffi
+      - py3-supported-python-dev
+      - py3-supported-setuptools
+      - systemd-dev
+      - yaml-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/canonical/netplan
+      tag: ${{package.version}}
+      expected-commit: 01045f683b9419beb90119497cd1b2be44e83b8e
+
+  - runs: ln -s python${{vars.py-version}} /usr/bin/python3
+
+  - uses: meson/configure
+    with:
+      opts: |
+        -Dtesting=false \
+        -Dsbindir=bin \
+
+  - uses: meson/compile
+
+  - uses: meson/install
+
+  - runs: |
+      sed -i 's,#!/usr/bin/python3,#!/usr/bin/python${{vars.py-version}},' ${{targets.destdir}}/usr/share/netplan/netplan.script
+      rm -rf ${{targets.destdir}}/usr/lib/python*
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: "${{package.name}} headers"
+    pipeline:
+      - uses: split/dev
+
+  - range: py-versions
+    name: py${{range.key}}-${{package.name}}
+    description: python${{range.key}} library of ${{package.name}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-cffi
+        - py${{range.key}}-pyyaml
+    pipeline:
+      - runs: |
+          # No option to specify a different python binary
+          rm -f /usr/bin/python3
+          ln -s python${{range.key}} /usr/bin/python3
+      - uses: meson/configure
+        with:
+          opts: |
+            -Dtesting=false \
+            -Dsbindir=bin \
+            --reconfigure \
+      # Waste of compute, but I don't think there's any way to build just the python bindings.
+      - uses: meson/compile
+      - uses: meson/install
+      - runs: |
+          mv ${{targets.subpkgdir}}/usr/lib/python${{range.key}} ./python-${{range.key}}-tmp
+          rm -rf ${{targets.subpkgdir}}
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/
+          mv ./python-${{range.key}}-tmp ${{targets.subpkgdir}}/usr/lib/python${{range.key}}
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{package.name}}
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+
+  - name: py3-supported-${{package.name}}
+    description: meta package providing ${{package.name}} library for supported python versions.
+    dependencies:
+      runtime:
+        - py3.10-${{package.name}}
+        - py3.11-${{package.name}}
+        - py3.12-${{package.name}}
+        - py3.13-${{package.name}}
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python3.10
+            import: ${{package.name}}
+
+update:
+  enabled: true
+  github:
+    identifier: canonical/netplan
+    use-tag: true
+
+test:
+  pipeline:
+    - runs: netplan --help
+    - uses: test/tw/ldd-check
+      with:
+        packages: ${{package.name}}
