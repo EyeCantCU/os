@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"path/filepath"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -41,6 +42,54 @@ func sshCmd() *cobra.Command {
 	cmd.Flags().StringVar(&subscriptionID, "subscription-id", "", "Azure subscription ID (required)")
 	cmd.Flags().StringVar(&sshUser, "user", "azureuser", "SSH username")
 	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
+	cmd.MarkFlagRequired("resource-group")
+	cmd.MarkFlagRequired("tag")
+	cmd.MarkFlagRequired("subscription")
+
+	return cmd
+}
+
+func runRemoteCmd() *cobra.Command {
+	var (
+		resourceGroup  string
+		vmTag          string
+		subscriptionID string
+		privateKeyPath string
+		sshUser        string
+		localFilePath  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "run-remote",
+		Short: "run a binary on an Azure VM by tag",
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx := cmd.Context()
+			publicIP := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			log.Printf("Connecting to VM at %s", publicIP)
+
+			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
+
+
+			err := sshutils.ShoveBinaryFile(publicIP, privateKeyPath, sshUser, localFilePath, remoteFile)
+			if err != nil {
+    				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
+			}
+
+			remotecmd := append([]string{"exec", remoteFile}, args...)
+
+			if err := sshutils.SSHToInstance(publicIP, privateKeyPath, sshUser, remotecmd); err != nil {
+    				log.Fatalf("failed to run %s on remote host: %v", filepath.Base(localFilePath), err)
+			}
+		},
+	}
+
+	cmd.Flags().StringVar(&localFilePath, "file", "", "File to run remotely (required)")
+	cmd.Flags().StringVar(&resourceGroup, "resource-group", "", "Azure resource group (required)")
+	cmd.Flags().StringVar(&vmTag, "tag", "", "Tag name of the VM (required)")
+	cmd.Flags().StringVar(&subscriptionID, "subscription-id", "", "Azure subscription ID (required)")
+	cmd.Flags().StringVar(&sshUser, "user", "azureuser", "SSH username")
+	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
+	cmd.MarkFlagRequired("file")
 	cmd.MarkFlagRequired("resource-group")
 	cmd.MarkFlagRequired("tag")
 	cmd.MarkFlagRequired("subscription")

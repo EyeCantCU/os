@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"log"
+	"path/filepath"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -40,6 +41,50 @@ func sshCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sshUser, "user", "ec2-user", "SSH username")
 	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
 	cmd.MarkFlagRequired("tag")
+	cmd.MarkFlagRequired("region")
+
+	return cmd
+}
+
+func runRemoteCmd() *cobra.Command {
+	var (
+		privateKeyPath string
+		sshUser        string
+		localFilePath  string
+		tagName        string
+		region         string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "run-remote",
+		Short: "run a binary on an EC2 VM by tag",
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx := cmd.Context()
+			publicIP := getIPByTag(ctx, tagName)
+			log.Printf("Connecting to VM at %s", publicIP)
+
+			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
+
+			err := sshutils.ShoveBinaryFile(publicIP, privateKeyPath, sshUser, localFilePath, remoteFile)
+			if err != nil {
+    				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
+			}
+
+			remotecmd := append([]string{"exec", remoteFile}, args...)
+
+			if err := sshutils.SSHToInstance(publicIP, privateKeyPath, sshUser, remotecmd); err != nil {
+    				log.Fatalf("failed to run %s on remote host: %v", filepath.Base(localFilePath), err)
+			}
+		},
+	}
+
+	cmd.Flags().StringVar(&localFilePath, "file", "", "File to run remotely (required)")
+	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name of the instance (required)")
+	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
+	cmd.Flags().StringVar(&sshUser, "user", "ec2-user", "SSH username")
+	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
+	cmd.MarkFlagRequired("tag")
+	cmd.MarkFlagRequired("file")
 	cmd.MarkFlagRequired("region")
 
 	return cmd
