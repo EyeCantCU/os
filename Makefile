@@ -9,7 +9,7 @@ go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
 $(go_tools_bin): go.mod pkg/tools/tools.go
 	@mkdir -p tools/
-	go build -v -o $@ $(filter %/$(@F),${go_tools})
+	GOBIN=$$(pwd)/tools/ go install $(shell go list -f '{{if eq .Path "$(filter %/$(@F),${go_tools})"}}{{.Path}}@{{.Version}}{{end}}' -m all)
 
 .PHONY: go-generate
 go-generate: $(generated_go_files)
