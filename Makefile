@@ -16,6 +16,9 @@ WOLFICTL ?= $(shell which wolfictl)
 KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
 
+ifneq (${MELANGE_RUNNER},)
+	MELANGE_OPTS += --runner ${MELANGE_RUNNER}
+endif
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
 MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
