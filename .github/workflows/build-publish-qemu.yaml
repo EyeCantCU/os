@@ -16,22 +16,72 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
+
   qemu-build-push:
+    runs-on: ubuntu-latest
+    needs:
+      - init
 
     permissions:
       id-token: write # federated identity
       contents: read # read repo
 
     strategy:
+      fail-fast: false
       matrix:
         arch:
           - x86_64
           - aarch64
 
-    uses: ./.github/workflows/.build.yaml
-    with:
-      cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
-      checkout_ref: ${{ github.sha }}
-      cloud_provider: "qemu"
-      arch: ${{ matrix.arch }}
-      push_vms: true
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_ARCH: ${{ matrix.arch }}
+      VM_CLOUD: "qemu"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Build vms disks
+        uses: './.github/actions/build-disks'
+        with:
+          cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          cloud_provider: "qemu"
+          arch: '${{ matrix.arch }}'
+
+      - name: Scan disks
+        uses: './.github/actions/scan-disks'
+        with:
+          cloud_provider: "qemu"
+          arch: '${{ matrix.arch }}'
+
+      - name: add HOME/bin to PATH
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - name: "Publish QEMU Images"
+        run: |
+          arch="${{ env.VM_ARCH }}"
+          names=$(make list-qemu)
+          [ -n "$names" ] || { echo "make list-qemu produced empty output"; exit 1; }
+
+          echo "publishing $names to qemu. arch=$arch timestamp=${BUILD_TIMESTAMP}"
+          find output/$arch/ -type f | xargs ls -l
+          exit 0

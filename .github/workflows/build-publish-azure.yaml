@@ -16,24 +16,106 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
+
   azure-build-push:
+    runs-on: ubuntu-latest
+    needs:
+      - init
 
     permissions:
       id-token: write # federated identity
       contents: read # read repo
 
     strategy:
+      fail-fast: false
       matrix:
         arch:
           - x86_64
           - aarch64
 
-    uses: ./.github/workflows/.build.yaml
-    with:
-      cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
-      checkout_ref: ${{ github.sha }}
-      cloud_provider: "azure"
-      arch: ${{ matrix.arch }}
-      push_vms: true
-    secrets:
-      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_ARCH: ${{ matrix.arch }}
+      VM_CLOUD: "azure"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Build vms disks
+        uses: './.github/actions/build-disks'
+        with:
+          cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          cloud_provider: "azure"
+          arch: '${{ matrix.arch }}'
+
+      - name: Scan disks
+        uses: './.github/actions/scan-disks'
+        with:
+          cloud_provider: "azure"
+          arch: '${{ matrix.arch }}'
+
+      - name: add HOME/bin to PATH
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - name: "Install Azure Deps"
+        run: |
+          # Install the azure cli
+          # The script sets up the key, repos and then installs the package
+          # https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-linux?pivots=apt
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: "Azure Login"
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # These credentials were generated on March 20 2025
+          # They are good for 365 days. They belong to 'VM Image Uploader'
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: "Publish Azure Images"
+        run: |
+          arch="${{ env.VM_ARCH }}"
+          names=$(make list-azure)
+          [ -n "$names" ] || { echo "make list-azure produced empty output"; exit 1; }
+          [ "$arch" = "x86_64" ] && az_arch=x64 || az_arch=arm64
+
+          echo "publishing $names to azure. arch=$arch az_arch=$az_arch timestamp=${BUILD_TIMESTAMP}"
+          for name in $names; do
+              ./tools/azure-image-upload  --arch $az_arch \
+              --gallery vmtesting \
+              --name "chainguard${name#azure}-${az_arch}" \
+              --disk-name "chainguard${name#azure}-${az_arch}-${BUILD_TIMESTAMP}" \
+              --image-version ${BUILD_TIMESTAMP%-*}.${BUILD_TIMESTAMP#*-}.0 \
+              output/$arch/$name/disk.raw
+
+            # Create image in EAP image gallery as well.
+            if [ "$name" == "azure-docker-dev" ]; then
+              # Create image in EAP image gallery as well.
+              ./tools/azure-image-upload --arch $az_arch \
+              --gallery chainguard_vms_eap \
+              --name "chainguard${name#azure}-${az_arch}" \
+              --disk-name "chainguard${name#azure}-${az_arch}-${BUILD_TIMESTAMP}" \
+              --existing-disk \
+              --image-version ${BUILD_TIMESTAMP%-*}.${BUILD_TIMESTAMP#*-}.0 \
+              output/$arch/$name/disk.raw
+            fi
+          done
+          exit 0
