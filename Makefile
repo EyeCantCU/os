@@ -9,7 +9,23 @@ go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
 $(go_tools_bin): go.mod pkg/tools/tools.go
 	@mkdir -p tools/
-	GOBIN=$$(pwd)/tools/ go install $(shell go list -f '{{if eq .Path "$(filter %/$(@F),${go_tools})"}}{{.Path}}@{{.Version}}{{end}}' -m all)
+	@TOOL_PKG=$(filter %/$(@F),${go_tools}); \
+	TOOL=$$TOOL_PKG; \
+	TOOL_MODULE=""; \
+	while true; do \
+		# Check if the current package has a valid module version, if so we're done \
+		TOOL_MODULE=$$(go list -f "{{if eq .Path \"$$TOOL\"}}{{.Path}}@{{.Version}}{{end}}" -m all); \
+		[ -n "$$TOOL_MODULE" ] && break; \
+		# Chop off the last bit of the URL, if we're down to the last part give up \
+		# Otherwise continue with the trimmed URL \
+		NEW=$${TOOL%/*}; \
+		[ "$$TOOL" = "$$NEW" ] && break; \
+		TOOL=$$NEW; \
+	done; \
+	echo "Resolved tool package $$TOOL_PKG to module $$TOOL_MODULE"; \
+	# Print the command manually since we silenced this long one-liner \
+	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_MODULE##*@}"; \
+	GOBIN=$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_MODULE##*@}
 
 .PHONY: go-generate
 go-generate: $(generated_go_files)
