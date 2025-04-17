@@ -18,7 +18,7 @@ func TestSSHStartTime(t *testing.T) {
 	sshdStartTime, err := findServiceStartTime(ctx, "sshd.service")
 	timeToSSHD := int(sshdStartTime.Sub(vmStartTime).Seconds())
 	if timeToSSHD > 20 {
-		t.Logf("timeToSSHD = %d seconds, want < 20", timeToSSHD)
+		t.Errorf("timeToSSHD = %d seconds, want < 20", timeToSSHD)
 	}
 	metrics.Log(t, metrics.SSHDStartTime, fmt.Sprintf("%d", timeToSSHD), nil)
 }
