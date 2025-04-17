@@ -1,9 +1,12 @@
 package sshutils
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 	"regexp"
@@ -12,7 +15,7 @@ import (
 )
 
 // NewSSHClient takes a host, ssh key, and user and returns an open ssh client connection.
-func NewSSHClient(host, privateKeyPath, user string) (*ssh.Client, error) {
+func NewSSHClient(ctx context.Context, host, privateKeyPath, user string) (*ssh.Client, error) {
 	key, err := ioutil.ReadFile(privateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read private key: %w", err)
@@ -32,19 +35,24 @@ func NewSSHClient(host, privateKeyPath, user string) (*ssh.Client, error) {
 
 	if !regexp.MustCompile(`:[0-9]+$`).MatchString(host) {
 		host = fmt.Sprintf("%s:22", host)
-    	}
-	client, err := ssh.Dial("tcp", host, config)
+	}
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", host)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
-	return client, nil
+	c, chans, reqs, err := ssh.NewClientConn(conn, host, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect via ssh: %w", err)
+	}
+	return ssh.NewClient(c, chans, reqs), nil
 }
 
 // SSHToInstance takes a host, ssh key, user, and optional command. If command
-// is empty, it opens an interactive terminal session. Otherwise, runs the command
+// is empty, it runs exec ssh with appropriate arguments. Otherwise, runs the command
 // remotely and prints the output.
-func SSHToInstance(host, privateKeyPath, user string, command []string) error {
-	client, err := NewSSHClient(host, privateKeyPath, user)
+func SSHToInstance(ctx context.Context, host, privateKeyPath, user string, command []string) error {
+	client, err := NewSSHClient(ctx, host, privateKeyPath, user)
 	if err != nil {
 		return fmt.Errorf("failed to make ssh client: %w", err)
 	}
@@ -63,28 +71,15 @@ func SSHToInstance(host, privateKeyPath, user string, command []string) error {
 		}
 		fmt.Print(string(output))
 	} else {
-		session.Stdout = os.Stdout
-		session.Stderr = os.Stderr
-		session.Stdin = os.Stdin
-		modes := ssh.TerminalModes{
-			ssh.ECHO:          1,
-			ssh.TTY_OP_ISPEED: 14400,
-			ssh.TTY_OP_OSPEED: 14400,
+		sshargs := []string{
+			"-i", privateKeyPath,
+			fmt.Sprintf("%s@%s", user, host),
 		}
-
-		term := os.Getenv("TERM")
-		if term == "" {
-			term = "xterm"
-		}
-
-		if err := session.RequestPty(term, 80, 40, modes); err != nil {
-			return fmt.Errorf("request for pseudo terminal failed: %w", err)
-		}
-
-		if err := session.Shell(); err != nil {
-			return fmt.Errorf("failed to start shell: %w", err)
-		}
-		session.Wait()
+		execSSH := exec.CommandContext(ctx, "ssh", sshargs...)
+		execSSH.Stdout = os.Stdout
+		execSSH.Stderr = os.Stderr
+		execSSH.Stdin = os.Stdin
+		execSSH.Run()
 	}
 
 	return nil
@@ -92,8 +87,8 @@ func SSHToInstance(host, privateKeyPath, user string, command []string) error {
 
 // ShoveBinaryFile takes a host, ssh key, user, local file path, and remote destination. It copies the
 // file to the remote host, marks it executable, and returns any error.
-func ShoveBinaryFile(host, privateKeyPath, user, localFilePath, destFilePath string) error {
-	client, err := NewSSHClient(host, privateKeyPath, user)
+func ShoveBinaryFile(ctx context.Context, host, privateKeyPath, user, localFilePath, destFilePath string) error {
+	client, err := NewSSHClient(ctx, host, privateKeyPath, user)
 	if err != nil {
 		return fmt.Errorf("failed to make ssh client: %w", err)
 	}
