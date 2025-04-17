@@ -29,7 +29,7 @@ func sshCmd() *cobra.Command {
 			publicIP := getIPByTag(ctx, tagName)
 			log.Printf("Connecting to VM at %s", publicIP)
 
-			if err := sshutils.SSHToInstance(publicIP, privateKeyPath, sshUser, args); err != nil {
+			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, args); err != nil {
 				log.Fatalf("SSH error: %v", err)
 			}
 
@@ -65,14 +65,14 @@ func runRemoteCmd() *cobra.Command {
 
 			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
 
-			err := sshutils.ShoveBinaryFile(publicIP, privateKeyPath, sshUser, localFilePath, remoteFile)
+			err := sshutils.ShoveBinaryFile(ctx, publicIP, privateKeyPath, sshUser, localFilePath, remoteFile)
 			if err != nil {
     				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
 			}
 
 			remotecmd := append([]string{"exec", remoteFile}, args...)
 
-			if err := sshutils.SSHToInstance(publicIP, privateKeyPath, sshUser, remotecmd); err != nil {
+			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, remotecmd); err != nil {
     				log.Fatalf("failed to run %s on remote host: %v", filepath.Base(localFilePath), err)
 			}
 		},
