@@ -6,7 +6,7 @@ TARGETDIR = packages/${ARCH}
 
 MELANGE ?= $(shell which melange)
 WOLFICTL ?= $(shell which wolfictl)
-KEY ?= local-melange.rsa
+KEY ?= local-melange-extra.rsa
 REPO ?= $(shell pwd)/packages
 
 ifneq (${MELANGE_RUNNER},)
