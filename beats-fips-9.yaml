@@ -1,0 +1,416 @@
+package:
+  name: beats-fips-9
+  version: "9.0.0"
+  epoch: 0
+  description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
+  resources:
+    cpu: 16
+    memory: 32Gi
+  copyright:
+    - license: Apache-2.0
+    - license: Elastic-2.0
+
+var-transforms:
+  - from: ${{package.name}}
+    match: ^beats-fips-(\d).*
+    replace: $1
+    to: beats_version
+
+environment:
+  contents:
+    packages:
+      - mage
+      - openssl-config-fipshardened
+      - rsync
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/beats
+      tag: v${{package.version}}
+      expected-commit: 42a721c925857c0d1f4160c977eb5f188e46d425
+
+subpackages:
+  - name: auditbeat-fips-${{vars.beats_version}}
+    dependencies:
+      provides:
+        - auditbeat-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          go-package: go-fips-md5
+          ldflags: |
+            -X github.com/elastic/beats/v7/libbeat/version.commit=$(git rev-parse HEAD)
+            -X github.com/elastic/beats/v7/libbeat/version.buildTime=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+          output: auditbeat
+          packages: ./auditbeat
+      - runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/auditbeat \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/data \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/logs \
+
+          cd auditbeat
+          mage fields
+
+          cp -r auditbeat.docker.yml auditbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
+          cp module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
+          mv ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.docker.yml ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.yml
+
+          ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
+
+          # Match the dashboards on the counterpart image
+          cd ../x-pack/auditbeat
+          mage dashboards
+          cp -r build/kibana/ ${{targets.subpkgdir}}/usr/share/auditbeat/
+
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/auditbeat && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/auditbeat/data "${{targets.subpkgdir}}"/usr/share/auditbeat/logs
+      - uses: strip
+    test:
+      environment:
+        accounts:
+          users:
+            - username: elasticsearch
+              uid: 1000
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - bash
+            - curl
+            - elasticsearch-${{vars.beats_version}}
+            - jq
+            - kibana-${{vars.beats_version}}
+            - sudo
+            - wait-for-it
+        environment:
+          ELASTICSEARCH_HOSTS: localhost:9200
+          ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "auditbeat-fips-${{vars.beats_version}}"
+        - name: Test build
+          runs: auditbeat version | grep ${{package.version}}
+        - name: Test exporting
+          working-directory: /usr/share/auditbeat
+          runs: |
+            auditbeat export config
+            auditbeat export ilm-policy
+            auditbeat export index-pattern
+            auditbeat export template
+        - name: Test keystore
+          working-directory: /usr/share/auditbeat
+          runs: |
+            auditbeat keystore create | grep "Created auditbeat keystore"
+            echo BAR | auditbeat keystore add FOO --stdin | grep "Successfully updated the keystore"
+            auditbeat keystore list | grep FOO
+            auditbeat keystore remove FOO | grep "successfully removed key: FOO"
+        - name: Test auditbeat setup and test
+          working-directory: /usr/share/auditbeat
+          runs: |
+            set -eu -o pipefail
+            chown -R elasticsearch:root /usr/share/elasticsearch
+
+            # Start up Elasticsearch with no username/password
+            sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+              -Ediscovery.type=single-node \
+              -Expack.security.enabled=false \
+              -p /tmp/elasticsearch.pid
+
+            wait-for-it localhost:9200 --timeout=60
+
+            # Confirm Elasticsearch status before continuing
+            es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+            echo "Elasticsearch status: $es_status"
+
+            timer_start=$(date +%s)
+            while [ $es_status != "green" ]
+            do
+              timer_now=$(date +%s)
+              es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+              echo "Elasticsearch status: $es_status"
+              if [ $(( timer_now - timer_start )) -gt 60 ]
+              then
+                echo "Timed out waiting for Elasticsearch!"
+                exit 1
+              fi
+              sleep 2
+            done
+
+            # Run Kibana
+            echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+            (
+              /usr/share/kibana/bin/kibana --config kibana.yml --allow-root 2>&1 | tee kibana.log
+            ) &
+            wait-for-it localhost:5601 --timeout=60
+
+            # Test auditbeat setup with default Elasticsearch and Kibana services running
+            for try in $(seq 1 5)
+            do
+              if ! auditbeat setup
+              then
+                sleep 5
+              else
+                break
+              fi
+            done
+
+            auditbeat test output
+
+  - name: metricbeat-fips-${{vars.beats_version}}
+    dependencies:
+      runtime:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
+      provides:
+        - metricbeat-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/bump
+        with:
+          deps: |-
+            github.com/golang-jwt/jwt/v4@v4.5.2
+      - uses: go/build
+        with:
+          packages: ./x-pack/metricbeat
+          output: metricbeat
+          go-package: go-fips
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/modules.d
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/module
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/metricbeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/metricbeat/NOTICE.txt
+          cp x-pack/metricbeat/metricbeat.docker.yml "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat.yml
+          cp x-pack/metricbeat/metricbeat.reference.yml "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat.reference.yml
+          cp README.md "${{targets.subpkgdir}}"/usr/share/metricbeat/README.md
+          rsync -av --include='*/' --include='*.yml' --exclude='*' x-pack/metricbeat/module/ "${{targets.subpkgdir}}"/usr/share/metricbeat/module
+          mv x-pack/metricbeat/modules.d/ "${{targets.subpkgdir}}"/usr/share/metricbeat/
+
+          cd metricbeat
+          mage dashboards
+          mv build/kibana "${{targets.subpkgdir}}"/usr/share/metricbeat/
+
+          ln -sf /usr/bin/metricbeat  "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/data "${{targets.subpkgdir}}"/usr/share/metricbeat/logs
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/metricbeat && \
+            find "${{targets.subpkgdir}}"/usr/share/metricbeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/metricbeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/metricbeat/modules.d && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/metricbeat/data "${{targets.subpkgdir}}"/usr/share/metricbeat/logs
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "metricbeat-fips-${{vars.beats_version}}"
+        - runs: |
+            metricbeat version
+            cd /usr/share/metricbeat
+            metricbeat modules list
+            metricbeat --help
+
+  - name: filebeat-fips-${{vars.beats_version}}
+    dependencies:
+      runtime:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
+      provides:
+        - filebeat-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./filebeat
+          output: filebeat
+          go-package: go-fips
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/module
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/filebeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/filebeat/NOTICE.txt
+          cd filebeat
+          cp filebeat.docker.yml "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat.yml
+          cp filebeat.reference.yml "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat.reference.yml
+          cp README.md "${{targets.subpkgdir}}"/usr/share/filebeat/README.md
+          mv ../x-pack/filebeat/module/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+          mv ../x-pack/filebeat/modules.d/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+
+          ln -sf /usr/bin/filebeat  "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/data "${{targets.subpkgdir}}"/usr/share/filebeat/logs
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/filebeat && \
+            find "${{targets.subpkgdir}}"/usr/share/filebeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/filebeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/filebeat/data "${{targets.subpkgdir}}"/usr/share/filebeat/logs
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "filebeat-fips-${{vars.beats_version}}"
+        - runs: |
+            filebeat version
+            cd /usr/share/filebeat
+            filebeat modules list
+            filebeat --help
+
+  - name: heartbeat-fips-${{vars.beats_version}}
+    dependencies:
+      runtime:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
+      provides:
+        - heartbeat-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./x-pack/heartbeat
+          output: heartbeat
+          go-package: go-fips
+      - name: Build heartbeat
+        runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/heartbeat
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/NOTICE.txt
+
+          cd heartbeat
+
+          mage fields
+          ln -sf /usr/bin/heartbeat "${{targets.subpkgdir}}"/usr/share/heartbeat/heartbeat
+
+          cp -r heartbeat.docker.yml heartbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/heartbeat/
+          cp -r monitors.d ${{targets.subpkgdir}}/usr/share/heartbeat/
+          mv ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.docker.yml ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.yml
+          cp README.md "${{targets.subpkgdir}}"/usr/share/heartbeat/README.md
+
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/heartbeat && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type d -exec chmod 0755 {} \; && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type f -exec chmod 0644 {} \; && \
+          chmod 0755 "${{targets.subpkgdir}}"/usr/share/heartbeat/fiheartbeatlebeat && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/modules.d && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+      - uses: strip
+    test:
+      environment:
+        accounts:
+          users:
+            - username: nonroot
+              uid: 65532
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - nginx
+            - sudo
+            - openssl
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "heartbeat-fips-${{vars.beats_version}}"
+        - runs: |
+            set -eu -o pipefail
+            cd /usr/share/heartbeat
+            heartbeat export config >/dev/null
+            heartbeat test config
+            heartbeat --help
+        - name: "Test http monitor"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # setup is not running with error handling
+              set -eu -o pipefail -x
+              certs_dir=/etc/nginx/certs
+              # Generate root CA (FIPS-compliant: 4096-bit RSA key)
+              mkdir -p $certs_dir
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $certs_dir/ca.key
+              openssl req -x509 -new -nodes -key $certs_dir/ca.key -sha256 -days 1024 -out $certs_dir/ca.crt -subj "/CN=localhost"
+
+              # Generate SSL certificates for server (FIPS-compliant: 4096-bit RSA key)
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $certs_dir/server.key
+              openssl req -new -key $certs_dir/server.key -out $certs_dir/server.csr -subj "/CN=localhost"
+              openssl x509 -req -in $certs_dir/server.csr -CA $certs_dir/ca.crt -CAkey $certs_dir/ca.key -CAcreateserial -out $certs_dir/server.crt -days 365
+              chown nonroot: -fR /etc/nginx/certs
+
+              echo TEST >/var/lib/nginx/html/test.html
+              echo TEST >/var/lib/nginx/html/test-tls.html
+              mkdir -p /var/lib/nginx/tmp /run/nginx
+              chown nonroot -fR /var/lib/nginx /run/nginx
+
+              cp test-nginx.conf /etc/nginx/nginx.conf
+              sudo -u nonroot nginx -c /etc/nginx/nginx.conf
+
+              cp test-heartbeat.yml /usr/share/heartbeat/heartbeat.yml
+            start: /usr/share/heartbeat/heartbeat run -e -c /usr/share/heartbeat/heartbeat.yml
+            expected_output: |
+              Setup Beat
+              heartbeat start running
+              scheduler/scheduler.go
+            post: |
+              # kill the nginx processes
+              pkill nginx
+              if ! grep "/test\\.html" /tmp/nginx.log ; then
+                echo "Heartbeat http request not found in nginx log"
+                exit 1
+              fi
+              if ! grep "/test-tls\\.html" /tmp/nginx.log ; then
+                echo "Heartbeat https request not found in nginx log"
+                exit 1
+              fi
+
+  - name: heartbeat-fips-${{vars.beats_version}}-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd heartbeat
+          sed 's/{{ \.BeatName }}/heartbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - .*-rc.*
+    - .*-alpha.*
+    - .*-beta.*
+    - .*\+build[0-9]*$
+  github:
+    strip-prefix: v
+    tag-filter: v9.
+    identifier: elastic/beats
