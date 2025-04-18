@@ -2,7 +2,6 @@ package boot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,20 +10,21 @@ import (
 	"time"
 )
 
-const (
-	systemdTimeFormat = "Mon 2006-01-02 15:04:05 MST"
+var (
+	procUptime = "/proc/uptime"
+	systemctl = "systemctl"
 )
 
 // findVMStartTime reads system uptime from /proc/uptime and computes the instance start time.
 func findVMStartTime(ctx context.Context) (time.Time, error) {
-	uptimeData, err := os.ReadFile("/proc/uptime")
+	uptimeData, err := os.ReadFile(procUptime)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to read /proc/uptime: %w", err)
+		return time.Time{}, fmt.Errorf("failed to read %s: %w", procUptime, err)
 	}
 
 	fields := strings.Fields(string(uptimeData))
 	if len(fields) < 1 {
-		return time.Time{}, errors.New("unexpected format in /proc/uptime")
+		return time.Time{}, fmt.Errorf("unexpected format in %s", procUptime)
 	}
 
 	uptimeSeconds, err := strconv.ParseFloat(fields[0], 64)
@@ -39,7 +39,7 @@ func findVMStartTime(ctx context.Context) (time.Time, error) {
 // findServiceStartTime waits for a service to become active, then returns its start time using systemd.
 func findServiceStartTime(ctx context.Context, service string) (time.Time, error) {
 	for {
-		cmd := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveState", service)
+		cmd := exec.CommandContext(ctx, systemctl, "show", "--property=ActiveState", service)
 		output, err := cmd.Output()
 		if err != nil {
 			return time.Time{}, fmt.Errorf("failed to check service %q state: %w", service, err)
@@ -57,19 +57,17 @@ func findServiceStartTime(ctx context.Context, service string) (time.Time, error
 		}
 	}
 
-	// TODO: use ActiveEnterMonotonicTimestamp, not wall clock timestamp
-	cmd := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveEnterTimestamp", service)
+	cmd := exec.CommandContext(ctx, systemctl, "show", "--property=ActiveEnterMonotonicTimestamp", service)
 	output, err := cmd.Output()
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to get ActiveEnterTimestamp for %q: %w", service, err)
+		return time.Time{}, fmt.Errorf("failed to get ActiveEnterMonotonicTimestamp for %q: %w", service, err)
 	}
 
-	timestamp := strings.TrimPrefix(strings.TrimSpace(string(output)), "ActiveEnterTimestamp=")
-	startTime, err := time.Parse(systemdTimeFormat, timestamp)
+	timestamp := strings.TrimPrefix(strings.TrimSpace(string(output)), "ActiveEnterMonotonicTimestamp=")
+	i, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse ActiveEnterTimestamp %q: %w", timestamp, err)
+		return time.Time{}, fmt.Errorf("failed to parse ActiveEnterMonotonicTimestamp %q: %w", timestamp, err)
 	}
-
-	return startTime, nil
+	return time.UnixMicro(i), nil
 }
 
