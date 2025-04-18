@@ -2,8 +2,8 @@
 # mysql-8.4 is current LTS stream 8.4.x
 package:
   name: mysql-8.4
-  version: "8.4.4"
-  epoch: 40
+  version: "8.4.5"
+  epoch: 1
   description: "The MySQL open source relational database"
   copyright:
     - license: GPL-2.0-only # https://downloads.mysql.com/docs/licenses/mysqld-8.4-gpl-en.pdf
@@ -46,7 +46,7 @@ pipeline:
       - uses: fetch
         with:
           uri: https://dev.mysql.com/get/Downloads/${{package.name}}/mysql-${{package.version}}.tar.gz
-          expected-sha256: fb290ef748894434085249c31bca52ac71853124446ab218bb3bc502bf0082a5
+          expected-sha256: 53639592a720a719fdfadf2c921b947eac86c06e333202e47667852a5781bd1a
       - uses: cmake/configure
         with:
           opts: |
@@ -83,13 +83,14 @@ pipeline:
   - uses: strip
 
 subpackages:
-  - name: "mysql-8.4-dev"
+  - name: "${{package.name}}-dev"
     description: "headers for mysql"
     pipeline:
       - uses: split/dev
     test:
       pipeline:
         - uses: test/pkgconf
+        - uses: test/tw/ldd-check
     dependencies:
       runtime:
         - merged-usrsbin
@@ -107,7 +108,7 @@ subpackages:
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mv "${{targets.destdir}}"/usr/bin/mysql "${{targets.subpkgdir}}"/usr/bin/
 
-  - name: mysql-8.4-oci-entrypoint
+  - name: "${{package.name}}-oci-entrypoint"
     description: Entrypoint for MySQL in OCI containers
     dependencies:
       runtime:
@@ -121,8 +122,12 @@ subpackages:
           mkdir -p ${{targets.subpkgdir}}/usr/bin/
           cp docker-entrypoint.sh ${{targets.subpkgdir}}/usr/bin/
           chmod +x ${{targets.subpkgdir}}/usr/bin/docker-entrypoint.sh
+    test:
+      pipeline:
+        - runs: |
+            test /usr/bin/docker-entrypoint.sh
 
-  - name: mysql-8.4-oci-entrypoint-compat
+  - name: "${{package.name}}-oci-entrypoint-compat"
     pipeline:
       - runs: |
           # Symlink the binary from usr/bin to /
@@ -135,6 +140,12 @@ subpackages:
         - merged-usrsbin
         - mysql-8.4-oci-entrypoint
         - wolfi-baselayout
+    test:
+      pipeline:
+        - name: Check symlinks
+          runs: |
+            test /entrypoint.sh
+            test /usr/local/bin/docker-entrypoint.sh
 
   - name: ${{package.name}}-bitnami-compat
     dependencies:
@@ -222,6 +233,9 @@ subpackages:
               Installing database
               Configuring authentication
               MySQL setup finished
+        - uses: bitnami/validate-welcome-message
+          with:
+            app-name: mysql
 
 update:
   enabled: true
@@ -237,13 +251,68 @@ test:
       packages:
         - ${{package.name}}
         - ${{package.name}}-client
+        - ${{package.name}}-dev
+        - gcc
+        - make
+        - glibc-dev
     environment:
       DBDATA: /var/lib/mysql
   pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/usr/lib/private/"
     - name: Check versions
       runs: |
-        mysql --version
-        mysqladmin --version
+        mysql --version |grep "${{package.version}}"
+        mysqladmin --version | grep "${{package.version}}"
+        comp_err --version
+        comp_err --help
+        ibd2sdi --version
+        ibd2sdi --help
+        innochecksum --version
+        innochecksum --help
+        my_print_defaults --version
+        my_print_defaults --help
+        myisamchk --version
+        myisamchk --help
+        myisampack --version
+        myisampack --help
+        mysql_client_test --help
+        mysql_config_editor --version
+        mysql_config_editor --help
+        mysql_migrate_keyring --version
+        mysql_migrate_keyring --help
+        mysql_secure_installation --help
+        mysqlbinlog --version
+        mysqlbinlog --help
+        mysqlcheck --version
+        mysqlcheck --help
+        mysqld --version
+        mysqld --help
+        mysqld_multi --version
+        mysqld_multi --help
+        mysqldump --version
+        mysqldump --help
+        mysqldumpslow version
+        mysqldumpslow --help
+        mysqlimport --version
+        mysqlimport --help
+        mysqlrouter --version
+        mysqlrouter --help
+        mysqlrouter_keyring --version
+        mysqlrouter_keyring --help
+        mysqlrouter_passwd --version
+        mysqlrouter_passwd --help
+        mysqlrouter_plugin_info --version
+        mysqlrouter_plugin_info --help
+        mysqlshow --version
+        mysqlshow --help
+        mysqlslap --version
+        mysqlslap --help
+        mysqltest --version
+        mysqltest --help
+        perror --version
+        perror --help
     - name: Test
       uses: test/daemon-check-output
       with:
@@ -253,6 +322,35 @@ test:
         start: mysqld --user=root --datadir="$DBDATA"
         post: |
           mysqladmin --user=root ping --wait=5
+          mkdir -p /tmp/mysql-test
+          cat << 'EOF' > test.c
+          #include <mysql/mysql.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+
+          int main() {
+              MYSQL *conn;
+              conn = mysql_init(NULL);
+
+              if (conn == NULL) {
+                  fprintf(stderr, "mysql_init() failed\n");
+                  return EXIT_FAILURE;
+              }
+
+              if (mysql_real_connect(conn, "127.0.0.1", "root", "", NULL, 3306, NULL, 0) == NULL) {
+                  fprintf(stderr, "mysql_real_connect() failed: %s\n", mysql_error(conn));
+                  mysql_close(conn);
+                  return EXIT_FAILURE;
+              }
+
+              printf("Connected to MySQL server successfully.\n");
+              mysql_close(conn);
+              return EXIT_SUCCESS;
+          }
+          EOF
+          gcc -o test test.c -lmysqlclient
+          ldd ./test | grep libmysqlclient # Verify correct library linkage
+          ./test | grep "Connected to MySQL server successfully."
         timeout: 60
         expected_output: |
           starting as process

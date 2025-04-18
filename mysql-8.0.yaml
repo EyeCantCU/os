@@ -2,8 +2,8 @@
 # mysql-8.4 is future LTS stream 8.4.x
 package:
   name: mysql-8.0
-  version: "8.0.41"
-  epoch: 40
+  version: "8.0.42"
+  epoch: 1
   description: "The MySQL open source relational database"
   copyright:
     - license: GPL-2.0-only # https://downloads.mysql.com/docs/licenses/mysqld-8.0-gpl-en.pdf
@@ -52,7 +52,7 @@ pipeline:
       - uses: fetch
         with:
           uri: https://dev.mysql.com/get/Downloads/${{package.name}}/mysql-${{package.version}}.tar.gz
-          expected-sha256: 015d208f738e29f46342bf62e07ab53b183f30442afd81354a7931ad23fe8cf7
+          expected-sha256: 5eb22c20c20b765c5894c9010485bd07d8a9b6ebfb628bcfd3060701715526fe
       - uses: cmake/configure
         with:
           opts: |
@@ -90,7 +90,7 @@ pipeline:
   - uses: strip
 
 subpackages:
-  - name: "mysql-8.0-dev"
+  - name: "${{package.name}}-dev"
     description: "headers for mysql"
     pipeline:
       - uses: split/dev
@@ -99,6 +99,7 @@ subpackages:
         - runs: |
             mysql_config --version
         - uses: test/pkgconf
+        - uses: test/tw/ldd-check
     dependencies:
       runtime:
         - merged-usrsbin
@@ -116,7 +117,7 @@ subpackages:
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mv "${{targets.destdir}}"/usr/bin/mysql "${{targets.subpkgdir}}"/usr/bin/
 
-  - name: mysql-8.0-oci-entrypoint
+  - name: "${{package.name}}-oci-entrypoint"
     description: Entrypoint for MySQL in OCI containers
     dependencies:
       runtime:
@@ -130,8 +131,12 @@ subpackages:
           mkdir -p ${{targets.subpkgdir}}/usr/bin/
           cp docker-entrypoint.sh ${{targets.subpkgdir}}/usr/bin/
           chmod +x ${{targets.subpkgdir}}/usr/bin/docker-entrypoint.sh
+    test:
+      pipeline:
+        - runs: |
+            test /usr/bin/docker-entrypoint.sh
 
-  - name: mysql-8.0-oci-entrypoint-compat
+  - name: "${{package.name}}-oci-entrypoint-compat"
     pipeline:
       - runs: |
           # Symlink the binary from usr/bin to /
@@ -144,6 +149,12 @@ subpackages:
         - merged-usrsbin
         - mysql-8.0-oci-entrypoint
         - wolfi-baselayout
+    test:
+      pipeline:
+        - name: Check symlinks
+          runs: |
+            test /entrypoint.sh
+            test /usr/local/bin/docker-entrypoint.sh
 
   - name: ${{package.name}}-bitnami-compat
     dependencies:
@@ -232,6 +243,9 @@ subpackages:
               Installing database
               Configuring authentication
               MySQL setup finished
+        - uses: bitnami/validate-welcome-message
+          with:
+            app-name: mysql
 
 update:
   enabled: true
@@ -247,13 +261,20 @@ test:
       packages:
         - ${{package.name}}
         - ${{package.name}}-client
+        - ${{package.name}}-dev
+        - gcc
+        - make
+        - glibc-dev
     environment:
       DBDATA: /var/lib/mysql
   pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/usr/lib/private/"
     - name: Check versions
       runs: |
-        mysql --version
-        mysqladmin --version
+        mysql --version |grep "${{package.version}}"
+        mysqladmin --version | grep "${{package.version}}"
         comp_err --version
         comp_err --help
         ibd2sdi --version
@@ -317,6 +338,35 @@ test:
         start: mysqld --user=root --datadir="$DBDATA"
         post: |
           mysqladmin --user=root ping --wait=5
+          mkdir -p /tmp/mysql-test
+          cat << 'EOF' > test.c
+          #include <mysql/mysql.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+
+          int main() {
+              MYSQL *conn;
+              conn = mysql_init(NULL);
+
+              if (conn == NULL) {
+                  fprintf(stderr, "mysql_init() failed\n");
+                  return EXIT_FAILURE;
+              }
+
+              if (mysql_real_connect(conn, "127.0.0.1", "root", "", NULL, 3306, NULL, 0) == NULL) {
+                  fprintf(stderr, "mysql_real_connect() failed: %s\n", mysql_error(conn));
+                  mysql_close(conn);
+                  return EXIT_FAILURE;
+              }
+
+              printf("Connected to MySQL server successfully.\n");
+              mysql_close(conn);
+              return EXIT_SUCCESS;
+          }
+          EOF
+          gcc -o test test.c -lmysqlclient
+          ldd ./test | grep libmysqlclient # Verify correct library linkage
+          ./test | grep "Connected to MySQL server successfully."
         timeout: 60
         expected_output: |
           starting as process
