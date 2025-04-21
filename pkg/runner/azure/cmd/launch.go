@@ -14,21 +14,21 @@ import (
 )
 
 func launchCmd() *cobra.Command {
-	var subscriptionID      string
-	var location            string
-	var resourceGroup       string
-	var vmName              string
-	var vmSize              string
-	var publicKeyPath       string
-	var adminUsername       string
+	var subscriptionID string
+	var location string
+	var resourceGroup string
+	var vmName string
+	var vmSize string
+	var publicKeyPath string
+	var adminUsername string
 	var imageSubscriptionID string
-	var imageResourceGroup  string
-	var imageGallery        string
-	var imageName           string
-	var imageVersion        string
-	var vnetName            string
-	var subnetName          string
-	var tagName             string
+	var imageResourceGroup string
+	var imageGallery string
+	var imageName string
+	var imageVersion string
+	var vnetName string
+	var subnetName string
+	var tagName string
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -60,7 +60,7 @@ func launchCmd() *cobra.Command {
 			log.Printf("Creating public IP: %s", publicIPName)
 			_, err = publicIPClient.BeginCreateOrUpdate(ctx, resourceGroup, publicIPName, armnetwork.PublicIPAddress{
 				Location: &location,
-				Tags: resourceTags,
+				Tags:     resourceTags,
 				Properties: &armnetwork.PublicIPAddressPropertiesFormat{
 					PublicIPAllocationMethod: utils.ToPtr(armnetwork.IPAllocationMethodDynamic),
 				},
@@ -88,7 +88,7 @@ func launchCmd() *cobra.Command {
 
 			_, err = nicClient.BeginCreateOrUpdate(ctx, resourceGroup, nicName, armnetwork.Interface{
 				Location: &location,
-				Tags: resourceTags,
+				Tags:     resourceTags,
 				Properties: &armnetwork.InterfacePropertiesFormat{
 					IPConfigurations: []*armnetwork.InterfaceIPConfiguration{
 						{
@@ -111,10 +111,10 @@ func launchCmd() *cobra.Command {
 			}
 
 			if imageResourceGroup == "" {
-    				imageResourceGroup = resourceGroup
+				imageResourceGroup = resourceGroup
 			}
 			if imageSubscriptionID == "" {
-    				imageSubscriptionID = subscriptionID
+				imageSubscriptionID = subscriptionID
 			}
 			imageReference := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/galleries/%s/images/%s/versions/%s", imageSubscriptionID, imageResourceGroup, imageGallery, imageName, imageVersion)
 
@@ -126,7 +126,7 @@ func launchCmd() *cobra.Command {
 
 			_, err = vmClient.BeginCreateOrUpdate(ctx, resourceGroup, vmName, armcompute.VirtualMachine{
 				Location: &location,
-				Tags: resourceTags,
+				Tags:     resourceTags,
 				Properties: &armcompute.VirtualMachineProperties{
 					HardwareProfile: &armcompute.HardwareProfile{
 						VMSize: utils.ToPtr(armcompute.VirtualMachineSizeTypes(vmSize)),
@@ -202,4 +202,3 @@ func launchCmd() *cobra.Command {
 
 	return cmd
 }
-

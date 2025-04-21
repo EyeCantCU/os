@@ -45,6 +45,12 @@ $(test_targets): test/%: $(go_files) .go-generated
 	@mkdir -p test
 	go test -C ./pkg/test/$* -c -o ../../../test/$* -tags vmtest
 
+gofmt: .go-formatted
+.go-formatted: $(go_files)
+	o=$$(gofmt -l -w pkg/ 2>&1) && [ -z "$$o" ] || \
+		{ echo "gofmt made changes: $$o" 1>&2; exit 1; }
+	@touch $@
+
 .PHONY: unit-test
 unit-test: $(go_files) .go-generated
 	go test ./... -tags unittest

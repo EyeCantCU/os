@@ -1,18 +1,20 @@
 package metrics
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"encoding/json"
-	"sync"
 	"strings"
-	"flag"
+	"sync"
 )
 
 // Metric Enums
+//
 //go:generate enumer -json -output metrics_id_generated.go -type=ID
 type ID int
+
 const (
 	// Take the zero value with this so that TestMetric{} reports something reasonable.
 	UnidentifiedMetric ID = iota
@@ -91,7 +93,7 @@ type TestFunction struct {
 	Metrics []TestMetric
 }
 
-// TestMetric is a single metric logged by a function. Logging the same metric ID multiple times is allowed. 
+// TestMetric is a single metric logged by a function. Logging the same metric ID multiple times is allowed.
 type TestMetric struct {
 	// ID is the metric identifier
 	ID ID
@@ -120,9 +122,9 @@ func (tr *TestRun) Log(t testingT, mID ID, val string, extra map[string]any) {
 	defer tr.mu.Unlock()
 	testfunc, _ := tr.Functions[t.Name()]
 	newmetric := TestMetric{
-		ID: mID,
+		ID:    mID,
 		Value: val,
-		Data: extra,
+		Data:  extra,
 	}
 	if newmetric.Data == nil {
 		newmetric.Data = make(map[string]any)
@@ -132,8 +134,8 @@ func (tr *TestRun) Log(t testingT, mID ID, val string, extra map[string]any) {
 	}
 	testfunc.Metrics = append(testfunc.Metrics, newmetric)
 	tr.Functions[t.Name()] = testfunc
-	t.Cleanup(func(){
-		if err:= tr.Flush(); err != nil {
+	t.Cleanup(func() {
+		if err := tr.Flush(); err != nil {
 			t.Logf("failed to flush logs for %s: %v", t.Name(), err)
 		}
 	})
@@ -156,4 +158,3 @@ func (tr *TestRun) Flush() error {
 	}
 	return nil
 }
-

@@ -10,13 +10,13 @@ import (
 
 var (
 	timeoutStr string
-	cancel context.CancelFunc
+	cancel     context.CancelFunc
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "azurecli",
-	Short: "CLI tool to manage Azure instances",
-	PersistentPreRun: setupContext,
+	Use:               "azurecli",
+	Short:             "CLI tool to manage Azure instances",
+	PersistentPreRun:  setupContext,
 	PersistentPostRun: cancelContext,
 }
 

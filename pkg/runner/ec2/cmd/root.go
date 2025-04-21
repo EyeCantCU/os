@@ -10,13 +10,13 @@ import (
 
 var (
 	timeoutStr string
-	cancel context.CancelFunc
+	cancel     context.CancelFunc
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "ec2cli",
-	Short: "CLI tool to manage EC2 instances",
-	PersistentPreRun: setupContext,
+	Use:               "ec2cli",
+	Short:             "CLI tool to manage EC2 instances",
+	PersistentPreRun:  setupContext,
 	PersistentPostRun: cancelContext,
 }
 

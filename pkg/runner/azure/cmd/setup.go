@@ -20,8 +20,8 @@ func setupCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
-			resourceTags := map[string]*string {
-    				tagName: utils.ToPtr(""),
+			resourceTags := map[string]*string{
+				tagName: utils.ToPtr(""),
 			}
 
 			cred, err := azidentity.NewDefaultAzureCredential(nil)
@@ -40,7 +40,7 @@ func setupCmd() *cobra.Command {
 			if err != nil {
 				log.Printf("Resource group %s not found. Creating...", resourceGroupName)
 				_, err = rgClient.CreateOrUpdate(ctx, resourceGroupName, armresources.ResourceGroup{
-					Tags: resourceTags,
+					Tags:     resourceTags,
 					Location: &region,
 				}, nil)
 				if err != nil {
@@ -57,7 +57,7 @@ func setupCmd() *cobra.Command {
 			}
 			nsgPoller, err := nsgClient.BeginCreateOrUpdate(ctx, resourceGroupName, nsgName, armnetwork.SecurityGroup{
 				Location: &region,
-				Tags: resourceTags,
+				Tags:     resourceTags,
 				Properties: &armnetwork.SecurityGroupPropertiesFormat{
 					SecurityRules: []*armnetwork.SecurityRule{
 						{
@@ -86,7 +86,7 @@ func setupCmd() *cobra.Command {
 			}
 			rtPoller, err := rtClient.BeginCreateOrUpdate(ctx, resourceGroupName, routeTableName, armnetwork.RouteTable{
 				Location: &region,
-				Tags: resourceTags,
+				Tags:     resourceTags,
 				Properties: &armnetwork.RouteTablePropertiesFormat{
 					Routes: []*armnetwork.Route{
 						{
@@ -106,7 +106,7 @@ func setupCmd() *cobra.Command {
 			vnetClient, _ := armnetwork.NewVirtualNetworksClient(subscriptionID, cred, nil)
 			vnetPoller, err := vnetClient.BeginCreateOrUpdate(ctx, resourceGroupName, vnetName, armnetwork.VirtualNetwork{
 				Location: &region,
-				Tags: resourceTags,
+				Tags:     resourceTags,
 				Properties: &armnetwork.VirtualNetworkPropertiesFormat{
 					AddressSpace: &armnetwork.AddressSpace{
 						AddressPrefixes: []*string{utils.ToPtr("10.0.0.0/24")},
@@ -153,5 +153,3 @@ func setupCmd() *cobra.Command {
 
 	return cmd
 }
-
-

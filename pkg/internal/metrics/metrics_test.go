@@ -1,8 +1,8 @@
 package metrics
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,23 +41,23 @@ func (m *mockT) callAllCleanups() {
 
 func TestLog(t *testing.T) {
 	tests := []struct {
-		name         string
-		mID          ID
-		val          string
-		flagTags     map[string]string
-		extra        map[string]any
-		expect       TestMetric
+		name     string
+		mID      ID
+		val      string
+		flagTags map[string]string
+		extra    map[string]any
+		expect   TestMetric
 	}{
 		{
-			name:  "standard_metric_with_extra",
-			mID:   SSHDStartTime,
-			val:   "12345",
-			extra: map[string]any{"foo": "bar"},
+			name:     "standard_metric_with_extra",
+			mID:      SSHDStartTime,
+			val:      "12345",
+			extra:    map[string]any{"foo": "bar"},
 			flagTags: map[string]string{"baz": "qux"},
 			expect: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "12345",
-				Data: map[string]any{"foo": "bar", "baz": "qux"},
+				Data:  map[string]any{"foo": "bar", "baz": "qux"},
 			},
 		},
 		{
@@ -68,7 +68,7 @@ func TestLog(t *testing.T) {
 			expect: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "abcde",
-				Data: nil,
+				Data:  nil,
 			},
 		},
 	}
@@ -85,7 +85,7 @@ func TestLog(t *testing.T) {
 			mt := &mockT{name: "TestFunction1", calledAll: &called}
 			oldFT := flagTags
 			flagTags = tt.flagTags
-			t.Cleanup(func(){ flagTags = oldFT } )
+			t.Cleanup(func() { flagTags = oldFT })
 
 			tr.Log(mt, tt.mID, tt.val, tt.extra)
 
@@ -102,7 +102,7 @@ func TestLog(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(tr, parsed, cmpopts.IgnoreUnexported(TestRun{})); diff != "" {
-    				t.Errorf("json.Unmarshal(%s) mismatch (-want +got):\n%s", data, diff)
+				t.Errorf("json.Unmarshal(%s) mismatch (-want +got):\n%s", data, diff)
 			}
 		})
 	}
@@ -119,7 +119,7 @@ func TestMarshalJSON(t *testing.T) {
 			metric: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "val1",
-				Data: map[string]any{"x": 42, "extra": "yes"},
+				Data:  map[string]any{"x": 42, "extra": "yes"},
 			},
 			expectMap: map[string]any{
 				"ID":    "SSHDStartTime",
@@ -139,7 +139,7 @@ func TestMarshalJSON(t *testing.T) {
 			expectMap: map[string]any{
 				"ID":    "SSHDStartTime",
 				"Value": "val2",
-				"Data": nil,
+				"Data":  nil,
 			},
 		},
 		{
@@ -147,12 +147,12 @@ func TestMarshalJSON(t *testing.T) {
 			metric: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "val3",
-				Data: map[string]any{},
+				Data:  map[string]any{},
 			},
 			expectMap: map[string]any{
 				"ID":    "SSHDStartTime",
 				"Value": "val3",
-				"Data": map[string]any{},
+				"Data":  map[string]any{},
 			},
 		},
 	}
@@ -178,8 +178,8 @@ func TestMarshalJSON(t *testing.T) {
 
 func TestUnmarshalJSON(t *testing.T) {
 	tests := []struct {
-		name      string
-		metric    TestMetric
+		name         string
+		metric       TestMetric
 		expectMetric TestMetric
 	}{
 		{
@@ -187,12 +187,12 @@ func TestUnmarshalJSON(t *testing.T) {
 			metric: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "val1",
-				Data: map[string]any{"x": 42, "extra": "yes"},
+				Data:  map[string]any{"x": 42, "extra": "yes"},
 			},
 			expectMetric: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "val1",
-				Data: map[string]any{"x": float64(42), "extra": "yes"},
+				Data:  map[string]any{"x": float64(42), "extra": "yes"},
 			},
 		},
 		{
@@ -211,12 +211,12 @@ func TestUnmarshalJSON(t *testing.T) {
 			metric: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "val3",
-				Data: map[string]any{},
+				Data:  map[string]any{},
 			},
 			expectMetric: TestMetric{
 				ID:    SSHDStartTime,
 				Value: "val3",
-				Data: map[string]any{},
+				Data:  map[string]any{},
 			},
 		},
 	}
@@ -312,7 +312,7 @@ func TestFlush(t *testing.T) {
 							{
 								ID:    SSHDStartTime,
 								Value: "value",
-								Data: map[string]any{"env": "prod", "code": 200},
+								Data:  map[string]any{"env": "prod", "code": 200},
 							},
 						},
 					},

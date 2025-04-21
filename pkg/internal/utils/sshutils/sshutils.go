@@ -7,9 +7,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
-	"regexp"
 
 	"golang.org/x/crypto/ssh"
 )

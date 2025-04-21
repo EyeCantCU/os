@@ -1,4 +1,5 @@
 //go:build unittest
+
 package boot
 
 import (
@@ -11,14 +12,14 @@ import (
 
 func TestFindVMStartTime(t *testing.T) {
 	tests := []struct {
-		name string
+		name           string
 		uptimeContents string
-		expectTime time.Time
+		expectTime     time.Time
 	}{
 		{
-			name: "basic_uptime_parsing",
+			name:           "basic_uptime_parsing",
 			uptimeContents: "6830 102264.36",
-			expectTime: time.Now().Add(-6830 * time.Second),
+			expectTime:     time.Now().Add(-6830 * time.Second),
 		},
 	}
 
@@ -26,11 +27,11 @@ func TestFindVMStartTime(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testProcUptime := filepath.Join(t.TempDir(), "procUptime")
 			if err := os.WriteFile(testProcUptime, []byte(tt.uptimeContents), 0644); err != nil {
-    				t.Fatalf("os.WriteFile(%s, %s, 0644) = %v, want nil", testProcUptime, tt.uptimeContents, err)
+				t.Fatalf("os.WriteFile(%s, %s, 0644) = %v, want nil", testProcUptime, tt.uptimeContents, err)
 			}
 			procUptimeOld := procUptime
 			procUptime = testProcUptime
-			t.Cleanup(func(){ procUptime = procUptimeOld })
+			t.Cleanup(func() { procUptime = procUptimeOld })
 			startTime, err := findVMStartTime(t.Context())
 			if err != nil {
 				t.Fatalf("findVMStartTime(ctx) = err %v, want nil", err)
@@ -71,9 +72,9 @@ exit 1
 		expectTime time.Time
 	}{
 		{
-			name:    "mocked_systemctl_start_time",
-			service: "mock-service",
-			timestamp: 982349843,
+			name:       "mocked_systemctl_start_time",
+			service:    "mock-service",
+			timestamp:  982349843,
 			expectTime: time.UnixMicro(982349843),
 		},
 	}
@@ -89,7 +90,7 @@ exit 1
 
 			systemctlOld := systemctl
 			systemctl = testSystemctl
-			t.Cleanup(func(){ systemctl = systemctlOld })
+			t.Cleanup(func() { systemctl = systemctlOld })
 
 			startTime, err := findServiceStartTime(t.Context(), tt.service)
 			if err != nil {
@@ -97,9 +98,8 @@ exit 1
 			}
 
 			if !startTime.Equal(tt.expectTime) {
-    				t.Fatalf("%q.Equal(%q) = false, want true", startTime, tt.expectTime)
+				t.Fatalf("%q.Equal(%q) = false, want true", startTime, tt.expectTime)
 			}
 		})
 	}
 }
-
