@@ -197,4 +197,3 @@ func terminateCmd() *cobra.Command {
 
 	return cmd
 }
-

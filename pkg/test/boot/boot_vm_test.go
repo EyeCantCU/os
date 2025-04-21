@@ -1,4 +1,5 @@
 //go:build vmtest
+
 package boot
 
 import (

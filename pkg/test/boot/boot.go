@@ -12,7 +12,7 @@ import (
 
 var (
 	procUptime = "/proc/uptime"
-	systemctl = "systemctl"
+	systemctl  = "systemctl"
 )
 
 // findVMStartTime reads system uptime from /proc/uptime and computes the instance start time.
@@ -70,4 +70,3 @@ func findServiceStartTime(ctx context.Context, service string) (time.Time, error
 	}
 	return time.UnixMicro(i), nil
 }
-
