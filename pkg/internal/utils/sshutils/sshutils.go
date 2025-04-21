@@ -52,18 +52,18 @@ func NewSSHClient(ctx context.Context, host, privateKeyPath, user string) (*ssh.
 // is empty, it runs exec ssh with appropriate arguments. Otherwise, runs the command
 // remotely and prints the output.
 func SSHToInstance(ctx context.Context, host, privateKeyPath, user string, command []string) error {
-	client, err := NewSSHClient(ctx, host, privateKeyPath, user)
-	if err != nil {
-		return fmt.Errorf("failed to make ssh client: %w", err)
-	}
-	defer client.Close()
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create session: %w", err)
-	}
-	defer session.Close()
-
 	if len(command) > 0 {
+		client, err := NewSSHClient(ctx, host, privateKeyPath, user)
+		if err != nil {
+			return fmt.Errorf("failed to make ssh client: %w", err)
+		}
+		defer client.Close()
+		session, err := client.NewSession()
+		if err != nil {
+			return fmt.Errorf("failed to create session: %w", err)
+		}
+		defer session.Close()
+
 		cmdString := strings.Join(command, " ")
 		output, err := session.CombinedOutput(cmdString)
 		if err != nil {
@@ -71,9 +71,15 @@ func SSHToInstance(ctx context.Context, host, privateKeyPath, user string, comma
 		}
 		fmt.Print(string(output))
 	} else {
+		hostOnly, port, err := net.SplitHostPort(host)
+		if err != nil {
+			port = "22"
+			hostOnly = host
+		}
+
 		sshargs := []string{
-			"-i", privateKeyPath,
-			fmt.Sprintf("%s@%s", user, host),
+			"-p" + port, "-i", privateKeyPath,
+			fmt.Sprintf("%s@%s", user, hostOnly),
 		}
 		execSSH := exec.CommandContext(ctx, "ssh", sshargs...)
 		execSSH.Stdout = os.Stdout
