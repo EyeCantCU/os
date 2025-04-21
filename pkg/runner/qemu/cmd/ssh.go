@@ -11,7 +11,7 @@ import (
 )
 
 func sshCmd() *cobra.Command {
-	var vmdir, sshKeyFile string
+	var vmdir, sshKeyFile, user string
 	cmd := &cobra.Command{
 		Use:   "ssh vmdir",
 		Short: "ssh to a running vm in dir",
@@ -30,13 +30,14 @@ func sshCmd() *cobra.Command {
 
 			log.Printf("connecting to %s:%d", sshAddr, sshPort)
 			if err := sshutils.SSHToInstance(ctx,
-				fmt.Sprintf("%s:%d", sshAddr, sshPort), sshKeyFile, "backdoor", sshArgs); err != nil {
+				fmt.Sprintf("%s:%d", sshAddr, sshPort), sshKeyFile, user, sshArgs); err != nil {
 				log.Fatalf("SSH error: %v", err)
 			}
 
 		},
 	}
 
+	cmd.Flags().StringVarP(&user, "user", "u", "linky", "USER")
 	cmd.Flags().StringVarP(&sshKeyFile, "private-key", "i", "", "id_ed25519")
 
 	return cmd
