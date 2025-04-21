@@ -11,10 +11,7 @@ import (
 )
 
 // Metric Enums
-// TODO: Account for these dependencies
-// Need golang.org/x/tools/cmd/stringer and github.com/campoy/jsonenums at build time
-//go:generate stringer -type=ID
-//go:generate jsonenums -type=ID
+//go:generate enumer -json -output metrics_id_generated.go -type=ID
 type ID int
 const (
 	// Take the zero value with this so that TestMetric{} reports something reasonable.
