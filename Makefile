@@ -7,6 +7,8 @@ generated_go_files=$(shell find pkg -name *_generated.go)
 go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)
 go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
+all: runners tests
+
 $(go_tools_bin): go.mod pkg/tools/tools.go
 	@mkdir -p tools/
 	@TOOL_PKG=$(filter %/$(@F),${go_tools}); \
