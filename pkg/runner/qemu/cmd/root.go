@@ -31,6 +31,8 @@ func New() *cobra.Command {
 		sshCmd(),
 		stopCmd(),
 		sshInfo(),
+		runRemoteCmd(),
+		waitForSSHCmd(),
 	)
 
 	return cmd

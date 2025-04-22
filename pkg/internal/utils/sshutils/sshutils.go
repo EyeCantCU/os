@@ -125,3 +125,80 @@ func GetAuthorizedKeysPath(user string) string {
 	}
 	return fmt.Sprintf("/home/%s/.ssh/authorized_keys", user)
 }
+
+// WaitForSSHHostKey tries to retrieve the SSH host key from the target address within the given timeout.
+// It retries at intervals specified by retryInterval.
+func WaitForSSHHostKey(parentCtx context.Context, address string, timeout, retryInterval time.Duration) (ssh.PublicKey, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
+	defer cancel()
+
+	var lastErr error
+
+	for {
+		hostKey, err := GetSSHHostKey(ctx, address)
+		if err == nil {
+			return hostKey, nil
+		}
+
+		if ctx.Err() == nil {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timed out or cancelled while waiting for SSH host key at %s, last error: %v: %w", address, lastErr, ctx.Err())
+		case <-time.After(retryInterval):
+		}
+	}
+}
+
+// GetSSHHostKey connects and extracts the SSH host key without authenticating.
+func GetSSHHostKey(ctx context.Context, address string) (ssh.PublicKey, error) {
+	result := make(chan ssh.PublicKey, 1)
+	errs := make(chan error, 1)
+
+	go func() {
+		var serverHostKey ssh.PublicKey
+
+		dialer := net.Dialer{Timeout: 5 * time.Second}
+		conn, err := dialer.DialContext(ctx, "tcp", address)
+		if err != nil {
+			errs <- err
+			return
+		}
+		defer conn.Close()
+
+		config := &ssh.ClientConfig{
+			User: "invalid",
+			HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+				serverHostKey = key
+				return nil // we accept it for observation
+			},
+			Timeout: 5 * time.Second,
+		}
+
+		sshConn, _, _, err := ssh.NewClientConn(conn, address, config)
+		if err != nil {
+			if serverHostKey != nil {
+				result <- serverHostKey
+			} else {
+				errs <- err
+			}
+			return
+		}
+		sshConn.Close()
+
+		errs <- fmt.Errorf("host key was not received. but connection succeeded!?")
+		return
+
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("GetSSHHostKey: context expired before host key could be retrieved: %w", ctx.Err())
+	case err := <-errs:
+		return nil, err
+	case pub := <-result:
+		return pub, nil
+	}
+}
