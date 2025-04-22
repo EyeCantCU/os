@@ -58,12 +58,32 @@ MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
 ${KEY}:
 	${MELANGE} keygen ${KEY}
 
+.PHONY: cache
+cache:
+	mkdir -p ${CACHEDIR}
+
+.PHONY: clean
 clean:
 	rm -rf packages/${ARCH}
 
+.PHONY: clean-cache
+clean-cache:
+	rm -rf ${CACHEDIR}
+
+.PHONY: apk-token
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
 
+${CACHEDIR}/.libraries_token.txt: cache
+	tmpf=$(shell mktemp); \
+	chainctl auth login --audience libraries.cgr.dev; \
+	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
+	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
+
+.PHONY: lib-token
+lib-token: ${CACHEDIR}/.libraries_token.txt
+
+.PHONY: fetch-kernel
 fetch-kernel: apk-token
 	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
 		zcat | \
@@ -71,51 +91,52 @@ fetch-kernel: apk-token
 		grep "^V:" | \
 		sort -V | \
 		tail -n1 | sed -e "s/^V://"))
-	@curl -s -LSo /tmp/linux.apk --user user:$(shell chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/linux-$(KERNEL_PKG).apk
-	@mkdir -p /tmp/kernel
-	@tar -xf /tmp/linux.apk -C /tmp/kernel/ 2>/dev/null
+	curl -s -LSo /tmp/linux.apk --user user:$(shell chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/linux-$(KERNEL_PKG).apk
+	mkdir -p /tmp/kernel
+	tar -xf /tmp/linux.apk -C /tmp/kernel/ 2>/dev/null
 	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
 	export MELANGE_OPTS="--runner=qemu"
 
 yamls := $(wildcard *.yaml)
 pkgs := $(subst .yaml,,$(yamls))
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
-$(pkg_targets): package/%: apk-token
+$(pkg_targets): package/%:
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	$(MAKE) yamlfile=$(yamlfile) pkgname=$* packages/$(ARCH)/$(pkgver).apk
 
-packages/$(ARCH)/%.apk: $(KEY)
-	@mkdir -p ./$(pkgname)/
+packages/$(ARCH)/%.apk: cache apk-token $(KEY)
+	mkdir -p ./$(pkgname)/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
 dbg_targets = $(foreach name,$(pkgs),debug/$(name))
-$(dbg_targets): debug/%: apk-token $(KEY)
+$(dbg_targets): debug/%: cache apk-token $(KEY)
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
-	@mkdir -p ./"$*"/
+	mkdir -p ./"$*"/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS)  --source-dir ./$(*)/
 
 test_targets = $(foreach name,$(pkgs),test/$(name))
-$(test_targets): test/%: apk-token $(KEY)
-	@mkdir -p ./$(*)/
+$(test_targets): test/%: cache apk-token $(KEY)
+	mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
 testdbg_targets = $(foreach name,$(pkgs),test-debug/$(name))
-$(testdbg_targets): test-debug/%: apk-token $(KEY)
-	@mkdir -p ./$(*)/
+$(testdbg_targets): test-debug/%: cache apk-token $(KEY)
+	mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
+.PHONY: dev-container
 dev-container: apk-token
 	docker run --pull=always --privileged --rm -it \
 			-v "${PWD}:${PWD}" \
@@ -137,12 +158,13 @@ TMP_REPOSITORIES_FILE := $(TMP_REPOSITORIES_DIR)/repositories
 # changes to the packages. It mounts the local packages folder as a read-only,
 # and sets up the necessary keys for you to run `apk add` commands, and then
 # test the packages however you see fit.
+.PHONY: local-wolfi
 local-wolfi: ${KEY} apk-token
-	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
-	@echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
-	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
-	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
-	@mkdir -p ${PWD}/packages
+	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
+	echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
+	echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
+	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+	mkdir -p ${PWD}/packages
 	docker run --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
@@ -150,8 +172,8 @@ local-wolfi: ${KEY} apk-token
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
 		cgr.dev/chainguard-private/chainguard-base:latest
-	@rm "$(TMP_REPOSITORIES_FILE)"
-	@rmdir "$(TMP_REPOSITORIES_DIR)"
+	rm "$(TMP_REPOSITORIES_FILE)"
+	rmdir "$(TMP_REPOSITORIES_DIR)"
 
 # This target spins up a docker container that is helpful for building images
 # using local packages.
@@ -187,9 +209,11 @@ OUT_LOCAL_DIR ?= /work/out
 OUT_DIR ?= $(shell mktemp -d)
 OS_LOCAL_DIR ?= /work/os
 OS_DIR ?= ${PWD}
+
+.PHONY: dev-container-wolfi
 dev-container-wolfi:
-	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
-	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
+	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 	docker run --pull=always --rm -it \
 		--mount type=bind,source="${OUT_DIR}",destination="$(OUT_LOCAL_DIR)" \
 		--mount type=bind,source="${OS_DIR}",destination="$(OS_LOCAL_DIR)",readonly \
@@ -198,12 +222,12 @@ dev-container-wolfi:
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
 		ghcr.io/wolfi-dev/sdk:latest
-	@rm "$(TMP_REPOSITORIES_FILE)"
-	@rmdir "$(TMP_REPOSITORIES_DIR)"
+	rm "$(TMP_REPOSITORIES_FILE)"
+	rmdir "$(TMP_REPOSITORIES_DIR)"
 
 .PHONY: gcp-auth
 gcp-auth:
-	@if ! [ -d ${HOME}/.config/gcloud ]; then \
+	if ! [ -d ${HOME}/.config/gcloud ]; then \
 		echo "Initializing GCP auth..."; \
 		gcloud auth login; \
 	fi
