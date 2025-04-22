@@ -1,3 +1,6 @@
+MAKEFLAGS := --jobs=$(shell command -v nproc >/dev/null && nproc || echo 4)
+MAKEFLAGS += --output-sync=target
+
 runners=$(subst pkg/runner/,,$(wildcard pkg/runner/*))
 tests=$(subst pkg/test/,,$(wildcard pkg/test/*))
 
