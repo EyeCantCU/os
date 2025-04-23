@@ -165,7 +165,7 @@ local-wolfi: ${KEY} apk-token
 	echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 	mkdir -p ${PWD}/packages
-	docker run --rm -it \
+	docker run --pull=always --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
