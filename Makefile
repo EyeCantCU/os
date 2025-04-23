@@ -1,6 +1,7 @@
 MAKEFLAGS := --jobs=$(shell command -v nproc >/dev/null && nproc || echo 4)
 MAKEFLAGS += --output-sync=target
 
+TEST_ARCHES := arm64 amd64
 runners=$(subst pkg/runner/,,$(wildcard pkg/runner/*))
 tests=$(subst pkg/test/,,$(wildcard pkg/test/*))
 
@@ -42,11 +43,18 @@ $(runner_targets): runner/%: $(go_files) .go-generated
 	@mkdir -p runner
 	go build -C ./pkg/runner/$* -o ../../../runner/$*
 
-test_targets=$(foreach test,$(tests),test/$(test))
+test_targets=$(foreach arch,$(TEST_ARCHES),$(foreach test,$(tests),test/$(arch)/$(test)))
 tests: $(test_targets)
+
+# getarch(prefix,string) returns the first path token in string after removing prefix.
+#   getarch(test/,test/myarch/bob) -> myarch
+getarch = $(firstword $(subst /, ,$(subst $(1),,$(2))))
+
+# test_targets are test/<arch>/<name>
+#  where <name> is a dir in pkg/test
 $(test_targets): test/%: $(go_files) .go-generated
-	@mkdir -p test
-	go test -C ./pkg/test/$* -c -o ../../../test/$* -tags vmtest
+	@mkdir -p $(notdir $@)
+	GOARCH=$(call getarch,test/,$@) go test -c -o $@ ./pkg/test/$(notdir $@) -tags vmtest
 
 gofmt: .go-formatted
 .go-formatted: $(go_files)
