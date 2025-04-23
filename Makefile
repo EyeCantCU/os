@@ -148,7 +148,7 @@ local-wolfi: $(KEY)
 	echo "https://apk.cgr.dev/extra-packages" >> $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 	mkdir -p ${PWD}/packages
-	docker run --rm -it \
+	docker run --pull=always --rm -it \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange.rsa.pub",destination="/etc/apk/keys/local-melange.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
