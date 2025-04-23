@@ -5,9 +5,10 @@ TOOLS_D = $(TOP_D)/tools
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
 disks_aws = aws-base aws-agents aws-docker aws-docker-dev aws-eks-dev
-disks_gcp = gcp-base gcp-agents gcp-agents-docker-dev gcp-docker gcp-docker-dev workstation
+disks_gcp = gcp-base gcp-agents gcp-agents-docker-dev gcp-docker gcp-docker-dev
 disks_qemu = generic
 disks_azure = azure-base azure-agents azure-aks-dev azure-eap-dev
+disks_workstation = workstation
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
@@ -35,13 +36,14 @@ apkoaas: $(gosrc)
 test:
 	go test -v -tags withauth ./...
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-workstation
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
+disks-workstation: $(foreach name,$(disks_workstation),disk-$(name))
 
-.PHONY: list-aws list-gcp list-qemu
+.PHONY: list-aws list-azure list-gcp list-qemu list workstation
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -52,6 +54,8 @@ list-gcp:
 	@for n in $(disks_gcp); do echo $$n; done
 list-qemu:
 	@for n in $(disks_qemu); do echo $$n; done
+list-workstation:
+	@for n in $(disks_workstation); do echo $$n; done
 
 .PHONY: disks
 disks: $(foreach name,$(names),disk-$(name))
