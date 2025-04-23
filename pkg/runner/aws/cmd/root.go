@@ -14,7 +14,7 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:               "ec2cli",
+	Use:               "aws",
 	Short:             "CLI tool to manage EC2 instances",
 	PersistentPreRun:  setupContext,
 	PersistentPostRun: cancelContext,

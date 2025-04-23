@@ -14,7 +14,7 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:               "gce",
+	Use:               "gcp",
 	Short:             "CLI tool to manage running tests on GCE VM instances",
 	PersistentPreRun:  setupContext,
 	PersistentPostRun: cancelContext,
