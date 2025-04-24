@@ -15,7 +15,7 @@ import (
 
 func launchCmd() *cobra.Command {
 	var subscriptionID string
-	var location string
+	var region string
 	var resourceGroup string
 	var vmName string
 	var vmSize string
@@ -59,7 +59,7 @@ func launchCmd() *cobra.Command {
 			publicIPName := fmt.Sprintf("ip-%s", vmName)
 			log.Printf("Creating public IP: %s", publicIPName)
 			_, err = publicIPClient.BeginCreateOrUpdate(ctx, resourceGroup, publicIPName, armnetwork.PublicIPAddress{
-				Location: &location,
+				Location: &region,
 				Tags:     resourceTags,
 				Properties: &armnetwork.PublicIPAddressPropertiesFormat{
 					PublicIPAllocationMethod: utils.ToPtr(armnetwork.IPAllocationMethodDynamic),
@@ -87,7 +87,7 @@ func launchCmd() *cobra.Command {
 			}
 
 			_, err = nicClient.BeginCreateOrUpdate(ctx, resourceGroup, nicName, armnetwork.Interface{
-				Location: &location,
+				Location: &region,
 				Tags:     resourceTags,
 				Properties: &armnetwork.InterfacePropertiesFormat{
 					IPConfigurations: []*armnetwork.InterfaceIPConfiguration{
@@ -125,7 +125,7 @@ func launchCmd() *cobra.Command {
 			}
 
 			_, err = vmClient.BeginCreateOrUpdate(ctx, resourceGroup, vmName, armcompute.VirtualMachine{
-				Location: &location,
+				Location: &region,
 				Tags:     resourceTags,
 				Properties: &armcompute.VirtualMachineProperties{
 					HardwareProfile: &armcompute.HardwareProfile{
@@ -172,7 +172,7 @@ func launchCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&subscriptionID, "subscription-id", "", "Azure subscription ID (required)")
-	cmd.Flags().StringVar(&location, "location", "", "Azure region")
+	cmd.Flags().StringVar(&region, "region", "", "Azure region")
 	cmd.Flags().StringVar(&resourceGroup, "resource-group", "", "Azure resource group (required)")
 
 	cmd.Flags().StringVar(&vmName, "name", "", "VM name (required)")
