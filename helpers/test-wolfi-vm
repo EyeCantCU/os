@@ -2,6 +2,7 @@
 # shellcheck disable=SC2015,SC2039,SC2166,SC3043
 VERBOSITY=0
 TEMP_D=""
+TOP_D=$(cd "${0%/*}/.." && pwd)
 
 stderr() { echo "$@" 1>&2; }
 fail() { local r=$?;  [ $r -eq 0 ] && r=1; failrc "$r" "$@"; }
@@ -24,6 +25,115 @@ EOF
 bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
 cleanup() {
     [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
+}
+
+cleanup_qemu() {
+    [ -z "$RUNNERPID" ] || kill "$RUNNERPID"
+    cleanup
+}
+
+log() {
+    local now=""
+    now=$(date -R)
+    echo "$now:" "$@" >> "$LOG"
+    echo "$now:" "$@"
+}
+
+vr() {
+    local rc="" sstart=$SECONDS
+    log "execute: $*"
+    "$@"
+    rc=$?
+    log ":: exit $rc [$((SECONDS-sstart))s]"
+    return $rc
+}
+
+test_qemu() {
+    RUNNERPID=""
+    local wolfivmd="$1" outd="$2" arch="" rund="" key="" vmname
+    local runner="${TOP_D}/runner/qemu"
+    shift 2
+    local vmnames=generic arches=""
+    arches=( "$@" )
+
+    TEMP_D=$(mktemp -d) || return
+    trap cleanup_qemu EXIT
+
+    rund="$TEMP_D/run"
+    mkdir "$rund" || return
+
+    for arch in "${arches[@]}"; do
+        make -C "$wolfivmd" "builder/ovmf-$arch.fd" || {
+            stderr "failed creating builder/ovmf-$arch in $wolfivmd"
+            return 1
+        }
+    done
+
+    key="$rund/id_ed25519"
+    vr ssh-keygen -t ed25519 -N '' -f "$key" ||
+        { stderr "failed creating ssh key"; return 1; }
+
+    local vmd="" tfile="" tname="" vfails="" voutd="" fails=""
+    for arch in "${arches[@]}"; do
+        for vmname in $vmnames; do
+            vfails=""
+            voutd="$outd/$arch/$vmname"
+            vmd="$rund/$arch/$vmname"
+            mkdir -p "$voutd" "$vmd" || { stderr "failed creating dir"; return 1; }
+
+            vr "$runner" create --fwcode="$wolfivmd/builder/ovmf-$arch.fd" \
+                "$vmd" "$wolfivmd/output/$arch/generic/disk.raw" || {
+                    stderr "failed $runner create";
+                    vfails="$arch-$vmname/create"
+                    continue
+                }
+
+            set -- "$runner" start "--arch=$arch" --public-key="$key.pub" "$vmd"
+            log "starting $*"
+            "$@" > "$voutd/vm-start.log" 2>&1 &
+            RUNNERPID=$!
+
+            vr "$runner" wait-for-ssh "$vmd" || {
+                stderr "failed runner wait-for-ssh $arch-$vmname"
+                vfails="$vfails $arch-$vmname/wait-for-ssh"
+                continue
+            }
+
+            for tfile in "${TOP_D}/test/$arch"/*; do
+                tname=${tfile##*/}
+                vr "$runner" run-remote \
+                    -i "$key" --file="$tfile" "$vmd" -- -test.v \
+                       > "$voutd/test-$tname.log" \
+                       2> "$voutd/test-$tname.stderr" || {
+                       vfails="$vfails $arch-$vmname/test-$tname"
+                       continue
+                   }
+            done
+
+            log "finished $arch/$vmname"
+            kill "$RUNNERPID"
+            wait "$RUNNERPID"
+            RUNNERPID=""
+        done
+        if [ ! -f "$vmd/ttyS0.log" ]; then
+            stderr "$vmd/ttyS0.log did not exist"
+        else
+            cp "$vmd/ttyS0.log" "$voutd/console.log" ||
+                stderr "failed copy of $vmd/ttyS0.log"
+        fi
+        fails="${fails:+$fails }$vfails"
+        if [ -z "$vfails" ]; then
+            log "finished $arch/$vmname PASS"
+        else
+            log "finished $arch/$vmname FAIL - $vfails"
+        fi
+    done
+    if [ -z "$fails" ]; then
+        log "PASS - no failures"
+        return 0
+    fi
+    log "FAIL - $fails"
+    return 1
 }
 
 main() {
@@ -53,6 +163,7 @@ main() {
     [ $# -eq 2 ] || { bad_Usage "got $# args [$*], expected 2"; return 1; }
     cloud="$1"
     outd="$2"
+    LOG="$outd/test-wolfi-vm.log"
 
     [ -n "$wolfivmd" ] || { bad_Usage "--wolfi-vm is required"; return 1; }
     [ -d "$wolfivmd" ] || { stderr "--wolfi-vm '$wolfivmd' is not a dir"; return 1; }
@@ -71,8 +182,14 @@ main() {
     [ -d "$outd" ] || mkdir -p "$outd" ||
         fail "could not create $outd"
 
-    echo "Testing for cloud=$cloud with wolfi-vm dir at $wolfivmd"
-    echo "Does not do anything just yet"
+    #shellcheck disable=SC2086
+    case "$cloud" in
+        qemu) test_qemu "$wolfivmd" "$outd" $testarches;;
+        *)
+           echo "Testing for cloud=$cloud with wolfi-vm dir at $wolfivmd"
+           echo "Does not do anything just yet"
+           ;;
+    esac
 }
 
 main "$@"
