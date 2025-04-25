@@ -156,6 +156,7 @@ func WaitForSSHHostKey(parentCtx context.Context, address string, retryInterval 
 			}
 
 			return nil, fmt.Errorf("context %s. last error: %v: %w", reason, lastErr, err)
+		case <-time.After(retryInterval):
 		}
 	}
 }
