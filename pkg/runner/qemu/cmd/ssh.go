@@ -105,10 +105,10 @@ func waitForSSHCmd() *cobra.Command {
 			hostPort := fmt.Sprintf("%s:%d", sshAddr, sshPort)
 
 			log.Printf("Waiting for hostkey from %s", hostPort)
-			key, err := sshutils.WaitForSSHHostKey(ctx, hostPort, time.Duration(2*time.Minute), time.Duration(200*time.Millisecond))
+			key, err := sshutils.WaitForSSHHostKey(ctx, hostPort, time.Duration(500*time.Millisecond))
 
 			if err != nil {
-				log.Fatalf("Wait for ssh hostkey failed: %v", key)
+				log.Fatalf("Wait for hostkey from %s failed: %v", hostPort, err)
 			}
 
 			fmt.Printf("%s %s %s\n", hostPort, key.Type(), base64.StdEncoding.EncodeToString(key.Marshal()))

@@ -3,6 +3,7 @@
 VERBOSITY=0
 TEMP_D=""
 TOP_D=$(cd "${0%/*}/.." && pwd)
+WAIT_SSH_TIMEOUT=${WAIT_SSH_TIMEOUT:-5m}
 
 stderr() { echo "$@" 1>&2; }
 fail() { local r=$?;  [ $r -eq 0 ] && r=1; failrc "$r" "$@"; }
@@ -39,12 +40,35 @@ log() {
     echo "$now:" "$@"
 }
 
+# vr(cmd) - run cmd, log execution and result. stdout and stderr unmodified.
 vr() {
     local rc="" sstart=$SECONDS
     log "execute: $*"
     "$@"
     rc=$?
     log ":: exit $rc [$((SECONDS-sstart))s]"
+    return $rc
+}
+
+# vrl(output, cmd) - verbose run log.
+#   run cmd with output to output.stdout and output.stderr
+vrl() {
+    local output="$1" rc="" sstart=$SECONDS
+    shift
+    log "execute: $*"
+    "$@" >"$output.stdout" 2>"$output.stderr"
+    rc=$?
+    log ":: exit $rc [$((SECONDS-sstart))s]"
+    return $rc
+}
+
+# rq(cmd) - run cmd quietly unless it fails
+rq() {
+    local rc="" out=""
+    out=$("$@" 2>&1) && return 0
+    rc=$?
+    stderr "failed [$rc]: $*"
+    printf "%s\n" "$out" | sed -e 's,^,> ,' 1>&2
     return $rc
 }
 
@@ -62,15 +86,16 @@ test_qemu() {
     rund="$TEMP_D/run"
     mkdir "$rund" || return
 
+    log "making builder/ovmf-<arch>.fd for ${arches[*]}"
     for arch in "${arches[@]}"; do
-        make -C "$wolfivmd" "builder/ovmf-$arch.fd" || {
+        rq make -C "$wolfivmd" "builder/ovmf-$arch.fd" || {
             stderr "failed creating builder/ovmf-$arch in $wolfivmd"
             return 1
         }
     done
 
     key="$rund/id_ed25519"
-    vr ssh-keygen -t ed25519 -N '' -f "$key" ||
+    rq ssh-keygen -t ed25519 -N '' -f "$key" ||
         { stderr "failed creating ssh key"; return 1; }
 
     local vmd="" tfile="" tname="" vfails="" voutd="" fails=""
@@ -93,40 +118,51 @@ test_qemu() {
             "$@" > "$voutd/vm-start.log" 2>&1 &
             RUNNERPID=$!
 
-            vr "$runner" wait-for-ssh "$vmd" || {
+            vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh "$vmd" || {
                 stderr "failed runner wait-for-ssh $arch-$vmname"
                 vfails="$vfails $arch-$vmname/wait-for-ssh"
+                if [ ! -f "$vmd/ttyS0.log" ]; then
+                    stderr "[$arch-$vmname] FATAL wait-for-ssh timeout." \
+                        "console log missing."
+                else
+                    sed -e 's,^,> ,' "$vmd/ttyS0.log" 2>&1
+                    stderr "[$arch-$vmname] FATAL wait-for-ssh timeout." \
+                        "console log above"
+                fi
                 continue
             }
 
+            local metd="/tmp/chainguard-vmtest-metrics"
             for tfile in "${TOP_D}/test/$arch"/*; do
                 tname=${tfile##*/}
-                vr "$runner" run-remote \
-                    -i "$key" --file="$tfile" "$vmd" -- -test.v \
-                       > "$voutd/test-$tname.log" \
-                       2> "$voutd/test-$tname.stderr" || {
+                vrl "$voutd/test-$tname" "$runner" run-remote \
+                    --private-key="$key" --file="$tfile" "$vmd" -- -test.v ||
                        vfails="$vfails $arch-$vmname/test-$tname"
-                       continue
-                   }
+                "$runner" ssh --private-key="$key" "$vmd" \
+                    "cat $metd/$tname" >  "$voutd/$tname-metrics.json" ||
+                    vfails="$vfails $arch-$vmname/$tname-metrics"
             done
 
-            log "finished $arch/$vmname"
             kill "$RUNNERPID"
             wait "$RUNNERPID"
             RUNNERPID=""
-        done
-        if [ ! -f "$vmd/ttyS0.log" ]; then
-            stderr "$vmd/ttyS0.log did not exist"
-        else
-            cp "$vmd/ttyS0.log" "$voutd/console.log" ||
+
+            if [ ! -f "$vmd/ttyS0.log" ]; then
+                vfails="$vfails $arch-$vmname/console-log"
+                stderr "$vmd/ttyS0.log did not exist"
+            elif ! cp "$vmd/ttyS0.log" "$voutd/console.log"; then
+                vfails="$vfails $arch-$vmname/console-log"
                 stderr "failed copy of $vmd/ttyS0.log"
-        fi
+            fi
+
+            vfails=${vfails# }
+            if [ -z "$vfails" ]; then
+                log "finished $arch/$vmname PASS"
+            else
+                log "finished $arch/$vmname FAIL - $vfails"
+            fi
+        done
         fails="${fails:+$fails }$vfails"
-        if [ -z "$vfails" ]; then
-            log "finished $arch/$vmname PASS"
-        else
-            log "finished $arch/$vmname FAIL - $vfails"
-        fi
     done
     if [ -z "$fails" ]; then
         log "PASS - no failures"

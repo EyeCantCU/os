@@ -2,6 +2,7 @@ package sshutils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -128,8 +129,8 @@ func GetAuthorizedKeysPath(user string) string {
 
 // WaitForSSHHostKey tries to retrieve the SSH host key from the target address within the given timeout.
 // It retries at intervals specified by retryInterval.
-func WaitForSSHHostKey(parentCtx context.Context, address string, timeout, retryInterval time.Duration) (ssh.PublicKey, error) {
-	ctx, cancel := context.WithTimeout(parentCtx, timeout)
+func WaitForSSHHostKey(parentCtx context.Context, address string, retryInterval time.Duration) (ssh.PublicKey, error) {
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
 	var lastErr error
@@ -146,8 +147,15 @@ func WaitForSSHHostKey(parentCtx context.Context, address string, timeout, retry
 
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("timed out or cancelled while waiting for SSH host key at %s, last error: %v: %w", address, lastErr, ctx.Err())
-		case <-time.After(retryInterval):
+			err := ctx.Err()
+			reason := "error"
+			if errors.Is(err, context.DeadlineExceeded) {
+				reason = "timed-out"
+			} else if errors.Is(err, context.Canceled) {
+				reason = "canceled"
+			}
+
+			return nil, fmt.Errorf("context %s. last error: %v: %w", reason, lastErr, err)
 		}
 	}
 }
