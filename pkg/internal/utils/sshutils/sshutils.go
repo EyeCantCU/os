@@ -132,6 +132,9 @@ func GetAuthorizedKeysPath(user string) string {
 func WaitForSSHHostKey(parentCtx context.Context, address string, retryInterval time.Duration) (ssh.PublicKey, error) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
+	if !regexp.MustCompile(`:[0-9]+$`).MatchString(address) {
+		address = fmt.Sprintf("%s:22", address)
+	}
 
 	var lastErr error
 
