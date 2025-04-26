@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015
+# To be sourced by test-wolfi-vm
+
+bad_azure_usage() { azure_usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+
+azure_usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] cloud out-dir -- [ azure options ]
+
+    azure options:
+        --subscription-id SUBSCRIPTION       subscription id for running tests
+        --resource-basename NAME             prefix for resource and tag names
+        --region REGION                      azure region to run tests in
+        --resource-group GROUP               azure resource group to run tests in
+        --test-user USER                     user to run tests as on the image
+        --image-name NAME                    name of image under test
+        --image-gallery GALLERY              gallery containing image under test
+        --image-version VERSION              image version under test
+        --image-resource-group GROUP         image gallery resource group (if different from test resource group)
+        --image-subscription-id SUBSCRIPTION image gallery subscription (if different from test subscription)
+
+EOF
+}
+
+cleanup_azure() {
+    local subscription="$1" resource_group="$2" tag="$3"
+    shift 3
+    runner="$TOP_D/runner/azure"
+    vr "$runner" teardown --resource-group "$resource_group" --subscription-id "$subscription" --tag "$tag"
+}
+
+setup_azure() {
+    local subscription="$1" resource_group="$2" tag="$3" region="$4"
+    shift 4
+    runner="$TOP_D/runner/azure"
+    vr "$runner" setup --resource-group "$resource_group" --subscription-id "$subscription" --tag "$tag" \
+        --nsg-name "$tag-nsg" --vnet-name "$tag-vnet" --route-table-name "$tag-routetable" --subnet-name "$tag-subnet" \
+        --region "$region"
+}
+
+test_azure() {
+    # wolfivmd is unused for now
+    # shellcheck disable=SC2034
+    local wolfivmd="$1" outd="$2" testarches="$3"
+    shift 3
+    local short_opts="h"
+    local long_opts="help,subscription-id:,resource-basename:,region:,resource-group:,test-user:,image-name:,image-gallery:,image-version:,image-resource-group:,image-subscription-id:"
+    local getopt_out=""
+    getopt_out=$(getopt --options "${short_opts}" \
+        --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_azure_usage; return; }
+
+    local cur="" next=""
+    local subscription="" resource_basename="" region="" resource_group="" test_user="azureuser" image_name="" image_gallery="" image_version="latest" image_resource_group="" image_subscription=""
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+               --help) azure_usage ; exit 0;;
+               --subscription-id) subscription="$next"; shift;;
+               --resource-basename) resource_basename="$next"; shift;;
+               --region) region="$next"; shift;;
+               --resource-group) resource_group="$next"; shift;;
+               --test-user) test_user="$next"; shift;;
+               --image-name) image_name="$next"; shift;;
+               --image-gallery) image_gallery="$next"; shift;;
+               --image-version) image_version="$next"; shift;;
+               --image-resource-group) image_resource_group="$next"; shift;;
+               --image-subscription-id) image_subscription="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ -n "$subscription" ] || { bad_azure_usage "--subscription-id is required"; return 1; }
+    [ -n "$resource_basename" ] || { bad_azure_usage "--resource-basename is required"; return 1; }
+    [ -n "$region" ] || { bad_azure_usage "--region is required"; return 1; }
+    [ -n "$resource_group" ] || { bad_azure_usage "--resource-group is required"; return 1; }
+    [ -n "$image_name" ] || { bad_azure_usage "--image-name is required"; return 1; }
+    [ -n "$image_gallery" ] || { bad_azure_usage "--image-gallery is required"; return 1; }
+
+    setup_azure "$subscription" "$resource_group" "$resource_basename" "$region" || return 1
+    # shellcheck disable=SC2064
+    # Expanding now is fine, these are static
+    trap "cleanup_azure '$subscription' '$resource_group' '$resource_basename'" EXIT
+
+    TEMP_D=$(mktemp -d) || return
+    runner="$TOP_D/runner/azure"
+    rund="$TEMP_D/run"
+    mkdir "$rund" || return
+
+    key="$rund/id_ed25519"
+    rq ssh-keygen -t ed25519 -N '' -f "$key" ||
+        { stderr "failed creating ssh key"; return 1; }
+
+    # TODO: test multiple VMs (one per image or something)
+    local vmnames="$image_name-$image_version"
+    local vmname="" arch=""
+    # serial console pid unused for now
+    # shellcheck disable=SC2034
+    local tfile="" tname="" vfails="" voutd="" fails="" SERIALCONSOLEPID=
+    for arch in $testarches; do
+        for vmname in $vmnames; do
+            vfails=""
+            voutd="$outd/$arch/$vmname"
+            rq mkdir -p "$voutd" || { stderr "failed creating $voutd"; return 1; }
+            vmtag="$resource_basename-$vmname-vm"
+            # Start VM
+            vr "$runner" launch --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                --vnet "$resource_basename-vnet" --subnet "$resource_basename-subnet" --name "$vmtag" --region "$region" \
+                --image-name="$image_name" --image-gallery="$image_gallery" --image-version="$image_version" \
+                --image-resource-group="$image_resource_group" --image-subscription-id="$image_subscription" \
+                --public-key="$key.pub" --admin-username "$test_user"
+            local LAUNCH_CODE=$?
+
+            if [ $LAUNCH_CODE -eq 0 ]; then
+                # TODO: Collect console
+                # Needs some additional options set at vm creation time first. Maybe put this into azure runner instead of az cli anway.
+                # rq az serial-console connect --subscription-id "$subscription" -n "$vmtag" -g "$resource_group" 2>&1 > "$voutd/console.log"
+                # SERIALCONSOLEPID=$!
+
+                vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
+                    --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag"
+
+                log "started testing $arch/$vmname"
+                # Run tests, collect metrics
+                for tfile in "${TOP_D}/test/$arch"/*; do
+                    tname=${tfile##*/}
+                    vrl "$voutd/test-$tname" "$runner" run-remote --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                        --private-key "$key" --user "$test_user" --file="$tfile" -- -test.v ||
+                           vfails="$vfails $arch-$vmname/test-$tname"
+                    "$runner" ssh --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                        --private-key "$key" --user "$test_user" \
+                        "cat $METD/$tname" \
+                           > "$voutd/$tname-metrics.json" ||
+                           vfails="$vfails $arch-$vmname/$tname-metrics"
+                done
+
+                log "finished testing $arch/$vmname"
+            else
+                # azure reserves resources for 180s after failed VM creation...
+                log "waiting 180s for azure to release resources from failed vm launch"
+                sleep 180
+            fi
+            # Terminate VM
+            vr "$runner" terminate --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag"
+
+            # Stop collecting console
+            #if [ -n "$SERIALCONSOLEPID" ]; then
+            #    rq kill $SERIALCONSOLEPID
+            #    rq wait $SERIALCONSOLEPID
+            #fi
+            vfails=${vfails# }
+            if [ -z "$vfails" ]; then
+                log "finished $arch/$vmname PASS"
+            else
+                log "finished $arch/$vmname FAIL - $vfails"
+            fi
+        done
+        fails="${fails:+$fails }$vfails"
+
+    done
+
+    if [ -z "$fails" ]; then
+        log "PASS - no failures"
+        return 0
+    fi
+    log "FAIL - $fails"
+    return 1
+}
