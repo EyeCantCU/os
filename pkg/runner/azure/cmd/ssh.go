@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -89,6 +92,42 @@ func runRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sshUser, "user", "azureuser", "SSH username")
 	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
 	cmd.MarkFlagRequired("file")
+	cmd.MarkFlagRequired("resource-group")
+	cmd.MarkFlagRequired("tag")
+	cmd.MarkFlagRequired("subscription")
+
+	return cmd
+}
+
+func waitForSSHCmd() *cobra.Command {
+	var (
+		resourceGroup  string
+		vmTag          string
+		subscriptionID string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "wait-for-ssh",
+		Short: "wait for ssh to be ready",
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx := cmd.Context()
+
+			publicIP := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+
+			log.Printf("Waiting for hostkey from %s", publicIP)
+			key, err := sshutils.WaitForSSHHostKey(ctx, publicIP, time.Duration(500*time.Millisecond))
+
+			if err != nil {
+				log.Fatalf("Wait for hostkey from %s failed: %v", publicIP, err)
+			}
+
+			fmt.Printf("%s %s %s\n", publicIP, key.Type(), base64.StdEncoding.EncodeToString(key.Marshal()))
+		},
+	}
+
+	cmd.Flags().StringVar(&resourceGroup, "resource-group", "", "Azure resource group (required)")
+	cmd.Flags().StringVar(&vmTag, "tag", "", "Tag name of the VM (required)")
+	cmd.Flags().StringVar(&subscriptionID, "subscription-id", "", "Azure subscription ID (required)")
 	cmd.MarkFlagRequired("resource-group")
 	cmd.MarkFlagRequired("tag")
 	cmd.MarkFlagRequired("subscription")
