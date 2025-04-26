@@ -11,6 +11,8 @@ go_gen_sources = $(git grep -l '^//go:generate')
 go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)
 go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
+shell_scripts=$(shell grep -rlIE "^#!/(usr/)?s?bin/(env )?(ba)?sh" *)
+
 all: runners tests
 
 $(go_tools_bin): go.mod pkg/tools/tools.go
@@ -62,6 +64,11 @@ gofmt: .go-formatted
 .go-formatted: $(go_files)
 	o=$$(gofmt -l -w pkg/ 2>&1) && [ -z "$$o" ] || \
 		{ echo "gofmt made changes: $$o" 1>&2; exit 1; }
+	@touch $@
+
+shellcheck: .shellcheck
+.shellcheck: $(shell_scripts)
+	shellcheck $(shell_scripts)
 	@touch $@
 
 .PHONY: unit-test
