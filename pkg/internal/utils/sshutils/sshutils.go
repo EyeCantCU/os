@@ -2,22 +2,93 @@ package sshutils
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
 
-// NewSSHClient takes a host, ssh key, and user and returns an open ssh client connection.
-func NewSSHClient(ctx context.Context, host, privateKeyPath, user string) (*ssh.Client, error) {
-	key, err := ioutil.ReadFile(privateKeyPath)
+var (
+	// TODO: mutex by filename. No usecase yet though.
+	knownHostsMu sync.Mutex
+)
+
+// Return a path to an ephemeral known hosts file. Caller is responsible for cleanup.
+func EphemeralKnownHosts() (string, error) {
+	tmpFile, err := os.CreateTemp(os.TempDir(), "known_hosts")
+	if err != nil {
+		return "", fmt.Errorf("failed to make ephemeral known hosts file: %w", err)
+	}
+	defer tmpFile.Close()
+	return filepath.Join(os.TempDir(), tmpFile.Name()), nil
+}
+
+// TOFUHostKeyCallback implements trust on first use, storing known host keys
+// in the standard OpenSSH known_hosts format.
+func TOFUHostKeyCallback(knownHostsFile, host string) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		knownHostsMu.Lock()
+		defer knownHostsMu.Unlock()
+
+		data, _ := os.ReadFile(knownHostsFile)
+		knownHosts := make(map[string]ssh.PublicKey)
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+			hostnames := strings.Split(fields[0], ",")
+			keyType := fields[1]
+			keyData := fields[2]
+			for _, h := range hostnames {
+				pubKeyBytes, err := base64.StdEncoding.DecodeString(keyData)
+				if err != nil {
+					continue
+				}
+				pubKey, err := ssh.ParsePublicKey(pubKeyBytes)
+				if err != nil {
+					continue
+				}
+				// Verify type matches
+				if pubKey.Type() == keyType {
+					knownHosts[h] = pubKey
+				}
+			}
+		}
+
+		if existingKey, ok := knownHosts[host]; ok {
+			if ssh.FingerprintSHA256(existingKey) != ssh.FingerprintSHA256(key) {
+				return fmt.Errorf("host key mismatch for %s", host)
+			}
+		} else {
+			f, err := os.OpenFile(knownHostsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+			if err != nil {
+				return fmt.Errorf("unable to write host key: %w", err)
+			}
+			defer f.Close()
+
+			line := fmt.Sprintf("%s %s %s\n", host, key.Type(), base64.StdEncoding.EncodeToString(key.Marshal()))
+			if _, err := f.WriteString(line); err != nil {
+				return fmt.Errorf("unable to write known_hosts line: %w", err)
+			}
+		}
+
+		return nil
+	}
+}
+
+// NewSSHClient takes a host, ssh key, user, and knownHostsFile, and returns an open ssh client connection.
+func NewSSHClient(ctx context.Context, host, privateKeyPath, user, knownHostsFile string) (*ssh.Client, error) {
+	key, err := os.ReadFile(privateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read private key: %w", err)
 	}
@@ -30,7 +101,7 @@ func NewSSHClient(ctx context.Context, host, privateKeyPath, user string) (*ssh.
 	config := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: implement TOFU or fetch the keys out of band or something?
+		HostKeyCallback: TOFUHostKeyCallback(knownHostsFile, host),
 		Timeout:         10 * time.Second,
 	}
 
@@ -49,12 +120,10 @@ func NewSSHClient(ctx context.Context, host, privateKeyPath, user string) (*ssh.
 	return ssh.NewClient(c, chans, reqs), nil
 }
 
-// SSHToInstance takes a host, ssh key, user, and optional command. If command
-// is empty, it runs exec ssh with appropriate arguments. Otherwise, runs the command
-// remotely and prints the output.
-func SSHToInstance(ctx context.Context, host, privateKeyPath, user string, command []string) error {
+// SSHToInstance takes a host, ssh key, user, knownHostsFile, and optional command.
+func SSHToInstance(ctx context.Context, host, privateKeyPath, user, knownHostsFile string, command []string) error {
 	if len(command) > 0 {
-		client, err := NewSSHClient(ctx, host, privateKeyPath, user)
+		client, err := NewSSHClient(ctx, host, privateKeyPath, user, knownHostsFile)
 		if err != nil {
 			return fmt.Errorf("failed to make ssh client: %w", err)
 		}
@@ -79,7 +148,7 @@ func SSHToInstance(ctx context.Context, host, privateKeyPath, user string, comma
 		}
 
 		sshargs := []string{
-			"-p" + port, "-i", privateKeyPath,
+			"-p" + port, "-i", privateKeyPath, "-o", "UserKnownHostsFile=" + knownHostsFile,
 			fmt.Sprintf("%s@%s", user, hostOnly),
 		}
 		execSSH := exec.CommandContext(ctx, "ssh", sshargs...)
@@ -92,10 +161,9 @@ func SSHToInstance(ctx context.Context, host, privateKeyPath, user string, comma
 	return nil
 }
 
-// ShoveBinaryFile takes a host, ssh key, user, local file path, and remote destination. It copies the
-// file to the remote host, marks it executable, and returns any error.
-func ShoveBinaryFile(ctx context.Context, host, privateKeyPath, user, localFilePath, destFilePath string) error {
-	client, err := NewSSHClient(ctx, host, privateKeyPath, user)
+// ShoveBinaryFile takes a host, ssh key, user, knownHostsFile, local file path, and remote destination.
+func ShoveBinaryFile(ctx context.Context, host, privateKeyPath, user, knownHostsFile, localFilePath, destFilePath string) error {
+	client, err := NewSSHClient(ctx, host, privateKeyPath, user, knownHostsFile)
 	if err != nil {
 		return fmt.Errorf("failed to make ssh client: %w", err)
 	}
