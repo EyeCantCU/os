@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 )
 
 func sshCmd() *cobra.Command {
-	var vmdir, sshKeyFile, user string
+	var vmdir, sshKeyFile, user, knownHosts string
 	cmd := &cobra.Command{
 		Use:   "ssh vmdir",
 		Short: "ssh to a running vm in dir",
@@ -23,6 +24,16 @@ func sshCmd() *cobra.Command {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 
+			if knownHosts == "" {
+				var err error
+				knownHosts, err = sshutils.EphemeralKnownHosts()
+				if err != nil {
+					log.Printf("could not get ephemeral known hosts file: %v, using /dev/null", err)
+					knownHosts = "/dev/null"
+				}
+				defer os.Remove(knownHosts)
+			}
+
 			vmdir = args[0]
 			sshArgs := args[1:]
 			sshAddr, sshPort, err := getSSHPortAddr(ctx, filepath.Join(vmdir, "qmp.sock"))
@@ -31,7 +42,7 @@ func sshCmd() *cobra.Command {
 			}
 
 			if err := sshutils.SSHToInstance(ctx,
-				fmt.Sprintf("%s:%d", sshAddr, sshPort), sshKeyFile, user, sshArgs); err != nil {
+				fmt.Sprintf("%s:%d", sshAddr, sshPort), sshKeyFile, user, knownHosts, sshArgs); err != nil {
 				log.Fatalf("SSH error: %v", err)
 			}
 
@@ -40,12 +51,13 @@ func sshCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&user, "user", "u", "linky", "USER")
 	cmd.Flags().StringVarP(&sshKeyFile, "private-key", "i", "", "id_ed25519")
+	cmd.Flags().StringVar(&knownHosts, "known-hosts", "", "known hosts file")
 
 	return cmd
 }
 
 func runRemoteCmd() *cobra.Command {
-	var vmdir, sshKeyFile, user, localFilePath string
+	var vmdir, sshKeyFile, user, knownHosts, localFilePath string
 
 	cmd := &cobra.Command{
 		Use:   "run-remote",
@@ -57,6 +69,16 @@ func runRemoteCmd() *cobra.Command {
 			vmdir = args[0]
 			cmdArgs := args[1:]
 
+			if knownHosts == "" {
+				var err error
+				knownHosts, err = sshutils.EphemeralKnownHosts()
+				if err != nil {
+					log.Printf("could not get ephemeral known hosts file: %v, using /dev/null", err)
+					knownHosts = "/dev/null"
+				}
+				defer os.Remove(knownHosts)
+			}
+
 			sshAddr, sshPort, err := getSSHPortAddr(ctx, filepath.Join(vmdir, "qmp.sock"))
 			if err != nil {
 				log.Fatalf("Failed to get ssh port from %s: %v\n", vmdir, err)
@@ -65,14 +87,14 @@ func runRemoteCmd() *cobra.Command {
 
 			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
 
-			err = sshutils.ShoveBinaryFile(ctx, hostPort, sshKeyFile, user, localFilePath, remoteFile)
+			err = sshutils.ShoveBinaryFile(ctx, hostPort, sshKeyFile, user, knownHosts, localFilePath, remoteFile)
 			if err != nil {
 				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
 			}
 
 			remotecmd := append([]string{"exec", remoteFile}, cmdArgs...)
 
-			if err := sshutils.SSHToInstance(ctx, hostPort, sshKeyFile, user, remotecmd); err != nil {
+			if err := sshutils.SSHToInstance(ctx, hostPort, sshKeyFile, user, knownHosts, remotecmd); err != nil {
 				log.Fatalf("failed to run %s on remote host: %v", filepath.Base(localFilePath), err)
 			}
 		},
@@ -80,6 +102,7 @@ func runRemoteCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&localFilePath, "file", "", "File to run remotely (required)")
 	cmd.Flags().StringVarP(&user, "user", "u", "linky", "USER")
+	cmd.Flags().StringVar(&knownHosts, "known-hosts", "", "known hosts file")
 	cmd.Flags().StringVarP(&sshKeyFile, "private-key", "i", "", "id_ed25519")
 	cmd.MarkFlagRequired("file")
 

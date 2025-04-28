@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -22,6 +23,7 @@ func sshCmd() *cobra.Command {
 		sshUser        string
 		tagName        string
 		region         string
+		knownHosts     string
 	)
 
 	cmd := &cobra.Command{
@@ -32,7 +34,17 @@ func sshCmd() *cobra.Command {
 			publicIP := getIPByTag(ctx, region, tagName)
 			log.Printf("Connecting to VM at %s", publicIP)
 
-			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, args); err != nil {
+			if knownHosts == "" {
+				var err error
+				knownHosts, err = sshutils.EphemeralKnownHosts()
+				if err != nil {
+					log.Printf("could not get ephemeral known hosts file: %v, using /dev/null", err)
+					knownHosts = "/dev/null"
+				}
+				defer os.Remove(knownHosts)
+			}
+
+			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, knownHosts, args); err != nil {
 				log.Fatalf("SSH error: %v", err)
 			}
 
@@ -41,8 +53,9 @@ func sshCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name of the instance (required)")
 	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
-	cmd.Flags().StringVar(&sshUser, "user", "ec2-user", "SSH username")
-	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
+	cmd.Flags().StringVarP(&sshUser, "user", "u", "ec2-user", "SSH username")
+	cmd.Flags().StringVarP(&privateKeyPath, "private-key", "i", "id_ed25519", "Path to private SSH key")
+	cmd.Flags().StringVar(&knownHosts, "known-hosts", "", "known hosts file")
 	cmd.MarkFlagRequired("tag")
 	cmd.MarkFlagRequired("region")
 
@@ -56,6 +69,7 @@ func runRemoteCmd() *cobra.Command {
 		localFilePath  string
 		tagName        string
 		region         string
+		knownHosts     string
 	)
 
 	cmd := &cobra.Command{
@@ -68,14 +82,24 @@ func runRemoteCmd() *cobra.Command {
 
 			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
 
-			err := sshutils.ShoveBinaryFile(ctx, publicIP, privateKeyPath, sshUser, localFilePath, remoteFile)
+			if knownHosts == "" {
+				var err error
+				knownHosts, err = sshutils.EphemeralKnownHosts()
+				if err != nil {
+					log.Printf("could not get ephemeral known hosts file: %v, using /dev/null", err)
+					knownHosts = "/dev/null"
+				}
+				defer os.Remove(knownHosts)
+			}
+
+			err := sshutils.ShoveBinaryFile(ctx, publicIP, privateKeyPath, sshUser, knownHosts, localFilePath, remoteFile)
 			if err != nil {
 				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
 			}
 
 			remotecmd := append([]string{"exec", remoteFile}, args...)
 
-			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, remotecmd); err != nil {
+			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, knownHosts, remotecmd); err != nil {
 				log.Fatalf("failed to run %s on remote host: %v", filepath.Base(localFilePath), err)
 			}
 		},
@@ -84,8 +108,9 @@ func runRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&localFilePath, "file", "", "File to run remotely (required)")
 	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name of the instance (required)")
 	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
-	cmd.Flags().StringVar(&sshUser, "user", "ec2-user", "SSH username")
-	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
+	cmd.Flags().StringVarP(&sshUser, "user", "u", "ec2-user", "SSH username")
+	cmd.Flags().StringVarP(&privateKeyPath, "private-key", "i", "id_ed25519", "Path to private SSH key")
+	cmd.Flags().StringVar(&knownHosts, "known-hosts", "", "known hosts file")
 	cmd.MarkFlagRequired("tag")
 	cmd.MarkFlagRequired("file")
 	cmd.MarkFlagRequired("region")
