@@ -227,8 +227,25 @@ subpackages:
 
 test:
   environment:
+    accounts:
+      groups:
+        - groupname: elasticsearch
+          gid: 1000
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 1000
+      run-as: 0
+    contents:
+      packages:
+        - curl
+        - sudo
+        - wait-for-it
     environment:
       ES_JAVA_HOME: "/usr/lib/jvm/java-21-openjdk"
+      ES_PIPE: "/tmp/elasticsearch"
+      ES_USER: elasticsearch
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
       JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
   pipeline:
     - name: "Check for LICENSE.txt"
@@ -236,6 +253,101 @@ test:
     - runs: |
         # Using generic tests as entire tests require creation of keystore and it requires separate env
         /usr/share/elasticsearch/bin/elasticsearch -h
+    - name: "Setup Elasticsearch configuration"
+      runs: |
+        set -x
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
+        -alias "localhost" \
+        -genkeypair \
+        -keyalg DSA \
+        -dname CN="localhost" \
+        -storetype bcfks \
+        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD \
+        -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
+        -providerpath /usr/share/java/bouncycastle-fips/bc-fips.jar
+
+        cat >>/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
+        cluster.name: "docker-cluster"
+        network.host: 0.0.0.0
+        node.store.allow_mmap: false
+        node.name: es
+        cluster.initial_master_nodes:
+          - es
+        EOF
+
+        sudo -E -u $ES_USER elasticsearch-keystore create -p <<EOF
+        ${KEYSTORE_PASSWORD}
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        sudo -E -u $ES_USER elasticsearch-keystore add xpack.security.transport.ssl.keystore.secure_password  <<EOF
+        ${KEYSTORE_PASSWORD}
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        # Create FIFO pipe for passing Elastic KeyStore password
+        mkfifo "${ES_PIPE}"
+
+        (
+          tail -f "${ES_PIPE}" | \
+            sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid
+        ) &
+        sleep 1
+
+        # Write password to pipe
+        cat > "${ES_PIPE}" << EOF
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        wait-for-it -t 60 localhost:9200
+
+        # At this point, Elastic is coming up but we don't have an entitlement
+        # to use FIPS, so it won't come up fully: it won't serve SSL, and it
+        # won't allow any authentication.  We check that it is at least up.
+        curl -s http://localhost:9200/_cluster/health | grep "missing authentication credentials"
+
+        kill $(cat /tmp/elasticsearch.pid)
+
+        # Check for unexpected WARN messages: ignoring, respectively,
+        # entitlement-related warnings, warnings emitted when auth fails,
+        # clustering failure (due to not coming up), and stat retrieval failure
+        # (ibid)
+        unexpected_warns="$(grep WARN /usr/share/elasticsearch/logs/docker-cluster.log \
+          | grep -Ev "(Not entitled|Skipped default trust store)" \
+          | grep -v "exception caught on transport layer" \
+          | grep -v "master not discovered" \
+          | grep -v "failed to retrieve stats for node" \
+          | wc -l)"
+        [ ${unexpected_warns} = "0" ]
+
+        # Check for unexpected ERROR messages: these are all caused by the
+        # cluster never properly coming up
+        unexpected_errors="$(grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log \
+          | grep -Ev "error adding (lifecycle|ingest)" \
+          | grep -v "unsupported ciphers" \
+          | grep -v "unable to install token metadata" \
+          | grep -v "failed to create geoip downloader task" \
+          | wc -l)"
+        [ ${unexpected_errors} = "0" ]
+
+        exit 0  # TODO: execute the rest of the test if we can get an entitlement figured out
+
+        # Reset the password
+        ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b << EOF | grep 'New value' | awk '{print $3}'
+        ${KEYSTORE_PASSWORD}
+        EOF
+        )
+        curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+        curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+            {
+              "name": "John Doe",
+              "age": 30,
+              "about": "I love to go rock climbing"
+            }' || exit 1
+        curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
     - uses: java-fips/algorithms
       with:
         java-version: 21
