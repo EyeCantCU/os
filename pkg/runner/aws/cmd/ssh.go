@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"log"
 	"path/filepath"
+	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,7 +29,7 @@ func sshCmd() *cobra.Command {
 		Short: "SSH into an EC2 VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP := getIPByTag(ctx, tagName)
+			publicIP := getIPByTag(ctx, region, tagName)
 			log.Printf("Connecting to VM at %s", publicIP)
 
 			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, args); err != nil {
@@ -60,7 +63,7 @@ func runRemoteCmd() *cobra.Command {
 		Short: "run a binary on an EC2 VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP := getIPByTag(ctx, tagName)
+			publicIP := getIPByTag(ctx, region, tagName)
 			log.Printf("Connecting to VM at %s", publicIP)
 
 			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
@@ -91,7 +94,7 @@ func runRemoteCmd() *cobra.Command {
 }
 
 // Find instance by tag
-func getIPByTag(ctx context.Context, tagName string) string {
+func getIPByTag(ctx context.Context, region string, tagName string) string {
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
 		log.Fatalf("failed to load AWS config: %v", err)
@@ -119,4 +122,36 @@ func getIPByTag(ctx context.Context, tagName string) string {
 		log.Fatalf("No running instance found with tag %s", tagName)
 	}
 	return publicIP
+}
+
+func waitForSSHCmd() *cobra.Command {
+	var (
+		privateKeyPath string
+		tagName        string
+		region         string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "wait-for-ssh",
+		Short: "wait for ssh to be ready",
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx := cmd.Context()
+			publicIP := getIPByTag(ctx, region, tagName)
+			log.Printf("Waiting for ssh VM at %s", publicIP)
+			key, err := sshutils.WaitForSSHHostKey(ctx, publicIP, time.Duration(500*time.Millisecond))
+			if err != nil {
+				log.Fatalf("Wait for hostkey from %s failed: %v", publicIP, err)
+			}
+			fmt.Printf("%s %s %s\n", publicIP, key.Type(), base64.StdEncoding.EncodeToString(key.Marshal()))
+
+		},
+	}
+
+	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name of the instance (required)")
+	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
+	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
+	cmd.MarkFlagRequired("tag")
+	cmd.MarkFlagRequired("region")
+
+	return cmd
 }
