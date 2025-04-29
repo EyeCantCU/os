@@ -1,7 +1,7 @@
 package:
   name: go-fips-1.24
   version: "1.24.2.2"
-  epoch: 0
+  epoch: 1
   description: "golang toolchain with patches/enhancements from Microsoft"
   copyright:
     - license: BSD-3-Clause
@@ -61,6 +61,7 @@ pipeline:
       git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0005-change-default-telemetry-from-local-to-off.patch
       git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0006-always-enable-fips.patch
       git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0007-set-gofips-latest.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0010-ed25519-check-rand-beforing-using-boring.patch
 
   - runs: |
       cd go/src
@@ -225,6 +226,68 @@ test:
         fi
 
         ./md5 "Go Cubs Go"
+    - name: "NATS ED25519 test"
+      runs: |
+        fail() { echo "$@" 1>&2; exit 1; }
+
+        cat <<EOF > go.mod
+        module natstest
+
+        go 1.24
+
+        require (
+          github.com/nats-io/nkeys v0.4.7
+        )
+        EOF
+
+        cat <<EOF > natstest.go
+        package main
+
+        import (
+          "fmt"
+          "log"
+
+          "github.com/nats-io/nkeys"
+        )
+
+        func main() {
+          kp, err := nkeys.CreateUser()
+          if err != nil {
+            log.Fatalf("failed to create NKey: %v", err)
+          }
+
+          pub, err := kp.PublicKey()
+          if err != nil {
+            log.Fatalf("failed to get public key: %v", err)
+          }
+          fmt.Println("Public Key:", pub)
+
+          message := []byte("hello, world")
+          sig, err := kp.Sign(message)
+          if err != nil {
+            log.Fatalf("failed to sign message: %v", err)
+          }
+          fmt.Println("Signature created successfully!")
+
+          err = kp.Verify(message, sig)
+          if err != nil {
+            log.Fatalf("signature verification failed: %v", err)
+          }
+          fmt.Println("Signature verified successfully!")
+        }
+        EOF
+
+        go mod tidy
+        go build -tags requirefips -o natstest natstest.go
+
+        go tool nm ./natstest > nm.out
+        if ! grep -q "${{vars.uses-boring-crypto-symbol}}" nm.out; then
+            echo "built natstest was missing ${{vars.uses-boring-crypto-symbol}} symbol"
+            cat nm.out
+            exit 1
+        fi
+
+        ./natstest
     - name: "parallel decrypt test"
       runs: |
         fail() { echo "$@" 1>&2; exit 1; }
