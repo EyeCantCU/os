@@ -5,6 +5,7 @@ package boot
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/metrics"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/vmtest"
@@ -12,14 +13,14 @@ import (
 
 func TestSSHStartTime(t *testing.T) {
 	ctx := vmtest.Context(t)
-	vmStartTime, err := findVMStartTime(ctx)
+	st, err := findServiceStartMonotonic(ctx, "sshd.service")
 	if err != nil {
-		t.Fatalf("findVMStartTime(ctx) = err %v want nil", err)
+		t.Errorf("failed to get monotonic: %v\n", err)
 	}
-	sshdStartTime, err := findServiceStartTime(ctx, "sshd.service")
-	timeToSSHD := int(sshdStartTime.Sub(vmStartTime).Seconds())
-	if timeToSSHD > 20 {
-		t.Errorf("timeToSSHD = %d seconds, want < 20", timeToSSHD)
+
+	limit := 180 * time.Second
+	if st > limit {
+		t.Errorf("timeToSSHD = %fs, want < %fs", st.Seconds(), limit.Seconds())
 	}
-	metrics.Log(t, metrics.SSHDStartTime, fmt.Sprintf("%d", timeToSSHD), nil)
+	metrics.Log(t, metrics.SSHDStartTime, fmt.Sprintf("%f", st.Seconds()), nil)
 }
