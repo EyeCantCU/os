@@ -8,7 +8,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
-func getInstanceByTag(ctx context.Context, client ec2.Client, tagName string) ([]ec2types.Instance, error) {
+func GetInstanceByTag(ctx context.Context, client *ec2.Client, tagName string) ([]ec2types.Instance, error) {
 	instances := []ec2types.Instance{}
 
 	out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
