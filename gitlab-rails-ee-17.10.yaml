@@ -1,6 +1,6 @@
 package:
   name: gitlab-rails-ee-17.10
-  version: "17.10.1"
+  version: "17.10.5"
   epoch: 0
   description: "GitLab's core webapp, built with Ruby on Rails"
   resources:
@@ -55,6 +55,7 @@ environment:
       - posix-libc-utils
       - postgresql-dev
       - python3
+      - rsync # to install everything from /srv/gitlab to targetdir.
       - ruby-3.2
       - ruby-3.2-dev
       - ruby3.2-bundler
@@ -79,14 +80,16 @@ environment:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 6313c41c8800bdea9c525d84ebfc419cd7f29027
+      expected-commit: 2f78e1e2cf3941d23882ec5dd6d35fd0d08bbba0
       repository: https://gitlab.com/gitlab-org/gitlab.git
       tag: v${{package.version}}-ee
-      destination: ${{targets.contextdir}}/srv/gitlab
+      destination: /srv/gitlab
 
-  - working-directory: ${{targets.contextdir}}/srv/gitlab
+  - working-directory: /srv/gitlab
     runs: |
-      bundle config set --local path ${{targets.contextdir}}/srv/gitlab/vendor/bundle/
+      # Use local path /srv/gitlab/vendor/bundle/ for ruby-magic gem.
+      # See: https://gitlab.com/gitlab-org/build/CNG/-/merge_requests/697/diffs
+      bundle config set --local path /srv/gitlab/vendor/bundle/
       bundle config set --local clean 'true'
       bundle config set --local deployment 'true'
       bundle config set --local without 'development test mysql aws'
@@ -94,7 +97,7 @@ pipeline:
       bundle install --jobs 4 --retry 5
 
       # Create GitLab datadir
-      export DATADIR=${{targets.contextdir}}/var/opt/gitlab
+      export DATADIR=/var/opt/gitlab
       mkdir -p ${DATADIR}
 
       cp config/gitlab.yml.example config/gitlab.yml
@@ -110,12 +113,12 @@ pipeline:
       yarn install --production --pure-lockfile
       bundle exec rake gettext:compile
       bundle exec rake gitlab:assets:compile
-      mkdir -p ${{targets.contextdir}}/assets/licenses
-      cp LICENSE ${{targets.contextdir}}/assets/licenses/GitLab.txt
+      mkdir -p /assets/licenses
+      cp LICENSE /assets/licenses/GitLab.txt
 
       # Some more directories that are needed in image
-      mkdir -p ${{targets.contextdir}}/home/git/gitlab-shell
-      ln -sf /srv/gitlab/GITLAB_SHELL_VERSION ${{targets.contextdir}}/home/git/gitlab-shell/VERSION
+      mkdir -p /home/git/gitlab-shell
+      ln -sf /srv/gitlab/GITLAB_SHELL_VERSION /home/git/gitlab-shell/VERSION
 
       bundle config unset --local path
 
@@ -123,7 +126,7 @@ pipeline:
       rm -rf node_modules/ tmp/ spec/ ee/spec/ qa/ rubocop/ tooling/ .git/ .gitlab/ \
              .github/ docker/ changelogs/ danger/ Dangerfile
       # Remove git directories
-      find ${{targets.contextdir}} -name "*.git" -exec rm -rf '{}' +
+      find /srv/gitlab -name "*.git" -exec rm -rf '{}' +
       # TODO: Create gitlab-cng-ee-rails-buildscripts packagee
 
       # Exclude additional files from specific gems.
@@ -132,7 +135,7 @@ pipeline:
       rm -rf ${ruby_dir}/*/gems/grpc-*/bin
 
       # Remove spec file which triggers malware check failure
-      rm ${{targets.contextdir}}/srv/gitlab/gems/csv_builder/spec/csv_builder_spec.rb
+      rm /srv/gitlab/gems/csv_builder/spec/csv_builder_spec.rb
 
       # Don't run, removes critical gems
       #/home/build/build-scripts/cleanup-gems
@@ -140,7 +143,7 @@ pipeline:
       # Rebuild devfile gem with Go
       cd ./vendor/bundle/ruby/*/gems/*devfile*/ext
       # Mitigate CVEs
-      go get golang.org/x/net@v0.36.0 github.com/docker/docker@v26.1.5 github.com/go-git/go-git/v5@v5.13.0 golang.org/x/oauth2@v0.27.0 golang.org/x/crypto@v0.35.0 github.com/containerd/containerd@v1.7.27
+      go get golang.org/x/net@v0.38.0 github.com/docker/docker@v26.1.5 github.com/go-git/go-git/v5@v5.13.0 golang.org/x/oauth2@v0.27.0 golang.org/x/crypto@v0.37.0 github.com/containerd/containerd@v1.7.27
       go mod tidy
       rm ../bin/devfile
       go build \
@@ -148,7 +151,19 @@ pipeline:
         -tags "netgo,osusergo" \
         -ldflags "-w" \
         -trimpath .
-      cd ${{targets.contextdir}}/srv/gitlab
+      cd /srv/gitlab
+
+  - name: Install /srv/gitlab, /var/opt/gitlab, /assets/licenses, and /home/git/gitlab-shell
+    runs: |
+      mkdir -p \
+        ${{targets.contextdir}}/srv/gitlab \
+        ${{targets.contextdir}}/var/opt/gitlab \
+        ${{targets.contextdir}}/assets/licenses \
+        ${{targets.contextdir}}/home/git/gitlab-shell
+      rsync -avz /srv/gitlab/ ${{targets.contextdir}}/srv/gitlab/
+      rsync -avz /var/opt/gitlab/ ${{targets.contextdir}}/var/opt/gitlab/
+      rsync -avz /assets/licenses/ ${{targets.contextdir}}/assets/licenses/
+      rsync -avz /home/git/gitlab-shell/ ${{targets.contextdir}}/home/git/gitlab-shell/
 
 subpackages:
   - name: gitlab-rails-ee-assets-${{vars.major-minor-version}}
@@ -170,6 +185,42 @@ subpackages:
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/srv/gitlab
           mv ${{targets.destdir}}/srv/gitlab/doc ${{targets.subpkgdir}}/srv/gitlab/
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - git
+        - ruby-3.2-dev
+        - libmagic
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test magic
+      working-directory: /srv/gitlab
+      runs: |
+        touch testfile
+        cat <<"EOF" >test.rb
+        require 'magic'
+
+        begin
+          # Open a file as an IO object
+          file_path = 'testfile'
+          io = File.open(file_path, 'rb')
+
+          # Use Magic to determine the MIME type
+          mime_type = Magic.open(Magic::MIME_TYPE) { |m| m.file(io.path) }
+
+          puts "Magic library is working! MIME type of #{file_path}: #{mime_type}"
+        rescue Magic::MagicError => e
+          puts "Error: #{e.message}"
+          puts "ruby-magic or libmagic might not be installed correctly."
+          exit(1)
+        ensure
+          io.close if io
+        end
+        EOF
+        bundle exec ruby test.rb
 
 update:
   enabled: true

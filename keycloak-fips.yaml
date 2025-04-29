@@ -1,17 +1,19 @@
 package:
   name: keycloak-fips
-  version: "26.1.4"
-  epoch: 40
+  version: "26.2.1"
+  epoch: 0
   description: Open Source Identity and Access Management For Modern Applications and Services
   copyright:
     - license: Apache-2.0
   dependencies:
     runtime:
-      - ${{package.name}}-policy
       - bash # Keycloak helper scripts require bash, aren't compatible with busybox.
+      - bcfips-policy-140-3-j${{vars.java-version}}
       - merged-usrsbin
       - openjdk-${{vars.java-version}}-default-jvm
       - wolfi-baselayout
+    provides:
+      - ${{package.name}}-policy-140-3=${{package.full-version}}
 
 vars:
   java-version: 17
@@ -26,7 +28,7 @@ environment:
   contents:
     packages:
       - bash
-      - bouncycastle-fips~2.0
+      - bouncycastle-fips~2.1
       - build-base
       - busybox
       - openjdk-${{vars.java-version}}-default-jdk
@@ -38,7 +40,7 @@ pipeline:
     with:
       repository: https://github.com/keycloak/keycloak
       tag: ${{package.version}}
-      expected-commit: b281b5f09d06a55c661d8df529f0020dd44942d1
+      expected-commit: 5f280d13bfde254dd70014f95af43e07ba576438
 
   - uses: patch
     with:
@@ -58,10 +60,11 @@ pipeline:
       # the source repo to build - ensures the correct maven version for
       # building the project, preventing issues such as CI hangs.
 
+      # Build keycloak-server. Depends on `keycloak-js-adapter-jar`.
       # Gross hack to work around broken NAPI ast-grep module that has
       # undefined symbol: static_assert
       export LD_PRELOAD=/tmp/preload.so
-      ./mvnw clean install -DskipTests=true -DskipProtoLock=true -Pdistribution -q
+      ./mvnw clean install -DskipTests -Dmaven.test.skip=true -DskipITs -DskipProtoLock=true -Pdistribution
       unset LD_PRELOAD
 
       mkdir -p ${{targets.destdir}}/usr/share/java
@@ -85,52 +88,13 @@ pipeline:
       # Remove any existing providers
       rm -r ${{targets.contextdir}}/usr/share/java/keycloak/providers/*
 
+      mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers
+      ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/
+
+      mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib
+      ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
+
 subpackages:
-  - name: ${{package.name}}-policy-140-2
-    description: bcfips 140-2 dependencies
-    checks:
-      disabled:
-        - empty
-    dependencies:
-      runtime:
-        - bcfips-policy-140-2-j${{vars.java-version}}
-        # Lower than 140-3
-        - merged-usrsbin
-        - wolfi-baselayout
-      provider-priority: 10
-      provides:
-        - ${{package.name}}-policy=${{package.full-version}}
-    pipeline:
-      - runs: |
-          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers
-          for jar in bc-fips.jar bctls-fips.jar bcpkix-fips.jar; do
-            ln -s /usr/share/java/bouncycastle-fips/$jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/$jar
-          done
-
-          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib
-          for jar in bc-fips.jar bctls-fips.jar bcpkix-fips.jar; do
-            ln -s /usr/share/java/bouncycastle-fips/$jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/$jar
-          done
-
-  - name: ${{package.name}}-policy-140-3
-    description: bcfips 140-3 dependencies
-    dependencies:
-      runtime:
-        - bcfips-policy-140-3-j${{vars.java-version}}
-        # Higher than 140-2
-        - merged-usrsbin
-        - wolfi-baselayout
-      provider-priority: 15
-      provides:
-        - ${{package.name}}-policy=${{package.full-version}}
-    pipeline:
-      - runs: |
-          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers
-          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/
-
-          mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib
-          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
-
   # NOTE: This is forked from the non-FIPS keycloak-bitnami-compat package so that
   # the steps copying Keycloak binaries to the expected path include the required
   # BC FIPS Jars
@@ -141,7 +105,7 @@ subpackages:
       provides:
         - ${{package.name}}-bitnami-compat=${{package.full-version}}
       runtime:
-        - ${{package.name}}-policy
+        - bcfips-policy-140-3-j${{vars.java-version}}
         - bash # Keycloak helper scripts require bash, aren't compatible with busybox.
         - coreutils # Keycloak Helm Chart scripts require coreutils, aren't compatible with busybox. (i.e., `cp` with `--preserve` option)
         - krb5
@@ -199,14 +163,6 @@ subpackages:
           # Link binaries used by Bitnami config
           ln -sf /opt/bitnami/scripts/keycloak/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
           ln -sf /opt/bitnami/scripts/keycloak/run.sh ${{targets.contextdir}}/run.sh
-
-          # Symlink BCFIPS JARs to providers
-          mkdir -p ${{targets.contextdir}}/opt/bitnami/keycloak/providers
-          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/opt/bitnami/keycloak/providers/
-
-          # Symlink BCFIPS JARs to client library
-          mkdir -p ${{targets.contextdir}}/opt/bitnami/keycloak/bin/client/lib
-          ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/opt/bitnami/keycloak/bin/client/lib/
     test:
       environment:
         contents:
@@ -293,7 +249,6 @@ test:
     - uses: java-fips/algorithms
       with:
         java-version: ${{vars.java-version}}
-        fips-compliance-version: 140-3
         classpath: /usr/share/java/keycloak/providers/*:.
 
 update:

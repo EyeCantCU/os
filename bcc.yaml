@@ -1,0 +1,342 @@
+package:
+  name: bcc
+  version: "0.34.0"
+  epoch: 0
+  description: A toolkit for creating efficient kernel tracing and manipulation programs
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  # 18 is unsuitable due to missing openmp-18
+  # 17 is unsuitable due to https://github.com/llvm/llvm-project/issues/78691
+  llvm-version: 16
+  python-version: 3.13 # For scripts & tools
+
+data:
+  - name: py-versions # For bindings
+    items:
+      3.10: "310"
+      3.11: "311"
+      3.12: "312"
+      3.13: "313"
+
+environment:
+  contents:
+    packages:
+      - bison
+      - build-base
+      - busybox
+      - clang-${{vars.llvm-version}}
+      - clang-${{vars.llvm-version}}-dev
+      - clang-${{vars.llvm-version}}-extras
+      - elfutils-dev
+      - flex-dev
+      - libLLVM-${{vars.llvm-version}}
+      - libbpf-dev
+      - libxml2-dev
+      - linux-headers
+      - llvm${{vars.llvm-version}}
+      - llvm${{vars.llvm-version}}-dev
+      - openmp-${{vars.llvm-version}}
+      - openmp-${{vars.llvm-version}}-dev
+      - py3-supported-build-base
+      - py3-supported-setuptools
+      - samurai
+      - zip
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 1f63ae6e1c34c9ca3d5dcf339abecd16651593c2
+      repository: https://github.com/iovisor/bcc
+      tag: v${{package.version}}
+
+  - runs: |
+      # Hack around the fact that bcc doesn't really respect LLVM_ROOT
+      # and cmake always finds llvm in /usr/include.
+      for dir in /usr/lib/llvm${{vars.llvm-version}}/include/*; do
+        ln -s $dir /usr/include/$(basename $dir)
+      done
+
+  - uses: cmake/configure
+    environment:
+      KERNELHEADERS_DIR: "/usr"
+    with:
+      opts: |
+        -DCMAKE_USE_LIBBPF_PACKAGE=ON \
+        -DENABLE_LLVM_SHARED=1 \
+        -DPYTHON_CMD=python${{vars.python-version}} \
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - runs: |
+      # Drop bindings from main package
+      rm -rf ${{targets.destdir}}/usr/lib/python*
+      # Fix manpage location for split pipeline
+      mv ${{targets.destdir}}/usr/share/bcc/man ${{targets.destdir}}/usr/share/
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-doc
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - range: py-versions
+    name: py${{range.key}}-${{package.name}}
+    description: python${{range.key}} bindings for ${{package.name}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: cmake/configure
+        with:
+          opts: |
+            -DPYTHON_CMD=python${{range.key}} \
+      - working-directory: output/src/python/bcc-python${{range.key}}/
+        uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - uses: strip
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{package.name}}
+
+  - name: py3-supported-${{package.name}}
+    description: meta package providing ${{package.name}} for supported python versions.
+    dependencies:
+      runtime:
+        - py3.10-${{package.name}}
+        - py3.11-${{package.name}}
+        - py3.12-${{package.name}}
+        - py3.13-${{package.name}}
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python3.10
+            import: ${{package.name}}
+
+  - name: ${{package.name}}-tools
+    dependencies:
+      runtime:
+        - audit
+        - bash
+        - py${{vars.python-version}}-pyelftools
+        - py${{vars.python-version}}-${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/share/bcc
+          mv ${{targets.destdir}}/usr/share/bcc/tools ${{targets.subpkgdir}}/usr/share/bcc
+
+          fix_python() {
+            for f in $1/*; do
+              if [ -d $f ]; then
+                fix_python $f
+              elif [ -f $f ]; then
+                sed -i 's#/usr/bin/python#/usr/bin/python${{vars.python-version}}#' $f
+                sed -i 's#/usr/bin/env python#/usr/bin/env python${{vars.python-version}}#' $f
+              fi
+            done
+          }
+          fix_python ${{targets.subpkgdir}}/usr/share/bcc/tools
+    test:
+      pipeline:
+        - runs: |
+            /usr/share/bcc/tools/perlstat --help >/dev/null
+            /usr/share/bcc/tools/rdmaucma --help >/dev/null
+            /usr/share/bcc/tools/memleak --help >/dev/null
+            /usr/share/bcc/tools/pythonstat --help >/dev/null
+            test -x /usr/share/bcc/tools/perlcalls # ausyscall fails in test environment
+            /usr/share/bcc/tools/ext4dist --help >/dev/null
+            /usr/share/bcc/tools/offwaketime --help >/dev/null
+            /usr/share/bcc/tools/javagc --help >/dev/null
+            /usr/share/bcc/tools/nodestat --help >/dev/null
+            /usr/share/bcc/tools/filetop --help >/dev/null
+            /usr/share/bcc/tools/biolatency --help >/dev/null
+            /usr/share/bcc/tools/tcpretrans --help >/dev/null
+            /usr/share/bcc/tools/biosnoop --help >/dev/null
+            /usr/share/bcc/tools/drsnoop --help >/dev/null
+            /usr/share/bcc/tools/pythongc --help >/dev/null
+            /usr/share/bcc/tools/sslsniff --help >/dev/null
+            /usr/share/bcc/tools/readahead --help >/dev/null
+            /usr/share/bcc/tools/tcpsynbl --help >/dev/null
+            /usr/share/bcc/tools/sofdsnoop --help >/dev/null
+            /usr/share/bcc/tools/profile --help >/dev/null
+            test -x /usr/share/bcc/tools/ppchcalls # ausyscall fails in test environment
+            /usr/share/bcc/tools/gethostlatency --help >/dev/null
+            /usr/share/bcc/tools/runqslower --help >/dev/null
+            /usr/share/bcc/tools/javaobjnew --help >/dev/null
+            /usr/share/bcc/tools/inject --help >/dev/null
+            /usr/share/bcc/tools/bpflist --help >/dev/null
+            test -x /usr/share/bcc/tools/mdflush # Needs headers for the running kernel (doesn't work in a container)
+             /usr/share/bcc/tools/cachestat --help >/dev/null
+            /usr/share/bcc/tools/zfsdist --help >/dev/null
+            /usr/share/bcc/tools/numasched --help >/dev/null
+            /usr/share/bcc/tools/cpudist --help >/dev/null
+            test -x /usr/share/bcc/tools/syscount # ausyscall fails in test environment
+            test -x /usr/share/bcc/tools/phpcalls # ausyscall fails in test environment
+            /usr/share/bcc/tools/tcpconnlat --help >/dev/null
+            /usr/share/bcc/tools/exitsnoop --help >/dev/null
+            /usr/share/bcc/tools/dcsnoop --help >/dev/null
+            /usr/share/bcc/tools/f2fsslower --help >/dev/null
+            /usr/share/bcc/tools/phpstat --help >/dev/null
+            /usr/share/bcc/tools/shmsnoop --help >/dev/null
+            /usr/share/bcc/tools/swapin --help >/dev/null
+            test -x /usr/share/bcc/tools/oomkill # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/bashreadline --help >/dev/null
+            /usr/share/bcc/tools/mysqld_qslower --help >/dev/null
+            /usr/share/bcc/tools/lib/ustat --help >/dev/null
+            /usr/share/bcc/tools/lib/uflow --help >/dev/null
+            /usr/share/bcc/tools/lib/ugc --help >/dev/null
+            /usr/share/bcc/tools/lib/uthreads --help >/dev/null
+            test -x /usr/share/bcc/tools/lib/ucalls # ausyscall fails in test environment
+            /usr/share/bcc/tools/lib/uobjnew --help >/dev/null
+            /usr/share/bcc/tools/tcpstates --help >/dev/null
+            /usr/share/bcc/tools/rubyflow --help >/dev/null
+            /usr/share/bcc/tools/xfsslower --help >/dev/null
+            test -x /usr/share/bcc/tools/pidpersec # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/kvmexit --help >/dev/null
+            /usr/share/bcc/tools/perlflow --help >/dev/null
+            /usr/share/bcc/tools/tcpdrop --help >/dev/null
+            /usr/share/bcc/tools/fileslower --help >/dev/null
+            /usr/share/bcc/tools/btrfsslower --help >/dev/null
+            /usr/share/bcc/tools/klockstat --help >/dev/null
+            /usr/share/bcc/tools/compactsnoop --help >/dev/null
+            /usr/share/bcc/tools/ext4slower --help >/dev/null
+            /usr/share/bcc/tools/xfsdist --help >/dev/null
+            /usr/share/bcc/tools/softirqs --help >/dev/null
+            test -x /usr/share/bcc/tools/javacalls # ausyscall fails in test environment
+            /usr/share/bcc/tools/wqlat --help >/dev/null
+            /usr/share/bcc/tools/javaflow --help >/dev/null
+            /usr/share/bcc/tools/tcpconnect --help >/dev/null
+            /usr/share/bcc/tools/tcpaccept --help >/dev/null
+            /usr/share/bcc/tools/killsnoop --help >/dev/null
+            /usr/share/bcc/tools/slabratetop --help >/dev/null
+            /usr/share/bcc/tools/runqlat --help >/dev/null
+            /usr/share/bcc/tools/funcinterval --help >/dev/null
+            test -x /usr/share/bcc/tools/bitesize # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/argdist --help >/dev/null
+            /usr/share/bcc/tools/tclflow --help >/dev/null
+            /usr/share/bcc/tools/old/memleak --help >/dev/null
+            /usr/share/bcc/tools/old/offwaketime --help >/dev/null
+            test -x /usr/share/bcc/tools/old/biosnoop # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/argdist --help >/dev/null
+            /usr/share/bcc/tools/old/profile --help >/dev/null
+            test -x /usr/share/bcc/tools/old/gethostlatency # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/argdist --help >/dev/null
+            test -x /usr/share/bcc/tools/old/oomkill # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/argdist --help >/dev/null
+            test -x /usr/share/bcc/tools/old/bashreadline # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/old/compactsnoop --help >/dev/null
+            /usr/share/bcc/tools/old/softirqs --help >/dev/null
+            /usr/share/bcc/tools/old/tcpconnect --help >/dev/null
+            /usr/share/bcc/tools/old/tcpaccept --help >/dev/null
+            /usr/share/bcc/tools/old/killsnoop --help >/dev/null
+            /usr/share/bcc/tools/old/statsnoop --help >/dev/null
+            /usr/share/bcc/tools/old/filelife --help >/dev/null
+            /usr/share/bcc/tools/old/offcputime --help >/dev/null
+            /usr/share/bcc/tools/old/stacksnoop --help >/dev/null
+            /usr/share/bcc/tools/old/opensnoop --help >/dev/null
+            /usr/share/bcc/tools/old/hardirqs --help >/dev/null
+            /usr/share/bcc/tools/old/stackcount --help >/dev/null
+            /usr/share/bcc/tools/old/filegone --help >/dev/null
+            /usr/share/bcc/tools/old/wakeuptime --help >/dev/null
+            test -x /usr/share/bcc/tools/old/syncsnoop # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/statsnoop --help >/dev/null
+            /usr/share/bcc/tools/reset-trace -h >/dev/null
+            /usr/share/bcc/tools/tcprtt --help >/dev/null
+            /usr/share/bcc/tools/filelife --help >/dev/null
+            /usr/share/bcc/tools/runqlen --help >/dev/null
+            /usr/share/bcc/tools/tplist --help >/dev/null
+            /usr/share/bcc/tools/tcptracer --help >/dev/null
+            /usr/share/bcc/tools/tcplife --help >/dev/null
+            /usr/share/bcc/tools/netqtop --help >/dev/null
+            /usr/share/bcc/tools/pythonflow --help >/dev/null
+            /usr/share/bcc/tools/biopattern --help >/dev/null
+            /usr/share/bcc/tools/dcstat --help >/dev/null
+            /usr/share/bcc/tools/criticalstat --help >/dev/null
+            /usr/share/bcc/tools/tcpcong --help >/dev/null
+            /usr/share/bcc/tools/btrfsdist --help >/dev/null
+            /usr/share/bcc/tools/dbstat --help >/dev/null
+            /usr/share/bcc/tools/rubygc --help >/dev/null
+            /usr/share/bcc/tools/solisten --help >/dev/null
+            /usr/share/bcc/tools/vfscount --help >/dev/null
+            /usr/share/bcc/tools/offcputime --help >/dev/null
+            /usr/share/bcc/tools/biotop --help >/dev/null
+            /usr/share/bcc/tools/vfsstat --help >/dev/null
+            /usr/share/bcc/tools/deadlock --help >/dev/null
+            /usr/share/bcc/tools/cpuunclaimed --help >/dev/null
+            /usr/share/bcc/tools/opensnoop --help >/dev/null
+            test -x /usr/share/bcc/tools/pythoncalls # ausyscall fails in test environment
+            /usr/share/bcc/tools/funccount --help >/dev/null
+            /usr/share/bcc/tools/javathreads --help >/dev/null
+            /usr/share/bcc/tools/hardirqs --help >/dev/null
+            /usr/share/bcc/tools/rubystat --help >/dev/null
+            /usr/share/bcc/tools/tclstat --help >/dev/null
+            /usr/share/bcc/tools/stackcount --help >/dev/null
+            /usr/share/bcc/tools/tcptop --help >/dev/null
+            /usr/share/bcc/tools/cobjnew --help >/dev/null
+            /usr/share/bcc/tools/dbslower --help >/dev/null
+            test -x /usr/share/bcc/tools/rubycalls # ausyscall fails in test environment
+            /usr/share/bcc/tools/phpflow --help >/dev/null
+            /usr/share/bcc/tools/capable --help >/dev/null
+            /usr/share/bcc/tools/filegone --help >/dev/null
+            /usr/share/bcc/tools/nfsdist --help >/dev/null
+            /usr/share/bcc/tools/execsnoop --help >/dev/null
+            /usr/share/bcc/tools/cachetop --help >/dev/null
+            /usr/share/bcc/tools/funcslower --help >/dev/null
+            /usr/share/bcc/tools/virtiostat --help >/dev/null
+            /usr/share/bcc/tools/mountsnoop --help >/dev/null
+            /usr/share/bcc/tools/ttysnoop --help >/dev/null
+            /usr/share/bcc/tools/bindsnoop --help >/dev/null
+            /usr/share/bcc/tools/llcstat --help >/dev/null
+            /usr/share/bcc/tools/funclatency --help >/dev/null
+            /usr/share/bcc/tools/nfsslower --help >/dev/null
+            /usr/share/bcc/tools/wakeuptime --help >/dev/null
+            test -x /usr/share/bcc/tools/tclcalls # ausyscall fails in test environment
+            test -x /usr/share/bcc/tools/syncsnoop # Needs headers for the running kernel (doesn't work in a container)
+            /usr/share/bcc/tools/tcpsubnet --help >/dev/null
+            /usr/share/bcc/tools/trace --help >/dev/null
+            /usr/share/bcc/tools/dirtop --help >/dev/null
+            /usr/share/bcc/tools/nodegc --help >/dev/null
+            /usr/share/bcc/tools/rubyobjnew --help >/dev/null
+            /usr/share/bcc/tools/zfsslower --help >/dev/null
+            /usr/share/bcc/tools/biolatpcts --help >/dev/null
+            /usr/share/bcc/tools/threadsnoop --help >/dev/null
+            /usr/share/bcc/tools/javastat --help >/dev/null
+            /usr/share/bcc/tools/tclobjnew --help >/dev/null
+
+  - name: ${{package.name}}-examples
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/share/bcc
+          mv ${{targets.destdir}}/usr/share/bcc/examples ${{targets.subpkgdir}}/usr/share/bcc
+
+update:
+  enabled: true
+  github:
+    identifier: iovisor/bcc
+    strip-prefix: v
+    use-tag: true
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check

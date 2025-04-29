@@ -1,6 +1,7 @@
+#nolint:valid-pipeline-git-checkout-tag
 package:
   name: tritonserver-backend-tensorrtllm
-  version: 0.12.0
+  version: 0.16.0
   epoch: 0
   description: NVIDIA Triton Inference Server TensorRTLLM Backend
   copyright:
@@ -22,8 +23,8 @@ package:
       - nvidia-nccl-cuda-${{vars.cuda-version}}
       - openmp-17-dev
       - openmpi-cuda-${{vars.cuda-version}} # libnvinfer_plugin_tensorrt_llm.so links to its libmpi.so, not autodetected
-      - py3.10-torch-2.4-cuda-${{vars.cuda-version}}
-      - tensorrt-${{vars.tensorrt-major-minor-version}}
+      - py${{vars.py-version}}-torch-2.6-cuda-${{vars.cuda-version}}
+      - tensorrt-${{vars.tensorrt-major-minor-version}}-cuda-${{vars.cuda-version}}
       - tritonserver # libtriton_tensorrtllm.so links to libtritonserver.so, not autodetected
   options:
     no-depends: true
@@ -36,15 +37,17 @@ environment:
       - busybox
       - ca-certificates-bundle
       - cmake
+      - coreutils # we use ln -r below, busybox doesn't support that
       - file
-      - gcc-12
-      - gcc-12-default
+      - gcc-${{vars.gcc-version}}
+      # avoid duplicate detection while gcc-version == nvcc-gcc-version
+      #- gcc-${{vars.nvcc-gcc-version}}
       - git-lfs
+      - grep # busybox grep does not support -P and `grep -oP` is used in various places
       - hwloc-cuda-${{vars.cuda-version}}-dev
       - libarchive-dev
       - ninja
       - nvidia-cuda-cccl-${{vars.cuda-version}}
-      - nvidia-cuda-compat-${{vars.cuda-version}}
       - nvidia-cuda-cudart-${{vars.cuda-version}}
       - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
       - nvidia-cuda-cuobjdump-${{vars.cuda-version}}
@@ -82,32 +85,52 @@ environment:
       - openmpi-cuda-${{vars.cuda-version}}
       - openmpi-cuda-${{vars.cuda-version}}-dev
       - openssl-dev
-      - py3.10-attrs
-      - py3.10-build
-      - py3.10-huggingface-hub
-      - py3.10-importlib-metadata
-      - py3.10-mpi4py
-      - py3.10-numpy
-      - py3.10-pillow
-      - py3.10-pip
-      - py3.10-protobuf
-      - py3.10-pybind11
-      - py3.10-setuptools
-      - py3.10-torch-2.4-cuda-${{vars.cuda-version}}
-      - py3.10-typing-extensions
-      - py3.10-wheel
-      - python-3.10
-      - python-3.10-dev
+      - py${{vars.py-version}}-attrs
+      - py${{vars.py-version}}-build-base-dev
+      - py${{vars.py-version}}-huggingface-hub
+      - py${{vars.py-version}}-importlib-metadata
+      - py${{vars.py-version}}-mpi4py
+      - py${{vars.py-version}}-numpy
+      - py${{vars.py-version}}-pillow
+      - py${{vars.py-version}}-protobuf
+      - py${{vars.py-version}}-pybind11
+      - py${{vars.py-version}}-torch-2.6-cuda-${{vars.cuda-version}}
+      - py${{vars.py-version}}-typing-extensions
+      - python-${{vars.py-version}} # Need a `python3` for https://github.com/NVIDIA/TensorRT-LLM/blob/28fb9aacaa5a05494635194a9cbb264da9a744bd/cpp/CMakeLists.txt#L138
       - rapidjson-dev
-      - tensorrt-${{vars.tensorrt-major-minor-version}}
-      - tensorrt-${{vars.tensorrt-major-minor-version}}-dev
+      - tensorrt-${{vars.tensorrt-major-minor-version}}-cuda-${{vars.cuda-version}}
+      - tensorrt-${{vars.tensorrt-major-minor-version}}-cuda-${{vars.cuda-version}}-dev
       - wget
       - zlib-dev
+  environment:
+    # Restricting to one architecture will speed up builds when you're
+    # just debugging packaging.
+    #CUDA_ARCHITECTURES: 75
+    CC: gcc-${{vars.gcc-version}}
+    CXX: g++-${{vars.gcc-version}}
+    LD_LIBRARY_PATH: /usr/local/tensorrt-${{vars.tensorrt-version}}/lib:/usr/local/cuda-${{vars.cuda-version}}/lib:/usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/lib
+    NVCC_APPEND_FLAGS: -ccbin gcc-${{vars.nvcc-gcc-version}}
+    TRT_ROOT: /usr/local/tensorrt-${{vars.tensorrt-version}}
+    TRT_VERSION: ${{vars.tensorrt-version}}
+    VERBOSE: 1
 
 vars:
-  cuda-version: 12.5
+  cuda-version: 12.6
   cudnn-major-version: 9
-  tensorrt-version: 10.3.0.26
+  gcc-version: 12
+  nvcc-gcc-version: 12
+  py-version: 3.12
+  # Here's how do determine the tensorrt-version
+  # 1. Look at the requirements.txt file in TensorRT_LLM https://github.com/NVIDIA/TensorRT-LLM/blob/be9cd719f7d3149a5267c854284d83f717da0771/requirements.txt
+  # 2. This will be installing a pip file for TensorRT that is the version you want
+  # to use for the given version of TensorRT_LLM
+  # 3. The APK for TensorRT should be built at the same version as that pip
+  # The TRT version should be in the tar.gz of the TensorRT distribution you
+  # download.
+  tensorrt-version: 10.7.0.23
+  triton_common_repo_tag: r24.12
+  triton_core_repo_tag: r24.12
+  triton_backend_repo_tag: r24.12
 
 var-transforms:
   - from: ${{vars.cuda-version}}
@@ -122,146 +145,150 @@ var-transforms:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 9a78477873574098c32467f0fd8a9d3b4c243d9b
+      expected-commit: ad209ced188cbae19c7041d968dd4e6d3800ece2
       repository: https://github.com/triton-inference-server/tensorrtllm_backend.git
       tag: v${{package.version}}
       destination: backend
       recurse-submodules: true
 
-  - runs: |
-      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/tensorrt-${{vars.tensorrt-version}}/lib"
-      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda-${{vars.cuda-version}}/lib:/usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/lib:/usr/local/cuda-${{vars.cuda-version}}/compat/"
-      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/tensorrt-${{vars.tensorrt-version}}/bin"
-      export SRCDIR=/home/build/backend
-      export BUILDDIR=${SRCDIR}/build
+  - runs: mkdir -p triton-inference-server
 
-      # The tensorrtllm_backend repository pulls in the tensorrt_llm repository as a submodule.
-      # The tensorrt_llm repository uses git lfs to store the precompiled versions of the batch manager
+  - uses: git-checkout
+    with:
+      expected-commit: a6b410343234f9acaa5d615c19f5b38690b45dff
+      repository: https://github.com/triton-inference-server/common.git
+      branch: ${{vars.triton_common_repo_tag}}
+      destination: common
+    working-directory: triton-inference-server
+
+  - uses: git-checkout
+    with:
+      expected-commit: ce46b95dcaa860a524f91324c146877c018dcf13
+      repository: https://github.com/triton-inference-server/core.git
+      branch: ${{vars.triton_core_repo_tag}}
+      destination: core
+    working-directory: triton-inference-server
+
+  # Default CUDA_ARCHITECTURES are defined in this repository.
+  # Newer branches may introduce architectures that an older
+  # CUDA nvcc doesn't yet recognize.
+  - uses: git-checkout
+    with:
+      expected-commit: 70d71e0d68f7198cffa4e8688d5e2782c07f67a1
+      repository: https://github.com/triton-inference-server/backend.git
+      branch: ${{vars.triton_backend_repo_tag}}
+      destination: backend
+    working-directory: triton-inference-server
+
+  - name: pull precompiled batch manager
+    working-directory: backend/tensorrt_llm
+    runs: |
+      # The tensorrt_llm repository uses git lfs to store the precompiled
+      # versions of the batch manager
       # https://github.com/NVIDIA/TensorRT-LLM/tree/a96cccafcf6365c128f004f779160951f8c0801c/cpp/tensorrt_llm
       # So we need to pull in the lfs files.
-      cd ${SRCDIR}/tensorrt_llm
       git lfs install
       git lfs pull
 
-      mkdir -p "${BUILDDIR}"
-      cd ${BUILDDIR}
+  - runs: |
+      mkdir -p backend/build
 
-      export ARCH=x86_64
-      cd ${BUILDDIR}
+  - name: build tensorrt_llm wheel
+    working-directory: backend/build
+    runs: |
+      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/tensorrt-${{vars.tensorrt-version}}/bin"
 
-      # Here's how do determine the TRT VERSION
-      # 1. Look at the requirements.txt file in TensorRT_LLM https://github.com/NVIDIA/TensorRT-LLM/blob/be9cd719f7d3149a5267c854284d83f717da0771/requirements.txt
-      # 2. This will be installing a pip file for TensorRT that is the version you want to use for the given version of TensorRT_LLM
-      # 3. The APK for TensorRT should be built at the same version as that pip
-      # The TRT version should be in the tar.gz of the TensorRT distribution you download.
-      export TRT_VERSION=${{vars.tensorrt-version}}
-      export TRT_ROOT=/usr/local/tensorrt-${{vars.tensorrt-version}}
+      # torch is installed as an apk
+      sed -i 's/^torch/#torch/' ../tensorrt_llm/requirements.txt
 
       # If we don't specify the location of CUDA_TOOLKIT_ROOT_DIR it won't be found
       # Setting BUILD_TESTS and BUILD_BENCHMARKS didn't fix the error
 
-      # TODO(https://github.com/chainguard-dev/extra-packages/issues/902)
-      sed -i 's/^torch/#torch/' ${SRCDIR}/tensorrt_llm/requirements.txt
-
-      # Activate the virtual environment used by torch
+      [ -z "$CUDA_ARCHITECTURES" ] || cuda_arch_arg="--cuda_architectures $CUDA_ARCHITECTURES"
       # Note that we add the USE_CXX11_ABI option because of
       # https://github.com/chainguard-dev/extra-packages/issues/518#issuecomment-2274442194
-      echo "Executing in ${pwd}"
-      python3.10 ../tensorrt_llm/scripts/build_wheel.py --trt_root ${TRT_ROOT} \
+      python${{vars.py-version}} ../tensorrt_llm/scripts/build_wheel.py --trt_root ${TRT_ROOT} \
         -D "CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${{vars.cuda-version}}/" -D "ENABLE_MULTI_DEVICE=1" \
-        -D "USE_CXX11_ABI=1"
+        -D "USE_CXX11_ABI=1" $cuda_arch_arg
 
-      # Install the wheel
-      pip install --prefix=${{targets.destdir}}/usr ${SRCDIR}/tensorrt_llm/build/tensorrt_llm-*.whl
+  - name: install tensorrt_llm wheel
+    runs: |
+      pip${{vars.py-version}} install --prefix=${{targets.destdir}}/usr \
+        backend/tensorrt_llm/build/tensorrt_llm-*.whl
 
-      # Don't be fooled the directory is inflight_batcher_llm but this is really building the
-      # library for the triton trt llm backend.
-      cmake "-DTRT_VERSION=${TRT_VERSION}" \
+  - name: create versioned symlinks, required to pass ldd-check
+    runs: |
+      py_root="${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/tensorrt_llm"
+      ldconfig -N -l "$py_root"/libs/*.so
+
+  - name: build backend
+    working-directory: backend/inflight_batcher_llm
+    uses: cmake/configure
+    with:
+      output-dir: ../build
+      opts: |
+        "-DTRT_VERSION=${TRT_VERSION}" \
         "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}" \
         "-DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}" \
-        "-DTRT_LIB_DIR=${TRT_ROOT}/targets/${ARCH}-linux-gnu/lib" \
+        "-DTRT_LIB_DIR=${TRT_ROOT}/targets/${{build.arch}}-linux-gnu/lib" \
         "-DTRT_INCLUDE_DIR=${TRT_ROOT}/include" \
         "-DUSE_CXX11_ABI:BOOL=ON" \
         "-DCMAKE_BUILD_TYPE=Release" \
         "-DCMAKE_INSTALL_PREFIX:PATH=/tmp/tritonbuild/tensorrtllm/install" \
-        "-DTRITON_REPO_ORGANIZATION:STRING=https://github.com/triton-inference-server" \
-        "-DTRITON_COMMON_REPO_TAG:STRING=r24.05" \
-        "-DTRITON_CORE_REPO_TAG:STRING=r24.05" \
-        "-DTRITON_BACKEND_REPO_TAG:STRING=r24.05" \
+        "-DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${{vars.cuda-version}}" \
+        "-DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc" \
+        "-DCMAKE_INSTALL_PREFIX:PATH=/tmp/tritonbuild/tensorrtllm/install" \
+        "-DTRITON_REPO_ORGANIZATION:STRING=file://$(pwd)/triton-inference-server" \
+        "-DTRITON_COMMON_REPO_TAG:STRING=${{vars.triton_common_repo_tag}}" \
+        "-DTRITON_CORE_REPO_TAG:STRING=${{vars.triton_core_repo_tag}}" \
+        "-DTRITON_BACKEND_REPO_TAG:STRING=${{vars.triton_backend_repo_tag}}" \
         "-DTRITON_ENABLE_GPU:BOOL=ON" \
         "-DTRITON_ENABLE_MALI_GPU:BOOL=OFF" \
         "-DTRITON_ENABLE_STATS:BOOL=ON" \
         "-DTRITON_ENABLE_METRICS:BOOL=ON" \
-        "-DTRITON_ENABLE_MEMORY_TRACKER:BOOL=ON" \
-        -S \
-        ../inflight_batcher_llm \
-        -B \
-        .
+        "-DTRITON_ENABLE_MEMORY_TRACKER:BOOL=ON"
 
-      cmake --build . --config Release -j20  -t install
+  # cmake/build pipeline doesn't support -t yet
+  - name: Build backend
+    working-directory: backend/inflight_batcher_llm
+    runs: |
+      cmake --build ../build -t install
 
-      # Dest dir is the directory in final output where we should put the artifacts
+  - name: Install backend
+    runs: |
       # See https://github.com/triton-inference-server/server/issues/7410#issuecomment-2218856792
       # Using a directory other than the default seems to cause problems at least for the python backend.
-      export DESTDIR="${{targets.destdir}}/opt/tritonserver"
+      backend_dir="${{targets.destdir}}/opt/tritonserver/backends/tensorrtllm"
+      mkdir -p "$backend_dir"/plugins
+      mkdir -p "$backend_dir"/libs
+      cp backend/build/*.so "$backend_dir"
+      cp backend/build/trtllmExecutorWorker "$backend_dir"
 
-      # Create a destination directory for TensorRT
-      export TRTLLMDEST="${{targets.destdir}}/opt/tensorrt_llm"
+  - name: Symlink tensorrt_llm whl objects into system root
+    runs: |
+      py_root="${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/tensorrt_llm"
+      trtllm_root="${{targets.destdir}}/opt/tensorrt_llm"
 
-      export BACKENDDIR=${DESTDIR}/backends/tensorrtllm
-      mkdir -p ${BACKENDDIR}
+      py_libs="$py_root/libs"
+      trtllm_libs="$trtllm_root/libs"
+      mkdir -p "$trtllm_libs"
+      for lib in "$py_libs"/*; do
+        ln -f -s -r "$lib" "$trtllm_libs"/
+      done
 
-      # Print out a list of any so files in the build directory
-      # We do this to help debug if we end up dropping a necessary artifact
-      cd /home/build
-      find ./ -name *.so
-
-      mkdir -p ${BACKENDDIR}/plugins
-
-      mkdir -p ${TRTLLMDEST}/libs
-      # ************************************************************************************************
-      # Copy TensorRT-LLM artifacts
-      #
-      # These are the libs that get built here
-      # https://github.com/NVIDIA/TensorRT-LLM/blob/be9cd719f7d3149a5267c854284d83f717da0771/scripts/build_wheel.py#L214
-      cp ${SRCDIR}/tensorrt_llm/cpp/build/tensorrt_llm/kernels/decoderMaskedMultiheadAttention/decoderXQAImplJIT/nvrtcWrapper/libtensorrt_llm_nvrtc_wrapper.so \
-        ${TRTLLMDEST}/libs
-
-      cp ${SRCDIR}/tensorrt_llm/cpp/build/tensorrt_llm/*.so ${TRTLLMDEST}/libs
-
-      cp ${SRCDIR}/tensorrt_llm/cpp/build/tensorrt_llm/plugins/libnvinfer_plugin_tensorrt_llm.so ${TRTLLMDEST}/libs
-
-      # ************************************************
-      # Copy LibTriton artifacts
-      #*************************************************
-      cp ${BUILDDIR}/libtriton*.so ${BACKENDDIR}
-      cp ${BUILDDIR}/trtllmExecutorWorker ${BACKENDDIR}
+      py_bin="$py_root/bin"
+      trtllm_bin="$trtllm_root/bin"
+      mkdir -p "$trtllm_bin"
+      for bin in "$py_bin"/*; do
+        ln -f -s -r "$bin" "$trtllm_bin"/
+      done
 
 update:
-  enabled: false
+  exclude-reason: 0.17.0+ require tensorrt 10.8, which needs CUDA 12.8. block until we've moved the entire tritonserver stack to CUDA 12.8.
 
 test:
   environment:
-    contents:
-      packages:
-        - posix-libc-utils # for ldd
-        - openmpi-cuda-${{vars.cuda-version}} # libnvinfer_plugin_tensorrt_llm.so links to its libmpi.so, not autodetected
-        - nvidia-libcuda-${{vars.cuda-version}} # libnvinfer_plugin_tensorrt_llm.so links to libcuda.so, not autodetected
-        - nvidia-cuda-cupti-${{vars.cuda-version}} # libtriton_tensorrtllm.so links to libcupti.so, not autodetected
-        - tritonserver # libtriton_tensorrtllm.so links to libtritonserver.so, not autodetected
     environment:
-      LD_LIBRARY_PATH: /usr/local/cuda-12.5/lib64:/usr/local/cudnn-9/lib64:/opt/tensorrt_llm/libs:/opt/tritonserver/lib
+      LD_LIBRARY_PATH: /opt/tensorrt_llm/libs:/opt/tritonserver/lib
   pipeline:
-    - name: Scan .so files for undetected runtime dependencies
-      runs: |
-        ret=0
-        apk info -L "${{package.name}}" | grep \.so$ | sed 's,^,/,' | while read obj; do
-          echo -n "Scanning $obj... "
-          if ldd "$obj" | grep "not found"; then
-            echo "failed"
-            ret=1
-            continue
-          fi
-          echo "ok"
-        done
-        exit $ret
+    - uses: test/tw/ldd-check

@@ -3,7 +3,7 @@ package:
   name: ingress-nginx-controller-1.11
   version: 1.11.5
   # There are manual changes to review between each package update. See 'vars:' section.
-  epoch: 40
+  epoch: 43
   description: "Ingress-NGINX Controller for Kubernetes"
   copyright:
     - license: Apache-2.0
@@ -170,9 +170,9 @@ vars:
   MODSECURITY_NGINX_VERSION: "17405e09fa123eaa24186dd1be0cfaf9fbdf4c5b"
   # Instrumentation for nginx plugin: https://github.com/open-telemetry/opentelemetry-cpp-contrib
   # NOTE: this is really really critical and the config can break in backwards compatible way!!
-  # We should always use the SHA available in release-x.y branch of upstream project (e.g. https://github.com/kubernetes/ingress-nginx/blob/release-1.12/images/nginx/rootfs/build.sh#L532)
-  # please check https://github.com/open-telemetry/opentelemetry-cpp-contrib/compare/62cbae68035af2102e5fdd68c9f34ba12430fa26...main for regression
-  OTEL_SHA: "62cbae68035af2102e5fdd68c9f34ba12430fa26"
+  # We should always use the SHA available in release-x.y branch of upstream project (e.g. https://github.com/kubernetes/ingress-nginx/blob/release-1.11/images/nginx/rootfs/build.sh#L534)
+  # please check https://github.com/open-telemetry/opentelemetry-cpp-contrib/compare/8933841f0a7f8737f61404cf0a64acf6b079c8a5...main for regression
+  OTEL_SHA: "8933841f0a7f8737f61404cf0a64acf6b079c8a5"
 
 pipeline:
   - uses: git-checkout
@@ -187,6 +187,11 @@ pipeline:
       branch: master
       expected-commit: ${{vars.MODSECURITY_NGINX_VERSION}}
       destination: ModSecurity-nginx-${{vars.MODSECURITY_NGINX_VERSION}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
 
   - name: Build ingress-nginx controller from source
     runs: |
@@ -537,6 +542,9 @@ subpackages:
           # https://github.com/kubernetes/ingress-nginx/blob/8f54b538d9b32649411d9e507ca38fbee55ce51c/charts/ingress-nginx/templates/controller-daemonset.yaml#L99-L100
           mkdir -p ${{targets.subpkgdir}}/usr/local/lib
           ln -s /usr/lib/libmimalloc.so.1 ${{targets.subpkgdir}}/usr/local/lib/libmimalloc.so
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
 
   - name: ingress-nginx-controller-bitnami-compat-${{vars.nginx-ingress-major-minor}}
     description: Compatibility package with bitnami/nginx-ingress-controller image
@@ -585,8 +593,6 @@ subpackages:
           BITNAMI_APP_NAME: nginx-ingress-controller
       pipeline:
         - uses: test/tw/ldd-check
-          with:
-            packages: ${{subpkg.name}}
         - name: Test symlinks
           runs: |
             set -e
@@ -621,6 +627,11 @@ subpackages:
         - merged-usrsbin
         - wolfi-baselayout
     pipeline:
+      - uses: go/bump
+        with:
+          deps: |-
+            golang.org/x/net@v0.38.0
+          modroot: ./images/kube-webhook-certgen/rootfs
       - uses: go/build
         with:
           ldflags: -X 'github.com/jet/kube-webhook-certgen/core.Version=v${{package.version}}'
@@ -641,6 +652,11 @@ subpackages:
         - merged-usrsbin
         - wolfi-baselayout
     pipeline:
+      - name: Validate Open Telemetry version
+        runs: |
+          expected_sha=$(grep -E "^export OPENTELEMETRY_CONTRIB_COMMIT" images/nginx/rootfs/build.sh | awk -F '=' '{print $2}')
+          [[ "${{vars.OTEL_SHA}}" == "${expected_sha}" ]] || \
+            { echo "OTel version does not match. Expected ${expected_sha}, found ${{vars.OTEL_SHA}}"; exit 1; }
       - uses: git-checkout
         with:
           repository: https://github.com/open-telemetry/opentelemetry-cpp-contrib
@@ -660,6 +676,9 @@ subpackages:
           mkdir -p ${{targets.contextdir}}/etc/nginx/modules
           cp -p otel_ngx_module.so ${{targets.contextdir}}/etc/nginx/modules/
       - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
 
   - name: ingress-nginx-custom-error-pages-${{vars.nginx-ingress-major-minor}}
     description: OTel plugin for ingress nginx controller ${{vars.nginx-ingress-major-minor}}
@@ -752,6 +771,8 @@ test:
     contents:
       packages:
         - ingress-nginx-controller-compat-${{vars.nginx-ingress-major-minor}}
+        - libcap
+        - libcap-utils
   pipeline:
     - runs: |
         /usr/bin/nginx -v
@@ -789,6 +810,20 @@ test:
     # -T: test the configuration file: nginx checks the configuration for correct syntax, and then tries to open files referred in the configuration.
     # additionally dump configuration files to standard output (1.9.2).
     - runs: nginx -T
+    - name: Test opentelemetry_config directive
+      runs: |
+        touch empty
+        cat <<"EOF" >/etc/nginx/nginx.conf
+        pid /tmp/nginx/nginx.pid;
+        load_module /etc/nginx/modules/otel_ngx_module.so;
+        error_log stderr;
+        events {}
+        http {
+        opentelemetry_config empty;
+        }
+        daemon off;
+        EOF
+        nginx -T 2>&1 | grep "Missing required exporter field"
     - name: Run KwoK
       uses: test/kwok/cluster
     - name: Check controller logs
@@ -802,3 +837,8 @@ test:
           Release:       controller-v${{package.version}}
           nginx version: nginx/${{vars.NGINX_VERSION}}
           Running in Kubernetes cluster
+    - uses: test/tw/ldd-check
+    - name: Test file capabilities
+      runs: |
+        getcap /usr/bin/nginx-ingress-controller | cut -d ' ' -f2 | grep -q -E '^cap_net_bind_service=ep$'
+        getcap /usr/bin/nginx | cut -d ' ' -f2 | grep -q -E '^cap_net_bind_service=ep$'
