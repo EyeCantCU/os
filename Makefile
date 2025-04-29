@@ -15,10 +15,17 @@ MELANGE ?= $(shell which melange)
 WOLFICTL ?= $(shell which wolfictl)
 KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
+QEMU_KERNEL_REPO := https://apk.cgr.dev/chainguard-private/
 
 ifneq (${MELANGE_RUNNER},)
 	MELANGE_OPTS += --runner ${MELANGE_RUNNER}
 endif
+QEMU_KERNEL_IMAGE ?= kernel/boot/vmlinuz
+ifeq (${MELANGE_RUNNER},qemu)
+	QEMU_KERNEL_DEP = ${QEMU_KERNEL_IMAGE}
+	export QEMU_KERNEL_IMAGE
+endif
+
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
 MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
@@ -65,6 +72,7 @@ cache:
 .PHONY: clean
 clean:
 	rm -rf packages/${ARCH}
+	rm -rf kernel/
 
 .PHONY: clean-cache
 clean-cache:
@@ -84,18 +92,33 @@ ${CACHEDIR}/.libraries_token.txt: cache
 lib-token: ${CACHEDIR}/.libraries_token.txt
 
 .PHONY: fetch-kernel
-fetch-kernel: apk-token
-	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
-		zcat | \
-		grep -a -A1 "^P:linux$$" | \
-		grep "^V:" | \
-		sort -V | \
-		tail -n1 | sed -e "s/^V://"))
-	curl -s -LSo /tmp/linux.apk --user user:$(shell chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/linux-$(KERNEL_PKG).apk
-	mkdir -p /tmp/kernel
-	tar -xf /tmp/linux.apk -C /tmp/kernel/ 2>/dev/null
-	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
-	export MELANGE_OPTS="--runner=qemu"
+fetch-kernel:
+	rm -rf kernel
+	$(MAKE) kernel/boot/vmlinuz
+
+kernel/APKINDEX.tar.gz:
+	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$(ARCH)/APKINDEX.tar.gz)
+
+kernel/APKINDEX: kernel/APKINDEX.tar.gz
+	tar -x -C kernel -f $< $(notdir $@)
+	touch $@
+
+kernel/chosen: kernel/APKINDEX
+	# Extract lines with 'P:linux' and the following line that contains the version
+	# This approach is compatible with both GNU and BSD sed
+	awk '/^P:linux$$/ {print; getline; print}' $< > kernel/available
+	grep '^V:' kernel/available | sed 's/V://' | \
+	  sort -V | tail -n1 > $@.tmp
+	# Sanity check that this looks like an apk version
+	grep -E '^([0-9]+\.)+[0-9]+-r[0-9]+$$' $@.tmp
+	mv $@.tmp $@
+
+kernel/linux.apk: kernel/chosen
+	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$(ARCH)/linux-$(shell cat kernel/chosen).apk)
+
+kernel/boot/vmlinuz: kernel/linux.apk
+	tar -x -C kernel -f $< boot/ 2> /dev/null
+	touch $@
 
 yamls := $(wildcard *.yaml)
 pkgs := $(subst .yaml,,$(yamls))
@@ -106,13 +129,13 @@ $(pkg_targets): package/%:
 	$(info pkgver $(pkgver))
 	$(MAKE) yamlfile=$(yamlfile) pkgname=$* packages/$(ARCH)/$(pkgver).apk
 
-packages/$(ARCH)/%.apk: cache apk-token $(KEY)
+packages/$(ARCH)/%.apk: cache $(KEY) $(QEMU_KERNEL_DEP)
 	mkdir -p ./$(pkgname)/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
 dbg_targets = $(foreach name,$(pkgs),debug/$(name))
-$(dbg_targets): debug/%: cache apk-token $(KEY)
+$(dbg_targets): debug/%: cache $(KEY) $(QEMU_KERNEL_DEP)
 	$(eval yamlfile := $*.yaml)
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
@@ -233,3 +256,10 @@ gcp-auth:
 	fi
 	mkdir -p ${CACHEDIR}/.config/gcloud
 	cp -rf ~/.config/gcloud/* ${CACHEDIR}/.config/gcloud/
+
+authget = tok=$$(chainctl auth token --audience=$(1)) || \
+  { echo "failed token from $(1) for target $@"; exit 1; }; \
+  mkdir -p $$(dirname $(2)) && \
+  echo "auth-download[$(1)] to $(2) from $(3)" && \
+  curl -LS --silent -o $(2).tmp --user "user:$$tok" $(3) && \
+	mv "$(2).tmp" "$(2)"
