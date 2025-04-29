@@ -4,10 +4,28 @@ This repository houses a test harness for Chainguard vms.
 # Build test runners
 
 ```
-make runner/ec2
+make runner/aws
 ```
 
 ## AWS
+Login / setup aws client:
+
+ * download and install [awscli](https://aws.amazon.com/cli/) aws client
+ * login with client
+     ```
+     $ aws configure sso
+     SSO session name (Recommended): my-dev
+     There are 13 AWS accounts available to you
+     > select the 'Dev' account
+     > CLI default client Region [None]: us-west-2
+     > CLI default output format [None]:
+     > CLI profile name [Engineering-xxxxx-xxxxxxxxxxxx]: my-profile
+     ```
+ * set `AWS_DEFAULT_PROFILE` in environment
+     ```
+     $ export AWS_DEFAULT_PROFILE=my-profile
+     ```
+
 Example of using aws.
 
 
@@ -15,7 +33,7 @@ Example of using aws.
 
       ```
       $ aws ec2 describe-images --region=us-west-2 --executable-users=self > out.json
-      $ jq -r '.Images[] | select(.Name? | match("chainguard-base")) | "\(.ImageId) \(.Name)"' > out
+      $ jq -r '.Images[] | select(.Name? | match("chainguard-base")) | "\(.ImageId) \(.Name)"' <out.json > out
       $ sort -k2 out | tail -n 3
       ami-07dc0f4cce9d9a30f chainguard-base-x86_64-20250402-1742-prod-pprbi7od3pt3q
       ami-0ca028505645841eb chainguard-base-x86_64-20250402-2354-prod-pprbi7od3pt3q
@@ -25,7 +43,7 @@ Example of using aws.
  * Setup necessary resources (one time setup)
 
       ```
-      $ ./runner/ec2  setup --region=us-west-2 --tag=smoser-test
+      $ ./runner/aws  setup --region=us-west-2 --tag=smoser-test
       2025/04/03 15:24:49 Created VPC: vpc-07fa6bb7b6a4d1ec2
       2025/04/03 15:24:49 Created Subnet: subnet-0f9ec4068399fa4bf
       2025/04/03 15:24:49 Created Security Group: sg-09e97361cc8c787db
@@ -40,7 +58,7 @@ Example of using aws.
  * Launch an instance
 
      ```
-     $ ./runner/ec2 launch --region=us-west-2 --tag=smoser-dev1 --public-key=./id_ed25519.pub \
+     $ ./runner/aws launch --region=us-west-2 --tag=smoser-dev1 --public-key=./id_ed25519.pub \
          --subnet-id=subnet-0f9ec4068399fa4bf \
          --vpc-id=vpc-07fa6bb7b6a4d1ec2 \
          --security-group-id=sg-09e97361cc8c787db \
@@ -52,7 +70,7 @@ Example of using aws.
  * ssh 
 
      ```
-     $ ./runner/ec2 ssh --region=us-west-2 --tag=smoser-dev1
+     $ ./runner/aws ssh --region=us-west-2 --tag=smoser-dev1
      ip-10-0-0-50:~$ ls         
      ls
      ip-10-0-0-50:~$ ls /     
@@ -65,7 +83,7 @@ Example of using aws.
  * terminate
 
     ```
-    $ ./runner/ec2 terminate --region=us-west-2 --tag=smoser-dev1
+    $ ./runner/aws terminate --region=us-west-2 --tag=smoser-dev1
     2025/04/03 15:30:51 Requested termination for instances: [i-05ce463388c21c51a]
     2025/04/03 15:30:51 Deleted key pair: key-smoser-dev1
     ```
