@@ -30,7 +30,10 @@ func sshCmd() *cobra.Command {
 		Short: "SSH into an Azure VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			publicIP, err := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			if err != nil {
+				log.Fatalf("Could not get public IP for %s: %v", vmTag, err)
+			}
 			log.Printf("Connecting to VM at %s", publicIP)
 
 			if err := sshutils.SSHToInstance(ctx, publicIP, privateKeyPath, sshUser, args); err != nil {
@@ -67,12 +70,15 @@ func runRemoteCmd() *cobra.Command {
 		Short: "run a binary on an Azure VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			publicIP, err := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			if err != nil {
+				log.Fatalf("Could not get public IP for %s: %v", vmTag, err)
+			}
 			log.Printf("Connecting to VM at %s", publicIP)
 
 			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
 
-			err := sshutils.ShoveBinaryFile(ctx, publicIP, privateKeyPath, sshUser, localFilePath, remoteFile)
+			err = sshutils.ShoveBinaryFile(ctx, publicIP, privateKeyPath, sshUser, localFilePath, remoteFile)
 			if err != nil {
 				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
 			}
@@ -112,7 +118,20 @@ func waitForSSHCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
-			publicIP := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			var publicIP string
+			var err error
+			for {
+				publicIP, err = getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+				if err == nil {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					log.Fatalf("Never found public IP for tag %s, last err: %v", vmTag, err)
+				case <-time.After(500 * time.Millisecond):
+					continue
+				}
+			}
 
 			log.Printf("Waiting for hostkey from %s", publicIP)
 			key, err := sshutils.WaitForSSHHostKey(ctx, publicIP, time.Duration(500*time.Millisecond))
@@ -135,15 +154,15 @@ func waitForSSHCmd() *cobra.Command {
 	return cmd
 }
 
-func getIPByTag(ctx context.Context, subscriptionID, resourceGroup, vmTag string) string {
+func getIPByTag(ctx context.Context, subscriptionID, resourceGroup, vmTag string) (string, error) {
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
-		log.Fatalf("failed to get Azure credentials: %v", err)
+		return "", fmt.Errorf("failed to get Azure credentials: %v", err)
 	}
 
 	vmClient, err := armcompute.NewVirtualMachinesClient(subscriptionID, cred, nil)
 	if err != nil {
-		log.Fatalf("failed to create VM client: %v", err)
+		return "", fmt.Errorf("failed to create VM client: %v", err)
 	}
 
 	pager := vmClient.NewListPager(resourceGroup, nil)
@@ -156,7 +175,7 @@ func getIPByTag(ctx context.Context, subscriptionID, resourceGroup, vmTag string
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			log.Fatalf("failed to get VM list: %v", err)
+			return "", fmt.Errorf("failed to get VM list: %v", err)
 		}
 		for _, vm := range page.Value {
 			if vm.Tags != nil {
@@ -173,28 +192,28 @@ func getIPByTag(ctx context.Context, subscriptionID, resourceGroup, vmTag string
 	}
 
 	if vmName == "" {
-		log.Fatalf("no VM found with tag '%s'", vmTag)
+		return "", fmt.Errorf("no VM found with tag '%s'", vmTag)
 	}
 
 	parts := strings.Split(nicID, "/")
 	if len(parts) < 9 {
-		log.Fatalf("unexpected NIC ID format: %s", nicID)
+		return "", fmt.Errorf("unexpected NIC ID format: %s", nicID)
 	}
 	nicRG := parts[4]
 	nicName := parts[8]
 
 	nicClient, err := armnetwork.NewInterfacesClient(subscriptionID, cred, nil)
 	if err != nil {
-		log.Fatalf("failed to create NIC client: %v", err)
+		return "", fmt.Errorf("failed to create NIC client: %v", err)
 	}
 
 	nic, err := nicClient.Get(ctx, nicRG, nicName, nil)
 	if err != nil {
-		log.Fatalf("failed to get NIC: %v", err)
+		return "", fmt.Errorf("failed to get NIC: %v", err)
 	}
 
 	if nic.Properties == nil || nic.Properties.IPConfigurations == nil || len(nic.Properties.IPConfigurations) == 0 {
-		log.Fatalf("NIC has no IP configuration")
+		return "", fmt.Errorf("NIC has no IP configuration")
 	}
 
 	ipConf := nic.Properties.IPConfigurations[0]
@@ -206,18 +225,18 @@ func getIPByTag(ctx context.Context, subscriptionID, resourceGroup, vmTag string
 
 	pubIPClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
 	if err != nil {
-		log.Fatalf("failed to create public IP client: %v", err)
+		return "", fmt.Errorf("failed to create public IP client: %v", err)
 	}
 
 	pubIP, err := pubIPClient.Get(ctx, ipRG, ipName, nil)
 	if err != nil {
-		log.Fatalf("failed to get public IP: %v", err)
+		return "", fmt.Errorf("failed to get public IP: %v", err)
 	}
 
 	if pubIP.Properties == nil || pubIP.Properties.IPAddress == nil {
-		log.Fatalf("no public IP found")
+		return "", fmt.Errorf("no public IP found")
 	}
 
 	publicIP := *pubIP.Properties.IPAddress
-	return publicIP
+	return publicIP, nil
 }
