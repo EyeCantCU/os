@@ -27,6 +27,7 @@ func New() *cobra.Command {
 
 	cmd.AddCommand(
 		createCmd(),
+		consoleLogCmd(),
 		startCmd(),
 		sshCmd(),
 		stopCmd(),
