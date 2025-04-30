@@ -1,6 +1,6 @@
 package:
   name: py3.12-torchaudio-cuda-12.4
-  version: 2.3.1
+  version: 2.6.0
   epoch: 0
   description: Data manipulation and transformation for audio signal processing, powered by PyTorch
   copyright:
@@ -22,6 +22,11 @@ package:
       - py${{vars.py-version}}-pyyaml
       - py${{vars.py-version}}-typing-extensions
       - python-${{vars.py-version}}
+
+vars:
+  cudnn-version: 8
+  gcc-version: 12
+  torch-version: 2.6
 
 var-transforms:
   - from: ${{package.name}}
@@ -55,84 +60,59 @@ environment:
       - py${{vars.py-version}}-installer
       - py${{vars.py-version}}-numpy
       - py${{vars.py-version}}-pip
-      - py${{vars.py-version}}-pytorch-cuda-12.3
       - py${{vars.py-version}}-setuptools
+      - py${{vars.py-version}}-torch-2.6-cuda-12.4
       - py${{vars.py-version}}-wheel
       - python-${{vars.py-version}}
       - python-${{vars.py-version}}-dev
+  environment:
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    LIBRARY_PATH: /usr/local/cuda-${{vars.cuda-version}}/lib64/stubs
+    PATH: "$PATH:/usr/local/cuda-12.4/bin"
+    MAX_JOBS: 16
+    USE_CUDA: 1
+    FORCE_CUDA: 1
+    USE_CUDNN: 1
+    TORCH_CUDA_ARCH_LIST: "8.0"
+    TORCH_NVCC_FLAGS: "-Xfatbin -compress-all"
+    CFLAGS: "$CFLAGS -Wno-error=nonnull -Wno-nonnull"
+    CXXFLAGS: "$CXXFLAGS -Wno-error=nonnull -Wno-nonnull"
+    CUDA_VERSION: "12.4"
+    CUDAToolkit_ROOT: "/usr/local/cuda-12.4"
+    BUILD_VERSION: "${{package.version}}+cu124"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/pytorch/audio
       tag: v${{package.version}}
-      expected-commit: 3edcf69e78a3c9a3077a11159861422440ec7d4a
+      expected-commit: d8831425203385077a03c1d92cfbbe3bf2106008
 
   - runs: |
-      export PATH="$PATH:/usr/local/cuda-12.4/bin"
-
-      export USE_CUDA=1
-      export FORCE_CUDA=1
-      export USE_CUDNN=1
-      export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
-      export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
-
-      export CFLAGS="$CFLAGS -Wno-error=nonnull -Wno-nonnull"
-      export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull"
-
-      export CUDA_VERSION="12.4"
-      export CUDAToolkit_ROOT="/usr/local/cuda-12.4"
-
-      export BUILD_VERSION="${{package.version}}+cu124"
-
-      /usr/share/pytorch/.venv/bin/pip install -r requirements.txt
-
-      /usr/share/pytorch/.venv/bin/python setup.py bdist_wheel
-      /usr/share/pytorch/.venv/bin/pip install dist/*.whl
-
-  - runs: |
-      mkdir -p ${{targets.destdir}}/usr/share/torchaudio
-      mv /usr/share/pytorch/.venv ${{targets.destdir}}/usr/share/torchaudio/
-
-      # edit the venv paths
-      sed -i "s|/usr/share/pytorch|/usr/share/torchaudio|g" ${{targets.destdir}}/usr/share/torchaudio/.venv/bin/*
-
-      # allow site-packages
-      sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/usr/share/torchaudio/.venv/pyvenv.cfg
-
-  - uses: strip
-
-subpackages:
-  - name: py3.12-wheels-torchaudio-cuda-12.4
-    pipeline:
-      - runs: |
-          mkdir -p ${{targets.contextdir}}/usr/share/wheels
-          cp dist/*.whl ${{targets.contextdir}}/usr/share/wheels
+      python setup.py bdist_wheel
+      python${{vars.py-version}} -m pip install --verbose \
+        --no-index --no-build-isolation --no-deps \
+        --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/*.whl
+      sitepkgd=$(python${{vars.py-version}} -c 'import site; print(site.getsitepackages()[0])')
+      python${{vars.py-version}} -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
 
 update:
   enabled: true
   github:
     identifier: pytorch/audio
     strip-prefix: v
-    tag-filter: v2.3.
+    tag-filter: v2.6.
 
 test:
-  environment:
-    contents:
-      packages:
-        - build-base
-        - bash
-        - libgomp
-        - openmp-17-dev
-        - py3.12-pytorch-cuda-12.4
   pipeline:
+    - uses: python/import
+      with:
+        python: python${{vars.py-version}}
+        import: torch
+    - uses: python/import
+      with:
+        python: python${{vars.py-version}}
+        import: torchaudio
     - runs: |
-        export PATH=/usr/share/torchaudio/.venv/bin:$PATH
-        if ! python -c "import torchaudio" > output.out 2>&1; then
-            echo "Failed to import torchaudio"
-            cat output.out
-            exit 1
-        else
-            echo "torchaudio imported successfully"
-            exit 0
-        fi
+        python${{vars.py-version}} ./quickstart.py > output.out 2>&1
+        grep -E "ERROR|None" output.out && exit 1
