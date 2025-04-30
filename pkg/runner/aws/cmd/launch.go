@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 
+	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/aws/util"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -19,10 +21,13 @@ func launchCmd() *cobra.Command {
 		instanceType    string
 		publicKeyPath   string
 		tagName         string
+		launchGroupName string
 		vpcID           string
 		subnetID        string
 		securityGroupID string
 	)
+
+	launchGroup := util.LaunchGroup{}
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -34,6 +39,21 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("failed to load AWS config: %v", err)
 			}
 			client := ec2.NewFromConfig(cfg)
+
+			if launchGroupName != "" {
+				launchGroup, err = util.GetLaunchGroupByTag(ctx, client, launchGroupName)
+				if err != nil {
+					log.Fatalf("Error retrieving launch-group '%s': %v", launchGroupName, err)
+				}
+			} else if vpcID != "" {
+				launchGroup.SecurityGroupID = securityGroupID
+				launchGroup.VpcID = vpcID
+				launchGroup.SubnetID = subnetID
+			} else if val := os.Getenv("VMT_LAUNCH_GROUP"); val != "" {
+				launchGroup, err = util.GetLaunchGroupByTag(ctx, client, val)
+			} else {
+				log.Fatalf("Must provide launch group info via --launch-group, (--security-group and --vpc-id), or environment VMT_LAUNCH_GROUP")
+			}
 
 			pubKey, err := ioutil.ReadFile(publicKeyPath)
 			if err != nil {
@@ -57,7 +77,7 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("failed to import key pair: %v", err)
 			}
 
-			if subnetID == "" {
+			if launchGroup.SubnetID == "" {
 				subnets, err := client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
 					Filters: []ec2types.Filter{
 						{
@@ -72,7 +92,7 @@ func launchCmd() *cobra.Command {
 				if len(subnets.Subnets) == 0 {
 					log.Fatalf("no subnets found in VPC %s", vpcID)
 				}
-				subnetID = *subnets.Subnets[0].SubnetId
+				launchGroup.SubnetID = *subnets.Subnets[0].SubnetId
 				log.Printf("Selected subnet %s from VPC %s", subnetID, vpcID)
 			}
 
@@ -93,9 +113,9 @@ func launchCmd() *cobra.Command {
 				NetworkInterfaces: []ec2types.InstanceNetworkInterfaceSpecification{
 					{
 						DeviceIndex:              aws.Int32(0),
-						SubnetId:                 aws.String(subnetID),
+						SubnetId:                 aws.String(launchGroup.SubnetID),
 						AssociatePublicIpAddress: aws.Bool(true),
-						Groups:                   []string{securityGroupID},
+						Groups:                   []string{launchGroup.SecurityGroupID},
 					},
 				},
 			})
@@ -115,15 +135,13 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tagName, "tag", "", "Tag to apply to instance and key pair (required)")
 	cmd.Flags().StringVar(&vpcID, "vpc-id", "", "VPC ID to launch the instance into (required)")
 	cmd.Flags().StringVar(&subnetID, "subnet-id", "", "Subnet ID to use (optional, will auto-select one from the VPC)")
-	cmd.Flags().StringVar(&securityGroupID, "security-group-id", "", "Security group ID for the instance (required)")
-	cmd.MarkFlagRequired("security-group-id")
-	cmd.MarkFlagRequired("vpc-id")
+	cmd.Flags().StringVar(&securityGroupID, "security-group-id", "", "Security group ID for the instance")
+	cmd.Flags().StringVar(&launchGroupName, "launch-group", "", "the tag created to setup")
+	cmd.MarkFlagsRequiredTogether("vpc-id", "security-group-id")
+	cmd.MarkFlagsMutuallyExclusive("launch-group", "vpc-id")
 	cmd.MarkFlagRequired("ami-id")
 	cmd.MarkFlagRequired("region")
 	cmd.MarkFlagRequired("tag")
 
 	return cmd
-}
-
-func init() {
 }

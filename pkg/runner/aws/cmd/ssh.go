@@ -126,9 +126,8 @@ func getIPByTag(ctx context.Context, region string, tagName string) string {
 
 func waitForSSHCmd() *cobra.Command {
 	var (
-		privateKeyPath string
-		tagName        string
-		region         string
+		tagName string
+		region  string
 	)
 
 	cmd := &cobra.Command{
@@ -149,7 +148,6 @@ func waitForSSHCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name of the instance (required)")
 	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
-	cmd.Flags().StringVar(&privateKeyPath, "private-key", "id_ed25519", "Path to private SSH key")
 	cmd.MarkFlagRequired("tag")
 	cmd.MarkFlagRequired("region")
 
