@@ -3,7 +3,6 @@ package boot
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -15,30 +14,9 @@ var (
 	systemctl  = "systemctl"
 )
 
-// findVMStartTime reads system uptime from /proc/uptime and computes the instance start time.
-func findVMStartTime(ctx context.Context) (time.Time, error) {
-	uptimeData, err := os.ReadFile(procUptime)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to read %s: %w", procUptime, err)
-	}
-
-	fields := strings.Fields(string(uptimeData))
-	if len(fields) < 1 {
-		return time.Time{}, fmt.Errorf("unexpected format in %s", procUptime)
-	}
-
-	uptimeSeconds, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse uptime value %q: %w", fields[0], err)
-	}
-
-	instanceStartTime := time.Now().Add(-time.Duration(uptimeSeconds) * time.Second)
-	return instanceStartTime, nil
-}
-
-func systemctlShow(service string) (map[string]string, error) {
+func systemctlShow(ctx context.Context, service string) (map[string]string, error) {
 	rmap := map[string]string{}
-	cmd := exec.Command(systemctl, "show", service)
+	cmd := exec.CommandContext(ctx, systemctl, "show", service)
 	output, err := cmd.Output()
 	if err != nil {
 		return rmap, err
@@ -56,31 +34,27 @@ func systemctlShow(service string) (map[string]string, error) {
 	return rmap, nil
 }
 
-func getMonotonicProperty(showInfo map[string]string, prop string) (time.Duration, error) {
-	errDuration := time.Duration(-1 * time.Second)
-	strval, ok := showInfo[prop]
-	if !ok {
-		return errDuration, fmt.Errorf("no %s field in output of systemctl show %s", prop, showInfo)
-	}
-
-	n, err := strconv.ParseInt(strval, 10, 64)
+func monotonicToDuration(val string) (time.Duration, error) {
+	n, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
-		return errDuration, fmt.Errorf("failed to parse integer from %s: %v", strval, err)
+		return time.Duration(-1), fmt.Errorf("failed to parse integer from monotonic string %s: %v", val, err)
 	}
 
 	return time.Duration(n) * time.Microsecond, nil
 }
 
-func findServiceStartMonotonic(ctx context.Context, service string) (time.Duration, error) {
+func getServiceStartMonotonic(ctx context.Context, service string) (time.Duration, error) {
+	var info map[string]string
+	var err error
+
 	for {
-		cmd := exec.CommandContext(ctx, systemctl, "show", "--property=ActiveState", service)
-		output, err := cmd.Output()
+		info, err = systemctlShow(ctx, service)
 		if err != nil {
 			return -1, fmt.Errorf("failed to check service %q state: %w", service, err)
 		}
 
-		if strings.Contains(string(output), "ActiveState=active") {
-			break
+		if val, ok := info["ActiveEnterTimestampMonotonic"]; ok {
+			return monotonicToDuration(val)
 		}
 
 		select {
@@ -90,11 +64,4 @@ func findServiceStartMonotonic(ctx context.Context, service string) (time.Durati
 			return -1, fmt.Errorf("context expired before service %q became active: %w", service, ctx.Err())
 		}
 	}
-
-	info, err := systemctlShow(service)
-	if err != nil {
-		return -1, err
-	}
-
-	return getMonotonicProperty(info, "ActiveEnterTimestampMonotonic")
 }

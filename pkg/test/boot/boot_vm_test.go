@@ -13,7 +13,7 @@ import (
 
 func TestSSHStartTime(t *testing.T) {
 	ctx := vmtest.Context(t)
-	st, err := findServiceStartMonotonic(ctx, "sshd.service")
+	st, err := getServiceStartMonotonic(ctx, "sshd.service")
 	if err != nil {
 		t.Errorf("failed to get monotonic: %v\n", err)
 	}
