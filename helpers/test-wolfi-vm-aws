@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2162
+# To be sourced by test-wolfi-vm
+
+bad_aws_usage() { aws_usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+
+aws_usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] aws out-dir -- [ aws-options ]
+
+    aws options:
+        --launch-group                      the tag to find vpc/subnet...
+                                            as passed to 'aws setup --tag='
+
+        --awspub-inputs DIR or FILE         directory of files with
+                                            'awspub create' output
+
+        --instance-type  TYPE               size to test. default to t3.medium.
+
+awspub input is json format. An example is:
+
+    $ cat ./my-inputs/aws-base-x86_64.json
+    {
+       "images": {
+           "chainguard-base-x86_64-20250501-1545-prod-pprbi7od3pt3q": {
+               "us-west-2": "ami-03e36b33dc4d57b34"
+           }
+       },
+       "images-by-group": {}
+    }
+EOF
+}
+
+cleanup_aws() {
+    cleanup
+}
+
+dump_awspubin() {
+    local f="$1" out="" arch=""
+    out=$(jq -r '.images | to_entries[] | . as $entry | $entry.value |
+        to_entries[] | "\(.key) \(.value) \($entry.key)"' < "$f")
+    # shellcheck disable=SC2030
+    echo "$out" |
+        while read region ami name ; do
+            # 'name' looks like chainguard-docker-x86_64-20250501-1545
+            case "$name" in
+                *-arm64-*)
+                    arch=aarch64
+                    family=${name%-arm64-*}
+                    ;;
+                *-x86_64-*)
+                    arch=x86_64
+                    family=${name%-x86_64-*}
+                    ;;
+                *) stderr "could not find arch in $name"; return 1;;
+            esac
+            echo "$region $ami $arch $family ec2-user"
+        done
+}
+
+parse_awspubins() {
+    local i="" f="" n=0
+    for i in "$@"; do
+        if [ -d "$i" ]; then
+            for f in "$i"/*.json; do
+                dump_awspubin "$f" || { stderr "failed reading $f in $i"; return 1; }
+                n=$((n+1))
+            done
+        elif [ -f "$i" ]; then
+            dump_awspubin "$i" || { stderr "failed reading $f"; return 1; }
+            n=$((n+1))
+        else
+            stderr "$f: not a file"
+            return 1
+        fi
+    done
+    [ $n -ne 0 ] || { stderr "did not process any files"; return 1; }
+    return 0
+}
+
+test_aws() {
+    # shellcheck disable=SC2034
+    local short_opts="h"
+    local long_opts="help,awspub-inputs:,instance-type:,launch-group:"
+    local getopt_out=""
+    getopt_out=$(getopt --options "${short_opts}" \
+        --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_aws_usage; return; }
+
+    local cur="" next=""
+    local awspubin="" insttype="t3.medium" launchgroup=""
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            --help) aws_usage ; exit 0;;
+            --awspub-inputs) awspubin="$next"; shift;;
+            --instance-type) insttype="$next"; shift;;
+            --launch-group) launchgroup="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ $# -eq 1 ] || { bad_aws_usage "confused by $# args. expected 1"; return 1; }
+
+    [ -n "$launchgroup" ] || { bad_aws_usage "--launch-group required"; return 1; }
+    [ -n "$awspubin" ] || { bad_aws_usage "--awspub-inputs required"; return 1; }
+
+    local outd="$1"
+    shift
+
+    trap cleanup_aws EXIT
+
+    TEMP_D=$(mktemp -d) || return
+    local runner="$TOP_D/runner/aws"
+    rund="$TEMP_D/run"
+    mkdir "$rund" || return
+
+    parse_awspubins "$awspubin" > "$rund/inputs" ||
+        { stderr "failed parsing awspub inputs in $awspubin"; return 1; }
+
+    local n=""
+    n=$(wc -l < "$rund/inputs")
+    log "testing $n images"
+
+    key="$rund/id_ed25519"
+    rq ssh-keygen -t ed25519 -N '' -f "$key" ||
+        { stderr "failed creating ssh key"; return 1; }
+
+    local region="" ami="" family="" arch="" fails="" tagid="" testuser=""
+    while read region ami arch family testuser; do
+        tagid="vmt-$family-$RANDOM"
+        vr aws_testimage "$launchgroup" "$outd/$arch/$family" "$tagid" \
+            "$insttype" "$key" "$region" "$ami" "$arch" "$testuser" "$family" ||
+            { fails="$fails $region/$ami"; return 1; }
+    done < "$rund/inputs"
+
+    if [ -n "$fails" ]; then
+        echo "FAIL: ${fails# }"
+        return 1
+    fi
+    return 0
+}
+
+aws_testimage() {
+    local launchgroup="$1" voutd="$2" vmtag="$3" insttype="$4"
+    local key="$5" region="$6" ami="$7" arch="$8" testuser="$9" vmname="${10}"
+    local tfile="" tname="" vfails="" fails=""
+    local pubkey="$key.pub"
+
+
+    # FIXME: instance-type is per-arch
+    case "$arch" in
+        aarch64)
+            case "$insttype" in
+                t3.medium) insttype="t4g.medium";;
+            esac
+            ;;
+    esac
+
+    rq mkdir -p "$voutd" || { stderr "failed creating $voutd"; return 1; }
+    vr "$runner" launch \
+        --launch-group="$launchgroup" --region="$region" --instance-type="$insttype" \
+        --public-key="$pubkey" --tag="$vmtag" --ami-id="$ami" || {
+            log "finished $arch-$vmname FAIL - launch"
+            return 1
+        }
+
+    vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
+        --region="$region" --tag="$vmtag" || {
+            stderr "failed runner wait-for-ssh $arch-$vmname"
+            vfails="$vfails $arch-$vmname/wait-for-ssh"
+        }
+
+    if [ "$vfails" = "" ]; then
+        log "started testing $arch/$vmname"
+        # Run tests, collect metrics
+        for tfile in "${TOP_D}/test/$arch"/*; do
+            tname=${tfile##*/}
+            vrl "$voutd/test-$tname" "$runner" run-remote \
+                --region="$region" --tag="$vmtag" --private-key="$key" \
+                --user="$testuser" --file="$tfile" -- \
+                -test.v -metric-tags "arch:$arch,$METRIC_TAGS" ||
+                   vfails="$vfails $arch-$vmname/test-$tname"
+
+            "$runner" ssh \
+                --region="$region" --tag="$vmtag" --private-key="$key" \
+                --user="$testuser" "cat $METD/$tname" \
+                   > "$voutd/$tname-metrics.json" ||
+                   vfails="$vfails $arch-$vmname/$tname-metrics"
+        done
+    fi
+
+    # Terminate VM
+    vr "$runner" terminate --region="$region" --tag="$vmtag" || {
+        vfails="$vfails $arch-$vmname/$tname-terminate"
+        log "termination failed for $arch/$vmname"
+    }
+
+    # FIXME: console logs sometimes don't show up for quite some time.
+    # 4 minutes is the number that sticks in memory.
+    vr "$runner" console-log --region="$region" --tag="$vmtag" > "$voutd/console.log" ||
+        vfails="$vfails $arch-$vmname/$tname-console-log"
+
+    vfails=${vfails# }
+    if [ -z "$vfails" ]; then
+        log "finished $arch/$vmname PASS"
+        return 0
+    fi
+
+    log "finished $arch/$vmname FAIL - $vfails"
+    return 1
+}

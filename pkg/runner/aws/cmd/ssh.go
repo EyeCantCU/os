@@ -128,7 +128,6 @@ func getIPByTag(ctx context.Context, region string, tagName string) string {
 	out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		Filters: []ec2types.Filter{
 			{Name: aws.String("tag:Name"), Values: []string{tagName}},
-			{Name: aws.String("instance-state-name"), Values: []string{"running"}},
 		},
 	})
 	if err != nil {
