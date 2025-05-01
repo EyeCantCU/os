@@ -1,19 +1,16 @@
 package cmd
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/azutil"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +29,11 @@ func sshCmd() *cobra.Command {
 		Short: "SSH into an Azure VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP, err := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			if err != nil {
+				log.Fatalf("failed to get Azure credentials: %v", err)
+			}
+			publicIP, err := azutil.GetIPByTag(ctx, cred, subscriptionID, resourceGroup, vmTag)
 			if err != nil {
 				log.Fatalf("Could not get public IP for %s: %v", vmTag, err)
 			}
@@ -84,7 +85,11 @@ func runRemoteCmd() *cobra.Command {
 		Short: "run a binary on an Azure VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP, err := getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			if err != nil {
+				log.Fatalf("failed to get Azure credentials: %v", err)
+			}
+			publicIP, err := azutil.GetIPByTag(ctx, cred, subscriptionID, resourceGroup, vmTag)
 			if err != nil {
 				log.Fatalf("Could not get public IP for %s: %v", vmTag, err)
 			}
@@ -143,10 +148,13 @@ func waitForSSHCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
+			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			if err != nil {
+				log.Fatalf("failed to get Azure credentials: %v", err)
+			}
 			var publicIP string
-			var err error
 			for {
-				publicIP, err = getIPByTag(ctx, subscriptionID, resourceGroup, vmTag)
+				publicIP, err = azutil.GetIPByTag(ctx, cred, subscriptionID, resourceGroup, vmTag)
 				if err == nil {
 					break
 				}
@@ -177,91 +185,4 @@ func waitForSSHCmd() *cobra.Command {
 	cmd.MarkFlagRequired("subscription")
 
 	return cmd
-}
-
-func getIPByTag(ctx context.Context, subscriptionID, resourceGroup, vmTag string) (string, error) {
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to get Azure credentials: %v", err)
-	}
-
-	vmClient, err := armcompute.NewVirtualMachinesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create VM client: %v", err)
-	}
-
-	pager := vmClient.NewListPager(resourceGroup, nil)
-
-	var (
-		vmName string
-		nicID  string
-	)
-
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return "", fmt.Errorf("failed to get VM list: %v", err)
-		}
-		for _, vm := range page.Value {
-			if vm.Tags != nil {
-				if _, ok := vm.Tags[vmTag]; ok {
-					vmName = *vm.Name
-					nicID = *vm.Properties.NetworkProfile.NetworkInterfaces[0].ID
-					break
-				}
-			}
-		}
-		if vmName != "" {
-			break
-		}
-	}
-
-	if vmName == "" {
-		return "", fmt.Errorf("no VM found with tag '%s'", vmTag)
-	}
-
-	parts := strings.Split(nicID, "/")
-	if len(parts) < 9 {
-		return "", fmt.Errorf("unexpected NIC ID format: %s", nicID)
-	}
-	nicRG := parts[4]
-	nicName := parts[8]
-
-	nicClient, err := armnetwork.NewInterfacesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create NIC client: %v", err)
-	}
-
-	nic, err := nicClient.Get(ctx, nicRG, nicName, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to get NIC: %v", err)
-	}
-
-	if nic.Properties == nil || nic.Properties.IPConfigurations == nil || len(nic.Properties.IPConfigurations) == 0 {
-		return "", fmt.Errorf("NIC has no IP configuration")
-	}
-
-	ipConf := nic.Properties.IPConfigurations[0]
-	publicIPID := *ipConf.Properties.PublicIPAddress.ID
-
-	ipParts := strings.Split(publicIPID, "/")
-	ipRG := ipParts[4]
-	ipName := ipParts[8]
-
-	pubIPClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create public IP client: %v", err)
-	}
-
-	pubIP, err := pubIPClient.Get(ctx, ipRG, ipName, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to get public IP: %v", err)
-	}
-
-	if pubIP.Properties == nil || pubIP.Properties.IPAddress == nil {
-		return "", fmt.Errorf("no public IP found")
-	}
-
-	publicIP := *pubIP.Properties.IPAddress
-	return publicIP, nil
 }
