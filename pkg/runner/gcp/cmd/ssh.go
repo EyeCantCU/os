@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	compute "cloud.google.com/go/compute/apiv1"
@@ -27,7 +30,10 @@ func sshCmd() *cobra.Command {
 		Short: "SSH into a GCE VM by name",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP := getInstanceExternalIP(ctx, projectID, zone, instanceName)
+			publicIP, err := getInstanceExternalIP(ctx, projectID, zone, instanceName)
+			if err != nil {
+				log.Fatalf("Could not get public IP for %s: %v", instanceName, err)
+			}
 			log.Printf("Connecting to VM at %s", publicIP)
 
 			if knownHosts == "" {
@@ -76,7 +82,10 @@ func runRemoteCmd() *cobra.Command {
 		Short: "run a binary on a GCE VM by name",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP := getInstanceExternalIP(ctx, projectID, zone, instanceName)
+			publicIP, err := getInstanceExternalIP(ctx, projectID, zone, instanceName)
+			if err != nil {
+				log.Fatalf("Could not get public IP for %s: %v", instanceName, err)
+			}
 			log.Printf("Connecting to VM at %s", publicIP)
 
 			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
@@ -91,7 +100,7 @@ func runRemoteCmd() *cobra.Command {
 				defer os.Remove(knownHosts)
 			}
 
-			err := sshutils.ShoveBinaryFile(ctx, publicIP, privateKeyPath, sshUser, knownHosts, localFilePath, remoteFile)
+			err = sshutils.ShoveBinaryFile(ctx, publicIP, privateKeyPath, sshUser, knownHosts, localFilePath, remoteFile)
 			if err != nil {
 				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
 			}
@@ -119,12 +128,60 @@ func runRemoteCmd() *cobra.Command {
 	return cmd
 }
 
+func waitForSSHCmd() *cobra.Command {
+	var (
+		instanceName string
+		projectID    string
+		zone         string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "wait-for-ssh",
+		Short: "wait for ssh to be ready",
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx := cmd.Context()
+
+			var publicIP string
+			var err error
+			for {
+				publicIP, err = getInstanceExternalIP(ctx, projectID, zone, instanceName)
+				if err == nil {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					log.Fatalf("Never found public IP for instance %s, last err: %v", instanceName, err)
+				case <-time.After(500 * time.Millisecond):
+					continue
+				}
+			}
+
+			log.Printf("Waiting for hostkey from %s", publicIP)
+			key, err := sshutils.WaitForSSHHostKey(ctx, publicIP, time.Duration(500*time.Millisecond))
+
+			if err != nil {
+				log.Fatalf("Wait for hostkey from %s failed: %v", publicIP, err)
+			}
+
+			fmt.Printf("%s %s %s\n", publicIP, key.Type(), base64.StdEncoding.EncodeToString(key.Marshal()))
+		},
+	}
+
+	cmd.Flags().StringVar(&instanceName, "name", "", "Instance name (required)")
+	cmd.Flags().StringVar(&projectID, "project", "", "Project ID (required)")
+	cmd.Flags().StringVar(&zone, "zone", "us-central1-a", "GCE zone for resources (required)")
+	cmd.MarkFlagRequired("name")
+	cmd.MarkFlagRequired("project")
+
+	return cmd
+}
+
 // getInstanceExternalIP retrieves the external IP address of the created instance.
-func getInstanceExternalIP(ctx context.Context, projectID, zone, instanceName string) string {
+func getInstanceExternalIP(ctx context.Context, projectID, zone, instanceName string) (string, error) {
 	var publicIP string
 	instancesClient, err := compute.NewInstancesRESTClient(ctx)
 	if err != nil {
-		log.Fatalf("Failed to create compute instances client: %v", err)
+		return "", fmt.Errorf("failed to create compute instances client: %v", err)
 	}
 	defer instancesClient.Close()
 
@@ -135,18 +192,17 @@ func getInstanceExternalIP(ctx context.Context, projectID, zone, instanceName st
 	}
 	instance, err := instancesClient.Get(ctx, req)
 	if err != nil {
-		log.Fatalf("could not get instance details: %v", err)
+		return "", fmt.Errorf("could not get instance details: %v", err)
 	}
 	// Extract the external IP from the access configuration.
 	for _, ni := range instance.GetNetworkInterfaces() {
 		for _, ac := range ni.GetAccessConfigs() {
 			if ac.NatIP != nil {
 				publicIP = ac.GetNatIP() // This is IPv4 only.
+			} else {
+				return "", fmt.Errorf("no external IP found for instance %s", instanceName)
 			}
 		}
 	}
-	if err != nil {
-		log.Fatalf("no external IP found for instance %s", instanceName)
-	}
-	return publicIP
+	return publicIP, nil
 }

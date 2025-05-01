@@ -44,10 +44,12 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&timeoutStr, "timeout", "", "Overall operation timeout (optional)")
+	rootCmd.AddCommand(consoleLogCmd())
 	rootCmd.AddCommand(launchCmd())
 	rootCmd.AddCommand(runRemoteCmd())
 	rootCmd.AddCommand(setupCmd())
 	rootCmd.AddCommand(sshCmd())
 	rootCmd.AddCommand(teardownCmd())
 	rootCmd.AddCommand(terminateCmd())
+	rootCmd.AddCommand(waitForSSHCmd())
 }
