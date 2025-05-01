@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -29,7 +28,7 @@ func EphemeralKnownHosts() (string, error) {
 		return "", fmt.Errorf("failed to make ephemeral known hosts file: %w", err)
 	}
 	defer tmpFile.Close()
-	return filepath.Join(os.TempDir(), tmpFile.Name()), nil
+	return tmpFile.Name(), nil
 }
 
 // TOFUHostKeyCallback implements trust on first use, storing known host keys
