@@ -143,12 +143,12 @@ output/awspub.mapping:
 	echo "BUILD_TIMESTAMP: $(BUILD_TIMESTAMP)" >> $@
 
 prodawspub-%: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
-	o=$(ARCH_OUT_D)/awspub-create/$*.json && echo o=$o && \
-	  mkdir -p $$(dirname "$$o") &&
+	o=$(ARCH_OUT_D)/awspub/create/$*.json && echo o=$o && \
+	  mkdir -p $$(dirname "$$o") && \
 	  awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml > $$o && \
 	  cat "$$o"
-	o=$(ARCH_OUT_D)/awspub-publish/$*.json && echo o=$o && \
-	  mkdir -p $$(dirname "$$o") &&
+	o=$(ARCH_OUT_D)/awspub/publish/$*.json && echo o=$o && \
+	  mkdir -p $$(dirname "$$o") && \
 	  awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml > $$o && \
 	  cat "$$o"
 
