@@ -161,6 +161,11 @@ func launchCmd() *cobra.Command {
 							},
 						},
 					},
+					DiagnosticsProfile: &armcompute.DiagnosticsProfile{
+						BootDiagnostics: &armcompute.BootDiagnostics{
+							Enabled: utils.ToPtr(true),
+						},
+					},
 				},
 			}, nil)
 			if err != nil {
