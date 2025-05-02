@@ -12,7 +12,7 @@ import (
 )
 
 func setupCmd() *cobra.Command {
-	var region, tagName string
+	var region, azone, tagName string
 
 	cmd := &cobra.Command{
 		Use:   "setup",
@@ -46,8 +46,9 @@ func setupCmd() *cobra.Command {
 
 			// Create Subnet
 			subnetOut, err := client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
-				VpcId:     aws.String(vpcID),
-				CidrBlock: aws.String("10.0.0.0/24"),
+				VpcId:            aws.String(vpcID),
+				CidrBlock:        aws.String("10.0.0.0/24"),
+				AvailabilityZone: &azone,
 				TagSpecifications: []ec2types.TagSpecification{
 					{
 						ResourceType: ec2types.ResourceTypeSubnet,
@@ -181,6 +182,7 @@ func setupCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
+	cmd.Flags().StringVar(&azone, "availability-zone", "", "availability-zone")
 	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name to apply to resources (required)")
 	cmd.MarkFlagRequired("region")
 	cmd.MarkFlagRequired("tag")
