@@ -138,7 +138,7 @@ func getIPByTag(ctx context.Context, region string, tagName string) string {
 			tagName, region, inst.State.Name)
 	}
 
-	if *inst.PublicIpAddress == "" {
+	if inst.PublicIpAddress == nil {
 		log.Fatalf("Instance %s (tag %s) in region %s with state %s had no public IP adddress",
 			*inst.InstanceId, tagName, region, inst.State.Name)
 	}
