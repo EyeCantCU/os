@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/aws/util"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
 )
 
@@ -30,25 +30,15 @@ func terminateCmd() *cobra.Command {
 			}
 			client := ec2.NewFromConfig(cfg)
 
-			// Describe instances with tag
-			desc, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-				Filters: []ec2types.Filter{
-					{Name: aws.String("tag:Name"), Values: []string{tagName}},
-					{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "shutting-down", "terminated", "stopping", "stopped"}},
-
-					//   - instance-state-name - The state of the instance ( pending | running |
-					//   shutting-down | terminated | stopping | stopped ).
-				},
-			})
-			if err != nil {
-				log.Fatalf("describe instances failed: %v", err)
-			}
+			instances, err := util.GetInstancesByTag(ctx, client, tagName)
 
 			var instanceIDs []string
-			for _, r := range desc.Reservations {
-				for _, inst := range r.Instances {
-					instanceIDs = append(instanceIDs, *inst.InstanceId)
+			for _, inst := range instances {
+				if inst.State.Name == types.InstanceStateNameTerminated {
+					log.Printf("skipping instance %s [already terminated]", *inst.InstanceId)
+					continue
 				}
+				instanceIDs = append(instanceIDs, *inst.InstanceId)
 			}
 
 			if len(instanceIDs) > 0 {
