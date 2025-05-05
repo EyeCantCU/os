@@ -34,7 +34,10 @@ func terminateCmd() *cobra.Command {
 			desc, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 				Filters: []ec2types.Filter{
 					{Name: aws.String("tag:Name"), Values: []string{tagName}},
-					{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
+					{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "shutting-down", "terminated", "stopping", "stopped"}},
+
+					//   - instance-state-name - The state of the instance ( pending | running |
+					//   shutting-down | terminated | stopping | stopped ).
 				},
 			})
 			if err != nil {

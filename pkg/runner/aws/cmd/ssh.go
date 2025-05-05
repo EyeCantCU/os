@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
-	"github.com/aws/aws-sdk-go-v2/aws"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/aws/util"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
 )
 
@@ -125,27 +125,27 @@ func getIPByTag(ctx context.Context, region string, tagName string) string {
 		log.Fatalf("failed to load AWS config: %v", err)
 	}
 	client := ec2.NewFromConfig(cfg)
-	out, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-		Filters: []ec2types.Filter{
-			{Name: aws.String("tag:Name"), Values: []string{tagName}},
-		},
-	})
+
+	inst, err := util.GetInstanceByTag(ctx, client, tagName)
 	if err != nil {
-		log.Fatalf("describe failed: %v", err)
+		log.Fatalf("failed to get instance by tag: %v", err)
 	}
-	var publicIP string
-	for _, r := range out.Reservations {
-		for _, inst := range r.Instances {
-			if inst.PublicIpAddress != nil {
-				publicIP = *inst.PublicIpAddress
-				break
-			}
-		}
+
+	switch inst.State.Name {
+	case types.InstanceStateNamePending, types.InstanceStateNameRunning:
+	default:
+		log.Fatalf("Instance %s (tag %s) in %s is in state %s", *inst.InstanceId,
+			tagName, region, inst.State.Name)
 	}
-	if publicIP == "" {
-		log.Fatalf("No running instance found with tag %s", tagName)
+
+	if *inst.PublicIpAddress == "" {
+		log.Fatalf("Instance %s (tag %s) in region %s with state %s had no public IP adddress",
+			*inst.InstanceId, tagName, region, inst.State.Name)
 	}
-	return publicIP
+
+	log.Printf("Tag %s in region %s is instance %s. state=%s ip=%s",
+		tagName, region, *inst.InstanceId, inst.State.Name, *inst.PublicIpAddress)
+	return *inst.PublicIpAddress
 }
 
 func waitForSSHCmd() *cobra.Command {

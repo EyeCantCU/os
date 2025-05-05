@@ -28,16 +28,11 @@ func consoleLogCmd() *cobra.Command {
 				log.Fatalf("failed to load AWS config: %v", err)
 			}
 
-			instances, err := util.GetInstanceByTag(ctx, client, tagName)
+			inst, err := util.GetInstanceByTag(ctx, client, tagName)
 			if err != nil {
-				log.Fatalf("Failed to get  instances with tag %s: %v", tagName, err)
+				log.Fatalf("Failed to get instances in %s with tag %s: %v", region, tagName, err)
 			}
 
-			if len(instances) != 1 {
-				log.Fatalf("Got %d instances with tag %s", len(instances), tagName)
-			}
-
-			inst := instances[0]
 			input := &ec2.GetConsoleOutputInput{
 				InstanceId: inst.InstanceId,
 			}
