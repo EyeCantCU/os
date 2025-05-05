@@ -126,25 +126,29 @@ func getIPByTag(ctx context.Context, region string, tagName string) string {
 	}
 	client := ec2.NewFromConfig(cfg)
 
-	inst, err := util.GetInstanceByTag(ctx, client, tagName)
-	if err != nil {
-		log.Fatalf("failed to get instance by tag: %v", err)
+	var inst types.Instance
+
+	for {
+		inst, err = util.GetInstanceByTag(ctx, client, tagName)
+		if err != nil {
+			log.Fatalf("failed to get instance by tag: %v", err)
+		}
+
+		if inst.PublicIpAddress != nil {
+			break
+		}
+
+		if inst.State.Name != types.InstanceStateNamePending {
+			log.Fatalf("Instance %s in state %s had no public IP", *inst.InstanceId, inst.State.Name)
+		}
+
+		select {
+		case <-ctx.Done():
+			log.Fatalf("context ended: %v", ctx.Err())
+		case <-time.After(time.Millisecond * 500):
+		}
 	}
 
-	switch inst.State.Name {
-	case types.InstanceStateNamePending, types.InstanceStateNameRunning:
-	default:
-		log.Fatalf("Instance %s (tag %s) in %s is in state %s", *inst.InstanceId,
-			tagName, region, inst.State.Name)
-	}
-
-	if inst.PublicIpAddress == nil {
-		log.Fatalf("Instance %s (tag %s) in region %s with state %s had no public IP adddress",
-			*inst.InstanceId, tagName, region, inst.State.Name)
-	}
-
-	log.Printf("Tag %s in region %s is instance %s. state=%s ip=%s",
-		tagName, region, *inst.InstanceId, inst.State.Name, *inst.PublicIpAddress)
 	return *inst.PublicIpAddress
 }
 
