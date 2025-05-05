@@ -11,11 +11,15 @@ package:
     runtime:
       - busybox
       - kubectl
-      - nvidia-cuda-cccl-12.3
-      - nvidia-cuda-nvml-dev-12.3
-      - nvidia-cuda-profiler-api-12.3
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-nvml-dev-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
       - nvidia-cudnn-8-cuda-12
-      - nvidia-nccl-cuda-12.3
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+  
+vars:
+# Based on the base image used in upstream dockerfile: https://github.com/NVIDIA/gpu-operator/blob/main/docker/Dockerfile#L17
+    cuda-version: 12.8
 
 pipeline:
   - uses: git-checkout
@@ -34,7 +38,7 @@ pipeline:
       modroot: .
       packages: ./cmd/gpu-operator
       output: gpu-operator
-      ldflags: -s -w -X github.com/NVIDIA/gpu-operator/internal/info.gitCommit=$(git rev-list -1 HEAD) -X github.com/NVIDIA/gpu-operator/internal/info.version=v${{package.version}}
+      ldflags: -X github.com/NVIDIA/gpu-operator/internal/info.gitCommit=$(git rev-list -1 HEAD) -X github.com/NVIDIA/gpu-operator/internal/info.version=v${{package.version}}
       vendor: true
 
   - runs: |
@@ -59,13 +63,29 @@ test:
     - runs: |
         gpu-operator --help
     - uses: test/kwok/cluster
-    - name: Smoke test run
-      runs: |
-        mkdir -p /opt/gpu-operator/manifests/state-driver
-        echo "{}" > /opt/gpu-operator/manifests/state-driver/dummy.yaml
-        /usr/bin/gpu-operator &
-        sleep 5
-        curl -sf localhost:8081/healthz || exit 1
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /opt/gpu-operator/manifests/state-driver
+          echo "{}" > /opt/gpu-operator/manifests/state-driver/dummy.yaml
+        start: /usr/bin/gpu-operator
+        timeout: 30
+        expected_output: |
+          starting manager
+          Starting metrics server
+          starting server
+          Serving metrics server
+        post: |
+          sleep 3
+          STATUS=$(curl -k -s -o /dev/null -w "%{http_code}" http://localhost:8081/healthz)
+          # Check if the status code is 200, if so exit 0, otherwise exit 1
+          if [ "$STATUS" -eq 200 ]; then
+              echo "Health check passed with status code 200"
+              exit 0
+          else
+              echo "Health check failed with status code $STATUS"
+              exit 1
+          fi
 
 update:
   enabled: true
@@ -73,3 +93,4 @@ update:
     identifier: NVIDIA/gpu-operator
     strip-prefix: v
     use-tag: true
+    tag-filter-prefix: v25.3.
