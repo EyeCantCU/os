@@ -107,27 +107,15 @@ jobs:
 
       - name: "Publish Azure Images to staging"
         run: |
-          arch="${{ env.VM_ARCH }}"
-          names=$(make list-azure)
-          [ -n "$names" ] || { echo "make list-azure produced empty output"; exit 1; }
-          az_arch="${{ env.az_arch }}"
-
-          commit=$(git rev-parse HEAD)
-          export arch
-          export az_arch
-          export commit
-
-          pnames=$(echo $names)
-          echo "publishing $pnames to vmtesting in azure. arch=$arch az_arch=$az_arch timestamp=${BUILD_TIMESTAMP}"
-          echo "$names" | parallel -j$(nproc) --no-run-if-empty 'name={};
-             $DEBUG ./tools/azure-image-upload --arch=$az_arch \
-                 --gallery=vmtesting \
-                 --name="chainguard${name#azure}-${az_arch}" \
-                 --disk-name="chainguard${name#azure}-${az_arch}-${BUILD_TIMESTAMP}" \
-                 --image-version=${BUILD_TIMESTAMP%-*}.${BUILD_TIMESTAMP#*-}.0 \
-                 --tags="env=staging commit=$commit" \
-                 output/$arch/$name/disk.raw'
-          exit 0
+          make publish-azure -j$(nproc) --output-sync=recurse ARCH="${{ env.VM_ARCH }}" PUBLISH_TARGET=staging PREFIX=chainguard
+          # TODO: test azure-base (uses a different user)
+          mkdir -p test-inputs
+          for name in $(make list-azure);
+              if [ "$name" == "azure-base"]; then
+                  continue
+              fi
+              cp "output/${{ env.VM_ARCH }}/$name/publish.staging.json" "test-inputs/$name.json"
+          done
 
       - name: "Test Azure Images in staging"
         uses: './.github/actions/vms-test'
@@ -136,32 +124,10 @@ jobs:
           arch: '${{ matrix.arch }}'
           opts: |
             -- --subscription-id="ad60e736-b0ce-432e-b77c-4b8218f452ae" \
-            --resource-group=chainguard-vms --image-name="chainguard-eap-dev-${{ env.az_arch }}" \
-            --image-gallery=vmtesting --resource-basename="${BUILD_TIMESTAMP}-${{env.az_arch}}" \
-            --region="eastus" --image-version="${BUILD_TIMESTAMP%-*}.${BUILD_TIMESTAMP#*-}.0" \
-            --image-resource-group=chainguard-vms --image-subscription-id="ad60e736-b0ce-432e-b77c-4b8218f452ae" \
-            --vm-size="${{ env.test_vm_size }}"
+            --resource-group=chainguard-vms --region=eastus \
+            --vm-size="${{ env.test_vm_size }}" --azure-inputs="./test-inputs" \
+            --azure-input-filename="*.json"
 
       - name: "Publish Azure Images to EAP"
         run: |
-          arch="${{ env.VM_ARCH }}"
-          names=$(make list-azure)
-          [ -n "$names" ] || { echo "make list-azure produced empty output"; exit 1; }
-          az_arch="${{ env.az_arch }}"
-
-          for name in $names; do
-            # Create image in EAP image gallery as well.
-            echo "publishing $name to chainguard_vms_eap in azure. arch=$arch az_arch=$az_arch timestamp=${BUILD_TIMESTAMP}"
-            if [ "$name" == "azure-eap-dev" ]; then
-              # Create image in EAP image gallery as well.
-              ./tools/azure-image-upload --arch $az_arch \
-              --gallery chainguard_vms_eap \
-              --name "chainguard${name#azure}-${az_arch}" \
-              --disk-name "chainguard${name#azure}-${az_arch}-${BUILD_TIMESTAMP}" \
-              --existing-disk \
-              --image-version ${BUILD_TIMESTAMP%-*}.${BUILD_TIMESTAMP#*-}.0 \
-              --tags "env=eap commit=$(git rev-parse HEAD)" \
-              output/$arch/$name/disk.raw
-            fi
-          done
-          exit 0
+          make publish-azure-eap-dev ARCH="${{ env.VM_ARCH }}" PUBLISH_TARGET=eap PREFIX=chainguard

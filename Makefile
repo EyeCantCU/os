@@ -120,13 +120,38 @@ builder/kernel-%: apkoaas
 %.vmdk: %.raw
 	./tools/aws-image-upload create-vmdk $< $@
 
+PUBLISH_TARGET ?= dev
+COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
 PREFIX ?= $(shell id -un)
 BUILD_TIMESTAMP ?= $(shell date --utc "+%Y%m%d-%H%M")
+AZVERSION = $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP#*-}.0")
+AZTAGS += env=$(PUBLISH_TARGET) commit=$(COMMIT)
+
+ifeq ($(COMMIT),$(filter $(COMMIT), "", no-git))
+$(error "Bad value for COMMIT: '$(COMMIT)'")
+endif
+
+ifeq ($(AZVERSION),$(filter $(AZVERSION), "", ..0))
+$(error "Bad value for AZVERSION: '$(AZVERSION)')
+endif
+
 ifeq ($(ARCH),aarch64)
 AWSARCH = arm64
+AZARCH = arm64
 else
 AWSARCH = x86_64
+AZARCH = x64
 endif
+ifeq ($(PUBLISH_TARGET),dev)
+AZGALLERY = vmtesting_dev
+else ifeq ($(PUBLISH_TARGET),staging)
+AZGALLERY = vmtesting
+else ifeq ($(PUBLISH_TARGET),eap)
+AZGALLERY = chainguard_vms_eap
+else
+$(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
+endif
+
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
 awspub-%: AWSSSM=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)
@@ -154,6 +179,17 @@ prodawspub-%: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
 
 prodawspub: $(foreach name,$(disks_aws),prodawspub-$(name))
 
+.PHONY: publish-azure
+publish-azure: $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name)))
+$(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name))): publish-azure-%: $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json
+
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-$*-$(AZARCH)
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: disk-azure-%
+	@mkdir -p $(dir $@)
+	$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
+		--tags="$(AZTAGS)" $(dir $@)disk.raw > $(@) || { s=$$?; rm -f $(@); exit $$s; }
+	@cat $(@)
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
