@@ -9,17 +9,13 @@ azure_usage() {
 Usage: ${0##*/} [ options ] cloud out-dir -- [ azure options ]
 
     azure options:
-        --subscription-id SUBSCRIPTION       subscription id for running tests
-        --resource-basename NAME             prefix for resource and tag names
-        --region REGION                      azure region to run tests in
-        --resource-group GROUP               azure resource group to run tests in
-        --test-user USER                     user to run tests as on the image
-        --vm-size SIZE                       VM size to use for testing
-        --image-name NAME                    name of image under test
-        --image-gallery GALLERY              gallery containing image under test
-        --image-version VERSION              image version under test
-        --image-resource-group GROUP         image gallery resource group (if different from test resource group)
-        --image-subscription-id SUBSCRIPTION image gallery subscription (if different from test subscription)
+       -s|--subscription-id SUBSCRIPTION       subscription id for running tests
+       -r|--region REGION                      azure region to run tests in
+       -g|--resource-group GROUP               azure resource group to run tests in
+       -u|--test-user USER                     user to run tests as on the image
+       -v|--vm-size SIZE                       VM size to use for testing
+       -i|--azure-inputs DIR or FILE           directory of files with 'az sig image-defintion' and 'az sig image-version create' output
+          --azure-input-filename PATTERN       look for filenames matching this pattern
 
 EOF
 }
@@ -41,8 +37,8 @@ setup_azure() {
 }
 
 test_azure() {
-    local short_opts="h"
-    local long_opts="help,subscription-id:,resource-basename:,region:,resource-group:,test-user:,vm-size:,image-name:,image-gallery:,image-version:,image-resource-group:,image-subscription-id:"
+    local short_opts="h,s:,r:,g:,u:,v:,i:"
+    local long_opts="help,subscription-id:,region:,resource-group:,test-user:,vm-size:,azure-inputs:,azure-input-filename:"
     local getopt_out=""
     getopt_out=$(getopt --options "${short_opts}" \
         --long "${long_opts}" -- "$@") &&
@@ -50,116 +46,129 @@ test_azure() {
         { bad_azure_usage; return; }
 
     local cur="" next=""
-    local subscription="" resource_basename="" region="" resource_group="" test_user="azureuser" image_name="" image_gallery="" image_version="latest" image_resource_group="" image_subscription="" vm_size=""
+    local subscription="" region="" resource_group="" test_user="azureuser" vm_size="" azure_inputs="" azure_input_filename="publish.*.json"
     while [ $# -ne 0 ]; do
         { cur="$1"; next="$2"; }
         case "$cur" in
-               --help) azure_usage ; exit 0;;
-               --subscription-id) subscription="$next"; shift;;
-               --resource-basename) resource_basename="$next"; shift;;
-               --region) region="$next"; shift;;
-               --resource-group) resource_group="$next"; shift;;
-               --test-user) test_user="$next"; shift;;
-               --vm-size) vm_size="$next"; shift;;
-               --image-name) image_name="$next"; shift;;
-               --image-gallery) image_gallery="$next"; shift;;
-               --image-version) image_version="$next"; shift;;
-               --image-resource-group) image_resource_group="$next"; shift;;
-               --image-subscription-id) image_subscription="$next"; shift;;
+            -h|--help) azure_usage ; exit 0;;
+            -s|--subscription-id) subscription="$next"; shift;;
+            -r|--region) region="$next"; shift;;
+            -g|--resource-group) resource_group="$next"; shift;;
+            -u|--test-user) test_user="$next"; shift;;
+            -v|--vm-size) vm_size="$next"; shift;;
+            -i|--azure-inputs) azure_inputs="$next"; shift;;
+               --azure-input-filename) azure_input_filename="$next"; shift;;
             --) shift; break;;
         esac
         shift;
     done
 
     [ -n "$subscription" ] || { bad_azure_usage "--subscription-id is required"; return 1; }
-    [ -n "$resource_basename" ] || { bad_azure_usage "--resource-basename is required"; return 1; }
     [ -n "$region" ] || { bad_azure_usage "--region is required"; return 1; }
     [ -n "$resource_group" ] || { bad_azure_usage "--resource-group is required"; return 1; }
-    [ -n "$image_name" ] || { bad_azure_usage "--image-name is required"; return 1; }
-    [ -n "$image_gallery" ] || { bad_azure_usage "--image-gallery is required"; return 1; }
+    [ -n "$vm_size" ] || { bad_azure_usage "--vm-size is required"; return 1; }
+    [ -n "$azure_inputs" ] || { bad_azure_usage "--azure-inputs is required"; return 1; }
+    if [ -f "$azure_inputs" ] && [ -d "$azure_inputs" ]; then
+        { bad_azure_usage "--azure-inputs '$azure_inputs' is not a file or directory"; return 1; }
+    fi
 
-    # shellcheck disable=SC2034
-    # wolfivmd is unused for now
-    local wolfivmd="$1" outd="$2" testarches="$3"
-    shift 3
-
-    setup_azure "$subscription" "$resource_group" "$resource_basename" "$region" || return 1
-    # shellcheck disable=SC2064
-    # Expanding now is fine, these are static
-    trap "cleanup_azure '$subscription' '$resource_group' '$resource_basename'" EXIT
+    local resource_basename="vms-test-$RANDOM"
+    local outd="$1"
+    shift 1
 
     TEMP_D=$(mktemp -d) || return
     runner="$TOP_D/runner/azure"
     rund="$TEMP_D/run"
     mkdir "$rund" || return
 
+    local publish_files=""
+    if [ -f "$azure_inputs" ]; then
+        publish_files="$azure_inputs"
+    else
+        publish_files=$(find "$azure_inputs" -type f -name "$azure_input_filename")
+        [ -n "$publish_files" ] || { stderr "no files matching '$azure_input_filename' in '$azure_inputs'"; return 1; }
+    fi
+    log "using publish files '$publish_files'"
+
     known_hosts="$rund/known_hosts"
     key="$rund/id_ed25519"
     rq ssh-keygen -t ed25519 -N '' -f "$key" ||
         { stderr "failed creating ssh key"; return 1; }
 
-    # TODO: test multiple VMs (one per image or something)
-    local vmnames="$image_name-$image_version"
-    local vmname="" arch=""
-    local tfile="" tname="" vfails="" voutd="" fails=""
-    for arch in $testarches; do
-        for vmname in $vmnames; do
-            vfails=""
-            voutd="$outd/$arch/$vmname"
-            rq mkdir -p "$voutd" || { stderr "failed creating $voutd"; return 1; }
-            vmtag="$resource_basename-$vmname-vm"
-            # Start VM
-            vr "$runner" launch --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
-                --vnet "$resource_basename-vnet" --subnet "$resource_basename-subnet" --name "$vmtag" --region "$region" \
-                --image-name="$image_name" --image-gallery="$image_gallery" --image-version="$image_version" \
-                --image-resource-group="$image_resource_group" --image-subscription-id="$image_subscription" \
-                --public-key="$key.pub" --admin-username "$test_user" --vm-size="$vm_size"
-            local launch_code=$?
+    setup_azure "$subscription" "$resource_group" "$resource_basename" "$region" || return 1
+    # shellcheck disable=SC2064
+    # Expanding now is fine, these are static
+    trap "cleanup_azure '$subscription' '$resource_group' '$resource_basename'" EXIT
 
-            if [ $launch_code -eq 0 ]; then
-                vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
-                    --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
-                    >> "$known_hosts"
+    local publish_file="" vmname="" az_arch="" arch="" tfile="" tname="" vfails="" voutd="" fails="" image_uri=""
+    for publish_file in $publish_files; do
+        vfails=""
+        image_uri=$(jq -rse '.[1].id' < "$publish_file") || \
+            { vfails="$publish_file/read-image-uri"; \
+              log "finished $publish_file FAIL - $vfails"; \
+              fails="${fails+$fails }$vfails"; continue; }
+        az_arch=$(jq -rse '.[0].architecture' < "$publish_file") || \
+            { vfails="$publish_file/read-architecture"; \
+              log "finished $publish_file FAIL - $vfails"; \
+              fails="${fails+$fails }$vfails"; continue; }
+        [ "$az_arch" == "x64" ] && arch="x86_64" || arch="aarch64"
+        # Should look like $image_name-$image_version
+        vmname=$(jq -rse 'map(.name) | join("-")' < "$publish_file") || \
+            { vfails="$publish_file/read-image-name"; \
+              log "finished $publish_file FAIL - $vfails"; \
+              fails="${fails+$fails }$vfails"; continue; }
+        voutd="$outd/$arch/$vmname"
+        log "launching $vmname, detected arch $arch"
+        rq mkdir -p "$voutd" || { stderr "failed creating $voutd"; return 1; }
+        vmtag="$resource_basename-vm-$RANDOM"
+        # Start VM
+        vr "$runner" launch --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+            --vnet "$resource_basename-vnet" --subnet "$resource_basename-subnet" --name "$vmtag" --region "$region" \
+            --image-uri="$image_uri" --public-key="$key.pub" --admin-username "$test_user" --vm-size="$vm_size"
+        local launch_code=$?
 
-                log "started testing $arch/$vmname"
-                # Run tests, collect metrics
-                for tfile in "${TOP_D}/test/$arch"/*; do
-                    tname=${tfile##*/}
-                    vrl "$voutd/test-$tname" "$runner" run-remote --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
-                        --private-key "$key" --user "$test_user" --file="$tfile" --known-hosts="$known_hosts" -- \
-                           -test.v -metric-tags "arch:$arch,$METRIC_TAGS" ||
-                           vfails="$vfails $arch-$vmname/test-$tname"
+        if [ $launch_code -eq 0 ]; then
+            vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
+                --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                >> "$known_hosts"
 
-                    "$runner" ssh --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
-                        --private-key "$key" --user "$test_user" --known-hosts="$known_hosts" \
-                        "cat $METD/$tname" \
-                           > "$voutd/$tname-metrics.json" ||
-                           vfails="$vfails $arch-$vmname/$tname-metrics"
-                done
+            log "started testing $arch/$vmname"
+            # Run tests, collect metrics
+            for tfile in "${TOP_D}/test/$arch"/*; do
+                tname=${tfile##*/}
+                vrl "$voutd/test-$tname" "$runner" run-remote --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                    --private-key "$key" --user "$test_user" --file="$tfile" --known-hosts="$known_hosts" -- \
+                       -test.v -metric-tags "arch:$arch,$METRIC_TAGS" ||
+                       vfails="$vfails $arch-$vmname/test-$tname"
 
-                "$runner" console-log --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
-                    --timeout="${WAIT_CONSOLE_TIMEOUT}" --wait > "$voutd/console.log" ||
-                    vfails="$vfails $arch-$vmname/console-log"
+                "$runner" ssh --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                    --private-key "$key" --user "$test_user" --known-hosts="$known_hosts" \
+                    "cat $METD/$tname" \
+                       > "$voutd/$tname-metrics.json" ||
+                       vfails="$vfails $arch-$vmname/$tname-metrics"
+            done
 
-                log "finished testing $arch/$vmname"
-            else
-                # azure reserves resources for 180s after failed VM creation...
-                log "waiting 180s for azure to release resources from failed vm launch"
-                vfails="$vfails $arch-$vmname/launch"
-                sleep 180
-            fi
-            # Terminate VM
-            vr "$runner" terminate --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag"
+            "$runner" console-log --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                --timeout="${WAIT_CONSOLE_TIMEOUT}" --wait > "$voutd/console.log" ||
+                vfails="$vfails $arch-$vmname/console-log"
 
-            vfails=${vfails# }
-            if [ -z "$vfails" ]; then
-                log "finished $arch/$vmname PASS"
-            else
-                log "finished $arch/$vmname FAIL - $vfails"
-            fi
-        done
+            log "finished testing $arch/$vmname"
+        else
+            # azure reserves resources for 180s after failed VM creation...
+            log "waiting 180s for azure to release resources from failed vm launch"
+            vfails="$vfails $arch-$vmname/launch"
+            sleep 180
+        fi
+        # Terminate VM
+        vr "$runner" terminate --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag"
+
+        vfails=${vfails# }
+        if [ -z "$vfails" ]; then
+            log "finished $arch/$vmname PASS"
+        else
+            log "finished $arch/$vmname FAIL - $vfails"
+        fi
         fails="${fails:+$fails }$vfails"
-
     done
 
     if [ -z "$fails" ]; then

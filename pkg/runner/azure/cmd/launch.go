@@ -21,11 +21,7 @@ func launchCmd() *cobra.Command {
 	var vmSize string
 	var publicKeyPath string
 	var adminUsername string
-	var imageSubscriptionID string
-	var imageResourceGroup string
-	var imageGallery string
-	var imageName string
-	var imageVersion string
+	var imageURI string
 	var vnetName string
 	var subnetName string
 	var tagName string
@@ -110,14 +106,6 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("failed to create NIC: %v", err)
 			}
 
-			if imageResourceGroup == "" {
-				imageResourceGroup = resourceGroup
-			}
-			if imageSubscriptionID == "" {
-				imageSubscriptionID = subscriptionID
-			}
-			imageReference := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/galleries/%s/images/%s/versions/%s", imageSubscriptionID, imageResourceGroup, imageGallery, imageName, imageVersion)
-
 			// Create VM
 			vmClient, err := armcompute.NewVirtualMachinesClient(subscriptionID, cred, nil)
 			if err != nil {
@@ -133,7 +121,7 @@ func launchCmd() *cobra.Command {
 					},
 					StorageProfile: &armcompute.StorageProfile{
 						ImageReference: &armcompute.ImageReference{
-							ID: &imageReference,
+							ID: &imageURI,
 						},
 					},
 					OSProfile: &armcompute.OSProfile{
@@ -185,11 +173,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&adminUsername, "admin-username", "azureuser", "Admin username for SSH")
 	cmd.Flags().StringVar(&publicKeyPath, "public-key", "id_rsa.pub", "Path to SSH public key")
 
-	cmd.Flags().StringVar(&imageSubscriptionID, "image-subscription-id", "", "Image gallery subscription ID (if different from subscription-id)")
-	cmd.Flags().StringVar(&imageResourceGroup, "image-resource-group", "", "Image gallery resource group (if different from resource-group)")
-	cmd.Flags().StringVar(&imageGallery, "image-gallery", "", "Image gallery (required)")
-	cmd.Flags().StringVar(&imageName, "image-name", "", "Image name (required)")
-	cmd.Flags().StringVar(&imageVersion, "image-version", "latest", "Image version")
+	cmd.Flags().StringVar(&imageURI, "image-uri", "", "Image reference URI (required)")
 
 	cmd.Flags().StringVar(&vnetName, "vnet", "", "VNet name (required)")
 	cmd.Flags().StringVar(&subnetName, "subnet", "default", "Subnet name (optional)")
@@ -201,8 +185,7 @@ func launchCmd() *cobra.Command {
 	cmd.MarkFlagRequired("resource-group")
 	cmd.MarkFlagRequired("name")
 	cmd.MarkFlagRequired("public-key")
-	cmd.MarkFlagRequired("image-gallery")
-	cmd.MarkFlagRequired("image-name")
+	cmd.MarkFlagRequired("image-uri")
 	cmd.MarkFlagRequired("vnet")
 
 	return cmd
