@@ -1,0 +1,76 @@
+package:
+  name: newrelic-k8s-metadata-injection-fips
+  version: "1.32.0"
+  epoch: 0
+  description: Kubernetes metadata injection for New Relic APM to make a linkage between APM and Infrastructure data.
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: d0e3d6c7c72d3e42b808fd2a7cf177701d75b038
+      repository: https://github.com/newrelic/k8s-metadata-injection
+      tag: v${{package.version}}
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/app
+      install -Dm755 entrypoint.sh ${{targets.contextdir}}/app/entrypoint.sh
+
+  - uses: go/build
+    with:
+      output: k8s-metadata-injection
+      packages: ./cmd/server
+      go-package: go-fips
+
+update:
+  enabled: true
+  github:
+    identifier: newrelic/k8s-metadata-injection
+    strip-prefix: v
+
+subpackages:
+  - name: ${{package.name}}-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/app
+          ln -sf /usr/bin/k8s-metadata-injection ${{targets.contextdir}}/app/k8s-metadata-injection
+    test:
+      pipeline:
+        - runs: |
+            if [ ! -L "/app/k8s-metadata-injection" ]; then
+             echo "Error: Failed to create symlink"
+             exit 1
+            fi
+            if [ "$(readlink -f /app/k8s-metadata-injection)" != "/usr/bin/k8s-metadata-injection" ]; then
+             echo "Error: Symlink points to incorrect location"
+             exit 1
+            fi
+    description: Compatibility symlink for ${{package.name}}
+
+test:
+  environment:
+    contents:
+      packages:
+        - mkcert
+        - curl
+        - wait-for-it
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+    - name: test the webhook
+      runs: |
+        mkdir -p /etc/tls-key-cert-pair
+        mkcert -install
+        mkcert -key-file /etc/tls-key-cert-pair/tls.key -cert-file /etc/tls-key-cert-pair/tls.crt localhost
+        k8s-metadata-injection &
+        wait-for-it localhost:8080 --timeout=10
+        STATUS=$(curl -v -k -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+        # if the status code is 200, exit 0, otherwise exit 1
+        if [ "$STATUS" -eq 200 ]; then
+            echo "Health check passed with status code 200"
+            exit 0
+        else
+            echo "Health check failed with status code $STATUS"
+            exit 1
+        fi
