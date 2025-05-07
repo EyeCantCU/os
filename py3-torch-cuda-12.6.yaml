@@ -79,8 +79,8 @@ environment:
   environment:
     PYTORCH_BUILD_VERSION: "${{package.version}}+${{vars.cuda-pyvariant}}"
     PYTORCH_BUILD_NUMBER: 0
-    CC: /usr/bin/gcc-${{vars.gcc-version}} #FIXME - no /usr/bin
-    CXX: /usr/bin/g++-${{vars.gcc-version}}
+    CC: gcc-${{vars.gcc-version}}
+    CXX: g++-${{vars.gcc-version}}
     CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
     CUDA_NVCC_EXECUTABLE: /usr/local/cuda-${{vars.cuda-version}}/bin/nvcc
     CMAKE_CUDA_ARCHITECTURES: all
@@ -101,7 +101,7 @@ environment:
     # and https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_dual_abi.html
     _GLIBCXX_USE_CXX11_ABI: 1
     CFLAGS: -Wno-error=nonnull -Wno-nonnull
-    CXXFLAGS: -Wno-error=nonnull -Wno-nonnull
+    CXXFLAGS: -Wno-error=nonnull -Wno-nonnull -fdelete-null-pointer-checks
 
 pipeline:
   - uses: git-checkout
@@ -123,7 +123,7 @@ pipeline:
   - name: build and install libtorch whl into holding directory
     runs: |
       if [ ${{build.arch}} == "aarch64" ]; then
-        # with cpu: 64, memory: 128Gi, MAX_JOBS=37 works,
+        # with cpu: 64, memory: 128Gi, MAX_JOBS=40 works,
         # MAX_JOBS=42 is too high
         export MAX_JOBS=40
       fi
@@ -177,9 +177,9 @@ subpackages:
         runs: |
           mkdir -p ${{targets.contextdir}}/usr/include/torch
           sitepkgd=$(python3 -c 'import site; print(site.getsitepackages()[0])')
-          cp -a libtorch-install/${sitepkgd}/torch/include/* ${{targets.contextdir}}/usr/include/torch
-          mkdir -p ${{targets.contextdir}}/usr/share/cmake
-          cp -a libtorch-install/${sitepkgd}/torch/share/cmake/Torch ${{targets.contextdir}}/usr/share/cmake
+          cp -a "libtorch-install/${sitepkgd}/torch/include/"* "${{targets.contextdir}}/usr/include/torch"
+          mkdir -p ${{targets.contextdir}}/usr/share
+          cp -a "libtorch-install/${sitepkgd}/torch/share/cmake" "${{targets.contextdir}}/usr/share/"
       - uses: strip
     test:
       pipeline:
@@ -220,7 +220,7 @@ subpackages:
     pipeline:
       - runs: |
           if [ ${{build.arch}} == "aarch64" ]; then
-            # with cpu: 64, memory: 128Gi, MAX_JOBS=37 works,
+            # with cpu: 64, memory: 128Gi, MAX_JOBS=40 works,
             # MAX_JOBS=42 is too high
             export MAX_JOBS=40
           fi
@@ -254,6 +254,11 @@ subpackages:
             fi
             ln -s "/usr/lib/${base}" "$py_path"
           done
+      - name: libtorch-dev provides the *.cmake files, so remove them here
+        runs: |
+          sitepkgd=$(python${{range.key}} -c 'import site; print(site.getsitepackages()[0])')
+          py_path="${{targets.contextdir}}/${sitepkgd}"
+          rm -rf "$py_path"/torch/share
       - uses: strip
     test:
       pipeline:
@@ -276,32 +281,19 @@ subpackages:
       - uses: split/dev
         with:
           package: py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
-      - name: move cmake files that split/dev didn't
-        runs: |
-          sitepkgd=$(python${{range.key}} -c 'import site; print(site.getsitepackages()[0])')
-          nondev_destdir="$(echo ${{targets.contextdir}} | sed 's/-dev$//')"
-          nondev_pypath="$nondev_destdir/$sitepkgd"
-          dev_py_path="${{targets.contextdir}}/$sitepkgd"
-          mkdir -p "$dev_py_path/torch"
-          mv "$nondev_pypath/torch/share" "$py_path/torch"
       - name: symlink libtorch headers into python tree
         runs: |
-          libtorch_sitepkgd=$(python3 -c 'import site; print(site.getsitepackages()[0])')
           sitepkgd=$(python${{range.key}} -c 'import site; print(site.getsitepackages()[0])')
-          for f in libtorch-install/${libtorch_sitepkgd}/torch/include/*; do
-            base="$(basename $f)"
-            lt_path="/usr/include/torch/${base}"
-            py_path="${{targets.contextdir}}/${sitepkgd}/torch/include/${base}"
-            if [ -f "$py_path" ]; then
-              rm "$py_path"
-            fi
-            ln -s "/usr/include/torch/${base}" "$py_path"
-          done
+          py_path="${{targets.contextdir}}/${sitepkgd}"/torch/include
+          rm -rf "$py_path"
+          ln -s /usr/include/torch "$py_path"
       - name: symlink libtorch cmake config into python tree
         runs: |
+          # libtorch-dev installs *.cmake into the system cmake directory
           sitepkgd=$(python${{range.key}} -c 'import site; print(site.getsitepackages()[0])')
-          py_path="${{targets.contextdir}}/$sitepkgd/torch"
-          ln -s "/usr/share/cmake/Torch" "$py_path/share/cmake"
+          py_path="${{targets.contextdir}}/${sitepkgd}"
+          mkdir -p "$py_path"/torch/share
+          ln -s "/usr/share/cmake" "$py_path"/torch/share/
 
   - range: py-versions
     name: py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}-bin
