@@ -161,35 +161,45 @@ awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
 .PHONY: awspub
 awspub: $(foreach name,$(disks_aws),awspub-$(name))
 
+.PHONY: aws-create-% aws-publish-% aws-create aws-publish
+# these are just so human can type 'make aws-create-aws-base' to do the create/publish
+$(foreach name,$(disks_aws),aws-create-$(name)): aws-create-%: $(ARCH_OUT_D)/awspub/create/%.json
+$(foreach name,$(disks_aws),aws-publish-$(name)): aws-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
+aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
+aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
 
 output/awspub.mapping:
 	mkdir -p output
 	echo "---" > $@
 	echo "BUILD_TIMESTAMP: $(BUILD_TIMESTAMP)" >> $@
 
-prodawspub-%: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
-	o=$(ARCH_OUT_D)/awspub/create/$*.json && \
-	  mkdir -p $$(dirname "$$o") && \
-	  awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml > $$o && \
-	  cat "$$o" && echo
-	o=$(ARCH_OUT_D)/awspub/publish/$*.json && echo o=$o && \
-	  mkdir -p $$(dirname "$$o") && \
-	  awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml > $$o && \
-	  cat "$$o" && echo
+# capture_stdout(output,command)
+# safely write the output of command to output
+capture_stdout = rm -f "$(1)" && mkdir -p "$(dir $(1))" && \
+	tmpf="$(1).tmp.$$$$" && trap "rm -f $$tmpf" EXIT && \
+	echo "$(2) > $(1)" && $(2) > "$$tmpf" && mv "$$tmpf" "$(1)" && \
+	echo "== $(1) ==" && cat "$(1)" && echo
 
-prodawspub: $(foreach name,$(disks_aws),prodawspub-$(name))
+# we use the json output of awspub to indicate the thing was published.
+$(ARCH_OUT_D)/awspub/create/%.json: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
+	@$(call capture_stdout,$@,\
+	  awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
 
 .PHONY: publish-azure
 publish-azure: $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name)))
 $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name))): publish-azure-%: $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-$*-$(AZARCH)
-$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: disk-azure-%
-	@mkdir -p $(dir $@)
-	$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
-		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
-		--tags="$(AZTAGS)" $(dir $@)disk.raw > $(@) || { s=$$?; rm -f $(@); exit $$s; }
-	@cat $(@)
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/azure-%/disk.raw
+	@$(call capture_stdout,$@,\
+		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+			--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
+			--tags="$(AZTAGS)" $(dir $@)disk.raw)
+	#
+# we use the stdout of awspub publish to indicate the thing was published.
+$(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
+	@$(call capture_stdout,$@,\
+	  awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
@@ -236,6 +246,7 @@ show-vars:
 
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%.yaml builder/ovmf-%.fd
+.PRECIOUS: %.vmdk
 
 arches = aarch64 x86_64
 ifneq ($(filter-out $(arches),$(BUILDER_ARCH)),)
