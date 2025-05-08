@@ -24,6 +24,7 @@ func launchCmd() *cobra.Command {
 	var vnetName string
 	var subnetName string
 	var tagName string
+	var diskType string
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -122,6 +123,12 @@ func launchCmd() *cobra.Command {
 						ImageReference: &armcompute.ImageReference{
 							ID: &imageURI,
 						},
+						OSDisk: &armcompute.OSDisk{
+							CreateOption: utils.ToPtr(armcompute.DiskCreateOptionTypesFromImage),
+							ManagedDisk: &armcompute.ManagedDiskParameters{
+								StorageAccountType: utils.ToPtr(armcompute.StorageAccountTypes(diskType)),
+							},
+						},
 					},
 					OSProfile: &armcompute.OSProfile{
 						ComputerName:  &vmName,
@@ -168,7 +175,8 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&resourceGroup, "resource-group", "", "Azure resource group (required)")
 
 	cmd.Flags().StringVar(&vmName, "name", "", "VM name (required)")
-	cmd.Flags().StringVar(&vmSize, "vm-size", "Standard_B1s", "Azure VM size")
+	cmd.Flags().StringVar(&vmSize, "vm-size", "", "Azure VM size")
+	cmd.Flags().StringVar(&diskType, "disk-type", "", "Azure disk type")
 	cmd.Flags().StringVar(&adminUsername, "admin-username", "azureuser", "Admin username for SSH")
 	cmd.Flags().StringVar(&publicKeyPath, "public-key", "id_rsa.pub", "Path to SSH public key")
 
@@ -183,6 +191,8 @@ func launchCmd() *cobra.Command {
 	cmd.MarkFlagRequired("subscription-id")
 	cmd.MarkFlagRequired("resource-group")
 	cmd.MarkFlagRequired("name")
+	cmd.MarkFlagRequired("disk-type")
+	cmd.MarkFlagRequired("vm-size")
 	cmd.MarkFlagRequired("image-uri")
 	cmd.MarkFlagRequired("vnet")
 
