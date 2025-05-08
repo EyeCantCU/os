@@ -84,7 +84,6 @@ apk-token:
 
 ${CACHEDIR}/.libraries_token.txt: cache
 	tmpf=$(shell mktemp); \
-	chainctl auth login --audience libraries.cgr.dev; \
 	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
 	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
 
