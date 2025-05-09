@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/metrics"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/vmtest"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/metrics"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
 )
 
 func TestSSHStartTime(t *testing.T) {

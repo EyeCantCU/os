@@ -5,6 +5,9 @@ import (
 	"flag"
 	"testing"
 	"time"
+
+	// Import this so that any package importing this also gets the flags declared by metrics
+	_ "chainguard.dev/wolfi-vm/vm-test/pkg/metrics"
 )
 
 var (
