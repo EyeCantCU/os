@@ -17,6 +17,7 @@ import (
 	apkfs "chainguard.dev/apko/pkg/apk/fs"
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
+	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/format/syftjson"
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/google/go-cmp/cmp"
@@ -137,11 +138,16 @@ func TestCreateAttestation(t *testing.T) {
 		t.Fatalf("failed to decode SBOM: %v", err)
 	}
 
-	if !cmp.Equal(expect.Artifacts, sbom.Artifacts,
-		cmpopts.IgnoreUnexported(pkg.Collection{})) {
+	if !cmp.Equal(expect.Artifacts.Packages.Sorted(), sbom.Artifacts.Packages.Sorted(),
+		cmpopts.IgnoreUnexported(pkg.Package{}),
+		cmpopts.IgnoreUnexported(pkg.LicenseSet{}),
+		cmpopts.IgnoreUnexported(file.LocationSet{})) {
 		// visually show what is different
-		diff := cmp.Diff(expect.Artifacts, sbom.Artifacts,
-			cmpopts.IgnoreUnexported(pkg.Collection{}))
+		diff := cmp.Diff(expect.Artifacts.Packages.Sorted(), sbom.Artifacts.Packages.Sorted(),
+			cmpopts.IgnoreUnexported(pkg.Package{}),
+			cmpopts.IgnoreUnexported(pkg.LicenseSet{}),
+			cmpopts.IgnoreUnexported(file.LocationSet{}),
+		)
 		t.Fatalf("Expected syft attestation is different from expected(-want +got):\n%s", diff)
 	}
 }

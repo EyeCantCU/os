@@ -32,12 +32,7 @@ func CreateAttestationFromLayer(ctx context.Context, layer v1.Layer) (io.Reader,
 	}
 	defer r.Close()
 
-	result, err := CreateAttestation(ctx, r)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
+	return CreateAttestation(ctx, r)
 }
 
 func CreateAttestation(ctx context.Context, layer io.Reader) (io.Reader, error) {
