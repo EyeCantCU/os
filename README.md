@@ -1,3 +1,47 @@
+# Build your own VM
+Chainguard Virtual Machines are build in a very similar fashion to how containers are built. Apko creates a tarball that is then converted into a raw disk image.
+
+## Create your VM Config file
+A VM config file is just a apko YAML file that describes the packages that are part of your virtual machine images.
+
+These files are stored under `configs` folder.
+
+## Build your VM
+Once you have created a config, you can run the following command:
+
+```
+make disk-<your config>
+```
+
+For example, the following command will build a raw disk image from the `configs/generic.yaml` file.
+
+```
+make disk-generic
+```
+
+## Running your VM
+You can test run your VM with:
+
+```
+make run-<your config>
+```
+
+Or for example:
+
+```
+make run-generic
+```
+
+## Accessing your VM
+VM images come with no default user or password. If you wish to test it locally and access it, you will need to backdoor it. You can do so with `tools/backdoor-image`.
+
+For example:
+
+```
+sudo ./tools/backdoor-image --password-auth --password <your-password> outputs/x86_64/generic/disk.raw
+```
+
+
 # Experiments with tar2efi go library
 
 
