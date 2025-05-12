@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
@@ -41,7 +40,7 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("failed to obtain credential: %v", err)
 			}
 
-			pubKey, err := ioutil.ReadFile(publicKeyPath)
+			pubKey, err := sshutils.GetSinglePublicKey(publicKeyPath)
 			if err != nil {
 				log.Fatalf("failed to read public key: %v", err)
 			}
@@ -184,7 +183,6 @@ func launchCmd() *cobra.Command {
 	cmd.MarkFlagRequired("subscription-id")
 	cmd.MarkFlagRequired("resource-group")
 	cmd.MarkFlagRequired("name")
-	cmd.MarkFlagRequired("public-key")
 	cmd.MarkFlagRequired("image-uri")
 	cmd.MarkFlagRequired("vnet")
 

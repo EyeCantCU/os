@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 	"log"
-	"os"
 
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/spf13/cobra"
@@ -31,11 +31,10 @@ func launchCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
-			pubKey, err := os.ReadFile(publicKeyPath)
+			pubKey, err := sshutils.GetSinglePublicKey(publicKeyPath)
 			if err != nil {
 				log.Fatalf("failed to read public key: %v", err)
 			}
-
 			// Create the Compute Engine Instances client.
 			instancesClient, err := compute.NewInstancesRESTClient(ctx)
 			if err != nil {
@@ -124,7 +123,6 @@ func launchCmd() *cobra.Command {
 	cmd.MarkFlagRequired("label")
 	cmd.MarkFlagRequired("name")
 	cmd.MarkFlagRequired("project")
-	cmd.MarkFlagRequired("public-key")
 
 	return cmd
 }

@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/aws/util"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -55,15 +55,16 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("Must provide launch group info via --launch-group, (--security-group and --vpc-id), or environment VMT_LAUNCH_GROUP")
 			}
 
-			pubKey, err := ioutil.ReadFile(publicKeyPath)
+			pubKey, err := sshutils.GetSinglePublicKey(publicKeyPath)
 			if err != nil {
 				log.Fatalf("failed to read public key: %v", err)
 			}
+
 			keyName := fmt.Sprintf("key-%s", tagName)
 
 			_, err = client.ImportKeyPair(ctx, &ec2.ImportKeyPairInput{
 				KeyName:           aws.String(keyName),
-				PublicKeyMaterial: pubKey,
+				PublicKeyMaterial: []byte(pubKey),
 				TagSpecifications: []ec2types.TagSpecification{
 					{
 						ResourceType: ec2types.ResourceTypeKeyPair,

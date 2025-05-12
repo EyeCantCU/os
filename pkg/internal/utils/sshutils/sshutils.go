@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -404,4 +405,29 @@ func GetSSHHostKey(ctx context.Context, address string) (ssh.PublicKey, error) {
 	case pub := <-result:
 		return pub, nil
 	}
+}
+
+func GetSinglePublicKey(path string) (string, error) {
+	if path == "none" {
+		return "", nil
+	}
+	if path != "" {
+		pubKeyBytes, err := os.ReadFile(path)
+		if err != nil {
+			log.Fatalf("failed to read public key: %v", err)
+		}
+		return string(pubKeyBytes), nil
+	}
+
+	pubkeys, err := GetUserPubkeys()
+	if err != nil {
+		return "", fmt.Errorf("failed to get public keys (try --public-key): %v", err)
+	}
+	if len(pubkeys) == 0 {
+		return "", fmt.Errorf("Not able to find a default public key. Try --public-key")
+	} else if len(pubkeys) > 1 {
+		log.Printf("%d public keys were found. selected first one", len(pubkeys))
+	}
+	log.Printf("Using public key: %s", pubkeys[0])
+	return pubkeys[0], nil
 }
