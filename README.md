@@ -38,7 +38,7 @@ VM images come with no default user or password. If you wish to test it locally 
 For example:
 
 ```
-sudo ./tools/backdoor-image --password-auth --password <your-password> outputs/x86_64/generic/disk.raw
+sudo ./tools/backdoor-image --password-auth --password <your-password> output/x86_64/generic/disk.raw
 ```
 
 
