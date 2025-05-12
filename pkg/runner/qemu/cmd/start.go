@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util/qmp"
 	"github.com/spf13/cobra"
@@ -31,7 +32,15 @@ func startCmd() *cobra.Command {
 
 			var err error
 			pkdata := ""
-			if pubkey != "" {
+			if pubkey == "" {
+				fmt.Printf("getting pubkeys")
+				pubkeys, err := sshutils.GetUserPubkeys()
+				fmt.Printf("pubkeys: %v\n", pubkeys)
+				if err != nil {
+					log.Fatalf("Could not find default public key. try --public-key: %v", err)
+				}
+				pkdata = strings.Join(pubkeys, "\n")
+			} else if pubkey != "none" {
 				bpkdata, err := os.ReadFile(pubkey)
 				if err != nil {
 					log.Fatalf("Failed tor ead public key file from %s", pubkey)

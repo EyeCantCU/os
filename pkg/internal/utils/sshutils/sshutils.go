@@ -8,12 +8,16 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 var (
@@ -85,21 +89,161 @@ func TOFUHostKeyCallback(knownHostsFile, host string) ssh.HostKeyCallback {
 	}
 }
 
+func GetPrivateKeyOrDefaultAuth(path string) ([]ssh.AuthMethod, error) {
+	if path == "" {
+		return GetSigners()
+	}
+	return PrivateKeyAuth([]string{path})
+}
+
+// reutrns a slice of ssh.AuthMethod easily used ClientConfig.Auth
+func GetSigners() ([]ssh.AuthMethod, error) {
+	ret := []ssh.AuthMethod{}
+
+	pubkeys := []string{}
+	if authSock := os.Getenv("SSH_AUTH_SOCK"); authSock != "" {
+		sshAgent, err := net.Dial("unix", authSock)
+		if err != nil {
+			return ret, fmt.Errorf("failed to connect to SSH_AUTH_SOCK=%s: %v", authSock, err)
+		}
+		ag := agent.NewClient(sshAgent)
+
+		aKeys, err := ag.List()
+		if err != nil {
+			return ret, fmt.Errorf("Error listing public keys in SSH_AUTH_SOCK=%s: %v", authSock, err)
+		}
+
+		for _, k := range aKeys {
+			pubkeys = append(pubkeys, string(ssh.MarshalAuthorizedKey(k)))
+		}
+		ret = append(ret, ssh.PublicKeysCallback(ag.Signers))
+	}
+
+	userKeys, err := getUserPrivateKeys()
+	if err != nil {
+		return ret, err
+	}
+
+	for _, k := range userKeys {
+		if !slices.Contains(pubkeys, string(ssh.MarshalAuthorizedKey(k.PublicKey()))) {
+			ret = append(ret, ssh.PublicKeys(k))
+		}
+	}
+
+	return ret, nil
+}
+
+func getUserPrivateKeys() ([]ssh.Signer, error) {
+	ret := []ssh.Signer{}
+	user, err := user.Current()
+	if err != nil {
+		return ret, err
+	}
+	keydir := filepath.Join(user.HomeDir, ".ssh")
+
+	for _, fname := range []string{"id_ed25519", "id_rsa"} {
+		fpath := filepath.Join(keydir, fname)
+		key, err := os.ReadFile(fpath)
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return ret, fmt.Errorf("Error reading %s: %v", fpath, err)
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			return ret, fmt.Errorf("Error parsing %s: %v", fpath, err)
+		}
+		ret = append(ret, signer)
+	}
+	return ret, nil
+}
+
+func GetUserPubkeys() ([]string, error) {
+	ret := []string{}
+	user, err := user.Current()
+	if err != nil {
+		return ret, err
+	}
+	keydir := filepath.Join(user.HomeDir, ".ssh")
+
+	for _, fname := range []string{"id_ed25519.pub", "id_rsa.pub"} {
+		fpath := filepath.Join(keydir, fname)
+		pubkeyb, err := os.ReadFile(fpath)
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return ret, fmt.Errorf("Error reading %s: %v", fpath, err)
+		}
+		ret = append(ret, string(pubkeyb))
+	}
+
+	if authSock := os.Getenv("SSH_AUTH_SOCK"); authSock != "" {
+		sshAgent, err := net.Dial("unix", authSock)
+		if err != nil {
+			return ret, fmt.Errorf("failed to connect to SSH_AUTH_SOCK=%s: %v", authSock, err)
+		}
+		ag := agent.NewClient(sshAgent)
+
+		aKeys, err := ag.List()
+		if err != nil {
+			return ret, fmt.Errorf("Error listing public keys in SSH_AUTH_SOCK=%s: %v", authSock, err)
+		}
+
+		for _, k := range aKeys {
+			pk := string(ssh.MarshalAuthorizedKey(k))
+			if !slices.Contains(ret, pk) {
+				ret = append(ret, pk)
+			}
+		}
+	}
+
+	return ret, nil
+}
+
+func PrivateKeyAuth(paths []string) ([]ssh.AuthMethod, error) {
+	ret := []ssh.AuthMethod{}
+	for _, p := range paths {
+		key, err := os.ReadFile(p)
+		if err != nil {
+			return ret, fmt.Errorf("unable to read private key: %w", err)
+		}
+
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			return ret, fmt.Errorf("unable to parse private key: %w", err)
+		}
+		ret = append(ret, ssh.PublicKeys(signer))
+	}
+	return ret, nil
+}
+
+func SSHCommand(ctx context.Context, host, user, privateKeyPath, knownHostsFile string, args []string) {
+	hostOnly, port, err := net.SplitHostPort(host)
+	if err != nil {
+		port = "22"
+		hostOnly = host
+	}
+
+	opts := []string{}
+	if privateKeyPath != "" {
+		opts = append(opts, "-i"+privateKeyPath)
+	}
+
+	opts = append(opts, "-p"+port, "-oUserKnownHostsFile="+knownHostsFile)
+	opts = append(opts, fmt.Sprintf("%s@%s", user, hostOnly))
+	opts = append(opts, args...)
+	execSSH := exec.CommandContext(ctx, "ssh", opts...)
+	execSSH.Stdout = os.Stdout
+	execSSH.Stderr = os.Stderr
+	execSSH.Stdin = os.Stdin
+	execSSH.Run()
+}
+
 // NewSSHClient takes a host, ssh key, user, and knownHostsFile, and returns an open ssh client connection.
-func NewSSHClient(ctx context.Context, host, privateKeyPath, user, knownHostsFile string) (*ssh.Client, error) {
-	key, err := os.ReadFile(privateKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("unable to read private key: %w", err)
-	}
-
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse private key: %w", err)
-	}
-
+func NewSSHClient(ctx context.Context, host string, auths []ssh.AuthMethod, user, knownHostsFile string) (*ssh.Client, error) {
 	config := &ssh.ClientConfig{
 		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		Auth:            auths,
 		HostKeyCallback: TOFUHostKeyCallback(knownHostsFile, host),
 		Timeout:         10 * time.Second,
 	}
@@ -120,49 +264,29 @@ func NewSSHClient(ctx context.Context, host, privateKeyPath, user, knownHostsFil
 }
 
 // SSHToInstance takes a host, ssh key, user, knownHostsFile, and optional command.
-func SSHToInstance(ctx context.Context, host, privateKeyPath, user, knownHostsFile string, command []string) error {
-	if len(command) > 0 {
-		client, err := NewSSHClient(ctx, host, privateKeyPath, user, knownHostsFile)
-		if err != nil {
-			return fmt.Errorf("failed to make ssh client: %w", err)
-		}
-		defer client.Close()
-		session, err := client.NewSession()
-		if err != nil {
-			return fmt.Errorf("failed to create session: %w", err)
-		}
-		defer session.Close()
-
-		cmdString := strings.Join(command, " ")
-		output, err := session.CombinedOutput(cmdString)
-		if err != nil {
-			return fmt.Errorf("command error: %w\nOutput: %s", err, output)
-		}
-		fmt.Print(string(output))
-	} else {
-		hostOnly, port, err := net.SplitHostPort(host)
-		if err != nil {
-			port = "22"
-			hostOnly = host
-		}
-
-		sshargs := []string{
-			"-p" + port, "-i", privateKeyPath, "-o", "UserKnownHostsFile=" + knownHostsFile,
-			fmt.Sprintf("%s@%s", user, hostOnly),
-		}
-		execSSH := exec.CommandContext(ctx, "ssh", sshargs...)
-		execSSH.Stdout = os.Stdout
-		execSSH.Stderr = os.Stderr
-		execSSH.Stdin = os.Stdin
-		execSSH.Run()
+func SSHToInstance(ctx context.Context, host string, auths []ssh.AuthMethod, user, knownHostsFile string, command []string) error {
+	client, err := NewSSHClient(ctx, host, auths, user, knownHostsFile)
+	if err != nil {
+		return fmt.Errorf("failed to make ssh client: %w", err)
 	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
 
+	cmdString := strings.Join(command, " ")
+	output, err := session.CombinedOutput(cmdString)
+	if err != nil {
+		return fmt.Errorf("command error: %w\nOutput: %s", err, output)
+	}
 	return nil
 }
 
 // ShoveBinaryFile takes a host, ssh key, user, knownHostsFile, local file path, and remote destination.
-func ShoveBinaryFile(ctx context.Context, host, privateKeyPath, user, knownHostsFile, localFilePath, destFilePath string) error {
-	client, err := NewSSHClient(ctx, host, privateKeyPath, user, knownHostsFile)
+func ShoveBinaryFile(ctx context.Context, host string, auths []ssh.AuthMethod, user, knownHostsFile, localFilePath, destFilePath string) error {
+	client, err := NewSSHClient(ctx, host, auths, user, knownHostsFile)
 	if err != nil {
 		return fmt.Errorf("failed to make ssh client: %w", err)
 	}

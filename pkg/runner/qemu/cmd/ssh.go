@@ -36,16 +36,26 @@ func sshCmd() *cobra.Command {
 
 			vmdir = args[0]
 			sshArgs := args[1:]
+
 			sshAddr, sshPort, err := getSSHPortAddr(ctx, filepath.Join(vmdir, "qmp.sock"))
 			if err != nil {
 				log.Fatalf("Failed to get ssh port from %s: %v\n", vmdir, err)
 			}
+			addr := fmt.Sprintf("%s:%d", sshAddr, sshPort)
 
-			if err := sshutils.SSHToInstance(ctx,
-				fmt.Sprintf("%s:%d", sshAddr, sshPort), sshKeyFile, user, knownHosts, sshArgs); err != nil {
-				log.Fatalf("SSH error: %v", err)
+			if len(sshArgs) == 0 {
+				sshutils.SSHCommand(ctx, addr, user, sshKeyFile, knownHosts, sshArgs)
+				return
 			}
 
+			auth, err := sshutils.GetPrivateKeyOrDefaultAuth(sshKeyFile)
+			if err != nil {
+				log.Fatalf("Error setting up auth: %v", err)
+			}
+
+			if err := sshutils.SSHToInstance(ctx, addr, auth, user, knownHosts, sshArgs); err != nil {
+				log.Fatalf("SSH error: %v", err)
+			}
 		},
 	}
 
@@ -87,14 +97,19 @@ func runRemoteCmd() *cobra.Command {
 
 			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
 
-			err = sshutils.ShoveBinaryFile(ctx, hostPort, sshKeyFile, user, knownHosts, localFilePath, remoteFile)
+			auth, err := sshutils.GetPrivateKeyOrDefaultAuth(sshKeyFile)
+			if err != nil {
+				log.Fatalf("Error setting up auth: %v", err)
+			}
+
+			err = sshutils.ShoveBinaryFile(ctx, hostPort, auth, user, knownHosts, localFilePath, remoteFile)
 			if err != nil {
 				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
 			}
 
 			remotecmd := append([]string{"exec", remoteFile}, cmdArgs...)
 
-			if err := sshutils.SSHToInstance(ctx, hostPort, sshKeyFile, user, knownHosts, remotecmd); err != nil {
+			if err := sshutils.SSHToInstance(ctx, hostPort, auth, user, knownHosts, remotecmd); err != nil {
 				log.Fatalf("failed to run %s on remote host: %v", filepath.Base(localFilePath), err)
 			}
 		},
