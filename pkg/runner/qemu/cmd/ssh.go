@@ -37,6 +37,12 @@ func sshCmd() *cobra.Command {
 			vmdir = args[0]
 			sshArgs := args[1:]
 
+			if st, err := os.Stat(vmdir); err != nil {
+				log.Fatalf("Error reading %s: %v", vmdir, err)
+			} else if !st.IsDir() {
+				log.Fatalf("supplied vmdir '%s': not a directory", vmdir)
+			}
+
 			sshAddr, sshPort, err := getSSHPortAddr(ctx, filepath.Join(vmdir, "qmp.sock"))
 			if err != nil {
 				log.Fatalf("Failed to get ssh port from %s: %v\n", vmdir, err)
