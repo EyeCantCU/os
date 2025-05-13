@@ -143,7 +143,7 @@ test_azure() {
             { vfails="$arch-$imagename/read-vmconfigs"; \
               log "finished $arch-$imagename FAIL - $vfails"; \
               fails="${fails+$fails }$vfails"; continue; }
-        user=$(yq -re "explode(.) | .data.vmuser" "$testconfig") || user="azureuser"
+        user=$(yq -re "explode(.) | .data.vmuser" "$testconfig" 2>/dev/null) || { log "using default user 'azureuser'"; user="azureuser"; }
         region="$region_flag"
         if [ -z "$region" ]; then
             region=$(yq -re "explode(.) | .data.region" "$testconfig") || \
@@ -162,14 +162,23 @@ test_azure() {
               log "finished $arch-$imagename FAIL - $vfails"; \
               fails="${fails+$fails }$vfails"; continue; }
 
-        local i="" vmtag="" vm_size="" disk_type="" vmconfig_name="" vm_tests="" launchuser="" vm_testd="" voutd="" launcher="" launch_code="" tname="" tfile="" location=""
+        local i="" vmtag="" vm_size="" disk_type="" vmconfig_name="" named_tests="" test_groups="" group="" launchuser="" vm_testd="" voutd="" launcher="" launch_code="" tid="" tgroup="" tname="" tname_pretty="" tfile="" location=""
         for i in $(seq 0 $((num_vmconfigs-1))); do
             vmtag="$resource_basename-vm-$RANDOM"
             vm_size=$(echo "$vmconfigs" | jq -re ".[$i].vm_size") || { vfails="$vfails $arch-$imagename/missing-vm-size"; continue; }
             disk_type=$(echo "$vmconfigs" | jq -re ".[$i].disk_type") || { vfails="$vfails $arch-$imagename/missing-disk-type"; continue; }
             vmconfig_name=$(echo "$vmconfigs" | jq -re ".[$i].name" 2>/dev/null) || vmconfig_name="$vm_size-$disk_type"
-            vm_tests=$(echo "$vmconfigs" | jq -re ".[$i].tests[].name") || { vfails="$vfails $arch-$imagename/$vmconfig_name/read-tests"; continue; }
-            vm_tests="${vm_tests/_builtin/"$BUILTIN_TESTS"}"
+            named_tests=$(echo "$vmconfigs" | jq -re ".[$i].tests[].name | select (. != null)" 2>/dev/null) || named_tests=""
+            test_groups=$(echo "$vmconfigs" | jq -re ".[$i].tests[].test_group | select (. != null)" 2>/dev/null) || test_groups=""
+            for group in $test_groups; do
+                for tname in "$TOP_D/pkg/test/$group/"*; do
+                    named_tests="$named_tests $group/$(basename "$tname")"
+                done
+            done
+            if [ -z "$named_tests" ]; then
+                vfails="$vfails $arch-$imagename/$vmconfig_name/no-tests-defined"
+                continue
+            fi
             launchuser=$(echo "$vmconfigs" | jq -re ".[$i].launchuser" 2>/dev/null) || launchuser=$(yq -re "explode(.) | .data.launchuser" "$testconfig" 2>/dev/null) || launchuser="$user"
 
             vm_testd="$TEMP_D/$arch/$imagename/$vmconfig_name"
@@ -190,21 +199,32 @@ test_azure() {
                     >> "$known_hosts"
                 log "started testing $arch/$imagename/$vmconfig_name"
                 # Run tests, collect metrics
-                for tname in $vm_tests; do
-                    tfile=""
-                    if [ -f "$TOP_D/test/$arch/$tname" ]; then
-                        tfile="$TOP_D/test/$arch/$tname"
+                for tid in $named_tests; do
+                    case "$tid" in
+                        *"/"*)
+                            tname="${tid##*/}"
+                            tgroup="${tid%%/*}"
+                            ;;
+                        *)
+                            tname="$tid"
+                            tgroup=""
+                            ;;
+                    esac
+                    if [ -n "$tgroup" ]; then
+                        tname_pretty="$tgroup-$tname"
+                        tfile="$TOP_D/test/$arch/$tgroup/$tname"
                     else
+                        tname_pretty="$tname"
                         location=$(dirname "$testconfig")"/"$(echo "$vmconfigs" | jq -re ".[$i].tests[] | select(.name==\"$tname\").location") || { vfails="$vfails $arch/$imagename/$vmconfig_name/missing-test-location-$tname"; continue; }
                         goarch=$(goarch "$arch") || { vfails="$vfails $arch/$imagename/$vmconfig_name/invalid-test-arch-$tname"; continue; }
                         tfile="$vm_testd/$tname"
                         rq env GOOS="linux" GOARCH="$goarch" go test -C "$location" -c -o "$tfile" -tags vmtest || { vfails="$vfails $arch/$imagename/$vmconfig_name/compile-test-$tname"; continue; }
                     fi
-                    test_user=$(echo "$vmconfigs" | jq -re ".[$i].vmuser") || test_user="$user"
-                    vrl "$voutd/test-$tname" "$runner" run-remote --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                    test_user=$(echo "$vmconfigs" | jq -re ".[$i].vmuser" 2>/dev/null) || test_user="$user"
+                    vrl "$voutd/test$tname_pretty" "$runner" run-remote --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
                         --private-key "$key" --user "$test_user" --file="$tfile" --known-hosts="$known_hosts" -- \
                         -test.v -metric-tags "arch:$arch,$METRIC_TAGS" ||
-                        vfails="$vfails $arch-$imagename/$vmconfig_name/test-$tname"
+                        vfails="$vfails $arch-$imagename/$vmconfig_name/test-$tname_pretty"
 
                     # Don't try to collect metrics unless the test binary actually calls metrics.Log()
                     metric_logs=$(strings "$tfile" | grep "chainguard.dev/wolfi-vm/vm-test/pkg/metrics.Log")
@@ -212,7 +232,7 @@ test_azure() {
                         "$runner" ssh --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
                             --private-key "$key" --user "$test_user" --known-hosts="$known_hosts" \
                             "cat $METD/$tname" \
-                            > "$voutd/$tname-metrics.json" || vfails="$vfails $arch/$imagename/$vmconfig_name/$tname-metrics"
+                            > "$voutd/${tname}${tgroup}metrics.json" || vfails="$vfails $arch/$imagename/$vmconfig_name/$tname_pretty-metrics"
                     fi
 
                 done

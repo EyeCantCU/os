@@ -3,7 +3,8 @@ MAKEFLAGS += --output-sync=target
 
 TEST_ARCHES := x86_64 aarch64
 runners=$(subst pkg/runner/,,$(wildcard pkg/runner/*))
-tests=$(subst pkg/test/,,$(wildcard pkg/test/*))
+test_groups=$(subst pkg/test/,,$(wildcard pkg/test/*))
+tests=$(foreach group,$(test_groups),$(subst pkg/test/,,$(wildcard pkg/test/$(group)/*)))
 
 go_files=$(shell find pkg -name *.go -and -not -name '*_generated.go')
 go_gen_sources = $(git grep -l '^//go:generate')
@@ -54,11 +55,12 @@ getarch = $(firstword $(subst /, ,$(subst $(1),,$(2))))
 # goarch converts x86_64 to arm64 and aarch64->arm64
 goarch = $(subst aarch64,arm64,$(subst x86_64,amd64,$(call getarch,$(1),$(2))))
 
-# test_targets are test/<arch>/<name>
-#  where <name> is a dir in pkg/test
+# test_targets are test/<arch>/<group/<name>
+#  where <group> is a dir in pkg/test
+#  and <name> is a dir in pkg/test/<group>
 $(test_targets): test/%: $(go_files) .go-generated
 	@mkdir -p $(notdir $@)
-	GOOS=linux GOARCH=$(call goarch,test/,$@) go test -c -o $@ ./pkg/test/$(notdir $@) -tags vmtest
+	GOOS=linux GOARCH=$(call goarch,test/,$@) go test -c -o $@ ./pkg/$(subst $(call getarch,test/,$@)/,,$(@)) -tags vmtest
 
 gofmt: .go-formatted
 .go-formatted: $(go_files)

@@ -39,18 +39,18 @@ vmconfigs:
     - vm_size: Standard_F2s_v2
       disk_type: StandardSSD_LRS
       tests:
-        - name: _builtin
+        - test_group: core
     - vm_size: Standard_F2as_v6
       disk_type: StandardSSD_LRS
       tests:
-        - name: _builtin
+        - test_group: core
   aarch64:
     - vm_size: Standard_D2ps_v6
       disk_type: StandardSSD_LRS
       tests:
-        - name: _builtin
+        - test_group: core
     - vm_size: Standard_E2ps_v6
       disk_type: StandardSSD_LRS
       tests:
-        - name: _builtin
+        - test_group: core
 ```
