@@ -90,6 +90,10 @@ func TOFUHostKeyCallback(knownHostsFile, host string) ssh.HostKeyCallback {
 	}
 }
 
+// GetPrivateKeyOrDefaultAuth - return AuthMethod to for ssh.
+//
+// If path is empty, then use GetSigners() otherwise return a PrivateKeyAuth
+// for the provided path.
 func GetPrivateKeyOrDefaultAuth(path string) ([]ssh.AuthMethod, error) {
 	if path == "" {
 		return GetSigners()
@@ -97,7 +101,7 @@ func GetPrivateKeyOrDefaultAuth(path string) ([]ssh.AuthMethod, error) {
 	return PrivateKeyAuth([]string{path})
 }
 
-// reutrns a slice of ssh.AuthMethod easily used ClientConfig.Auth
+// GetSigners - returns a slice of ssh.AuthMethod easily used ClientConfig.Auth
 func GetSigners() ([]ssh.AuthMethod, error) {
 	ret := []ssh.AuthMethod{}
 
@@ -159,6 +163,9 @@ func getUserPrivateKeys() ([]ssh.Signer, error) {
 	return ret, nil
 }
 
+// GetUserPubkeys - return public keys suitable for authorized_keys
+//
+// Search common path locations and consult ssh-agent if present.
 func GetUserPubkeys() ([]string, error) {
 	ret := []string{}
 	user, err := user.Current()
@@ -201,6 +208,7 @@ func GetUserPubkeys() ([]string, error) {
 	return ret, nil
 }
 
+// PrivateKeyAuth - return slice of ssh.PublicKeys for the provided paths.
 func PrivateKeyAuth(paths []string) ([]ssh.AuthMethod, error) {
 	ret := []ssh.AuthMethod{}
 	for _, p := range paths {
@@ -218,6 +226,7 @@ func PrivateKeyAuth(paths []string) ([]ssh.AuthMethod, error) {
 	return ret, nil
 }
 
+// SSHCommand - run ssh command (for interactive use)
 func SSHCommand(ctx context.Context, host, user, privateKeyPath, knownHostsFile string, args []string) {
 	hostOnly, port, err := net.SplitHostPort(host)
 	if err != nil {
@@ -407,10 +416,11 @@ func GetSSHHostKey(ctx context.Context, address string) (ssh.PublicKey, error) {
 	}
 }
 
+// GetSinglePublicKey - get a public key suitable for authorized_keys.
+//
+//	if path is empty string, then use GetUserPubkeys to find user public
+//	keys and return the first in the list.
 func GetSinglePublicKey(path string) (string, error) {
-	if path == "none" {
-		return "", nil
-	}
 	if path != "" {
 		pubKeyBytes, err := os.ReadFile(path)
 		if err != nil {

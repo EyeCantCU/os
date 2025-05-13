@@ -33,7 +33,6 @@ func startCmd() *cobra.Command {
 			var err error
 			pkdata := ""
 			if pubkey == "" {
-				fmt.Printf("getting pubkeys")
 				pubkeys, err := sshutils.GetUserPubkeys()
 				fmt.Printf("pubkeys: %v\n", pubkeys)
 				if err != nil {
