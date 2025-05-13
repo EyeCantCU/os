@@ -10,7 +10,7 @@ The following options are part of this version of the test configuration specifi
 * **version**: The version of configuration options. This specification is for version 1.
 * **cloud**: the cloud this image is intended for (one of qemu, azure, aws, or gcp).
 * **data**: top level configuration details.
-	* **user**: The user which tests will be run as unless otherwise specified in test configuration.
+	* **vmuser**: The user which tests will be run as on the VM unless otherwise specified in test configuration.
 	* Any other fields under this key are considered a cloud specific definition.
 * **vmconfigs**: Contains a list of architectures for which VM configs and tests are defined.
 	* **x86_64**: This field is a list of vm configurations on x86_64.
@@ -18,7 +18,7 @@ The following options are part of this version of the test configuration specifi
 		* **launch** (optional): If specified, this binary will be called to launch the VM under test rather than the “runner/$cloud launch” command. Arguments provided to the binary will be the same arguments that would have been provided to the runner. The 'RUNNER' environment variable points to the binary that would have been run.
 		* **tests**: This key contains a list of test configurations to be run on the VM.
 			* **name**: This is the name of the test which should be run. The name ‘_builtin’ will be interpreted as referring to all of the tests which are built into the test harness. Specifying individual tests which are members of '_builtin' by name is permitted, though the list of tests and their names are subject to change.
-			* **user** (optional): This the name of the user the test should be run as in the VM, if different from top-level user definition.
+			* **vmuser** (optional): This the name of the user the test should be run as in the VM, if different from top-level vmuser definition.
 			* **location** (optional): This is the location on the filesystem of a folder containing a go package defining a test. It will be compiled in the same manner as built-in tests are compiled. The compiler tag 'vmtest' can be used to detect when being compiled for execution on the target. Must be defined if the test is not part of _builtin.
 		* All other fields under this key are considered a cloud specific definition.
 
@@ -36,7 +36,7 @@ Currently, finding test configuration files is done by trying to determine the n
 version: 1
 cloud: fixme # one of qemu, azure, aws, gcp
 data:
-  user: root
+  vmuser: root
 
 vmconfigs:
   x86_64:
