@@ -18,6 +18,8 @@ Usage: ${0##*/} [ options ] cloud out-dir -- [ azure options ]
 EOF
 }
 
+# cleanup_azure(subscription, resource_group, tag)
+# remove all resources with a certain tag
 cleanup_azure() {
     local subscription="$1" resource_group="$2" tag="$3"
     shift 3
@@ -25,13 +27,18 @@ cleanup_azure() {
     vr "$runner" teardown --resource-group "$resource_group" --subscription-id "$subscription" --tag "$tag"
 }
 
+# setup_azure(state_dir, subscription, resource_group, tag, region)
+# ensure setup resources with the given tag exist in the region
+# no-op if setup was already done, tracked via state dir
 setup_azure() {
-    local subscription="$1" resource_group="$2" tag="$3" region="$4"
-    shift 4
+    local state_dir="$1" subscription="$2" resource_group="$3" tag="$4" region="$5"
+    shift 5
+    grep "$tag" "$state_dir/$region" >/dev/null 2>&1 && return 0
     runner="$TOP_D/runner/azure"
     vr "$runner" setup --resource-group "$resource_group" --subscription-id "$subscription" --tag "$tag" \
-        --nsg-name "$tag-nsg" --vnet-name "$tag-vnet" --route-table-name "$tag-routetable" --subnet-name "$tag-subnet" \
-        --region "$region"
+        --nsg-name "$tag-$region-nsg" --vnet-name "$tag-$region-vnet" --route-table-name "$tag-$region-routetable" --subnet-name "$tag-$region-subnet" \
+        --region "$region" || return $?
+    echo "$tag" >> "$state_dir/$region"
 }
 
 test_azure() {
@@ -44,13 +51,13 @@ test_azure() {
         { bad_azure_usage; return; }
 
     local cur="" next=""
-    local subscription="" region="" resource_group="" azure_inputs="" azure_input_filename="publish.*.json"
+    local subscription="" region_flag="" resource_group="" azure_inputs="" azure_input_filename="publish.*.json"
     while [ $# -ne 0 ]; do
         { cur="$1"; next="$2"; }
         case "$cur" in
             -h|--help) azure_usage ; exit 0;;
             -s|--subscription-id) subscription="$next"; shift;;
-            -r|--region) region="$next"; shift;;
+            -r|--region) region_flag="$next"; shift;;
             -g|--resource-group) resource_group="$next"; shift;;
             -i|--azure-inputs) azure_inputs="$next"; shift;;
                --azure-input-filename) azure_input_filename="$next"; shift;;
@@ -60,7 +67,6 @@ test_azure() {
     done
 
     [ -n "$subscription" ] || { bad_azure_usage "--subscription-id is required"; return 1; }
-    [ -n "$region" ] || { bad_azure_usage "--region is required"; return 1; }
     [ -n "$resource_group" ] || { bad_azure_usage "--resource-group is required"; return 1; }
     [ -n "$azure_inputs" ] || { bad_azure_usage "--azure-inputs is required"; return 1; }
     if [ -f "$azure_inputs" ] && [ -d "$azure_inputs" ]; then
@@ -71,10 +77,18 @@ test_azure() {
     local wolfivmd="$1" outd="$2"
     shift 2
 
+    # shellcheck disable=SC2064
+    # Expanding now is fine, these are static
+    # We trap this once outside the loop because we use the same tag across all
+    # images so we only need to clean up once to catch resources across all regions.
+    trap "cleanup_azure '$subscription' '$resource_group' '$resource_basename'" EXIT
+
     TEMP_D=$(mktemp -d) || return
     runner="$TOP_D/runner/azure"
     rund="$TEMP_D/run"
     mkdir "$rund" || return
+    setupd="$TEMP_D/setup"
+    mkdir "$setupd" || return
 
     local publish_files=""
     if [ -f "$azure_inputs" ]; then
@@ -90,12 +104,7 @@ test_azure() {
     rq ssh-keygen -t ed25519 -N '' -f "$key" ||
         { stderr "failed creating ssh key"; return 1; }
 
-    setup_azure "$subscription" "$resource_group" "$resource_basename" "$region" || return 1
-    # shellcheck disable=SC2064
-    # Expanding now is fine, these are static
-    trap "cleanup_azure '$subscription' '$resource_group' '$resource_basename'" EXIT
-
-    local publish_file="" vfails="" fails="" image_uri="" arch="" az_arch="" imagename="" localname="" testconfig="" vmconfigs="" user="" num_vmconfigs=""
+    local region="" publish_file="" vfails="" fails="" image_uri="" arch="" az_arch="" imagename="" localname="" testconfig="" vmconfigs="" user="" num_vmconfigs=""
     for publish_file in $publish_files; do
         vfails=""
         image_uri=$(jq -rse '.[1].id' < "$publish_file") || \
@@ -135,9 +144,21 @@ test_azure() {
               log "finished $arch-$imagename FAIL - $vfails"; \
               fails="${fails+$fails }$vfails"; continue; }
         user=$(yq -re "explode(.) | .data.user" "$testconfig") || user="azureuser"
-        log "launching $imagename, detected arch $arch"
+        region="$region_flag"
+        if [ -z "$region" ]; then
+            region=$(yq -re "explode(.) | .data.region" "$testconfig") || \
+            { vfails="$arch-$imagename/empty-region"; \
+              log "finished $arch-$imagename FAIL - $vfails"; \
+              fails="${fails+$fails }$vfails"; continue; }
+        fi
         num_vmconfigs=$(echo "$vmconfigs" | jq 'length') || \
             { vfails="$arch-$imagename/malformed-vmconfigs"; \
+              log "finished $arch-$imagename FAIL - $vfails"; \
+              fails="${fails+$fails }$vfails"; continue; }
+
+        log "setting up $imagename in $region, detected arch $arch"
+        setup_azure "$setupd" "$subscription" "$resource_group" "$resource_basename" "$region" || \
+            { vfails="$arch-$imagename/setup"; \
               log "finished $arch-$imagename FAIL - $vfails"; \
               fails="${fails+$fails }$vfails"; continue; }
 
@@ -160,7 +181,7 @@ test_azure() {
             # shellcheck disable=SC2086
             # Intentional wordsplitting.
             vr env RUNNER="$runner" $launcher --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
-                --vnet "$resource_basename-vnet" --subnet "$resource_basename-subnet" --name "$vmtag" --region "$region" \
+                --vnet "$resource_basename-$region-vnet" --subnet "$resource_basename-$region-subnet" --name "$vmtag" --region "$region" \
                 --image-uri="$image_uri" --public-key="$key.pub" --admin-username "$launchuser" --vm-size="$vm_size" --disk-type="$disk_type"
             launch_code=$?
             if [ $launch_code -eq 0 ]; then

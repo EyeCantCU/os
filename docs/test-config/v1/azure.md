@@ -5,6 +5,7 @@ This file specifies azure-specific options in test configuration v1. Refer to co
 * **cloud**: must be azure.
 * **data**:
 	* **user**: If unspecified, this will default to "azureuser".
+	* **region**: *Suggested* region. The user may choose to change this at runtime, do not rely on it.
 	* **launchuser**: The username to set as the admin username during VM launch, if different from the user to run tests as. If unspecified, user will be used.
 * **vmconfigs**:
 	* **x86_64**:
@@ -31,6 +32,7 @@ cloud: azure
 data:
   launchuser: azureuser
   user: root
+  region: eastus
 
 vmconfigs:
   x86_64:
