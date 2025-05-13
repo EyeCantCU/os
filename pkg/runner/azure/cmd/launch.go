@@ -19,7 +19,7 @@ func launchCmd() *cobra.Command {
 	var vmName string
 	var vmSize string
 	var publicKeyPath string
-	var adminUsername string
+	var user string
 	var imageURI string
 	var vnetName string
 	var subnetName string
@@ -132,13 +132,13 @@ func launchCmd() *cobra.Command {
 					},
 					OSProfile: &armcompute.OSProfile{
 						ComputerName:  &vmName,
-						AdminUsername: &adminUsername,
+						AdminUsername: &user,
 						LinuxConfiguration: &armcompute.LinuxConfiguration{
 							DisablePasswordAuthentication: utils.ToPtr(true),
 							SSH: &armcompute.SSHConfiguration{
 								PublicKeys: []*armcompute.SSHPublicKey{
 									{
-										Path:    utils.ToPtr(sshutils.GetAuthorizedKeysPath(adminUsername)),
+										Path:    utils.ToPtr(sshutils.GetAuthorizedKeysPath(user)),
 										KeyData: utils.ToPtr(string(pubKey)),
 									},
 								},
@@ -177,7 +177,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&vmName, "name", "", "VM name (required)")
 	cmd.Flags().StringVar(&vmSize, "vm-size", "", "Azure VM size")
 	cmd.Flags().StringVar(&diskType, "disk-type", "", "Azure disk type")
-	cmd.Flags().StringVar(&adminUsername, "admin-username", "azureuser", "Admin username for SSH")
+	cmd.Flags().StringVar(&user, "user", "azureuser", "Admin username for SSH")
 	cmd.Flags().StringVar(&publicKeyPath, "public-key", "id_rsa.pub", "Path to SSH public key")
 
 	cmd.Flags().StringVar(&imageURI, "image-uri", "", "Image reference URI (required)")
