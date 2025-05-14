@@ -6,6 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 package utils
 
 import (
+	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -28,12 +30,27 @@ func GenerateQEMUCommand(arch, efiDisk, ovmf string) []string {
 	return result
 }
 
+func getDisplayArgs() []string {
+	display := os.Getenv("WVM_DISPLAY")
+	if display == "" {
+		display = "none"
+	}
+
+	vnc := os.Getenv("WVM_VNC")
+	if vnc == "" {
+		vnc = "none"
+	}
+
+	return []string{"-display", display, "-vnc", vnc}
+}
+
 func generateArmCommand(arch, efiDisk, ovmf, socketPath string) []string {
-	qemuArmCommand := []string{
+	cmd := []string{
 		"qemu-system-aarch64",
 		"-machine", "virt",
-		"-m", "4G",
-		"-display", "none",
+		"-m", "4G"}
+	cmd = append(cmd, getDisplayArgs()...)
+	cmd = append(cmd, []string{
 		"-serial", "mon:stdio",
 		"-echr", "0x05",
 		"-device", "virtio-rng-pci",
@@ -45,34 +62,36 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath string) []string {
 		"-chardev", "socket,path=" + socketPath + ",server=on,wait=off,id=debugshell",
 		"-device", "pci-serial,id=serial0,chardev=debugshell",
 		"-snapshot",
-	}
+	}...)
 
 	switch runtime.GOOS {
 	case "darwin":
 		out, err := exec.Command("sysctl", "kern.hv_support").Output()
 		if err == nil && strings.Contains(string(out), "1") {
-			return append(qemuArmCommand, []string{
+			return append(cmd, []string{
 				"-cpu", "host", "-accel", "hvf",
 			}...)
 		}
 	case "linux":
 		if CanUseKVM() &&
 			types.ParseArchitecture(arch).ToAPK() == types.ParseArchitecture(runtime.GOARCH).ToAPK() {
-			return append(qemuArmCommand, []string{
+			return append(cmd, []string{
 				"-machine", "virt", "-cpu", "host", "-accel", "kvm",
 			}...)
 		}
 	}
 
-	return append(qemuArmCommand, []string{"-cpu", "cortex-a53", "-accel", "tcg"}...)
+	return append(cmd, []string{"-cpu", "cortex-a53", "-accel", "tcg"}...)
 }
 
 func generateAmdCommand(arch, efiDisk, ovmf, socketPath string) []string {
-	qemuAmdCommand := []string{
+	cmd := []string{
 		"qemu-system-x86_64",
 		"-machine", "q35",
 		"-m", "4G",
-		"-display", "none",
+	}
+	cmd = append(cmd, getDisplayArgs()...)
+	cmd = append(cmd, []string{
 		"-serial", "mon:stdio",
 		"-echr", "0x05",
 		"-device", "virtio-rng-pci",
@@ -83,14 +102,15 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath string) []string {
 		"-netdev", "user,id=id1,hostfwd=tcp:127.0.0.1:6379-:6379",
 		"-serial", "unix:" + socketPath + ",wait=off,server=on",
 		"-snapshot",
-	}
+	}...)
 	// on linux, with kvm and if arches match, let's use acceleration
 	if runtime.GOOS == "linux" &&
 		CanUseKVM() &&
 		types.ParseArchitecture(arch).ToAPK() == types.ParseArchitecture(runtime.GOARCH).ToAPK() {
-		qemuAmdCommand = append(qemuAmdCommand, []string{"-cpu", "host", "-accel", "kvm"}...)
+		cmd = append(cmd, []string{"-cpu", "host", "-accel", "kvm"}...)
 	} else {
-		qemuAmdCommand = append(qemuAmdCommand, []string{"-cpu", "Haswell-v4", "-accel", "tcg"}...)
+		cmd = append(cmd, []string{"-cpu", "Haswell-v4", "-accel", "tcg"}...)
 	}
-	return qemuAmdCommand
+	log.Printf("cmd: %v", cmd)
+	return cmd
 }
