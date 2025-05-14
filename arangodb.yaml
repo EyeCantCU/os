@@ -1,13 +1,13 @@
 package:
-  name: arangodb-3.11
-  version: "3.11.14"
+  name: arangodb
+  version: "3.12.4.4"
   epoch: 0
   description: "Native multi-model database with flexible data models for documents, graphs, and key-values."
   copyright:
     - license: "BUSL-1.1"
   dependencies:
-    provides:
-      - arangodb=${{package.full-version}}
+    runtime:
+      - openmp-19
 
 environment:
   contents:
@@ -16,25 +16,31 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
-      - clang-16
-      - clang-16-dev
+      - clang-19
+      - clang-19-dev
       - cmake
       - curl
       - gc-dev
+      - icu-dev
       - jemalloc-dev
+      - jitterentropy-library-dev
       - libunwind-dev
       - lld
-      - llvm-libcxx-16
-      - llvm-libcxx-16-dev
-      - llvm16
+      - llvm-19
+      - llvm-libcxx-19
+      - llvm-libcxx-19-dev
       - lz4-dev
       - nodejs
       - npm
+      - openblas-dev
+      - openmp-19-dev
       - openssl-dev
       - perl
+      - py3-setuptools
       - python3-dev
       - snappy-dev
       - systemd-dev
+      - yarn
       - zlib-dev
 
 pipeline:
@@ -42,34 +48,40 @@ pipeline:
     with:
       repository: https://github.com/arangodb/arangodb
       tag: v${{package.version}}
-      expected-commit: 46e2b30879c5acdd5090bc3d050c0d7dfa074ce2
+      expected-commit: 9533315ee20c2efd3eb748ac885e7ca9e29ae0f9
 
   - name: Get dependencies
     runs: |
       git submodule update --init --recursive
 
-  - name: Fix CVE-2024-21538 GHSA-3xgq-45jj-v275
-    uses: patch
-    with:
-      patches: |
-        js-node.patch
-
-  - name: Regenrate node modules
+  - name: Hack to use our libs
     runs: |
-      rm -rf js/node/node_modules js/node/package-lock.json
-      cd js/node
-      npm install
+      sed -i '/if (LIBOMP)/,/endif ()/c\
+        message(STATUS "Using shared libomp.so from /usr/lib")\
+        set(OpenMP_C_FLAGS "-fopenmp=libomp -L/usr/lib -Wl,-rpath,/usr/lib")\
+        set(OpenMP_CXX_FLAGS "${OpenMP_C_FLAGS}")' 3rdParty/CMakeLists.txt
+      mkdir -p /usr/lib/x86_64-linux-gnu/blas
+      mkdir -p /usr/lib/x86_64-linux-gnu/lapack
+      ln -sf /usr/lib/libopenblas.a /usr/lib/x86_64-linux-gnu/blas/libblas.a
+      ln -sf /usr/lib/libopenblas.a /usr/lib/x86_64-linux-gnu/lapack/liblapack.a
 
   - name: Configure the build
     runs: |
       cmake \
-        -DCMAKE_C_COMPILER=clang-16 \
+        -DSTATIC_EXECUTABLES=OFF \
+        -DOpenMP_C_FLAGS="-fopenmp" \
+        -DOpenMP_CXX_FLAGS="-fopenmp" \
+        -DOpenMP_C_LIB_NAMES="omp" \
+        -DOpenMP_CXX_LIB_NAMES="omp" \
+        -DOpenMP_omp_LIBRARY="/usr/lib/libomp.so" \
+        -DOpenMP_ROOT="/usr/lib" \
+        -DCMAKE_C_COMPILER=clang-19 \
         -DCMAKE_CXX_COMPILER=clang++ \
         -DCMAKE_C_COMPILER_AR="/usr/bin/llvm-ar" \
         -DCMAKE_CXX_COMPILER_AR="/usr/bin/llvm-ar" \
         -DCMAKE_C_COMPILER_RANLIB="/usr/bin/llvm-ranlib" \
         -DCMAKE_CXX_COMPILER_RANLIB="/usr/bin/llvm-ranlib" \
-        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--build-id=sha1 -fno-stack-protector -fuse-ld=lld" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--build-id=sha1 -fno-stack-protector -fuse-ld=lld -ljitterentropy" \
         -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld" \
         -DUSE_LIBUNWIND=true -DUSE_PRECOMPILED_V8=false \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -103,9 +115,9 @@ pipeline:
       cp -a js ${{targets.destdir}}/usr/share/arangodb3/js
       cp Installation/arangodb-helper ${{targets.destdir}}/usr/share/arangodb3/arangodb-helper
       cp Installation/arangodb-update-db ${{targets.destdir}}/usr/share/arangodb3/arangodb-update-db
-      cp 3rdParty/V8/v7.9.317/third_party/icu/ios/icudtl.dat ${{targets.destdir}}/usr/share/arangodb3/icudtl.dat
+      cp build-presets/community/bin/icudtl.dat ${{targets.destdir}}/usr/share/arangodb3/icudtl.dat
+      cp build-presets/community/bin/icudtl_legacy.dat ${{targets.destdir}}/usr/share/arangodb3/icudtl_legacy.dat
       cp -a 3rdParty/tzdata ${{targets.destdir}}/usr/share/arangodb3/
-
       mkdir -p ${{targets.destdir}}/etc
       cp -a build-presets/community/etc/arangodb3 ${{targets.destdir}}/etc/arangodb3
       mkdir -p ${{targets.destdir}}/var/log/arangodb3
@@ -114,24 +126,15 @@ subpackages:
   - name: "${{package.name}}-compat"
     description: "Compatibility package to place binaries in the location expected by upstream helm charts"
     dependencies:
-      provides:
-        - arangodb-compat=${{package.full-version}}
       runtime:
         # pwgen and numactl are required by entrypoint scripts
         # https://github.com/arangodb/arangodb-docker/blob/351d27922fd2060deb86a76a26a99ff1bb2f3c12/alpine/3.11.9/docker-entrypoint.sh#L68
         - pwgen
         - numactl
     pipeline:
-      - uses: fetch
-        with:
-          uri: https://raw.githubusercontent.com/arangodb/oskar/master/containers/arangodb311deb.docker/entrypoint.sh
-          extract: false
-          expected-sha512: e0ac15d896c966f959c07d189a185de0f6958dcf8dfe3072552a5d8ff5779c636f3caa46d22190985a1ed857adb4481a36987c465c52bf13f200e924873bc3bb
       - name: Install entrypoint
-        runs: |
-          install -m755 entrypoint.sh "${{targets.destdir}}/usr/share/entrypoint.sh"
-      # This entrypoint does not exist in the upstream repo under v3.11.x and is added by their external build system.
-      # This does exist for 3.12.x in the main repo.
+        runs: install -m755 scripts/docker/deploy/entrypoint.sh "${{targets.destdir}}/usr/share/entrypoint.sh"
+      # Differs from 3.11 because 3.11 does not have the docker entrypoint stored in the main arangodb repo
       - name: Create symlinks
         runs: |
           ln -sf /usr/share/entrypoint.sh ${{targets.subpkgdir}}/entrypoint.sh
@@ -147,7 +150,7 @@ update:
   enabled: true
   github:
     identifier: arangodb/arangodb
-    tag-filter: v3.11
+    tag-filter: v3.12
     strip-prefix: v
     use-tag: true
 
@@ -179,7 +182,7 @@ test:
           -c /etc/arangodb3/arangod.conf \
           --server.endpoint tcp://127.0.0.1:8529 \
           --server.authentication=false \
-          /tmp/database-dir &
+          /tmp/database-dir &> /tmp/arangod_output.log &
         wait-for-it localhost:8529 --timeout=10
 
         # Set credentials using arangosh tool.
