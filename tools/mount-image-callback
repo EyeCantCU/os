@@ -147,9 +147,10 @@ get_partition() {
     # return in _RET the 'auto' partition for a image.
     # _RET=partition number for a partitioned image
     # _RET=0 for unpartitioned
-    local img="$1"
+    local img="$1" out=""
+    _RET_ERR=""
     out=$(LANG=C sfdisk --list -uS "$img" 2>&1) || {
-        error "failed determining if partitioned: $out";
+        _RET_ERR="$?:$out"
         return 1;
     }
     if echo "$out" | grep -q 'Device.*Start.*End'; then
@@ -169,6 +170,12 @@ add_helpers() {
     [ -d "$1" ] || mkdir -p "$1"
     add_bin "$d/mchroot" <<"EOF" || return 1
 #!/bin/sh
+if [ $# -eq 0 ]; then
+  for p in ${SHELL#/} bin/bash bin/sh; do
+    [ -x "${MOUNTPOINT}/$p" ] && set -- "/$p" && break
+  done
+  [ $# -ne 0 ] || { echo "no shell found in $MOUNTPOINT/bin" 1>&2; exit 1; }
+fi
 exec chroot "$MOUNTPOINT" "$@"
 EOF
     return
@@ -270,7 +277,7 @@ connect_nbd() {
 
     debug 1 "connected $img_in ($fmt) ${rwmode} to $nbd. waiting for device."
 
-    local out=""
+    local out="" tries=40
     # This can fail due to udev events, but we ignore that.  We need to ensure
     # it happens for where it doesnt happen automatically (LP: #1741300)
     out=$(blockdev --rereadpt "$nbd" 2>&1) ||
@@ -280,11 +287,17 @@ connect_nbd() {
     i=0
     while i=$((i+1)); do
         get_partition "$nbd" && nptnum="$_RET" && break
-        [ $i -eq 40 ] && {
+        [ $i -eq $tries ] && {
             error "gave up on $nbd"
+            if [ -n "$_RET_ERR" ]; then
+                error "get_partition error: $_RET_ERR"
+            fi
             disconnect_qemu
             return 1
         }
+        if [ -n "$_RET_ERR" ] && [ "$VERBOSITY" -gt 1 ]; then
+            error "get_partition $i/$tries error: $_RET_ERR"
+        fi
         [ $((i%10)) -eq 0 ] &&
             debug 1 "waiting for $nbd to be ready."
         sleep .1
@@ -508,10 +521,12 @@ mount_callback_umount() {
     debug 1 "invoking: MOUNTPOINT=$mp" "${cmd[@]}"
 
     # shellcheck disable=SC2194
-    ${cd_mountpoint} && cd "$mp" || {
-        error "cd $mp failed"
-        return 1;
-    }
+    if [ "${cd_mountpoint}" = "true" ]; then
+        cd "$mp" || {
+            error "cd $mp failed"
+            return 1;
+        }
+    fi
     MOUNTPOINT="$mp" "${cmd[@]}"
     ret=$?
     cd "$startwd" || :
