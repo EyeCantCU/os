@@ -4,7 +4,7 @@ TOOLS_D = $(TOP_D)/tools
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
-disks_aws = aws-base aws-agents aws-docker aws-docker-dev aws-eks-dev
+disks_aws = aws-base aws-agents aws-agents-docker-dev aws-docker aws-docker-dev aws-eks-dev
 disks_gcp = gcp-base gcp-agents gcp-agents-docker-dev gcp-docker gcp-docker-dev
 disks_qemu = generic
 disks_azure = azure-base azure-agents azure-aks-dev azure-eap-dev
