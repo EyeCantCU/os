@@ -1,0 +1,126 @@
+package:
+  name: ollama
+  version: 0.6.8
+  epoch: 0
+  description: Get up and running with Llama 3.3, DeepSeek-R1, Phi-4, Gemma 3, and other large language models.
+  copyright:
+    - license: MIT
+
+vars:
+  cuda_version: 12.8
+
+environment:
+  contents:
+    packages:
+      - ca-certificates
+      - cmake
+      - cuda-toolkit-${{vars.cuda_version}}-dev
+      - nvidia-cuda-cccl-${{vars.cuda_version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ollama/ollama
+      tag: v${{package.version}}
+      expected-commit: 6a74bba7e7e19bf5f5aeacb039a1537afa3522a5
+
+  - uses: go/build
+    with:
+      modroot: .
+      packages: .
+      output: ollama
+      ldflags: -X=github.com/ollama/ollama/version.Version=${{package.version}} -linkmode external
+
+  - uses: strip
+
+subpackages:
+  - name: ollama-cpu
+    description: Ollama CPU inferencing component
+    dependencies:
+      runtime:
+        - ollama
+    pipeline:
+    - name: Copy required files for build
+      runs: |
+        mkdir -p ${{targets.contextdir}}/ml/backend/ggml
+        install -Dpm0644 CMakeLists.txt ${{targets.contextdir}}/CMakeLists.txt
+        install -Dpm0644 CMakePresets.json ${{targets.contextdir}}/CMakePresets.json
+        cp -R ml/backend/ggml/ggml ${{targets.contextdir}}/ml/backend/ggml/ggml
+    - name: build-cpu-ggml
+      runs: |
+         cmake --preset 'CPU'
+         cmake --build --parallel $(nproc) --preset 'CPU'
+         DESTDIR="${{targets.destdir}}" cmake --install build --component CPU
+    test:
+      pipeline:
+        - name: Ensure CPU component exists
+          runs: |
+            ls -lah /usr/lib/ollama/libggml*.so
+
+  - name: ollama-cuda
+    description: Ollama CUDA support component
+    dependencies:
+      runtime:
+        - ollama
+    pipeline:
+      - name: Copy required files for build
+        runs: |
+          mkdir -p ${{targets.contextdir}}/ml/backend/ggml
+          install -Dpm0644 CMakeLists.txt ${{targets.contextdir}}/CMakeLists.txt
+          install -Dpm0644 CMakePresets.json ${{targets.contextdir}}/CMakePresets.json
+          cp -R ml/backend/ggml/ggml ${{targets.contextdir}}/ml/backend/ggml/ggml
+
+      - name: Build CUDA component
+        runs: |
+          CUDA_MAJOR=$(echo ${{vars.cuda_version}} | cut -d. -f1)
+
+          # Remove the runtime dependencies from installation so CMake doesn't install
+          # lots of system dependencies into the target path.
+          sed -i 's/PRE_INCLUDE_REGEXES.*/PRE_INCLUDE_REGEXES = ""/' CMakeLists.txt
+
+          export PATH=/usr/local/cuda-${{vars.cuda_version}}/bin/:$PATH
+          export CMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda_version}}/bin/nvcc
+          export CPATH=/usr/local/cuda-${{vars.cuda_version}}/include:$CPATH
+          export CUDACXX=/usr/local/cuda-${{vars.cuda_version}}/bin/nvcc
+          export CXX=/usr/local/cuda-${{vars.cuda_version}}/bin/nvcc
+          export CC=/usr/local/cuda-${{vars.cuda_version}}/bin/nvcc
+
+          cmake -DCMAKE_CUDA_COMPILER=$CMAKE_CUDA_COMPILER --preset "CUDA ${CUDA_MAJOR}"
+          cmake --build --parallel $(nproc) --preset "CUDA ${CUDA_MAJOR}"
+          DESTDIR="${{targets.destdir}}" cmake --install build --component CUDA
+    test:
+      pipeline:
+        - name: Ensure CUDA component exists
+          runs: |
+            CUDA_MAJOR=$(echo ${{vars.cuda_version}} | cut -d. -f1)
+            ls -lah /lib/ollama/cuda_v${CUDA_MAJOR}/libcu*.so
+
+update:
+  enabled: true
+  github:
+    identifier: ollama/ollama
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - name: Ensure CLI works
+      runs: |
+        ollama --version | grep "${{package.version}}"
+        ollama --help | grep "Large language model"
+    - name: Test if Ollama server works
+      runs: |
+        HOST_IP=localhost
+        PREDEFINED_PORT=9999
+        OLLAMA_HOST=$HOST_IP:$PREDEFINED_PORT ollama serve &
+        SERVER_PID=$!
+        sleep 5
+
+        # Check if the server is running
+        curl -s $HOST_IP:$PREDEFINED_PORT | grep -q "Ollama is running"
+
+        # Kill the server process
+        kill $SERVER_PID
