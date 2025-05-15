@@ -20,66 +20,77 @@ make disk-generic
 ```
 
 ## Running your VM
+Images built for a cloud have a kernel and packages built for that platform.  They aren't necessarily of any use inside qemu.
+
+That being said, to test a VM locally, you can make similar changes to a qemu image (like 'generic.yaml') and boot it.
+
 You can test run your VM with:
 
-```
-make run-<your config>
-```
+    make run-<your config>
 
-Or for example:
+As an example:
 
-```
-make run-generic
-```
+    make run-generic
 
-## Accessing your VM
-VM images come with no default user or password. If you wish to test it locally and access it, you will need to backdoor it. You can do so with `tools/backdoor-image`.
+That will boot a VM with the generic disk image.  You can watch it boot and will get a login prompt on your terminal.
 
-For example:
+There are no builtin passwords, so you won't be able to log in. :cry:
 
-```
-sudo ./tools/backdoor-image --password-auth --password <your-password> output/x86_64/generic/disk.raw
-```
+2 things make it possible to get in.
+
+1. [qemu-guesthelper](https://github.com/chainguard-dev/enterprise-packages/blob/main/qemu-guesthelper/README.md)
+
+   The `make run-<vmname>` will supply ssh keys to the guest vm via smbios in a way that
+   A vm that has `qemu-guesthelper-authorized-keys-command` installed can read.
+
+   So if your vm has that package installed (like 'generic') then you can do:
+
+       make run-generic
+
+   And then switch to another terminal and
+
+       ssh -p6379 linky@localhost
+
+   The linky user will have passwordless sudo to be root.
+
+2. `make run-debug-<name>`
+
+   This will create a 'debug-<name>' image that has systemd-debug.shell enabled.
+   The terminal you run that in will boot and show a login prompt, but you can
+   then switch to another terminal and type: `make debug-shell-<name>` in order
+   to be placed into the vm in a root shell.
 
 
-# Experiments with tar2efi go library
+## Modifying run targets
+You can influence the qemu invocation created by `make run-<vmname>` with the following environment variables:
 
+ * `WVM_SSH_PORT`: forward localhost:WVM_SSH_PORT to guest's port 22.  Default is 6379.
+   When ssh'ing to vms on localhost, it may be useful to configure `NoHostAuthenticationForLocalhost yes` in your ssh config.
 
-## Compile
+ * `WVM_DISPLAY`: use `-display` instead of default `none`.  See qemu doc for other values. A useful value might be `sdl` or `vnc`
 
-```
-go build .
-```
+ * `WVM_VNC`: Start qemu with `-vnc` value other than the default `none`.  For example to listen on localhost port 5900 (vnc `:0`) you can set `WVM_VNC=localhost:0` and then connect to that with your vnc client.
 
-## Run
+## Adding a "backdoor" to an image.
+It can be tricky to figure out what is going wrong in a VM if you can't get log into it.
 
-```console
-./wolfi-vm build --builder iac/builder.yaml ../configs/generic.yaml
-```
+The `./tools/backdoor-image` script will insert a user named `backdoor` into the image
+and can add some public keys to the user's .ssh/authorized_keys.  The user will also
+have sudo access.
 
-you can specify a kernel so that it's not downloaded each time:
+To add your .ssh/id_ed25519.pub key into the vm:
 
-```console
-./wolfi-vm build --builder iac/builder.yaml --kernel /boot/vmlinuz ../configs/generic.yaml
-```
+    sudo ./tools/backdoor-image --pubkeys ~/.ssh/id_ed25519.pub output/x86_64/generic/disk.raw
 
-you can specify an arch so that it's not downloaded each time:
+To insert github user 'smoser' public keys:
 
-```console
-./wolfi-vm build --builder iac/builder.yaml --arch arm64 ../configs/generic.yaml
-```
+    sudo ./tools/backdoor-image --import-id=smoser output/x86_64/aws-base/disk.raw
 
-Output is: `disk.raw`
+Just run the script on your image before publishing (or before running `make run-<vmname>`)
+and you should then be able to ssh in as the 'backdoor' user.
 
 ## Test
-
-`go test -tags withauth ./...`
-
-or
-
-`make test`
-
-This will test the builder logic, builder entrypoint script and the tar2efi functions
+Run `make test` to test builder logic and run other tests.
 
 ## Converting existing OCI images
 
@@ -94,8 +105,3 @@ make convert
 ```
 
 Then checkout the `converted/` directory.
-
-## TODO
-
-- a way to validate a created image
-- a way to convert to other formats

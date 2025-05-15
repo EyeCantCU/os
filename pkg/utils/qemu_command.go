@@ -44,6 +44,14 @@ func getDisplayArgs() []string {
 	return []string{"-display", display, "-vnc", vnc}
 }
 
+func getHostFwd() string {
+	port := os.Getenv("WVM_SSH_PORT")
+	if port == "" {
+		port = "6379"
+	}
+	return "hostfwd=tcp:127.0.0.1:" + port + "-:22"
+}
+
 func generateArmCommand(arch, efiDisk, ovmf, socketPath string) []string {
 	cmd := []string{
 		"qemu-system-aarch64",
@@ -58,7 +66,7 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath string) []string {
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
-		"-netdev", "user,id=id1,hostfwd=tcp:127.0.0.1:6379-:6379",
+		"-netdev", "user,id=id1," + getHostFwd(),
 		"-chardev", "socket,path=" + socketPath + ",server=on,wait=off,id=debugshell",
 		"-device", "pci-serial,id=serial0,chardev=debugshell",
 		"-snapshot",
@@ -99,7 +107,7 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath string) []string {
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
-		"-netdev", "user,id=id1,hostfwd=tcp:127.0.0.1:6379-:6379",
+		"-netdev", "user,id=id1," + getHostFwd(),
 		"-serial", "unix:" + socketPath + ",wait=off,server=on",
 		"-snapshot",
 	}...)
