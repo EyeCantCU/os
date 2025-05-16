@@ -1,5 +1,6 @@
 TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 TOOLS_D = $(TOP_D)/tools
+HASH := \#
 
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
@@ -124,9 +125,7 @@ PUBLISH_TARGET ?= dev
 COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
 PREFIX ?= $(shell id -un)
 BUILD_TIMESTAMP ?= $(shell date -u "+%Y%m%d-%H%M")
-# MacOS: As of 5/15/25 the make on macOS is treating the '#' below as the start of a comment
-# Install brew make and put it in the front of your path. A ticket will be filed.
-AZVERSION = $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP#*-}.0")
+AZVERSION = $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
 AZTAGS += env=$(PUBLISH_TARGET) commit=$(COMMIT)
 
 ifeq ($(COMMIT),$(filter $(COMMIT), "", no-git))
