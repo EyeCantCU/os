@@ -1,21 +1,10 @@
 package:
   name: eck-operator
   version: "3.0.0"
-  epoch: 0
+  epoch: 1
   description: Elastic Cloud on Kubernetes
   copyright:
     - license: Elastic-2.0
-
-environment:
-  contents:
-    packages:
-      - build-base
-      - busybox
-      - ca-certificates-bundle
-      - go
-      - make
-  environment:
-    CGO_ENABLED: "0"
 
 pipeline:
   - uses: git-checkout
@@ -28,6 +17,8 @@ pipeline:
       mkdir -p ${{targets.contextdir}}/conf
       install -Dm644 ./config/eck.yaml ${{targets.contextdir}}/conf/eck.yaml
 
+  - runs: go generate ./...
+
   - uses: go/bump
     with:
       deps: |-
@@ -38,10 +29,12 @@ pipeline:
     with:
       packages: github.com/elastic/cloud-on-k8s/v2/cmd
       output: elastic-operator
-      ldflags: -X github.com/elastic/cloud-on-k8s/v2/pkg/about.version=${{package.version}} -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildHash=$(git rev-parse HEAD) -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildDate=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ") -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildSnapshot=true
+      ldflags: |
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.version=${{package.version}}
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildHash=$(git rev-parse HEAD)
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildDate=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildSnapshot=true
       modroot: .
-
-  - uses: strip
 
 subpackages:
   - name: "${{package.name}}-compat"
@@ -51,20 +44,52 @@ subpackages:
       - runs: |
           mkdir -p "${{targets.contextdir}}"
           ln -sf /usr/bin/elastic-operator ${{targets.contextdir}}/elastic-operator
+    test:
+      pipeline:
+        - runs: test "$(readlink /elastic-operator)" = "/usr/bin/elastic-operator"
+
+test:
+  environment:
+    contents:
+      packages:
+        - eck-operator-compat
+        - wait-for-it
+  pipeline:
+    - runs: |
+        [ -f /usr/bin/elastic-operator ] && exit 0 || exit 1
+        /elastic-operator --version
+        elastic-operator --version
+    - uses: test/kwok/cluster
+    - runs: |
+        kubectl create -f https://download.elastic.co/downloads/eck/3.0.0/crds.yaml
+        kubectl create namespace test
+    - uses: test/daemon-check-output
+      with:
+        start: elastic-operator manager --operator-namespace test
+        timeout: 30
+        expected_output: |
+          Starting the manager
+          Starting Controller
+          Starting workers
+        error_strings: |
+          unlicensed
+        post: |
+          kubectl get pods -n test
+          kubectl logs -n test -l control-plane=elastic-operator
+
+          wait-for-it localhost:8080 --timeout=30
+
+          # Check all endpoints
+          curl -s http://localhost:8080/metrics | grep -q "elastic_operator_"
+          curl -s http://localhost:8080/health | grep -q "status.*ok"
+          curl -s http://localhost:8080/ready | grep -q "ready"
+
+          # Check operator status
+          kubectl get elasticsearch -A
+          kubectl get kibana -A
 
 update:
   enabled: true
   github:
     identifier: elastic/cloud-on-k8s
     strip-prefix: v
-
-test:
-  environment:
-    contents:
-      packages:
-        - ${{package.name}}-compat
-  pipeline:
-    - runs: |
-        [ -f /usr/bin/elastic-operator ] && exit 0 || exit 1
-        /elastic-operator --version
-        elastic-operator --version
