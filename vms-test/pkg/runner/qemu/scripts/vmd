@@ -1,0 +1,71 @@
+#!/bin/sh
+# shellcheck disable=SC2120,SC2015,SC3043,SC2166
+m_arch() {
+    local arch="$1"
+    if [ -z "$arch" ]; then
+        arch=$(uname -m 2>/dev/null)
+    fi
+    case "${arch}" in
+        aarch64|x86_64):;;
+        arm64) arch=aarch64;;
+        *) return 1;;
+    esac
+    echo "$arch"
+}
+
+Usage() {
+    cat <<EOF
+${0##*/} wolfi-vm-dir [--backdoor] output [ name [arch] ]
+
+   name defaults to 'generic'
+   arch defaults to current arch [$DEF_ARCH]
+EOF
+}
+
+fail() { echo "$@" 1>&2; exit 1; }
+
+DEF_ARCH=$(m_arch)
+
+backdoor=false
+[ "$1" = "--backdoor" ] && backdoor=true && shift
+
+wolfivmd="$1"
+outd="$2"
+name="${3:-generic}"
+archin="${4:-${DEF_ARCH}}"
+
+[ "$1" = "-h" -o "$1" = "--help" ] && { Usage; exit 0; }
+[ $# -ge 2 ] || { Usage 1>&2; fail "got $# args, need 2 or more"; }
+
+bdi=""
+if [ "$backdoor" = "true" ]; then
+    bdi=$(PATH="$PATH:$wolfivmd/tools" which backdoor-image) ||
+        fail "--backdoor provided but did not find backdoor-image"
+fi
+
+arch=$(m_arch "$archin") || fail "failed to determine arch from $archin"
+
+if ! { [ -d "$wolfivmd" ] && [ -f "$wolfivmd/Makefile" ]; }; then
+    fail "wolfi-vm-dir '$wolfivmd' does not exist or not have Makefile"
+fi
+
+[ -d "$outd" ] || mkdir "$outd" || fail "failed mkdir $outd"
+
+make -C "$wolfivmd" "builder/ovmf-$arch.fd" &&
+    cp "$wolfivmd/builder/ovmf-$arch.fd" "$outd/fw-code.fd" ||
+    fail "failed getting builder/ovmf-$arch.fd"
+
+make -C "$wolfivmd" "disk-$name" "ARCH=$arch" &&
+    cp --sparse=always "$wolfivmd/output/$arch/$name/disk.raw" "$outd/disk.raw" ||
+    fail "failed to get disk-$name from $wolfivmd"
+
+if [ "$backdoor" = "true" ]; then
+    sudo "$bdi" \
+        --user=backdoor --password=passw0rd --root-password=passw0rd \
+        "$outd/disk.raw" ||
+        fail "failed to backdoor $outd/disk.raw"
+fi
+
+echo "$arch" > "$outd/arch"
+
+echo "setup $outd with $name and arch $arch"

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043
+VERBOSITY=0
+TEMP_D=""
+
+stderr() { echo "$@" 1>&2; }
+failrc() { local rc=$1; shift; stderr "$@"; exit "$rc"; }
+fail() { local r=$?;  [ $r -eq 0 ] && r=1; failrc "$r" "$@"; }
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] <<ARGUMENTS>>
+
+   install necessary dependencies.
+
+   options:
+      --test-arch ARCH     install deps needed for testing ARCH
+                           [x86_64, aarch64, ALL] - default ALL
+EOF
+}
+
+bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+cleanup() {
+    [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
+}
+
+go_install() {
+    for pkg in "$@"; do
+        # We want these to end up in $HOME/bin in CI jobs
+        GOBIN="$PWD/bin" go install "$pkg"
+    done
+}
+
+apt_install() {
+    apt-get update
+    apt-get --quiet --assume-yes \
+      --option=Dpkg::Options::=--force-confold \
+      --option=Dpkg::options::=--force-unsafe-io \
+      install "$@"
+}
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,test-arch:,verbose"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_Usage; return; }
+
+    local cur="" next="" testarches="" arch=""
+
+    while [ $# -ne 0 ]; do
+        # shellcheck disable=SC2034
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+               --test-arch) testarches=$next; shift;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ $# -eq 0 ] || { bad_Usage "got $# args, did not expect any"; return 1; }
+
+    local uid=""
+    uid=$(id -u) || fail "id -u failed - don't know who you are"
+    if [ "$uid" != "0" ]; then
+        stderr "must be root, using sudo for $0 $*"
+        exec sudo "$0" "$@"
+    fi
+
+    if [ "$testarches" = "" -o "$testarches" = "ALL" ]; then
+        testarches="x86_64 aarch64"
+    fi
+
+    for arch in $testarches; do
+        case "$arch" in
+            x86_64|aarch64) continue;;
+            *) fail "unknown arch $arch";;
+        esac
+    done
+
+    local qemus=""
+    for arch in $testarches; do
+        case "$arch" in
+            x86_64) qemus="$qemus qemu-system-x86";;
+            aarch64) qemus="$qemus qemu-system-arm";;
+        esac
+    done
+
+    # shellcheck disable=SC2086
+    apt_install binutils make $qemus || fail "apt installation failed"
+    # The version we have in wolfi is mikefarah's yq, which is only available as a snap in Ubuntu.
+    # They differ significantly in usage.
+    go_install github.com/mikefarah/yq/v4@v4.45.4 || fail "go installation failed"
+}
+
+main "$@"
+# vi: ts=4 expandtab
