@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -25,6 +26,7 @@ func launchCmd() *cobra.Command {
 		vpcID           string
 		subnetID        string
 		securityGroupID string
+		userDataPath    string
 	)
 
 	launchGroup := util.LaunchGroup{}
@@ -87,6 +89,7 @@ func launchCmd() *cobra.Command {
 						},
 					},
 				})
+
 				if err != nil {
 					log.Fatalf("failed to describe subnets in VPC %s: %v", vpcID, err)
 				}
@@ -97,7 +100,7 @@ func launchCmd() *cobra.Command {
 				log.Printf("Selected subnet %s from VPC %s", subnetID, vpcID)
 			}
 
-			runOut, err := client.RunInstances(ctx, &ec2.RunInstancesInput{
+			input := &ec2.RunInstancesInput{
 				ImageId:      aws.String(amiID),
 				InstanceType: ec2types.InstanceType(instanceType),
 				MinCount:     aws.Int32(1),
@@ -119,7 +122,17 @@ func launchCmd() *cobra.Command {
 						Groups:                   []string{launchGroup.SecurityGroupID},
 					},
 				},
-			})
+			}
+
+			if userDataPath != "" {
+				userData, err := os.ReadFile(userDataPath)
+				if err != nil {
+					log.Fatalf("failed to read user data file: %v", err)
+				}
+				input.UserData = aws.String(base64.StdEncoding.EncodeToString(userData))
+			}
+
+			runOut, err := client.RunInstances(ctx, input)
 			if err != nil {
 				log.Fatalf("failed to launch instance: %v", err)
 			}
@@ -138,6 +151,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&subnetID, "subnet-id", "", "Subnet ID to use (optional, will auto-select one from the VPC)")
 	cmd.Flags().StringVar(&securityGroupID, "security-group-id", "", "Security group ID for the instance")
 	cmd.Flags().StringVar(&launchGroupName, "launch-group", "", "the tag created to setup")
+	cmd.Flags().StringVar(&userDataPath, "user-data", "", "Path to user-data file")
 	cmd.MarkFlagsRequiredTogether("vpc-id", "security-group-id")
 	cmd.MarkFlagsMutuallyExclusive("launch-group", "vpc-id")
 	cmd.MarkFlagRequired("ami-id")
