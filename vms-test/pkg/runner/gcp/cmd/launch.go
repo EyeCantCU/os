@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
@@ -28,6 +29,7 @@ func launchCmd() *cobra.Command {
 	var nestedVirt bool
 	var zone string
 	var extraMetadata string
+	var userDataPath string
 	var secondaryDiskSizeGb int64
 	var secondaryDiskType string
 	var secondaryDiskName string
@@ -133,10 +135,26 @@ func launchCmd() *cobra.Command {
 			if minCPUPlatform != "" {
 				instance.MinCpuPlatform = &minCPUPlatform
 			}
-			for k, v := range parseMetadataString(extraMetadata) {
+
+			metadata := parseMetadataString(extraMetadata)
+			for k, v := range metadata {
 				instance.Metadata.Items = append(instance.Metadata.Items, &computepb.Items{
 					Key:   &k,
 					Value: &v,
+				})
+			}
+
+			if userDataPath != "" {
+				if _, exists := metadata["user-data"]; exists {
+					log.Fatalf("cannot attach user data file as meta data with key 'user-data' has already been specified explicitly")
+				}
+				userData, err := os.ReadFile(userDataPath)
+				if err != nil {
+					log.Fatalf("failed to read user data file: %v", err)
+				}
+				instance.Metadata.Items = append(instance.Metadata.Items, &computepb.Items{
+					Key:   proto.String("user-data"),
+					Value: proto.String(string(userData)),
 				})
 			}
 
@@ -172,6 +190,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&zone, "zone", "us-central1-a", "GCE zone for resources (required)")
 	cmd.Flags().StringVar(&minCPUPlatform, "min-cpu-platform", "", "Minimum CPU Platform")
 	cmd.Flags().StringVar(&extraMetadata, "metadata", "", "Extra metadata for the instance. Syntax is same as gcloud (key=value;key2=val2)")
+	cmd.Flags().StringVar(&userDataPath, "user-data", "", "Path to user-data file")
 	cmd.Flags().BoolVar(&nestedVirt, "nested-virt", false, "Enable nested virtualization")
 	cmd.Flags().Int64Var(&secondaryDiskSizeGb, "secondary-disk-size", 0, "Size of secondary disk in Gb (0 = no secondary disk)")
 	cmd.Flags().StringVar(&secondaryDiskType, "secondary-disk-type", "", "GCE disk type for secondary disk (defaults to same as disk-type)")
