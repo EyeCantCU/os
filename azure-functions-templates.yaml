@@ -1,0 +1,100 @@
+package:
+  name: azure-functions-templates
+  version: 4.19.0
+  epoch: 0
+  description: Collection of templates used by development tools to provide a quick start experience for Azure Functions.
+  target-architecture:
+    - x86_64
+  copyright:
+    - license: MIT
+    - license: Apache-2.0
+    - license: ISC
+    - license: BSD-3-Clause
+    - license: BSD-2-Clause
+    - license: 0BSD
+    - license: GPL-2.0
+    - license: LGPL-3.0-only
+
+environment:
+  contents:
+    packages:
+      - bash
+      - mono
+      - wget
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Azure/azure-functions-templates.git
+      tag: Bundle-${{package.version}}
+      expected-commit: 83c3dc1e2159788cc3f5546aeb067f77cfe6c833
+
+  - name: Fix templates build on linux
+    uses: patch
+    with:
+      patches: ./fix-build-on-linux-templates.patch
+
+  - working-directory: /home/build/Build
+    pipeline:
+      - name: Install other required tools for building the package
+        uses: npm/install
+        with:
+          package: gulp-cli
+          prefix: /usr
+          version: latest
+      - name: Prepare repository for building on Linux (Origin supports Windows only)
+        runs: |
+          # Create custom nuget shell wrapper to make gulp build available on Linux
+          # Linux can only call nuget.exe through mono
+          # upstream uses nuget.exe dirrectly: https://github.com/Azure/azure-functions-templates/blob/83c3dc1e2159788cc3f5546aeb067f77cfe6c833/Build/gulpfile.js#L22
+          # we changed nuget.exe to nuget.sh in the fix-build-on-linux-templates patch applied above
+          cat <<'EOF' > nuget.sh
+          #!/bin/bash
+          /usr/sbin/mono "$(dirname "$0")/nuget.exe" "$@"
+          EOF
+          chmod +x nuget.sh
+          mv ../Functions.Templates/Documentation/authenticationEventsTrigger.md ../Functions.Templates/Documentation/AuthenticationEventsTrigger.md
+      - name: Build the package
+        runs: |
+          npm install
+          # The build might fail on first try because of how nuget.exe works on wolfi, should work on a retry
+          max_attempts=5
+          delay=2
+
+          for attempt in $(seq 1 $max_attempts); do
+            echo "Attempt $attempt of $max_attempts: gulp build-all"
+            if gulp build-all; then
+              echo "Build succeeded on attempt $attempt."
+              exit 0
+            fi
+            echo "Build failed on attempt $attempt."
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "Retrying after $((delay * attempt)) seconds..."
+              sleep $((delay * attempt))
+            else
+              echo "Build failed after $max_attempts attempts. Exiting."
+              exit 1
+            fi
+          done
+      - name: Install the templates
+        runs: |
+          mkdir -p "${{targets.destdir}}"/usr/share/templates
+          mv /home/build/bin/ExtensionBundle.v*.zip "${{targets.destdir}}"/usr/share/templates
+
+update:
+  enabled: true
+  github:
+    identifier: Azure/azure-functions-templates
+    use-tag: true
+    strip-prefix: Bundle-
+    tag-filter-prefix: Bundle-4.
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Check extension bundle templates exist
+      runs: |
+        test -f /usr/share/templates/ExtensionBundle.v1.Templates.1.0.1.zip
+        test -f /usr/share/templates/ExtensionBundle.v2.Templates.2.0.1.zip
+        test -f /usr/share/templates/ExtensionBundle.v3.Templates.3.0.1.zip
+        test -f /usr/share/templates/ExtensionBundle.v4.Templates.4.0.1.zip
