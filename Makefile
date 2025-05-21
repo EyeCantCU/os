@@ -26,9 +26,9 @@ BUILDER_KERNEL := builder/kernel-$(BUILDER_ARCH)
 BUILDER_INITRD := builder/initrd-$(BUILDER_ARCH)
 BUILDER_DEBUG_INITRD := builder/initrd-debug-$(BUILDER_ARCH)
 
-cfgs = $(wildcard configs/*.yaml)
+cfgs = $(wildcard configs/*)
 # names is a list of each basename cfg
-names = $(foreach cfg,$(cfgs),$(subst .yaml,,$(notdir $(cfg))))
+names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
 
 gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
@@ -87,7 +87,7 @@ $(debug_shell_targets): debug-shell-%:
 	@echo "[hit enter]"
 	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
 
-configs/%.yaml:
+configs/%/build.yaml:
 	@mkdir -p $(dir $@)
 	cosign verify-attestation \
 		--type=https://apko.dev/image-configuration \
@@ -203,7 +203,7 @@ $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspu
 	@$(call capture_stdout,$@,\
 	  awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
 
-$(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
+$(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
 		--arch=$(ARCH) \
@@ -211,7 +211,7 @@ $(ARCH_OUT_D)/%/disk.raw: configs/%.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INI
 		--builder-cpio=$(BUILDER_INITRD) \
 		--kernel=$(BUILDER_KERNEL) \
 		--output=$@ \
-		configs/$*.yaml
+		configs/$*/build.yaml
 
 $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD)
 	@mkdir -p $(dir $@)
@@ -222,7 +222,7 @@ $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD
 		--builder-cpio=$(BUILDER_DEBUG_INITRD) \
 		--kernel=$(BUILDER_KERNEL) \
 		--output=$@ \
-		configs/$*.yaml "$@"
+		configs/$*/build.yaml "$@"
 
 clean:
 	rm -Rf output builder apkoaas *.raw
@@ -247,7 +247,7 @@ show-vars:
 	@echo names=$(names)
 
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
-.PRECIOUS: configs/%.yaml builder/ovmf-%.fd
+.PRECIOUS: configs/%/build.yaml builder/ovmf-%.fd
 .PRECIOUS: %.vmdk
 
 arches = aarch64 x86_64
