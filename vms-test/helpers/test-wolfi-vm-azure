@@ -179,6 +179,14 @@ test_azure() {
             continue
         }
 
+        local testconfig_dir=""
+        testconfig_dir=$(dirname "$testconfig") || {
+            vfails="$arch-$imagename/dirname-failed"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            return 1
+        }
+
         log "setting up $imagename in $region, detected arch $arch"
         setup_azure "$setupd" "$subscription" "$resource_group" "$resource_basename" "$region" || {
             vfails="$arch-$imagename/setup"
@@ -187,7 +195,7 @@ test_azure() {
             continue
         }
 
-        local i="" vmtag="" vm_size="" disk_type="" vmconfig_name="" named_tests="" test_groups="" group="" launchuser="" vm_testd="" voutd="" launcher="" launch_code="" tid="" tgroup="" tname="" tname_pretty="" tfile="" location=""
+        local i="" vmtag="" vm_size="" disk_type="" vmconfig_name="" custom_data="" named_tests="" test_groups="" group="" launchuser="" vm_testd="" voutd="" launcher="" launch_code="" tid="" tgroup="" tname="" tname_pretty="" tfile="" location=""
         for i in $(seq 0 $((num_vmconfigs-1))); do
             vmtag="$resource_basename-vm-$RANDOM"
             vm_size=$(echo "$vmconfigs" | jq -re ".[$i].vm_size") || {
@@ -199,6 +207,7 @@ test_azure() {
                 continue
             }
             vmconfig_name=$(echo "$vmconfigs" | jq -re ".[$i].name" 2>/dev/null) || vmconfig_name="$vm_size-$disk_type"
+            custom_data=$(echo "$vmconfigs" | jq -re ".[$i].user_data" 2>/dev/null) || custom_data=""
             named_tests=$(echo "$vmconfigs" | jq -re ".[$i].tests[].name | select (. != null)" 2>/dev/null) || named_tests=""
             test_groups=$(echo "$vmconfigs" | jq -re ".[$i].tests[].group | select (. != null)" 2>/dev/null) || test_groups=""
             for group in $test_groups; do
@@ -223,20 +232,23 @@ test_azure() {
                 return 1
             }
             if launcher=$(echo "$vmconfigs" | jq -re ".[$i].launch"); then
-                local test_config_dir=""
-                test_config_dir=$(dirname "$testconfig") || {
-                    stderr "failed to get dir of $testconfig"
-                    continue
-                }
-                launcher="$test_config_dir/$launcher"
+                launcher="$testconfig_dir/$launcher"
             else
                 log "launch option is unspecified for $vmconfig_name, using default runner"
                 launcher=("$runner" "launch")
             fi
+
+            local custom_data_args=()
+            if [[ -n $custom_data ]]; then
+                custom_data="$testconfig_dir/$custom_data"
+                custom_data_args=( '--custom-data' "${custom_data}" )
+            fi
+
             # Start VM
             vr env RUNNER="$runner" "${launcher[@]}" --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
                 --vnet "$resource_basename-$region-vnet" --subnet "$resource_basename-$region-subnet" --name "$vmtag" --region "$region" \
-                --image-uri="$image_uri" --public-key="$key.pub" --user "$launchuser" --vm-size="$vm_size" --disk-type="$disk_type"
+                --image-uri="$image_uri" --public-key="$key.pub" --user "$launchuser" --vm-size="$vm_size" --disk-type="$disk_type" \
+                "${custom_data_args[@]}"
             launch_code=$?
             if [ $launch_code -eq 0 ]; then
                 vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \

@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
@@ -25,6 +27,7 @@ func launchCmd() *cobra.Command {
 	var subnetName string
 	var tagName string
 	var diskType string
+	var customDataPath string
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -106,6 +109,15 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("failed to create NIC: %v", err)
 			}
 
+			var customData string
+			if customDataPath != "" {
+				data, err := os.ReadFile(customDataPath)
+				if err != nil {
+					log.Fatalf("failed to read custom data file: %v", err)
+				}
+				customData = base64.StdEncoding.EncodeToString(data)
+			}
+
 			// Create VM
 			vmClient, err := armcompute.NewVirtualMachinesClient(subscriptionID, cred, nil)
 			if err != nil {
@@ -133,6 +145,7 @@ func launchCmd() *cobra.Command {
 					OSProfile: &armcompute.OSProfile{
 						ComputerName:  &vmName,
 						AdminUsername: &user,
+						CustomData:    &customData,
 						LinuxConfiguration: &armcompute.LinuxConfiguration{
 							DisablePasswordAuthentication: utils.ToPtr(true),
 							SSH: &armcompute.SSHConfiguration{
@@ -185,6 +198,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&vnetName, "vnet", "", "VNet name (required)")
 	cmd.Flags().StringVar(&subnetName, "subnet", "default", "Subnet name (optional)")
 	cmd.Flags().StringVar(&tagName, "tag", "", "Tag name to apply to resources (required)")
+	cmd.Flags().StringVar(&customDataPath, "custom-data", "", "Path to custom data file")
 
 	cmd.MarkFlagRequired("tag")
 	cmd.MarkFlagRequired("location")
