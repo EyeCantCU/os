@@ -28,7 +28,7 @@ endif
 
 MELANGE_OPTS += --runner=${MELANGE_RUNNER}
 
-QEMU_KERNEL_IMAGE ?= kernel/boot/vmlinuz
+QEMU_KERNEL_IMAGE ?= kernel/$(ARCH)/vmlinuz
 ifeq (${MELANGE_RUNNER},qemu)
 	QEMU_KERNEL_DEP = ${QEMU_KERNEL_IMAGE}
 	export QEMU_KERNEL_IMAGE
