@@ -139,16 +139,24 @@ endif
 ifeq ($(ARCH),aarch64)
 AWSARCH = arm64
 AZARCH = arm64
+GCPARCH = arm64
 else
 AWSARCH = x86_64
 AZARCH = x64
+GCPARCH = amd64
 endif
 ifeq ($(PUBLISH_TARGET),dev)
 AZGALLERY = vmtesting_dev
+GCPPROJECT = $(shell gcloud config get project)
+GCPBUCKET = $(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
 AZGALLERY = vmtesting
+GCPPROJECT = wolfi-vm
+GCPBUCKET = wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 AZGALLERY = chainguard_vms_eap
+GCPPROJECT = chainguard-vms-eap
+GCPBUCKET = wolfi-vm-images-workloads
 else
 $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
@@ -197,7 +205,20 @@ $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/azure-%/disk
 		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 			--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
 			--tags="$(AZTAGS)" $(dir $@)disk.raw)
-	#
+
+.PHONY: publish-gcp
+publish-gcp: $(foreach name,$(disks_gcp),publish-gcp-$(subst gcp-,,$(name)))
+$(foreach name,$(disks_gcp),publish-gcp-$(subst gcp-,,$(name))): publish-gcp-%: $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml
+
+$(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: GCPNAME=$(PREFIX)-$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
+$(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: GCPFAMILY=$(PREFIX)-$*-$(GCPARCH)
+$(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: export GCP_PROJECT = $(GCPPROJECT)
+$(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
+	$(TOOLS_D)/google-image-upload --family="$(GCPFAMILY)" --name="$(GCPNAME)" \
+		--arch="$(GCPARCH)" "$(dir $@)disk.raw" "$(GCPBUCKET)"
+	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
+		
+
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
 	@$(call capture_stdout,$@,\
