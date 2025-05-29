@@ -127,6 +127,7 @@ PREFIX ?= $(shell id -un)
 BUILD_TIMESTAMP ?= $(shell date -u "+%Y%m%d-%H%M")
 AZVERSION = $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
 AZTAGS += env=$(PUBLISH_TARGET) commit=$(COMMIT)
+GCPLABELS =env=$(PUBLISH_TARGET),commit=$(COMMIT)
 
 ifeq ($(COMMIT),$(filter $(COMMIT), "", no-git))
 $(error "Bad value for COMMIT: '$(COMMIT)'")
@@ -215,7 +216,7 @@ $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: GCPFAMILY=$(PREFIX)-$*-$(GCP
 $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: export GCP_PROJECT = $(GCPPROJECT)
 $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
 	$(TOOLS_D)/google-image-upload --family="$(GCPFAMILY)" --name="$(GCPNAME)" \
-		--arch="$(GCPARCH)" "$(dir $@)disk.raw" "$(GCPBUCKET)"
+		--arch="$(GCPARCH)" --labels="$(GCPLABELS),local-name=gcp-$*" "$(dir $@)disk.raw" "$(GCPBUCKET)"
 	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
 		
 
