@@ -291,6 +291,7 @@ func SSHToInstance(ctx context.Context, host string, auths []ssh.AuthMethod, use
 	if err != nil {
 		return fmt.Errorf("command error: %w\nOutput: %s", err, output)
 	}
+	fmt.Printf("%s", output)
 	return nil
 }
 
