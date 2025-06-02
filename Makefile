@@ -226,7 +226,7 @@ $(foreach name,$(disks_workstation),publish-workstation-$(subst workstation-,,$(
 $(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: GCPNAME=$(PREFIX)-$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
 $(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: GCPFAMILY=$(PREFIX)-$*-$(GCPARCH)
 $(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: export GCP_PROJECT = $(GCPPROJECT)
-$(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
+$(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/workstation-%/disk.raw
 	$(TOOLS_D)/google-image-upload --family="$(GCPFAMILY)" --name="$(GCPNAME)" \
 		--arch="$(GCPARCH)" --labels="$(GCPLABELS),local-name=gcp-$*" "$(dir $@)disk.raw" "$(GCPBUCKET)"
 	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
