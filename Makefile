@@ -6,10 +6,9 @@ HASH := \#
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
 disks_aws = aws-base aws-base-fips aws-agents aws-agents-docker-dev aws-docker aws-docker-dev aws-docker-fips aws-docker-fips-dev aws-eks-dev
-disks_gcp = gcp-base gcp-agents gcp-agents-docker-dev gcp-docker gcp-docker-dev
+disks_gcp = gcp-base gcp-agents gcp-agents-docker-dev gcp-docker gcp-docker-dev gcp-workstation
 disks_qemu = generic
 disks_azure = azure-base azure-agents azure-aks-dev azure-eap-dev
-disks_workstation = workstation
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
@@ -37,14 +36,13 @@ apkoaas: $(gosrc)
 test:
 	go test -v -tags withauth ./...
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-workstation
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
-disks-workstation: $(foreach name,$(disks_workstation),disk-$(name))
 
-.PHONY: list-aws list-azure list-gcp list-qemu list workstation
+.PHONY: list-aws list-azure list-gcp list-qemu list
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -55,8 +53,6 @@ list-gcp:
 	@for n in $(disks_gcp); do echo $$n; done
 list-qemu:
 	@for n in $(disks_qemu); do echo $$n; done
-list-workstation:
-	@for n in $(disks_workstation); do echo $$n; done
 
 .PHONY: disks
 disks: $(foreach name,$(names),disk-$(name))
@@ -219,18 +215,6 @@ $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
 		--arch="$(GCPARCH)" --labels="$(GCPLABELS),local-name=gcp-$*" "$(dir $@)disk.raw" "$(GCPBUCKET)"
 	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
 		
-.PHONY: publish-workstation
-publish-workstation: $(foreach name,$(disks_workstation),publish-workstation-$(subst workstation-,,$(name)))
-$(foreach name,$(disks_workstation),publish-workstation-$(subst workstation-,,$(name))): publish-workstation-%: $(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml
-
-$(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: GCPNAME=$(PREFIX)-$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: GCPFAMILY=$(PREFIX)-$*-$(GCPARCH)
-$(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: export GCP_PROJECT = $(GCPPROJECT)
-$(ARCH_OUT_D)/workstation-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/workstation-%/disk.raw
-	$(TOOLS_D)/google-image-upload --family="$(GCPFAMILY)" --name="$(GCPNAME)" \
-		--arch="$(GCPARCH)" --labels="$(GCPLABELS),local-name=gcp-$*" "$(dir $@)disk.raw" "$(GCPBUCKET)"
-	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
-
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
 	@$(call capture_stdout,$@,\
