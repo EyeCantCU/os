@@ -194,7 +194,7 @@ func waitForIPByTag(ctx context.Context, region string, tagName string) string {
 			break
 		}
 
-		if inst.State.Name != types.InstanceStateNamePending {
+		if inst.State != nil && inst.State.Name != types.InstanceStateNamePending {
 			log.Fatalf("Instance %s in state %s had no public IP", *inst.InstanceId, inst.State.Name)
 		}
 
