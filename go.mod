@@ -8,7 +8,7 @@ require (
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/charmbracelet/log v0.4.2
 	github.com/google/go-cmp v0.7.0
-	github.com/google/go-containerregistry v0.20.4
+	github.com/google/go-containerregistry v0.20.5
 	github.com/spf13/cobra v1.9.1
 	github.com/wolfi-dev/wolfictl v0.37.3
 	golang.org/x/crypto v0.38.0
