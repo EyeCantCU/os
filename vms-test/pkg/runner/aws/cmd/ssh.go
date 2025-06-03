@@ -167,6 +167,47 @@ func getIPByTag(ctx context.Context, region string, tagName string) string {
 	return *inst.PublicIpAddress
 }
 
+// Find instance by tag, wait for existance
+func waitForIPByTag(ctx context.Context, region string, tagName string) string {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		log.Fatalf("failed to load AWS config: %v", err)
+	}
+	client := ec2.NewFromConfig(cfg)
+
+	var inst types.Instance
+	var instances []types.Instance
+
+	for {
+		inst = types.Instance{}
+		instances, err = util.GetInstancesByTag(ctx, client, tagName)
+		if err != nil {
+			log.Fatalf("failed to get instance by tag: %v", err)
+		}
+		if len(instances) == 1 {
+			inst = instances[0]
+		} else if len(instances) > 1 {
+			log.Fatalf("too many instances with tag %s, got %d", tagName, len(instances))
+		}
+
+		if inst.PublicIpAddress != nil {
+			break
+		}
+
+		if inst.State.Name != types.InstanceStateNamePending {
+			log.Fatalf("Instance %s in state %s had no public IP", *inst.InstanceId, inst.State.Name)
+		}
+
+		select {
+		case <-ctx.Done():
+			log.Fatalf("context ended: %v", ctx.Err())
+		case <-time.After(time.Millisecond * 500):
+		}
+	}
+
+	return *inst.PublicIpAddress
+}
+
 func waitForSSHCmd() *cobra.Command {
 	var (
 		tagName string
@@ -178,7 +219,7 @@ func waitForSSHCmd() *cobra.Command {
 		Short: "wait for ssh to be ready",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			publicIP := getIPByTag(ctx, region, tagName)
+			publicIP := waitForIPByTag(ctx, region, tagName)
 			log.Printf("Waiting for ssh VM at %s", publicIP)
 			key, err := sshutils.WaitForSSHHostKey(ctx, publicIP, time.Duration(500*time.Millisecond))
 			if err != nil {
