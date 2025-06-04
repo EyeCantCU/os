@@ -1,27 +1,24 @@
 package:
   name: mongodb-kubernetes-operator-fips
-  version: 0.12.0
-  epoch: 0
+  version: "0.13.0"
+  epoch: 1
   description: Kubernetes Operator which deploys MongoDB Community into Kubernetes clusters.
   copyright:
     - license: MIT
   dependencies:
     runtime:
       - bash-binsh
-      - coreutils
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/mongodb/mongodb-kubernetes-operator
       tag: v${{package.version}}
-      expected-commit: f3170c62c794768d123b81cf1793525e098891ed
+      expected-commit: e2467068a94f77757714eff9677be3b79bc4e114
 
-  - uses: go/bump
+  - uses: patch
     with:
-      deps: |-
-        golang.org/x/net@v0.36.0
-        golang.org/x/oauth2@v0.27.0
+      patches: 0001-swapped-MD5-with-SHA-256.patch
 
   - uses: go/build
     with:
@@ -30,22 +27,61 @@ pipeline:
       go-package: go-fips
 
 subpackages:
-  - name: ${{package.name}}-compat
+  # Note: Upstream uses different versioning for components (e.g., operator: 0.12.x, version hook: 1.0.x),
+  # but Chainguard images use a unified tag matching the main operator version due to Git-based automation.
+  # See upstream version mapping in release.json: https://github.com/mongodb/mongodb-kubernetes-operator/blob/master/release/release.json
+  # All components are built from the same source, even if upstream lacks separate tags.
+  - name: mongodb-kubernetes-operator-version-upgrade-post-start-hook-fips
+    dependencies:
+      runtime:
+        - coreutils # for `cp`
+        - bash
     pipeline:
-      - runs: |
-          # link /usr/bin/manager to /manager due to hardcoded command "./manager" in entrypoint script
-          # see "./${OPERATOR}" https://github.com/mongodb/mongodb-kubernetes-operator/blob/master/build/bin/entrypoint#L13
-          # and OPERATOR env variable is set to "manager" https://github.com/mongodb/mongodb-kubernetes-operator/blob/master/scripts/dev/templates/operator/Dockerfile.operator#L6
-          mkdir -p ${{targets.subpkgdir}}/
-          ln -sf /usr/bin/manager ${{targets.subpkgdir}}/manager
+      - uses: go/build
+        with:
+          output: version-upgrade-hook
+          packages: ./cmd/versionhook/main.go
+          go-package: go-fips
+    test:
+      environment:
+        environment:
+          AGENT_STATUS_FILEPATH: "/var/log/mongodb-mms-automation/healthstatus/agent-health-status.json"
+      pipeline:
+        - name: "Check FIPS"
+          uses: test/go-fips-check
+        - name: "Verify version-upgrade-hook"
+          uses: test/daemon-check-output
+          with:
+            start: |
+              version-upgrade-hook
+            timeout: 60
+            expected_output: |
+              Running version change post-start hook
 
-          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
-          cp -av build/bin/* ${{targets.subpkgdir}}/usr/local/bin/
+  - name: mongodb-kubernetes-operator-readinessprobe-fips
+    dependencies:
+      runtime:
+        - coreutils # for `cp`
+        - bash
+    pipeline:
+      - uses: go/build
+        with:
+          output: readinessprobe
+          packages: ./cmd/readiness/main.go
+          go-package: go-fips
     test:
       pipeline:
-        - runs: |
-            stat /manager
-            stat /usr/local/bin/entrypoint
+        - name: "Check FIPS"
+          uses: test/go-fips-check
+        - name: "Verify readinessprobe"
+          uses: test/daemon-check-output
+          with:
+            start: |
+              readinessprobe
+            timeout: 60
+            expected_output: |
+              KUBERNETES_SERVICE_HOST
+              KUBERNETES_SERVICE_PORT
 
 test:
   environment:

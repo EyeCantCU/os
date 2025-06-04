@@ -1,6 +1,6 @@
 package:
   name: cockroach-24.1
-  version: "24.1.14"
+  version: "24.1.19"
   description: "CockroachDB — the cloud native, distributed SQL database designed for high availability, effortless scale, and control over data placement"
   epoch: 0
   dependencies:
@@ -29,7 +29,7 @@ pipeline:
     with:
       repository: https://github.com/cockroachdb/cockroach.git
       tag: v${{package.version}}
-      expected-commit: c8459c085e2258f589949e970a527a0342871276
+      expected-commit: bebd9a7d30104773ff2b85d8af0785a1b2f00fab
 
   - if: ${{build.arch}} == "x86_64"
     runs: |
@@ -60,6 +60,61 @@ update:
 
 test:
   pipeline:
-    - name: version check
+    - name: Basic command and version check
       runs: |
-        /cockroach/cockroach --version
+        set -e
+        echo "Checking cockroach binary and version..."
+        /cockroach/cockroach --version | grep ${{package.version}}
+        /cockroach/cockroach help
+    - name: Start single-node server and run queries
+      runs: |
+        set -e
+        echo "Starting single-node CockroachDB instance..."
+        # Create a directory for the database files
+        mkdir -p /tmp/cockroach-data
+
+        # Start the database in the background with a safe configuration
+        /cockroach/cockroach start-single-node \
+          --insecure \
+          --store=/tmp/cockroach-data \
+          --listen-addr=localhost:26257 \
+          --http-addr=localhost:8080 \
+          --background \
+          --log-dir=/tmp/cockroach-logs
+
+        # Wait for server to become available (up to 30 seconds)
+        echo "Waiting for server to start..."
+        for i in $(seq 1 30); do
+          if /cockroach/cockroach sql --insecure -e "SELECT 1" >/dev/null 2>&1; then
+            echo "Server started successfully"
+            break
+          fi
+          if [ $i -eq 30 ]; then
+            echo "Server failed to start within timeout"
+            exit 1
+          fi
+          sleep 1
+        done
+
+        # Run basic SQL operations
+        echo "Running basic SQL operations..."
+        /cockroach/cockroach sql --insecure -e "CREATE DATABASE test_db;"
+        /cockroach/cockroach sql --insecure -e "USE test_db; CREATE TABLE test_table (id INT PRIMARY KEY, name STRING);"
+        /cockroach/cockroach sql --insecure -e "USE test_db; INSERT INTO test_table VALUES (1, 'one'), (2, 'two'), (3, 'three');"
+        /cockroach/cockroach sql --insecure -e "USE test_db; SELECT * FROM test_table ORDER BY id;" | grep "one"
+
+        # Test a more complex query
+        echo "Testing a more complex query..."
+        /cockroach/cockroach sql --insecure -e "USE test_db; SELECT id, upper(name) FROM test_table WHERE id > 1 ORDER BY id;" | grep "TWO"
+
+        # Verify database information
+        echo "Verifying database information..."
+        /cockroach/cockroach sql --insecure -e "SHOW TABLES FROM test_db;" | grep "test_table"
+
+        # Gracefully stop the server
+        echo "Stopping the server..."
+        /cockroach/cockroach node drain --insecure
+
+        # Clean up
+        echo "Cleaning up temporary files..."
+        rm -rf /tmp/cockroach-data /tmp/cockroach-logs
