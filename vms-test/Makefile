@@ -13,7 +13,7 @@ go_gen_sources = $(git grep -l '^//go:generate')
 go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)
 go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
-shell_scripts=$(shell grep -rlIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh" *)
+shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
 all: runners tests
 
@@ -71,7 +71,10 @@ gofmt: .go-formatted
 
 shellcheck: .shellcheck
 .shellcheck: $(shell_scripts)
-	shellcheck $(shell_scripts)
+	@rc=0;for script in $(shell_scripts); do \
+	    echo "shellcheck $$script"; \
+	    shellcheck "$$script" || rc=$$?; \
+	done; exit $$rc
 	@touch $@
 
 .PHONY: unit-test
