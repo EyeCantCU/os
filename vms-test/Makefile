@@ -1,5 +1,6 @@
 MAKEFLAGS := --jobs=$(shell command -v nproc >/dev/null && nproc || echo 4)
 MAKEFLAGS += --output-sync=target
+HASH := \#
 
 TEST_ARCHES := x86_64 aarch64
 runners=$(subst pkg/runner/,,$(wildcard pkg/runner/*))
@@ -12,7 +13,7 @@ go_gen_sources = $(git grep -l '^//go:generate')
 go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)
 go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
-shell_scripts=$(shell grep -rlIE "^#!/(usr/)?s?bin/(env )?(ba)?sh" *)
+shell_scripts=$(shell grep -rlIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh" *)
 
 all: runners tests
 
