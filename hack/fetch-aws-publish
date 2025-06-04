@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# To fetch the last images the CI published, do ./hack/fetch-aws-publish
+# To fetch the last images you pushed, do ./hack/fetch-aws-publish -p $(id -un)
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/}
+
+  Fetch aws publish details for latest images published to an account.
+
+    options:
+
+           -a|--arch           ARCH    fetch details for ARCH
+           -c|--account        ACCOUNT account which owns the images
+           -r|--region         REGION  region containing images
+           -p|--prefix         PREFIX  naming prefix for remote images
+           -i|--images         IMAGES  images to look for
+
+  Fetch latest aws publish details and write them to awspub json files as if you had just published them yourself.
+
+EOF
+}
+
+stderr() { echo "$@" 1>&2; }
+
+main() {
+    local short_opts="-h,a:,c:,p:,i:"
+    local long_opts="help,arch:,account:,prefix:,images:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local arch="$(uname -m)" account="607334848609" region="us-east-1" prefix="chainguard" images="$(make list-aws)"
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -a|--arch) arch="$next"; shift;;
+            -c|--account) account="$next"; shift;;
+            -r|--region) region="$next"; shift;;
+            -p|--prefix) prefix="$next"; shift;;
+            -i|--images) images="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    local awsarch=""
+
+    case "$arch" in
+        aarch64|arm64) awsarch="arm64";;
+        x86_64|amd64|x64) awsarch="x86_64";;
+        *) stderr "unknown arch $arch"; return 1;;
+    esac
+
+    local ok=0
+
+    local outdir="output/$arch/awspub/create"
+    mkdir -p "$outdir"
+    local remote_image="" output_filename=""
+    for image in $images; do
+        output_filename="$image.json"
+        remote_image="$prefix${image#aws}-$awsarch"
+        echo "Looking for $image as $remote_image"
+        # Date sorting kinda works.. it's actually just sorting the string, but
+        # its accurate to the day at least.
+        #
+        # First bit of the jq commnd (up to and including the [-1] index) is
+        # just selecting the latest image, last bit is transforming it into
+        # something that looks like the json output from `awspub`.
+        aws ec2 describe-images --region "$region" --owners "$account" | jq --arg "remote_image" "$remote_image" --arg "region" "$region"  \
+            '[ .Images | sort_by(.CreationDate)[] | select(.Name | contains($remote_image)) ][-1] | ."images-by-group"={} | .images[.Name][$region] = .ImageId | with_entries(select([.key] | inside(["images", "images-by-group"])))' \
+                > "$outdir/$output_filename" || { stderr "Could not find image definition for $image"; ok=1; continue; }
+    done
+    return $ok
+}
+main "$@"
