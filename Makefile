@@ -98,6 +98,14 @@ ${CACHEDIR}/.libraries_token.txt: cache
 .PHONY: lib-token
 lib-token: ${CACHEDIR}/.libraries_token.txt
 
+${CACHEDIR}/.github-token: cache
+	tmpf=$(shell mktemp); \
+	gh auth token > $${tmpf}; \
+	mv $${tmpf} ${CACHEDIR}/.github-token
+
+.PHONE: github-token
+github-token: ${CACHEDIR}/.github-token
+
 .PHONY: fetch-kernel
 fetch-kernel:
 	rm -rf kernel/$(ARCH)
