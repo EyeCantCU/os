@@ -12,6 +12,8 @@ This file specifies gcp-specific options in test configuration v1. Refer to conf
 		* **machine_type**: Machine type. See https://cloud.google.com/compute/docs/machine-resource
 		* **disk_type**: Disk type. See https://cloud.google.com/compute/docs/disks
 		* **disk_size**: Boot disk size in GB, default 10
+		* **min_cpu_platform** (optional): Minimum CPU platform for instance
+		* **nested_virt** (optional): Enable nested virtualization for instance
 
 ## Non-normative conventions
 

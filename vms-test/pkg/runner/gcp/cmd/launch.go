@@ -23,6 +23,8 @@ func launchCmd() *cobra.Command {
 	var sourceImageUri string
 	var sshUser string
 	var vpcNetwork string
+	var minCPUPlatform string
+	var nestedVirt bool
 	var zone string
 
 	cmd := &cobra.Command{
@@ -87,6 +89,15 @@ func launchCmd() *cobra.Command {
 					},
 				},
 			}
+			if nestedVirt {
+				if instance.AdvancedMachineFeatures == nil {
+					instance.AdvancedMachineFeatures = &computepb.AdvancedMachineFeatures{}
+				}
+				instance.AdvancedMachineFeatures.EnableNestedVirtualization = proto.Bool(true)
+			}
+			if minCPUPlatform != "" {
+				instance.MinCpuPlatform = &minCPUPlatform
+			}
 
 			req := &computepb.InsertInstanceRequest{
 				Project:          projectID,
@@ -118,6 +129,8 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sshUser, "ssh-user", "root", "Username for SSH")
 	cmd.Flags().StringVar(&vpcNetwork, "vpc-network", "default", "VPC network to use")
 	cmd.Flags().StringVar(&zone, "zone", "us-central1-a", "GCE zone for resources (required)")
+	cmd.Flags().StringVar(&minCPUPlatform, "min-cpu-platform", "", "Minimum CPU Platform")
+	cmd.Flags().BoolVar(&nestedVirt, "nested-virt", false, "Enable nested virtualization")
 
 	cmd.MarkFlagRequired("image-uri")
 	cmd.MarkFlagRequired("label")
