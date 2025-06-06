@@ -15,7 +15,8 @@ func TestDockerPullAndRun(t *testing.T) {
 	var cmd *exec.Cmd
 
 	// See if we can pull a wolfi-base container image and run it
-	cmd = exec.CommandContext(ctx, "docker", "run", "-q", "cgr.dev/chainguard/wolfi-base:latest", "echo", "Hello Wolfi")
+	// We need to run this with sudo as there is no guarantee that the running user will be in the docker group
+	cmd = exec.CommandContext(ctx, "sudo", "docker", "run", "-q", "cgr.dev/chainguard/wolfi-base:latest", "echo", "Hello Wolfi")
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
