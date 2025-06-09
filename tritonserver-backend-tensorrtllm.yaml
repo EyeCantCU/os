@@ -2,7 +2,7 @@
 package:
   name: tritonserver-backend-tensorrtllm
   version: 0.16.0
-  epoch: 1
+  epoch: 2
   description: NVIDIA Triton Inference Server TensorRTLLM Backend
   copyright:
     - license: Apache-2.0
@@ -19,11 +19,10 @@ package:
       - numactl
       - nvidia-cuda-cudart-${{vars.cuda-version}}
       - nvidia-cuda-cupti-${{vars.cuda-version}} # libtriton_tensorrtllm.so links to libcupti.so, not autodetected
-      - nvidia-libcuda-${{vars.cuda-version}} # libnvinfer_plugin_tensorrt_llm.so links to libcuda.so, not autodetected
       - nvidia-nccl-cuda-${{vars.cuda-version}}
       - openmp-17-dev
       - openmpi-cuda-${{vars.cuda-version}} # libnvinfer_plugin_tensorrt_llm.so links to its libmpi.so, not autodetected
-      - py${{vars.py-version}}-torch-2.6-cuda-${{vars.cuda-version}}
+      - py${{vars.py-version}}-torch-cuda-${{vars.cuda-version}}
       - tensorrt-${{vars.tensorrt-major-minor-version}}-cuda-${{vars.cuda-version}}
       - tritonserver # libtriton_tensorrtllm.so links to libtritonserver.so, not autodetected
   options:
@@ -54,6 +53,7 @@ environment:
       - nvidia-cuda-cupti-${{vars.cuda-version}}
       - nvidia-cuda-cupti-${{vars.cuda-version}}-dev
       - nvidia-cuda-cuxxfilt-${{vars.cuda-version}}
+      - nvidia-cuda-ld-config-${{vars.cuda-version}}-dev # Allow build-time linking against stub libcuda.so.1
       - nvidia-cuda-nvcc-${{vars.cuda-version}}
       - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
       - nvidia-cuda-nvml-dev-${{vars.cuda-version}}
@@ -97,7 +97,7 @@ environment:
       # pin setuptools to work around:
       #  https://github.com/chainguard-dev/enterprise-packages/issues/22689
       - py${{vars.py-version}}-setuptools<80
-      - py${{vars.py-version}}-torch-2.6-cuda-${{vars.cuda-version}}
+      - py${{vars.py-version}}-torch-cuda-${{vars.cuda-version}}-dev
       - py${{vars.py-version}}-typing-extensions
       - python-${{vars.py-version}} # Need a `python3` for https://github.com/NVIDIA/TensorRT-LLM/blob/28fb9aacaa5a05494635194a9cbb264da9a744bd/cpp/CMakeLists.txt#L138
       - rapidjson-dev
@@ -111,9 +111,9 @@ environment:
     #CUDA_ARCHITECTURES: 75
     CC: gcc-${{vars.gcc-version}}
     CXX: g++-${{vars.gcc-version}}
-    LD_LIBRARY_PATH: /usr/local/tensorrt-${{vars.tensorrt-version}}/lib
+    LD_LIBRARY_PATH: /usr/local/tensorrt/lib
     NVCC_APPEND_FLAGS: -ccbin gcc-${{vars.nvcc-gcc-version}}
-    TRT_ROOT: /usr/local/tensorrt-${{vars.tensorrt-version}}
+    TRT_ROOT: /usr/local/tensorrt
     TRT_VERSION: ${{vars.tensorrt-version}}
     VERBOSE: 1
 
@@ -199,7 +199,7 @@ pipeline:
   - name: build tensorrt_llm wheel
     working-directory: backend/build
     runs: |
-      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/tensorrt-${{vars.tensorrt-version}}/bin"
+      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/tensorrt/bin"
 
       # torch is installed as an apk
       sed -i 's/^torch/#torch/' ../tensorrt_llm/requirements.txt
@@ -286,6 +286,12 @@ pipeline:
         ln -f -s -r "$bin" "$trtllm_bin"/
       done
 
+  - name: Add libs to system library path
+    runs: |
+      mkdir -p "${{targets.contextdir}}"/etc/ld.so.conf.d
+      echo "/opt/tensorrt_llm/libs" > \
+        "${{targets.contextdir}}"/etc/ld.so.conf.d/${{package.name}}.conf
+
   - uses: strip
 
 update:
@@ -293,7 +299,13 @@ update:
 
 test:
   environment:
+    contents:
+      packages:
+        # Use stub libcuda.so.1 to pass ldd-check.
+        # IRL, the host will inject a compatible libcuda.so.1
+        - nvidia-cuda-cudart-${{vars.cuda-version}}
+        - nvidia-cuda-ld-config-${{vars.cuda-version}}-dev
     environment:
-      LD_LIBRARY_PATH: /opt/tensorrt_llm/libs:/opt/tritonserver/lib
+      LD_LIBRARY_PATH: /opt/tritonserver/lib
   pipeline:
     - uses: test/tw/ldd-check
