@@ -1,4 +1,4 @@
-package metrics
+package artifacts
 
 import (
 	"encoding/json"
@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
@@ -42,7 +43,7 @@ func (m *mockT) callAllCleanups() {
 func TestLog(t *testing.T) {
 	tests := []struct {
 		name     string
-		mID      ID
+		mID      metrics.ID
 		val      string
 		flagTags map[string]string
 		extra    map[string]any
@@ -50,23 +51,23 @@ func TestLog(t *testing.T) {
 	}{
 		{
 			name:     "standard_metric_with_extra",
-			mID:      SSHDStartTime,
+			mID:      metrics.SSHDStartTime,
 			val:      "12345",
 			extra:    map[string]any{"foo": "bar"},
 			flagTags: map[string]string{"baz": "qux"},
 			expect: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "12345",
 				Data:  map[string]any{"foo": "bar", "baz": "qux"},
 			},
 		},
 		{
 			name:  "metric_with_no_extra",
-			mID:   SSHDStartTime,
+			mID:   metrics.SSHDStartTime,
 			val:   "abcde",
 			extra: nil,
 			expect: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "abcde",
 				Data:  nil,
 			},
@@ -117,7 +118,7 @@ func TestMarshalJSON(t *testing.T) {
 		{
 			name: "with_extra_fields",
 			metric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val1",
 				Data:  map[string]any{"x": 42, "extra": "yes"},
 			},
@@ -133,7 +134,7 @@ func TestMarshalJSON(t *testing.T) {
 		{
 			name: "without_extra_fields",
 			metric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val2",
 			},
 			expectMap: map[string]any{
@@ -145,7 +146,7 @@ func TestMarshalJSON(t *testing.T) {
 		{
 			name: "empty_extra_map",
 			metric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val3",
 				Data:  map[string]any{},
 			},
@@ -185,12 +186,12 @@ func TestUnmarshalJSON(t *testing.T) {
 		{
 			name: "with_extra_fields",
 			metric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val1",
 				Data:  map[string]any{"x": 42, "extra": "yes"},
 			},
 			expectMetric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val1",
 				Data:  map[string]any{"x": float64(42), "extra": "yes"},
 			},
@@ -198,23 +199,23 @@ func TestUnmarshalJSON(t *testing.T) {
 		{
 			name: "without_extra_fields",
 			metric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val2",
 			},
 			expectMetric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val2",
 			},
 		},
 		{
 			name: "empty_extra_map",
 			metric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val3",
 				Data:  map[string]any{},
 			},
 			expectMetric: TestMetric{
-				ID:    SSHDStartTime,
+				ID:    metrics.SSHDStartTime,
 				Value: "val3",
 				Data:  map[string]any{},
 			},
@@ -254,7 +255,7 @@ func TestFlush(t *testing.T) {
 				Functions: map[string]TestFunction{
 					"FuncA": {
 						Metrics: []TestMetric{
-							{ID: SSHDStartTime, Value: "9999"},
+							{ID: metrics.SSHDStartTime, Value: "9999"},
 						},
 					},
 				},
@@ -310,7 +311,7 @@ func TestFlush(t *testing.T) {
 					"FuncZ": {
 						Metrics: []TestMetric{
 							{
-								ID:    SSHDStartTime,
+								ID:    metrics.SSHDStartTime,
 								Value: "value",
 								Data:  map[string]any{"env": "prod", "code": 200},
 							},

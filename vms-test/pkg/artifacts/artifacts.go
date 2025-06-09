@@ -1,4 +1,4 @@
-package metrics
+package artifacts
 
 import (
 	"encoding/json"
@@ -8,17 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-)
 
-// Metric Enums
-//
-//go:generate enumer -json -output metrics_id_generated.go -type=ID
-type ID int
-
-const (
-	// Take the zero value with this so that TestMetric{} reports something reasonable.
-	UnidentifiedMetric ID = iota
-	SSHDStartTime
+	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
 )
 
 var (
@@ -90,17 +82,26 @@ type TestRun struct {
 // TestFunction is an execution of a function within a test binary.
 type TestFunction struct {
 	// Metrics is the list of metrics logged by that function. Logging the same metric ID multiple times is allowed.
-	Metrics []TestMetric
+	Metrics []TestMetric `json:"metrics,omitempty"`
+	Files   []TestFile   `json:"files,omitempty"`
 }
 
 // TestMetric is a single metric logged by a function. Logging the same metric ID multiple times is allowed.
 type TestMetric struct {
 	// ID is the metric identifier
-	ID ID
+	ID metrics.ID
 	// Value is the value of the metric
 	Value string
 	// Data contains arbitary extra fields.
 	Data map[string]any
+}
+
+// TestFile is a file (content) collected by a test
+type TestFile struct {
+	// ID is the file identifier
+	ID      files.ID
+	Content []byte
+	Data    map[string]any
 }
 
 // testingT is an interface containing what metrics needs from testing.T
@@ -112,12 +113,17 @@ type testingT interface {
 }
 
 // Log calls Log for the current running test
-func Log(t testingT, mID ID, val string, extra map[string]any) {
+func Log(t testingT, mID metrics.ID, val string, extra map[string]any) {
 	CurrentTestRun.Log(t, mID, val, extra)
 }
 
+// File calls File for the current running test
+func File(t testingT, fID files.ID, content []byte, extra map[string]any) {
+	CurrentTestRun.File(t, fID, content, extra)
+}
+
 // Log logs a single TestMetric.
-func (tr *TestRun) Log(t testingT, mID ID, val string, extra map[string]any) {
+func (tr *TestRun) Log(t testingT, mID metrics.ID, val string, extra map[string]any) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	testfunc, _ := tr.Functions[t.Name()]
@@ -133,6 +139,31 @@ func (tr *TestRun) Log(t testingT, mID ID, val string, extra map[string]any) {
 		newmetric.Data[k] = v
 	}
 	testfunc.Metrics = append(testfunc.Metrics, newmetric)
+	tr.Functions[t.Name()] = testfunc
+	t.Cleanup(func() {
+		if err := tr.Flush(); err != nil {
+			t.Logf("failed to flush logs for %s: %v", t.Name(), err)
+		}
+	})
+}
+
+func (tr *TestRun) File(t testingT, fID files.ID, content []byte, extra map[string]any) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	testfunc, _ := tr.Functions[t.Name()]
+	newfile := TestFile{
+		ID:      fID,
+		Content: content,
+		Data:    extra,
+	}
+	if newfile.Data == nil {
+		newfile.Data = make(map[string]any)
+	}
+	for k, v := range flagTags {
+		newfile.Data[k] = v
+	}
+	testfunc.Files = append(testfunc.Files, newfile)
+
 	tr.Functions[t.Name()] = testfunc
 	t.Cleanup(func() {
 		if err := tr.Flush(); err != nil {
