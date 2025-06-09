@@ -84,6 +84,7 @@ func runRemoteCmd() *cobra.Command {
 		sshUser        string
 		zone           string
 		knownHosts     string
+		sudo           bool
 	)
 
 	cmd := &cobra.Command{
@@ -119,7 +120,10 @@ func runRemoteCmd() *cobra.Command {
 				log.Fatalf("failed to move %s to remote host: %v", localFilePath, err)
 			}
 
-			remotecmd := append([]string{"exec", remoteFile}, args...)
+			remotecmd := append([]string{remoteFile}, args...)
+			if sudo {
+				remotecmd = append([]string{"sudo"}, remotecmd...)
+			}
 
 			if err := sshutils.SSHToInstance(ctx, publicIP, auth, sshUser, knownHosts, remotecmd); err != nil {
 				log.Fatalf("failed to run %s on remote host: %v", filepath.Base(localFilePath), err)
@@ -134,6 +138,7 @@ func runRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&sshUser, "user", "root", "SSH username")
 	cmd.Flags().StringVar(&zone, "zone", "us-central1-a", "GCE zone for resources (required)")
 	cmd.Flags().StringVar(&knownHosts, "known-hosts", "", "known hosts file")
+	cmd.Flags().BoolVar(&sudo, "sudo", false, "Run as root")
 	cmd.MarkFlagRequired("file")
 	cmd.MarkFlagRequired("name")
 	cmd.MarkFlagRequired("private-key")

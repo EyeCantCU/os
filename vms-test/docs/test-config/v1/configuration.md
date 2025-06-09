@@ -10,7 +10,7 @@ The following options are part of this version of the test configuration specifi
 * **version**: The version of configuration options. This specification is for version 1.
 * **cloud**: the cloud this image is intended for (one of qemu, azure, aws, or gcp).
 * **data**: top level configuration details.
-	* **vmuser**: The user which tests will be run as on the VM unless otherwise specified in test configuration.
+	* **vmuser**: The user to connect to the VM with. Tests are run with root permissions.
 	* Any other fields under this key are considered a cloud specific definition.
 * **vmconfigs**: Contains a list of architectures for which VM configs and tests are defined.
 	* **x86_64**: This field is a list of vm configurations on x86_64.
@@ -19,7 +19,7 @@ The following options are part of this version of the test configuration specifi
 		* **tests**: This key contains a list of test configurations to be run on the VM.
 			* **group** (exclusive with name): This is the name of a test group, all memebers of which should be run.
 			* **name** (exclusive with group): This is the name of an individual test which should be run. Specifying individual tests in a test group as $group/$name is permitted. If this test is not part of any test group, location is required.
-			* **vmuser** (optional): This the name of the user the test should be run as in the VM, if different from top-level vmuser definition.
+			* **vmuser** (optional): This the name of the user to connect to the VM as, if different from top level definition.
 			* **location** (optional): This is the location on the filesystem (relative to the file containing the test configuration) of a folder containing a go package defining a test. It will be compiled in the same manner as built-in tests are compiled. The compiler tag 'vmtest' can be used to detect when being compiled for execution on the target.
 		* All other fields under this key are considered a cloud specific definition.
 
