@@ -121,7 +121,7 @@ PUBLISH_TARGET ?= dev
 COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
 PREFIX ?= $(shell id -un)
 BUILD_TIMESTAMP ?= $(shell date -u "+%Y%m%d-%H%M")
-AZVERSION = $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
+AZVERSION ?= $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
 AZTAGS += env=$(PUBLISH_TARGET) commit=$(COMMIT)
 GCPLABELS =env=$(PUBLISH_TARGET),commit=$(COMMIT)
 
@@ -214,7 +214,7 @@ $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
 	$(TOOLS_D)/google-image-upload --family="$(GCPFAMILY)" --name="$(GCPNAME)" \
 		--arch="$(GCPARCH)" --labels="$(GCPLABELS),local-name=gcp-$*" "$(dir $@)disk.raw" "$(GCPBUCKET)"
 	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
-		
+
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
 	@$(call capture_stdout,$@,\
@@ -278,3 +278,45 @@ endif
 .PHONY: convert
 convert:
 	./hack/convert.sh
+
+.PHONY: azure-marketplace-install-extension
+azure-marketplace-install-extension:
+# I don't particularly want to clone this from my repo during every image build
+# and build the wheel particularly since you need the azdev tooling as well.
+#
+# Might be better if it was a chainguard repo?
+#
+# For now I'll just include the wheel if someone in review has a preferred method
+# I'm happy to adopt that.
+#
+# Here are instructions for how to generate the wheel and install the extension
+#
+# az is convenient because it doesn't require us to add additional creds
+# to github secrets and instead can use the az auth stack.
+#
+# This should work to rebuild it.
+# TMPDIR := $(shell mktemp -d)
+# REVISION := 11f470f205c89c0d6671869c70dd7a4475a09778
+# git clone --revision $(REVISION) https://github.com/justinvreeland/partnercenter-cli-extension.git \
+# $(TMPDIR)/partnercenter-cli-extension
+# $(cd partnercenter && azdev extension build --verbose partnercenter)
+#
+# Fails if the extension wasn't installed to begin with which it shouldn't be
+	az extension remove -n partnercenter || true
+	az extension add --yes --source whl/partnercenter-0.2.7-py3-none-any.whl
+
+.PHONY: azure-marketplace-update-technical-plan
+azure-marketplace-update-technical-plan: $(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name)))
+$(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name))): azure-marketplace-update-technical-plan-%: output/azure-marketplace-update-technical-plan-%s.json
+
+output/azure-marketplace-update-technical-plan-%s.json: AZNAME=$(PREFIX)-$*
+output/azure-marketplace-update-technical-plan-%s.json: azure-marketplace-install-extension
+# We don't want to publish devel or testing images by mistake
+ifneq ("$(AZGALLERY)","chainguard_vms_eap")
+		    $(error This gallery is not allowed listed in the makefile if you want to upload images from it please update the makefile.)
+endif
+	$(call capture_stdout,$@,\
+		$(TOOLS_D)/azure-marketplace-add-vm-image-version \
+		--image-version=$(AZVERSION) --image-name=$(AZNAME) \
+		--gallery=$(AZGALLERY) --plan=$(AZMARKETPLACE_PLAN) \
+		--offer=$(AZMARKETPLACE_OFFER) )
