@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"os/user"
 	"strings"
 )
 
@@ -15,13 +14,7 @@ const (
 
 // run dmesg, if not root run sudo dmesg
 func dmesg(ctx context.Context, args ...string) ([]string, error) {
-	var cmd *exec.Cmd
-	user, err := user.Current()
-	if err == nil && user.Uid != "0" {
-		cmd = exec.CommandContext(ctx, sudoCli, append([]string{dmesgCli}, args...)...)
-	} else {
-		cmd = exec.CommandContext(ctx, dmesgCli, args...)
-	}
+	cmd := exec.CommandContext(ctx, dmesgCli, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, err
