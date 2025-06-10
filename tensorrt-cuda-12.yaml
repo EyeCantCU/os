@@ -1,6 +1,6 @@
 package:
   name: tensorrt-cuda-12
-  version: 10.10.0.31
+  version: 10.11.0.33
   epoch: 0
   description: TensorRT libraries for CUDA 12.0 to ${{vars.cuda-version}}
   copyright:
@@ -32,13 +32,16 @@ var-transforms:
     to: cuda-major-version
 
 vars:
-  # It's built for the latest minor version it supports
+  # It's versioned for the latest minor version it supports, but is backwards compatible.
   cuda-version: 12.9
+  pypi-package: tensorrt
+  import: tensorrt
 
 environment:
   contents:
     packages:
       - busybox
+      - py3-supported-build-base
 
 data:
   # libnvinfer-plugin is split out here because it has an extra dep
@@ -60,19 +63,26 @@ data:
       libnvonnxparser:
       libnvinfer:
 
+  - name: py-versions
+    items:
+      3.10:
+      3.11:
+      3.12:
+      3.13:
+
 pipeline:
   - if: ${{build.arch}} == "x86_64"
     uses: fetch
     with:
       uri: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/${{vars.mangled-package-version}}/tars/TensorRT-${{package.version}}.Linux.${{build.arch}}-gnu.cuda-${{vars.cuda-version}}.tar.gz"
-      expected-sha256: "690387fcf1dfe5ef8c4bc14a23d6360999145743471d806c2edbf998a64a0cd6"
+      expected-sha256: "7d9bcccf1b92d38c0f91bd47ad1fd516f2cfb71f655e70ed8f182eaa9842a617"
       timeout: 600
 
   - if: ${{build.arch}} == "aarch64"
     uses: fetch
     with:
       uri: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/${{vars.mangled-package-version}}/tars/TensorRT-${{package.version}}.Linux.${{build.arch}}-gnu.cuda-${{vars.cuda-version}}.tar.gz"
-      expected-sha256: "0dd0172055254d50c323fe342faa5ceea8a9b1da74320552c407745b4da110ba"
+      expected-sha256: "1e6366ccbec6862a643fb9ed9f98c4a0c3baf3e841ceac51f44536f2e9277d02"
       timeout: 600
 
   # Setup version symlinks
@@ -210,6 +220,73 @@ subpackages:
         - libnvonnxparser-cuda-${{vars.cuda-major-version}}-dev=${{package.full-version}}
         - libnvinfer-cuda-${{vars.cuda-major-version}}-dev=${{package.full-version}}
 
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-${{vars.major-minor}}-cuda-${{vars.cuda-major-version}}
+    description: python${{range.key}} version of ${{vars.pypi-package}}-${{vars.major-minor}} built for CUDA ${{vars.cuda-major-version}}
+    dependencies:
+      runtime:
+    pipeline:
+      - name: Check to see if upstream has added builds for python versions we suport
+        working-directory: python
+        runs: |
+          for file in tensorrt-${{package.version}}-*_${{build.arch}}.whl; do
+            pytag="$(echo $file | sed -r 's/.*-(cp[0-9]+)-.*/\1/')"
+            case $pytag in
+              cp38|cp39|cp310|cp311|cp312|cp313)
+                ;;
+              *)
+                echo "Found whl for unexpected Python version $pytag"
+                echo "If this is a version we support, please now enable it."
+                exit 1
+                ;;
+            esac
+          done
+      - working-directory: python
+        runs: |
+          pytag="cp$(echo ${{range.key}} | tr -d .)-none-linux"
+          python${{range.key}} -m pip install --no-deps --root ${{targets.contextdir}} \
+            tensorrt-${{package.version}}-${pytag}_${{build.arch}}.whl
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - py${{range.key}}-pip
+      pipeline:
+        - runs: |
+            python${{range.key}} -m pip check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+
+  - name: py3-supported-${{vars.pypi-package}}-${{vars.major-minor}}-cuda-${{vars.cuda-major-version}}
+    description: meta package providing ${{vars.pypi-package}}-${{vars.major-minor}} built for CUDA ${{vars.cuda-major-version}} for supported python versions
+    dependencies:
+      runtime:
+        - py3.10-${{vars.pypi-package}}-${{vars.major-minor}}-cuda-${{vars.cuda-major-version}}
+        - py3.11-${{vars.pypi-package}}-${{vars.major-minor}}-cuda-${{vars.cuda-major-version}}
+        - py3.12-${{vars.pypi-package}}-${{vars.major-minor}}-cuda-${{vars.cuda-major-version}}
+        - py3.13-${{vars.pypi-package}}-${{vars.major-minor}}-cuda-${{vars.cuda-major-version}}
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python3.10
+            import: ${{vars.import}}
+        - uses: python/import
+          with:
+            python: python3.11
+            import: ${{vars.import}}
+        - uses: python/import
+          with:
+            python: python3.12
+            import: ${{vars.import}}
+        - uses: python/import
+          with:
+            python: python3.13
+            import: ${{vars.import}}
+
   - name: ${{package.name}}-ld-config
     description: Runtime linker configuration for TensorRT libraries for NVIDIA GPUs
     pipeline:
@@ -219,6 +296,6 @@ subpackages:
           echo "$_libdir" > "${{targets.contextdir}}"/etc/ld.so.conf.d/${{context.name}}.conf
 
 update:
-  # No release-monitoring support for the multi-arch "enterprise" driver, only
-  # for x86-only consumer release train.
-  enabled: false
+  enabled: true
+  release-monitor:
+    identifier: 133035
