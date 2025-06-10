@@ -148,11 +148,17 @@ GCPPROJECT = $(shell gcloud config get project)
 GCPBUCKET = $(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
 AZGALLERY = vmtesting
-GCPPROJECT = wolfi-vm
+GCPPROJECT = staging-vms
 GCPBUCKET = wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
+# EAP is also considered "production" in that it hits any EAP end user right now.
 AZGALLERY = chainguard_vms_eap
 GCPPROJECT = chainguard-vms-eap
+GCPBUCKET = wolfi-vm-images-workloads
+else ifeq ($(PUBLISH_TARGET),production)
+# Currently we are using wolfi-vm for internal images for workstations and other cases.
+# TODO: Move production workstation images to the chainguard-workstations project.
+GCPPROJECT = wolfi-vm
 GCPBUCKET = wolfi-vm-images-workloads
 else
 $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
