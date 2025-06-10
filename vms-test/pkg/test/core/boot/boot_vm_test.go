@@ -3,6 +3,7 @@
 package boot
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"testing"
@@ -30,6 +31,17 @@ func TestSSHStartTime(t *testing.T) {
 
 func TestCollectLogs(t *testing.T) {
 	ctx := vmtest.Context(t)
+	timeout := 180 * time.Second
+	myCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// wait for multi-user.target
+	st, err := getServiceStartMonotonic(myCtx, "multi-user.target")
+	if err != nil {
+		t.Errorf("fail waiting for multi-user.target: %v\n", err)
+	}
+
+	artifacts.Log(t, metrics.MultiUserTarget, fmt.Sprintf("%f", st.Seconds()), nil)
 
 	cmds := []struct {
 		cmd []string
@@ -41,12 +53,17 @@ func TestCollectLogs(t *testing.T) {
 		{cmd: []string{"systemd-analyze", "critical-chain"}, id: files.SystemdCriticalChain},
 	}
 
+	errors := map[files.ID]error{}
 	for _, finfo := range cmds {
 		cmd := exec.CommandContext(ctx, finfo.cmd[0], finfo.cmd[1:]...)
-		output, err := cmd.Output()
+		output, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Errorf("Execution of '%s' failed: %v", cmd.String(), err)
+			errors[finfo.id] = fmt.Errorf("Execution of '%s' failed: %v", cmd.String(), err)
 		}
-		artifacts.File(t, finfo.id, output, nil)
+		artifacts.File(t, finfo.id, output, err, nil)
+	}
+
+	if len(errors) != 0 {
+		t.Errorf("File collection failed: %v", errors)
 	}
 }

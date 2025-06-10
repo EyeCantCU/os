@@ -102,6 +102,7 @@ type TestFile struct {
 	ID      files.ID
 	Content []byte
 	Data    map[string]any
+	Error   error `json:"error,omitempty"`
 }
 
 // testingT is an interface containing what metrics needs from testing.T
@@ -118,8 +119,8 @@ func Log(t testingT, mID metrics.ID, val string, extra map[string]any) {
 }
 
 // File calls File for the current running test
-func File(t testingT, fID files.ID, content []byte, extra map[string]any) {
-	CurrentTestRun.File(t, fID, content, extra)
+func File(t testingT, fID files.ID, content []byte, fErr error, extra map[string]any) {
+	CurrentTestRun.File(t, fID, content, fErr, extra)
 }
 
 // Log logs a single TestMetric.
@@ -147,7 +148,7 @@ func (tr *TestRun) Log(t testingT, mID metrics.ID, val string, extra map[string]
 	})
 }
 
-func (tr *TestRun) File(t testingT, fID files.ID, content []byte, extra map[string]any) {
+func (tr *TestRun) File(t testingT, fID files.ID, content []byte, fErr error, extra map[string]any) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	testfunc, _ := tr.Functions[t.Name()]
@@ -155,6 +156,7 @@ func (tr *TestRun) File(t testingT, fID files.ID, content []byte, extra map[stri
 		ID:      fID,
 		Content: content,
 		Data:    extra,
+		Error:   fErr,
 	}
 	if newfile.Data == nil {
 		newfile.Data = make(map[string]any)

@@ -9,4 +9,5 @@ const (
 	// Take the zero value with this so that TestMetric{} reports something reasonable.
 	UnidentifiedMetric ID = iota
 	SSHDStartTime
+	MultiUserTarget
 )
