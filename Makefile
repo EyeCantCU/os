@@ -148,7 +148,10 @@ GCPPROJECT = $(shell gcloud config get project)
 GCPBUCKET = $(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
 AZGALLERY = vmtesting
-GCPPROJECT = staging-vms-h8zx
+# TODO: use the real staging project when access is resolved
+# github-ci@wolfi-vm.iam.gserviceaccount.com does not have permission to access projects instance staging-vms-h8zx
+#GCPPROJECT = staging-vms-h8zx
+GCPPROJECT = wolfi-vm-test
 GCPBUCKET = wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
