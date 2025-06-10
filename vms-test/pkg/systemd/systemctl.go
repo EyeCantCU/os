@@ -1,4 +1,4 @@
-package boot
+package systemd
 
 import (
 	"context"
@@ -10,11 +10,10 @@ import (
 )
 
 var (
-	procUptime = "/proc/uptime"
-	systemctl  = "systemctl"
+	systemctl = "systemctl"
 )
 
-func systemctlShow(ctx context.Context, service string) (map[string]string, error) {
+func SystemctlShow(ctx context.Context, service string) (map[string]string, error) {
 	rmap := map[string]string{}
 	cmd := exec.CommandContext(ctx, systemctl, "show", service)
 	output, err := cmd.Output()
@@ -43,17 +42,18 @@ func monotonicToDuration(val string) (time.Duration, error) {
 	return time.Duration(n) * time.Microsecond, nil
 }
 
-func getServiceStartMonotonic(ctx context.Context, service string) (time.Duration, error) {
+// Waits for service to be started if it is not yet
+func GetServiceStartMonotonic(ctx context.Context, service string) (time.Duration, error) {
 	var info map[string]string
 	var err error
 
 	for {
-		info, err = systemctlShow(ctx, service)
+		info, err = SystemctlShow(ctx, service)
 		if err != nil {
 			return -1, fmt.Errorf("failed to check service %q state: %w", service, err)
 		}
 
-		if val, ok := info["ActiveEnterTimestampMonotonic"]; ok {
+		if val, ok := info["ActiveEnterTimestampMonotonic"]; ok && val != "0" {
 			return monotonicToDuration(val)
 		}
 

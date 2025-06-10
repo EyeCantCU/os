@@ -17,9 +17,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.211.3
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/dmarkham/enumer v1.5.11
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/go-cmp v0.7.0
 	github.com/spf13/cobra v1.9.1
 	golang.org/x/crypto v0.37.0
+	golang.org/x/sys v0.32.0
 	google.golang.org/protobuf v1.36.6
 )
 
@@ -79,7 +81,6 @@ require (
 	golang.org/x/net v0.39.0 // indirect
 	golang.org/x/oauth2 v0.29.0 // indirect
 	golang.org/x/sync v0.13.0 // indirect
-	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	golang.org/x/tools v0.30.0 // indirect
 	google.golang.org/api v0.229.0 // indirect

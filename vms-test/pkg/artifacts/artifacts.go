@@ -191,3 +191,12 @@ func (tr *TestRun) Flush() error {
 	}
 	return nil
 }
+
+// Turn any map[string]... into a map[string]any for Log()
+func MapOfAny[T any](m map[string]T) map[string]any {
+	out := make(map[string]any)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}

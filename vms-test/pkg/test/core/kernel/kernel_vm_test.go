@@ -1,32 +1,54 @@
 //go:build vmtest
 
-package boot
+package kernel
 
 import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/systemd"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
 )
 
-func TestSSHStartTime(t *testing.T) {
-	ctx := vmtest.Context(t)
-	st, err := getServiceStartMonotonic(ctx, "sshd.service")
-	if err != nil {
-		t.Errorf("failed to get monotonic: %v\n", err)
-	}
+var (
+	kernelOopsRe = regexp.MustCompile("] (BUG|Oops|Internal error)")
+	kernelWarnRe = regexp.MustCompile("] WARNING:")
+)
 
-	limit := 180 * time.Second
-	if st > limit {
-		t.Errorf("timeToSSHD = %fs, want < %fs", st.Seconds(), limit.Seconds())
+func TestErrorsInDmesg(t *testing.T) {
+	ctx := vmtest.Context(t)
+	dmesgout, err := dmesg(ctx)
+	if err != nil {
+		t.Fatalf("dmesg(ctx) = err %v want nil", err)
 	}
-	artifacts.Log(t, metrics.SSHDStartTime, fmt.Sprintf("%f", st.Seconds()), nil)
+	for i, line := range dmesgout {
+		if kernelOopsRe.MatchString(line) {
+			t.Logf("found kernel oops:")
+			trace, err := cutKernelTrace(i, dmesgout)
+			if err != nil {
+				t.Errorf("cutKernelTrace(%d, dmesg) = err %v, want nil\ndmesg[%d] = %q", i, err, i, dmesgout[i])
+			} else {
+				t.Log(strings.Join(trace, "\n"))
+			}
+		}
+		if kernelWarnRe.MatchString(line) {
+			t.Logf("found kernel warn:")
+			trace, err := cutKernelTrace(i, dmesgout)
+			if err != nil {
+				t.Errorf("cutKernelTrace(%d, dmesg) = err %v, want nil\ndmesg[%d] = %q", i, err, i, dmesgout[i])
+			} else {
+				t.Log(strings.Join(trace, "\n"))
+			}
+		}
+	}
 }
 
 func TestCollectLogs(t *testing.T) {
@@ -35,10 +57,10 @@ func TestCollectLogs(t *testing.T) {
 	myCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// wait for multi-user.target
-	st, err := getServiceStartMonotonic(myCtx, "multi-user.target")
+	// wait for graphical.target
+	st, err := systemd.GetServiceStartMonotonic(myCtx, "graphical.target")
 	if err != nil {
-		t.Errorf("fail waiting for multi-user.target: %v\n", err)
+		t.Errorf("fail waiting for graphical.target: %v\n", err)
 	}
 
 	artifacts.Log(t, metrics.MultiUserTarget, fmt.Sprintf("%f", st.Seconds()), nil)
@@ -48,9 +70,6 @@ func TestCollectLogs(t *testing.T) {
 		id  files.ID
 	}{
 		{cmd: []string{"dmesg"}, id: files.Dmesg},
-		{cmd: []string{"journalctl", "-b0"}, id: files.JournalCtlB0},
-		{cmd: []string{"systemd-analyze"}, id: files.SystemdAnalyze},
-		{cmd: []string{"systemd-analyze", "critical-chain"}, id: files.SystemdCriticalChain},
 	}
 
 	errors := map[files.ID]error{}

@@ -1,6 +1,4 @@
-//go:build unittest
-
-package boot
+package systemd
 
 import (
 	"fmt"
@@ -61,7 +59,7 @@ exit 1
 			systemctl = testSystemctl
 			t.Cleanup(func() { systemctl = systemctlOld })
 
-			startTime, err := getServiceStartMonotonic(t.Context(), tt.service)
+			startTime, err := GetServiceStartMonotonic(t.Context(), tt.service)
 			if err != nil {
 				t.Fatalf("getServiceStartMonotonic(ctx, %s) = err %v want nil", tt.service, err)
 			}

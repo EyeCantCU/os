@@ -10,4 +10,5 @@ const (
 	UnidentifiedMetric ID = iota
 	SSHDStartTime
 	MultiUserTarget
+	SystemdState
 )
