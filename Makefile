@@ -148,7 +148,7 @@ GCPPROJECT = $(shell gcloud config get project)
 GCPBUCKET = $(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
 AZGALLERY = vmtesting
-GCPPROJECT = staging-vms
+GCPPROJECT = staging-vms-h8zx
 GCPBUCKET = wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
