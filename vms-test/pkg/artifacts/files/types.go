@@ -12,4 +12,5 @@ const (
 	JournalCtlB0
 	SystemdAnalyze
 	SystemdCriticalChain
+	Proc1Mountinfo
 )
