@@ -5,10 +5,15 @@ HASH := \#
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
-disks_aws = aws-base aws-base-fips aws-agents aws-agents-docker-dev aws-docker aws-docker-dev aws-docker-fips aws-docker-fips-dev aws-eks-1.32-dev
-disks_gcp = gcp-base gcp-agents gcp-agents-docker-dev gcp-docker gcp-docker-dev gcp-workstation
+# list_cloud_images(cloud)
+define list_cloud_images
+    $(notdir $(wildcard configs/$1-*))
+endef
+
+disks_aws := $(call list_cloud_images,aws)
+disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu = generic
-disks_azure = azure-base azure-agents azure-aks-dev azure-eap-dev
+disks_azure := $(call list_cloud_images,azure)
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
