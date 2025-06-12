@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"strings"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	compute "cloud.google.com/go/compute/apiv1"
@@ -26,6 +27,7 @@ func launchCmd() *cobra.Command {
 	var minCPUPlatform string
 	var nestedVirt bool
 	var zone string
+	var extraMetadata string
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -98,6 +100,12 @@ func launchCmd() *cobra.Command {
 			if minCPUPlatform != "" {
 				instance.MinCpuPlatform = &minCPUPlatform
 			}
+			for k, v := range parseMetadataString(extraMetadata) {
+				instance.Metadata.Items = append(instance.Metadata.Items, &computepb.Items{
+					Key:   &k,
+					Value: &v,
+				})
+			}
 
 			req := &computepb.InsertInstanceRequest{
 				Project:          projectID,
@@ -130,6 +138,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&vpcNetwork, "vpc-network", "default", "VPC network to use")
 	cmd.Flags().StringVar(&zone, "zone", "us-central1-a", "GCE zone for resources (required)")
 	cmd.Flags().StringVar(&minCPUPlatform, "min-cpu-platform", "", "Minimum CPU Platform")
+	cmd.Flags().StringVar(&extraMetadata, "metadata", "", "Extra metadata for the instance. Syntax is same as gcloud (key=value;key2=val2)")
 	cmd.Flags().BoolVar(&nestedVirt, "nested-virt", false, "Enable nested virtualization")
 
 	cmd.MarkFlagRequired("image-uri")
@@ -138,4 +147,19 @@ func launchCmd() *cobra.Command {
 	cmd.MarkFlagRequired("project")
 
 	return cmd
+}
+
+func parseMetadataString(input string) map[string]string {
+	res := make(map[string]string)
+	for _, item := range strings.Split(input, ";") {
+		if item == "" {
+			continue
+		}
+		split := strings.SplitN(input, "=", 2)
+		if len(split) != 2 {
+			log.Fatalf("malformed metadata %q can't be parsed into key value pair", item)
+		}
+		res[split[0]] = split[1]
+	}
+	return res
 }
