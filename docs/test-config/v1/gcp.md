@@ -14,6 +14,7 @@ This file specifies gcp-specific options in test configuration v1. Refer to conf
 		* **disk_size**: Boot disk size in GB, default 10
 		* **min_cpu_platform** (optional): Minimum CPU platform for instance
 		* **nested_virt** (optional): Enable nested virtualization for instance
+		* **metadata**: String containing extra metadata, in 'key=value;' format
 
 ## Non-normative conventions
 
@@ -36,6 +37,7 @@ vmconfigs:
   x86_64:
     - machine_type: e2-medium
       disk_type: pd-balanced
+      metadata: 'enable-oslogin=true'
       tests:
         - group: core
     - machine_type: c4-standard-4
