@@ -41,6 +41,11 @@ apkoaas: $(gosrc)
 test:
 	go test -v -tags withauth ./...
 
+test-generic: $(ARCH_OUT_D)/generic/disk.raw  builder/ovmf-$(ARCH).fd
+	$(MAKE) -C vms-test TEST_ARCHES="$(ARCH)" runner/qemu tests
+	QEMU_VMS=generic ./vms-test/helpers/test-wolfi-vm \
+	    --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results/$(ARCH)"
+
 .PHONY: disks-aws disks-azure disks-gcp disks-qemu
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
