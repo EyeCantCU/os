@@ -1,7 +1,7 @@
 package:
   name: ct-manylinux-2.28
   version: 1
-  epoch: 0
+  epoch: 5
   description: "the cross native toolchain for manylinux 2.28"
   copyright:
     - license: GPL-3.0-or-later
@@ -14,15 +14,15 @@ package:
     replaces:
       # because we must replace the empty clang config file
       - openssf-compiler-options
-    runtime:
-      # for now we only build and provide GCC-14's libstdc++
-      - gcc~${{vars.gcc-version}}
+      # because we want system fallback linker scripts point to us too
+      - glibc-dev
 
 environment:
   contents:
     packages:
       - build-base
       - crosstool-ng
+      - gcc-14-default
 
 vars:
   # note also update the ct configs
@@ -148,15 +148,20 @@ pipeline:
 
       # start building the frankenstein's monster
       mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr/include
-      cp -r x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.destdir}}/usr/lib/oldglibc/usr/include
+      cp -vr x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.destdir}}/usr/lib/oldglibc/usr/include
       mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
       mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-      cp -r x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include/* ${{targets.destdir}}/usr/lib/oldglibc/usr/include/
+      cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include/* ${{targets.destdir}}/usr/lib/oldglibc/usr/include/
+      cp -vr x-tools/*-linux-gnu/lib/gcc/*/*/include-fixed/* ${{targets.destdir}}/usr/lib/oldglibc/usr/include/
+      rm -v ${{targets.destdir}}/usr/lib/oldglibc/usr/include/README
 
       # fixup glibc linker scripts due to relocation
       prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
       sed -i 's| /lib64/| /usr/lib/oldglibc/usr/lib/|g' $prefix/libc.so $prefix/libm.so $prefix/libm.a
       sed -i 's| /usr/lib64/| /usr/lib/oldglibc/usr/lib/|g' $prefix/libc.so $prefix/libm.so $prefix/libm.a
+
+      # override system linker scripts too
+      cp $prefix/libc.so $prefix/libm.so $prefix/libm.a ${{targets.destdir}}/usr/lib
 
       # Toolchain integration. Ideally I want to use sysroot but still
       # somehow also allow using public things. This is the next best
@@ -187,15 +192,20 @@ test:
   environment:
     contents:
       packages:
+        - autoconf
+        - automake
         - build-base
+        - libtool
         - perl
   pipeline:
     - uses: git-checkout
       with:
+        destination: openssl
         repository: https://github.com/openssl/openssl
         tag: openssl-3.5.0
         expected-commit: 636dfadc70ce26f2473870570bfd9ec352806b1d
     - runs: |
+        cd openssl/
         # OpenSSL build excercises C, C++, Kernel headers
         perl ./Configure --debug enable-ktls shared no-zlib
         perl configdata.pm --dump
@@ -212,6 +222,19 @@ test:
             grep -q dlopen@@GLIBC_2.34 symbols.txt && exit 1
             ;;
         esac
+    - uses: git-checkout
+      with:
+        destination: patchelf
+        expected-commit: 99c24238981b7b1084313aca8f5c493bb46f302c
+        repository: https://github.com/NixOS/patchelf
+        tag: 0.18.0
+        cherry-picks: |
+          master/0e338941fc730c1e7080ca04fc1ee18b9ae2854b: Fix alignment problem when rewriting sections
+    - runs: |
+        cd patchelf
+        autoreconf -fiv
+        ./configure
+        make
 
 update:
   enabled: false

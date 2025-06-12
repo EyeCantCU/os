@@ -17,10 +17,18 @@ KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
 QEMU_KERNEL_REPO := https://apk.cgr.dev/chainguard-private/
 
-ifneq (${MELANGE_RUNNER},)
-	MELANGE_OPTS += --runner ${MELANGE_RUNNER}
+ifeq (${MELANGE_RUNNER},)
+MELANGE_RUNNER = qemu
+$(warning ****************************** WARNING ******************************)
+$(warning *** MELANGE_RUNNER is unset. The default runner is now qemu, which)
+$(warning *** requires chainctl authentication to access the Chainguard kernel.)
+$(warning *** See `melange build --help` for a list of other runner options.)
+$(warning ****************************** WARNING ******************************)
 endif
-QEMU_KERNEL_IMAGE ?= kernel/boot/vmlinuz
+
+MELANGE_OPTS += --runner=${MELANGE_RUNNER}
+
+QEMU_KERNEL_IMAGE ?= kernel/$(ARCH)/vmlinuz
 ifeq (${MELANGE_RUNNER},qemu)
 	QEMU_KERNEL_DEP = ${QEMU_KERNEL_IMAGE}
 	export QEMU_KERNEL_IMAGE
@@ -92,10 +100,10 @@ lib-token: ${CACHEDIR}/.libraries_token.txt
 
 .PHONY: fetch-kernel
 fetch-kernel:
-	rm -rf kernel
-	$(MAKE) kernel/boot/vmlinuz
+	rm -rf kernel/$(ARCH)
+	$(MAKE) kernel/$(ARCH)/vmlinuz
 
-kernel/APKINDEX.tar.gz:
+kernel/%/APKINDEX.tar.gz:
 	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$(ARCH)/APKINDEX.tar.gz)
 	# Retry in case of failure
 	@if grep -q "UNAUTHORIZED" kernel/$(ARCH)/APKINDEX.tar.gz; then \
@@ -104,26 +112,28 @@ kernel/APKINDEX.tar.gz:
 		make kernel/$(ARCH)/APKINDEX.tar.gz; \
 	fi
 
-kernel/APKINDEX: kernel/APKINDEX.tar.gz
-	tar -x -C kernel -f $< $(notdir $@)
+kernel/%/APKINDEX: kernel/%/APKINDEX.tar.gz
+	tar -x -C kernel --to-stdout -f $< APKINDEX > $@.tmp.$$$$ && mv $@.tmp.$$$$ $@
 	touch $@
 
-kernel/chosen: kernel/APKINDEX
-	# Extract lines with 'P:linux' and the following line that contains the version
+kernel/%/chosen: kernel/%/APKINDEX
+	# Extract lines with 'P:linux-qemu-generic' and the following line that contains the version
 	# This approach is compatible with both GNU and BSD sed
-	awk '/^P:linux$$/ {print; getline; print}' $< > kernel/available
-	grep '^V:' kernel/available | sed 's/V://' | \
+	awk '/^P:linux-qemu-generic$$/ {print; getline; print}' $< > kernel/$*/available
+	grep '^V:' kernel/$*/available | sed 's/V://' | \
 	  sort -V | tail -n1 > $@.tmp
 	# Sanity check that this looks like an apk version
 	grep -E '^([0-9]+\.)+[0-9]+-r[0-9]+$$' $@.tmp
 	mv $@.tmp $@
 
-kernel/linux.apk: kernel/chosen
-	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$(ARCH)/linux-$(shell cat kernel/chosen).apk)
+kernel/%/linux.apk: kernel/%/chosen
+	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$*/linux-qemu-generic-$(shell cat kernel/$*/chosen).apk)
 
-kernel/boot/vmlinuz: kernel/linux.apk
-	tar -x -C kernel -f $< boot/ 2> /dev/null
-	touch $@
+kernel/%/vmlinuz: kernel/%/linux.apk
+	tmpd=kernel/.$$$$ && mkdir -p $$tmpd $(dir $@) && \
+		tar -x -C $$tmpd -f $< boot/ 2> /dev/null && \
+		[ -f $$tmpd/boot/vmlinuz ] && mv $$tmpd/boot/* $(dir $@) && \
+		rc=$$?; rm -Rf $$tmpd; exit $$rc
 
 yamls := $(wildcard *.yaml)
 pkgs := $(subst .yaml,,$(yamls))
