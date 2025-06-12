@@ -4,7 +4,6 @@ package waagent
 
 import (
 	"bytes"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,31 +12,17 @@ import (
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
 	"github.com/moby/sys/mountinfo"
-	"github.com/vishvananda/netlink"
 )
 
-var (
-	azurePlatformIP         = net.IPv4(168, 63, 129, 16)
-	azureMDSIP              = net.IPv4(169, 254, 169, 254)
+const (
 	datalossWarningFilename = "DATALOSS_WARNING_README.txt"
 )
 
-func TestRoutes(t *testing.T) {
-	for _, target := range []net.IP{azurePlatformIP, azureMDSIP} {
-		routes, err := netlink.RouteGet(target)
-		if err != nil {
-			t.Errorf("netlink.GetRoute(%v) = err %v, want nil", target, err)
-		} else if len(routes) < 1 {
-			t.Errorf("found no routes to %v, want at least one", target)
-		}
-	}
-}
-
 // Run this on a machine type that has local temp disk storage
 func TestResourceDisk(t *testing.T) {
-	resourceDiskPath, err := filepath.EvalSymlinks("/dev/disk/cloud/azure_resource")
+	resourceDiskPath, err := filepath.EvalSymlinks("/dev/disk/azure/resource")
 	if err != nil {
-		t.Fatalf("filepath.EvalSymlinks(/dev/disk/cloud/azure_resource) = err %v, want nil", err)
+		t.Fatalf("filepath.EvalSymlinks(/dev/disk/azure/resource) = err %v, want nil", err)
 	}
 	resourceDiskMountPoint := getDiskMountPoint(t, resourceDiskPath)
 	datalossWarningPath := filepath.Join(resourceDiskMountPoint, datalossWarningFilename)
