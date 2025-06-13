@@ -88,6 +88,61 @@ Example of using aws.
     2025/04/03 15:30:51 Deleted key pair: key-smoser-dev1
     ```
 
+### AWS-EKS
+To test EKS node using a chainguard ami:
+
+ * Install deps `aws-cli-v2` and `eksctl` and login to aws (see AWS login above)
+
+    ```
+    $ apk add aws-cli-v2 eksctl
+    ```
+
+ * Start a cluster, this will take ~15m if not running already.
+
+    ```
+    $ ./helpers/test-eks cluster-create-if-needed smdev-taco1 1.32
+    ```
+
+ * Get a kubeconfig for the cluster
+
+    ```
+    $ ./helpers/test-eks cluster-kubeconfig smdev-taco1 > kubeconfig
+    $ export KUBECONFIG=$PWD/kubeconfig
+    ```
+
+ * Add a nodegroup. This will take ~ 4m
+
+    Create a node group named 'ng-burrito1' with 2 nodes of type t3.medium
+    and the provided ami.
+
+    ```
+    $ ./helpers/test-eks ami-list
+    ...
+    ami-0e0fc09d9d8548bfb chainguard-eks-dev-x86_64-20250529-0033-prod-te64l7npzna7a
+
+    $ ./helpers/test-eks create-nodegroup \
+        smdev-taco1 ng-burrito1 t3.medium ami-0e0fc09d9d8548bfb
+    ```
+
+ * Use the cluster
+
+    ```
+    $ kubectl run tmp-shell --restart=Never --rm -it \
+       --image=cgr.dev/chainguard/wolfi-base:latest-dev -- /bin/sh
+    ```
+
+ * Destroy a nodegroup
+
+    ```
+    $ ./helpers/test-eks nodegroup-destroy smdev-taco1 ng-burrito1
+    ```
+
+ * Destroy the cluster
+
+    ```
+    $ ./helpers/test-eks cluster-destroy smdev-taco1
+    ```
+
 ## Azure
 
 Example of using azure.
