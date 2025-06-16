@@ -60,7 +60,7 @@ goarch = $(subst aarch64,arm64,$(subst x86_64,amd64,$(call getarch,$(1),$(2))))
 #  where <group> is a dir in pkg/test
 #  and <name> is a dir in pkg/test/<group>
 $(test_targets): test/%: $(go_files) .go-generated
-	@mkdir -p $(notdir $@)
+	@mkdir -p $(dir $@)
 	GOOS=linux GOARCH=$(call goarch,test/,$@) go test -c -o $@ ./pkg/$(subst $(call getarch,test/,$@)/,,$(@)) -tags vmtest
 
 gofmt: .go-formatted

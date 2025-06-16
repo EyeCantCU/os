@@ -28,6 +28,9 @@ func launchCmd() *cobra.Command {
 	var nestedVirt bool
 	var zone string
 	var extraMetadata string
+	var secondaryDiskSizeGb int64
+	var secondaryDiskType string
+	var secondaryDiskName string
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -47,20 +50,50 @@ func launchCmd() *cobra.Command {
 			defer instancesClient.Close()
 
 			// Populate the instance protobuf.
-			instance := &computepb.Instance{
-				Name: proto.String(instanceName),
-				Disks: []*computepb.AttachedDisk{
-					{
-						Boot:       proto.Bool(true),
-						AutoDelete: proto.Bool(true), // Note that when the instance is deleted, the boot disk is also deleted.
-						Type:       proto.String(computepb.AttachedDisk_PERSISTENT.String()),
-						InitializeParams: &computepb.AttachedDiskInitializeParams{
-							DiskSizeGb:  proto.Int64(bootDiskSizeGb),
-							DiskType:    proto.String(fmt.Sprintf("zones/%s/diskTypes/%s", zone, bootDiskType)),
-							SourceImage: proto.String(sourceImageUri),
-						},
+			disks := []*computepb.AttachedDisk{
+				{
+					Boot:       proto.Bool(true),
+					AutoDelete: proto.Bool(true), // Note that when the instance is deleted, the boot disk is also deleted.
+					Type:       proto.String(computepb.AttachedDisk_PERSISTENT.String()),
+					InitializeParams: &computepb.AttachedDiskInitializeParams{
+						DiskSizeGb:  proto.Int64(bootDiskSizeGb),
+						DiskType:    proto.String(fmt.Sprintf("zones/%s/diskTypes/%s", zone, bootDiskType)),
+						SourceImage: proto.String(sourceImageUri),
 					},
 				},
+			}
+
+			// Add secondary disk if specified
+			if secondaryDiskSizeGb > 0 {
+				// Use the instance name for the disk name so it is unique
+				diskName := fmt.Sprintf("%s-data", instanceName)
+				// Allow setting the in guest device name with the provided flag. This translates to /dev/disk/by-id/google-[deviceName]
+				deviceName := secondaryDiskName
+				if secondaryDiskName == "" {
+					deviceName = fmt.Sprintf("%s-data", instanceName)
+				}
+				// Use boot disk type if secondary disk type not specified
+				diskType := secondaryDiskType
+				if secondaryDiskType == "" {
+					diskType = bootDiskType
+				}
+				secondaryDisk := &computepb.AttachedDisk{
+					Boot:       proto.Bool(false),
+					AutoDelete: proto.Bool(true),
+					DeviceName: proto.String(deviceName),
+					Type:       proto.String(computepb.AttachedDisk_PERSISTENT.String()),
+					InitializeParams: &computepb.AttachedDiskInitializeParams{
+						DiskSizeGb: proto.Int64(secondaryDiskSizeGb),
+						DiskType:   proto.String(fmt.Sprintf("zones/%s/diskTypes/%s", zone, diskType)),
+						DiskName:   proto.String(diskName),
+					},
+				}
+				disks = append(disks, secondaryDisk)
+			}
+
+			instance := &computepb.Instance{
+				Name:        proto.String(instanceName),
+				Disks:       disks,
 				Labels:      map[string]string{"test": labelName}, // TODO we need to decide on what the label key:value should be.
 				MachineType: proto.String(fmt.Sprintf("zones/%s/machineTypes/%s", zone, machineType)),
 				Metadata: &computepb.Metadata{
@@ -129,7 +162,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&bootDiskType, "disk-type", "pd-balanced", "GCE disk type to use")
 	cmd.Flags().StringVar(&instanceName, "name", "", "Instance name (required)")
 	cmd.Flags().StringVar(&labelName, "label", "", "Label to apply to resources (required)")
-	cmd.Flags().StringVar(&machineType, "machine-type", "e2-standard-2", "GCE machine type")
+	cmd.Flags().StringVar(&machineType, "machine-type", "n2-standard-2", "GCE machine type")
 	cmd.Flags().StringVar(&projectID, "project", "", "Project ID (required)")
 	cmd.Flags().StringVar(&publicKeyPath, "public-key", "", "Path to SSH public key")
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "default", "Service account to attach to the VM (optional)")
@@ -140,6 +173,9 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&minCPUPlatform, "min-cpu-platform", "", "Minimum CPU Platform")
 	cmd.Flags().StringVar(&extraMetadata, "metadata", "", "Extra metadata for the instance. Syntax is same as gcloud (key=value;key2=val2)")
 	cmd.Flags().BoolVar(&nestedVirt, "nested-virt", false, "Enable nested virtualization")
+	cmd.Flags().Int64Var(&secondaryDiskSizeGb, "secondary-disk-size", 0, "Size of secondary disk in Gb (0 = no secondary disk)")
+	cmd.Flags().StringVar(&secondaryDiskType, "secondary-disk-type", "", "GCE disk type for secondary disk (defaults to same as disk-type)")
+	cmd.Flags().StringVar(&secondaryDiskName, "secondary-disk-name", "", "Device name for secondary disk (defaults to {instance-name}-data)")
 
 	cmd.MarkFlagRequired("image-uri")
 	cmd.MarkFlagRequired("label")
