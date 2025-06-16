@@ -4,6 +4,10 @@ This repository houses a test harness for Chainguard vms.
 # Build test runners
 
 ```
+# Make all test runners
+make runners
+
+# Make one test runner
 make runner/aws
 ```
 
@@ -256,22 +260,22 @@ Example of using GCE
   * Launch an instance
 
     ```
-    $ ./runner/gce launch --label test --name test-vm --project zmarano-chainguard --public-key ~/.ssh/id_ed25519.pub --source-image-uri projects/wolfi-vm/global/images/family/chainguard-docker-dev-amd64 
+    $ ./runner/gcp launch --label test --name test-vm --project zmarano-chainguard --public-key ~/.ssh/id_ed25519.pub --source-image-uri projects/wolfi-vm/global/images/family/chainguard-docker-dev-amd64 
     2025/04/11 09:12:27 Launched GCE VM: test-vm
     ```
 
-  * SSH - TODO the terminal isn't quite right.
+  * SSH
 
     ```
-    $ ./runner/gce ssh --name test-vm --project zmarano-chainguard --private-key ~/.ssh/id_ed25519
+    $ ./runner/gcp ssh --name test-vm --project zmarano-chainguard --private-key ~/.ssh/id_ed25519
     2025/04/11 09:19:25 Connecting to VM at 34.68.213.163
-    test-vm:~# ^[[41;12R
+    test-vm:~#
     ```
 
   * Execute a file
 
     ```
-    $ ./runner/gce run-remote --name test-vm --project zmarano-chainguard --private-key ~/.ssh/id_ed25519 --file /tmp/hello.sh
+    $ ./runner/gcp run-remote --name test-vm --project zmarano-chainguard --private-key ~/.ssh/id_ed25519 --file /tmp/hello.sh
     2025/04/11 09:18:41 Connecting to VM at 34.68.213.163
     Hello World!
     ```
@@ -281,7 +285,5 @@ Example of using GCE
     Note: In GCE, using deafult instance create and delete behavior, the boot disk is also deleted with the request. We aren't yet creating networks per test and thus the default VPC in the project is being used. There is therefore no additional cleanup in this basic flow.
 
     ```
-    $ ./runner/gce terminate --name test-vm --project zmarano-chainguard
-    # This will currently fail because wolfi isn't responding to ACPI events. Fix in progress.
-    2025/04/11 09:22:47 instance deletion operation failed: context deadline exceeded
+    $ ./runner/gcp terminate --name test-vm --project zmarano-chainguard
     ```

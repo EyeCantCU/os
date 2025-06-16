@@ -66,7 +66,7 @@ func setupCmd() *cobra.Command {
 
 			// Create Security Group
 			sgOut, err := client.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
-				GroupName:   aws.String(fmt.Sprintf(tagName)),
+				GroupName:   aws.String(fmt.Sprintf("%s", tagName)),
 				Description: aws.String("SSH access and all egress"),
 				VpcId:       aws.String(vpcID),
 				TagSpecifications: []ec2types.TagSpecification{

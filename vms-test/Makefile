@@ -7,7 +7,7 @@ runners=$(subst pkg/runner/,,$(wildcard pkg/runner/*))
 test_groups=$(subst pkg/test/,,$(wildcard pkg/test/*))
 tests=$(foreach group,$(test_groups),$(subst pkg/test/,,$(wildcard pkg/test/$(group)/*)))
 
-go_files=$(shell find pkg -name *.go -and -not -name '*_generated.go')
+go_files=$(shell find pkg -name '*.go' -and -not -name '*_generated.go')
 go_gen_sources = $(git grep -l '^//go:generate')
 
 go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)

@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-const _IDName = "UnidentifiedFileDmesgJournalCtlB0SystemdAnalyzeSystemdCriticalChainProc1Mountinfo"
+const _IDName = "UnidentifiedFileDmesgJournalCtlB0SystemdAnalyzeSystemdCriticalChainProc1MountinfoNestedQemuConsole"
 
-var _IDIndex = [...]uint8{0, 16, 21, 33, 47, 67, 81}
+var _IDIndex = [...]uint8{0, 16, 21, 33, 47, 67, 81, 98}
 
-const _IDLowerName = "unidentifiedfiledmesgjournalctlb0systemdanalyzesystemdcriticalchainproc1mountinfo"
+const _IDLowerName = "unidentifiedfiledmesgjournalctlb0systemdanalyzesystemdcriticalchainproc1mountinfonestedqemuconsole"
 
 func (i ID) String() string {
 	if i < 0 || i >= ID(len(_IDIndex)-1) {
@@ -31,9 +31,10 @@ func _IDNoOp() {
 	_ = x[SystemdAnalyze-(3)]
 	_ = x[SystemdCriticalChain-(4)]
 	_ = x[Proc1Mountinfo-(5)]
+	_ = x[NestedQemuConsole-(6)]
 }
 
-var _IDValues = []ID{UnidentifiedFile, Dmesg, JournalCtlB0, SystemdAnalyze, SystemdCriticalChain, Proc1Mountinfo}
+var _IDValues = []ID{UnidentifiedFile, Dmesg, JournalCtlB0, SystemdAnalyze, SystemdCriticalChain, Proc1Mountinfo, NestedQemuConsole}
 
 var _IDNameToValueMap = map[string]ID{
 	_IDName[0:16]:       UnidentifiedFile,
@@ -48,6 +49,8 @@ var _IDNameToValueMap = map[string]ID{
 	_IDLowerName[47:67]: SystemdCriticalChain,
 	_IDName[67:81]:      Proc1Mountinfo,
 	_IDLowerName[67:81]: Proc1Mountinfo,
+	_IDName[81:98]:      NestedQemuConsole,
+	_IDLowerName[81:98]: NestedQemuConsole,
 }
 
 var _IDNames = []string{
@@ -57,6 +60,7 @@ var _IDNames = []string{
 	_IDName[33:47],
 	_IDName[47:67],
 	_IDName[67:81],
+	_IDName[81:98],
 }
 
 // IDString retrieves an enum value from the enum constants string name.

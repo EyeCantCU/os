@@ -13,4 +13,5 @@ const (
 	SystemdAnalyze
 	SystemdCriticalChain
 	Proc1Mountinfo
+	NestedQemuConsole
 )
