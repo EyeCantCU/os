@@ -67,22 +67,22 @@ Example of using aws.
          --vpc-id=vpc-07fa6bb7b6a4d1ec2 \
          --security-group-id=sg-09e97361cc8c787db \
          --instance-type=t3.medium \
-         --ami-id=ami-0ac7483330414d688 
+         --ami-id=ami-0ac7483330414d688
      2025/04/03 15:27:29 Launched instance ID: i-05ce463388c21c51a
      ```
 
- * ssh 
+ * ssh
 
      ```
      $ ./runner/aws ssh --region=us-west-2 --tag=smoser-dev1
-     ip-10-0-0-50:~$ ls         
+     ip-10-0-0-50:~$ ls
      ls
-     ip-10-0-0-50:~$ ls /     
+     ip-10-0-0-50:~$ ls /
      bin    etc    opt    sbin   var
      boot   home   proc   sys
      dev    lib    root   tmp
      efi    lib64  run    usr
-     ip-10-0-0-50:~$ exit       
+     ip-10-0-0-50:~$ exit
 
  * terminate
 
@@ -209,7 +209,7 @@ Example of using azure.
      2025/04/08 12:07:31 Launched Azure VM: acrate-testrunner-vm-3
      ```
 
- * ssh 
+ * ssh
 
      ```
      $ ./runner/azure ssh --subscription-id=${AZ_ACCOUNT_ID} --tag acrate-testrunner --resource-group chainguard-vms \
@@ -260,7 +260,7 @@ Example of using GCE
   * Launch an instance
 
     ```
-    $ ./runner/gcp launch --label test --name test-vm --project zmarano-chainguard --public-key ~/.ssh/id_ed25519.pub --source-image-uri projects/wolfi-vm/global/images/family/chainguard-docker-dev-amd64 
+    $ ./runner/gcp launch --label test --name test-vm --project zmarano-chainguard --public-key ~/.ssh/id_ed25519.pub --source-image-uri projects/wolfi-vm/global/images/family/chainguard-docker-dev-amd64
     2025/04/11 09:12:27 Launched GCE VM: test-vm
     ```
 

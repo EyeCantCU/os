@@ -19,7 +19,7 @@ The QEMU application tests validate QEMU emulation and nested VM capabilities.
 - Locates OVMF firmware for x86_64
 - Launches QEMU VM with KVM acceleration
 
-#### TestQemuAarch64  
+#### TestQemuAarch64
 **Purpose**: Tests ARM64 virtualization with native KVM or cross-architecture emulation
 
 **Implementation**:

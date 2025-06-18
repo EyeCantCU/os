@@ -1,6 +1,6 @@
 # Packer Multi-Cloud Configuration Guide
 
-This repository contains Packer configurations for building custom machine images across AWS, GCP, and Azure cloud providers. 
+This repository contains Packer configurations for building custom machine images across AWS, GCP, and Azure cloud providers.
 Each configuration installs and runs the [Grype](https://github.com/anchore/grype) vulnerability scanner.
 
 ## Prerequisites

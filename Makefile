@@ -336,3 +336,7 @@ endif
 		--image-version=$(AZVERSION) --image-name=$(AZNAME) \
 		--gallery=$(AZGALLERY) --plan=$(AZMARKETPLACE_PLAN) \
 		--offer=$(AZMARKETPLACE_OFFER) )
+
+# Yam doesn't recurse
+lint-configs:
+	find ./ -name '*.yaml' -regex './configs.*' -exec yam {} \;

@@ -5,7 +5,7 @@ This directory contains documentation for VM test cases. These docs help enginee
 ## Documentation Purpose
 
 Each test group documentation provides:
-- **Test overview**: Purpose and scope of the test group  
+- **Test overview**: Purpose and scope of the test group
 - **Test location**: Source code
 - **Test cases**: What each test validates and basic implementation approach
 - **Group rationale**: Why these tests are organized into their respective groups
@@ -15,7 +15,7 @@ Each test group documentation provides:
 When creating documentation for new test groups, use this Claude prompt or add this to your CLAUDE.md:
 
 ```
-Create documentation for the [TEST_GROUP_NAME] test group following the wolfi-vm test documentation format. 
+Create documentation for the [TEST_GROUP_NAME] test group following the wolfi-vm test documentation format.
 
 Requirements:
 - Help engineers understand what is being tested, basic implementation details, and why tests are grouped together
@@ -27,7 +27,7 @@ Requirements:
 
 ## Test Location
 
-- **Source**: `vms-test/pkg/test/[path]/`  
+- **Source**: `vms-test/pkg/test/[path]/`
 - **Test Group**: `[group_name]` (or **Test Name**: `[name]` for individual tests)
 
 ## Test Cases

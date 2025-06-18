@@ -22,7 +22,7 @@ The `core` test group validates fundamental VM functionality required for all de
 **Purpose**: Collects kernel diagnostic information and performance metrics
 
 **Implementation**:
-- Waits for `graphical.target` to start 
+- Waits for `graphical.target` to start
 - Records time to reach graphical target as performance metric
 
 ### ssh

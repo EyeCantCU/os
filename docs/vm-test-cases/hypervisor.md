@@ -5,7 +5,7 @@ The `hypervisor` test group validates hypervisor functionality capabilities on V
 ## Test Location
 
 - **Source**: `vms-test/pkg/test/hypervisor/`
-- **Test Group**: `hypervisor` 
+- **Test Group**: `hypervisor`
 
 ## Test Cases
 

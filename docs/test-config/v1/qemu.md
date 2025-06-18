@@ -37,4 +37,3 @@ vmconfigs:
       tests:
       - group: core
 ```
-
