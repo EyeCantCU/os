@@ -50,11 +50,14 @@ jobs:
         arch:
           - x86_64
           - aarch64
+        group:
+          - aws-eks
+          - aws-noneks
 
     env:
       BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
       VM_ARCH: ${{ matrix.arch }}
-      VM_CLOUD: "aws"
+      VM_GROUP: ${{ matrix.group }}
 
     steps:
       - uses: step-security/harden-runner@002fdce3c6a235733a90a27c80493a3241e56863 # v2.12.1
@@ -73,13 +76,13 @@ jobs:
         uses: './.github/actions/build-disks'
         with:
           cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
-          cloud_provider: "aws"
+          vm_group: "${{ matrix.group }}"
           arch: '${{ matrix.arch }}'
 
       - name: Scan disks
         uses: './.github/actions/scan-disks'
         with:
-          cloud_provider: "aws"
+          vm_group: "aws-${{matrix.group}}"
           arch: '${{ matrix.arch }}'
 
       - name: add HOME/bin to PATH
@@ -97,7 +100,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
           # the secret used is the marketplace AWS account id
-          # AWS account kim_chainguard
+          # AWS account aws-marketplace
           role-to-assume: arn:aws:iam::607334848609:role/wolfi-vms-github-postsubmit-role
           aws-region: us-east-1
 
@@ -125,7 +128,7 @@ jobs:
 
       - name: "Create AWS Images"
         run: |
-          make -j`nproc` --output-sync=recurse aws-create BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
+          make -j`nproc` --output-sync=recurse aws-create-${VM_GROUP} BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
 
       - name: "Show publish output"
         run: |
@@ -137,25 +140,43 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: awspub-create-${{ matrix.arch }}
+          name: awspub-create-${{ matrix.group}}-${{ matrix.arch }}
           path: ./output/${{ matrix.arch }}/awspub/create
 
-      - name: "Setup Test AWS Creds"
+      - name: "[BASE] Setup Test AWS Creds"
+        if: ${{ matrix.group != 'aws-eks' }}
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
           # AWS account chainguard-vms
           role-to-assume: arn:aws:iam::235494789672:role/wolfi-vms-github-postsubmit-role
           aws-region: us-east-1
 
+      - name: "[EKS] Setup Test AWS Creds"
+        if: ${{ matrix.group == 'aws-eks' }}
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          # AWS account chainguard-vms
+          role-to-assume: arn:aws:iam::677043465004:role/cg-test-vms-postsubmit-role
+          aws-region: us-east-1
+
       - name: "Test AWS Images"
         uses: './.github/actions/vms-test'
         with:
           cloud_provider: "aws"
+          vm_group: '${{ matrix.group }}'
           arch: '${{ matrix.arch }}'
-          opts: |
-            -- \
-            --launch-group=wolfi-vm-test \
+          opts: >-
+            --
+            --launch-group=wolfi-vm-test
             --awspub-inputs=./output/${{ env.VM_ARCH }}/awspub/create/
+
+      - name: "[EKS] AWS EKS Nodes"
+        if: matrix.group == 'aws-eks'
+        uses: './.github/actions/test-eks-node'
+        with:
+          aws-region: us-east-1
+          artifact-suffix: "-${{ matrix.arch }}-${{ matrix.group }}"
+          awspub-inputs-dir: ./output/${{ matrix.arch }}/awspub/create
 
       - name: "Setup AWS Creds"
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
@@ -167,4 +188,4 @@ jobs:
 
       - name: "Publish AWS Images to marketplace"
         run: |
-          make -j`nproc` --output-sync=recurse aws-publish BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
+          make -j`nproc` --output-sync=recurse "aws-publish-${VM_GROUP}" BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}

@@ -48,6 +48,8 @@ test-generic: $(ARCH_OUT_D)/generic/disk.raw  builder/ovmf-$(ARCH).fd
 
 .PHONY: disks-aws disks-azure disks-gcp disks-qemu
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
+disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
+disks-aws-noneks: $(foreach name,$(group_aws_noneks),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
@@ -63,6 +65,10 @@ list-gcp:
 	@for n in $(disks_gcp); do echo $$n; done
 list-qemu:
 	@for n in $(disks_qemu); do echo $$n; done
+list-%:
+	@groups="$(group_$(subst -,_,$(*)))"; \
+		[ -n "$$groups" ] || { echo "no group $*"; exit 1; }; \
+		for n in $${groups}; do echo $$n; done
 
 .PHONY: disks
 disks: $(foreach name,$(names),disk-$(name))
@@ -180,15 +186,19 @@ awspub-%: AWSSSM=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)
 awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
 	./tools/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
 
-.PHONY: awspub
-awspub: $(foreach name,$(disks_aws),awspub-$(name))
-
 .PHONY: aws-create-% aws-publish-% aws-create aws-publish
 # these are just so human can type 'make aws-create-aws-base' to do the create/publish
-$(foreach name,$(disks_aws),aws-create-$(name)): aws-create-%: $(ARCH_OUT_D)/awspub/create/%.json
-$(foreach name,$(disks_aws),aws-publish-$(name)): aws-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
+$(foreach name,$(disks_aws),aws-image-create-$(name)): aws-image-create-%: $(ARCH_OUT_D)/awspub/create/%.json
+$(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
+
 aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
 aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
+group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
+group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
+aws-publish-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
+aws-publish-noneks: $(foreach name,$(group_aws_noneks),aws-image-publish-$(name))
+aws-create-eks: $(foreach name,$(group_aws_eks),aws-image-create-$(name))
+aws-create-noneks: $(foreach name,$(group_aws_noneks),aws-image-create-$(name))
 
 output/awspub.mapping:
 	mkdir -p output
