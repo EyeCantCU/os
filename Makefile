@@ -196,10 +196,10 @@ $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(A
 
 aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
 aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
-aws-publish-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
-aws-publish-noneks: $(foreach name,$(group_aws_noneks),aws-image-publish-$(name))
-aws-create-eks: $(foreach name,$(group_aws_eks),aws-image-create-$(name))
-aws-create-noneks: $(foreach name,$(group_aws_noneks),aws-image-create-$(name))
+aws-publish-aws-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
+aws-publish-aws-noneks: $(foreach name,$(group_aws_noneks),aws-image-publish-$(name))
+aws-create-aws-eks: $(foreach name,$(group_aws_eks),aws-image-create-$(name))
+aws-create-aws-noneks: $(foreach name,$(group_aws_noneks),aws-image-create-$(name))
 
 output/awspub.mapping:
 	mkdir -p output
