@@ -10,7 +10,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-containerregistry v0.20.6
 	github.com/spf13/cobra v1.9.1
-	github.com/wolfi-dev/wolfictl v0.37.5
+	github.com/wolfi-dev/wolfictl v0.37.6
 	golang.org/x/crypto v0.39.0
 	gopkg.in/yaml.v3 v3.0.1
 )
