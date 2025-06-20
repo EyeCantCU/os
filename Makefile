@@ -15,6 +15,9 @@ disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu = generic
 disks_azure := $(call list_cloud_images,azure)
 
+group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
+group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
+
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_M),arm64)
@@ -193,8 +196,6 @@ $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(A
 
 aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
 aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
-group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
-group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
 aws-publish-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
 aws-publish-noneks: $(foreach name,$(group_aws_noneks),aws-image-publish-$(name))
 aws-create-eks: $(foreach name,$(group_aws_eks),aws-image-create-$(name))
