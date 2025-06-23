@@ -65,7 +65,7 @@ main() {
     instance_id=$(aws ec2 describe-instances --region "$region" --filters "Name=tag:Name,Values=$tag" | jq -re '.Reservations[0].Instances[0].InstanceId') || failrc "can't find instance ID"
     local nodes="0"
     while [ "$nodes" == "0" ]; do
-        nodes=$(aws ssm list-nodes --region "$region" "--filters=Key=InstanceId,Values=$instance_id" | jq -re '.Nodes | length') || failrc "can't list ssm agent nodes"
+        nodes=$(aws ssm list-nodes --region "$region" --filters "Key=InstanceId,Values=$instance_id" "Key=InstanceStatus,Values=Active" "Key=ManagedStatus,Values=Managed" | jq -re '.Nodes | length') || failrc "can't list ssm agent nodes"
         sleep 1
     done
     # Send command
