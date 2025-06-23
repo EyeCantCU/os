@@ -7,7 +7,7 @@ BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
 
 # list_cloud_images(cloud)
 define list_cloud_images
-    $(notdir $(wildcard configs/$1-*))
+    $(filter-out %-fips %-fips-dev,$(notdir $(wildcard configs/$1-*)))
 endef
 
 disks_aws := $(call list_cloud_images,aws)
