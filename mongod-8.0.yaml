@@ -1,11 +1,12 @@
 package:
   name: mongod-8.0
   version: "8.0.10"
-  epoch: 2
+  epoch: 3
   description: "The MongoDB Database"
   resources:
     cpu: 30
     memory: 100Gi
+    disk: 100Gi
   dependencies:
     provides:
       - mongod=${{package.full-version}}
@@ -14,6 +15,12 @@ package:
       - wolfi-baselayout
   copyright:
     - license: "SSPL-1.0"
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
 
 environment:
   contents:
@@ -105,6 +112,97 @@ subpackages:
         - runs: |
             mongo --version
             mongo --help
+
+  - name: "mongod-8.0-iamguarded-compat"
+    description: "mongod iamguarded compat"
+    dependencies:
+      runtime:
+        # Required by startup scripts
+        - bash
+        - coreutils
+        - merged-usrsbin
+        - mongo-8.0
+        - mongod-8.0
+        - mongosh
+        - posix-libc-utils
+        - render-template
+        # These are needed, but must be specified in the image config to enable FIPS alternatives.
+        #- gosu
+        #- busybox
+        #- mongo-tools
+        #- wait-for-port
+        #- yq
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: mongodb
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded
+          mkdir -p /opt/iamguarded/licenses
+          mkdir -p /opt/iamguarded/scripts
+          mkdir -p /opt/iamguarded/etc
+          mkdir -p /opt/iamguarded/common/bin
+          mkdir -p /opt/iamguarded/mongodb/bin
+          mkdir -p /opt/iamguarded/mongodb/logs
+          mkdir -p /opt/iamguarded/mongodb/tmp
+          mkdir -p ${{targets.subpkgdir}}/iamguarded/mongodb/conf
+          mkdir -p ${{targets.subpkgdir}}/iamguarded/mongodb/data/db
+
+          ln -sf /usr/bin/gosu /opt/iamguarded/common/bin/gosu
+          ln -sf /usr/bin/render-template /opt/iamguarded/common/bin/render-template
+          ln -sf /usr/bin/wait-for-port /opt/iamguarded/common/bin/wait-for-port
+          ln -sf /usr/bin/yq /opt/iamguarded/common/bin/yq
+
+          /opt/iamguarded/scripts/mongodb/postunpack.sh
+      - runs: |
+          # Set the target directory for the symbolic links
+          target_dir="/opt/iamguarded/mongodb/bin/"
+
+          # Loop through the binaries in /usr/bin/
+          for binary_path in /usr/bin/mongo*; do
+              # Check if the path is a file and not a directory
+              if [ -f "$binary_path" ]; then
+                  # Extract the binary name from the path
+                  binary_name=$(basename "$binary_path")
+
+                  # Create the symbolic link
+                  ln -sf "$binary_path" "$target_dir$binary_name"
+
+                  echo "Created symbolic link for $binary_name"
+              fi
+          done
+          for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+            ln -sf /usr/bin/$binary /opt/iamguarded/mongodb/bin/$binary
+          done
+      - runs: |
+          # touch/mkdir these empty files and directories to quiet various startup messages per upstream
+          touch "${{targets.subpkgdir}}"/.dbshell
+          touch "${{targets.subpkgdir}}"/.mongorc.js
+          touch "${{targets.subpkgdir}}"/.mongoshrc.js
+          mkdir "${{targets.subpkgdir}}"/.mongodb
+          mkdir "${{targets.subpkgdir}}"/docker-entrypoint-initdb.d
+      - uses: iamguarded/finalize-compat
+        with:
+          package: mongodb
+          version: ${{vars.major-minor-version}}
+      # TODO(maxgio92): restore this hardlink, once Melange is released with:
+      # * https://github.com/chainguard-dev/melange/pull/205
+      - runs: rm -f ./build/install/LICENSE-Community.txt
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: mongodb
+            version: ${{vars.major-minor-version}}
+        - runs: |
+            run-script --version
+            run-script --help
+        - runs: |
+            for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+              test "$(readlink /opt/iamguarded/mongodb/bin/$binary)" = "/usr/bin/$binary"
+            done
 
   - name: "mongod-8.0-bitnami-compat"
     description: "mongod bitnami compat"
