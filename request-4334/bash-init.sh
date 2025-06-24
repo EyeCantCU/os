@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Check if we are in the Chainguard Build Ecosystem
-if [[ -n "${targets:-}" && -n "${targets.contextdir:-}" || "${TEST_PIPELINE}" == "true" ]]; then
+if [[ -n "${targets:-}" && -n "$(env | grep targets.contextdir=)" || "${TEST_PIPELINE}" == "true" ]]; then
     echo "Running inside the Chainguard Build Ecosystem"
 else
     if [[ "$(id -u)" -eq 0 ]]; then
