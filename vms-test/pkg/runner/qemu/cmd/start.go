@@ -53,7 +53,7 @@ func startCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&pubkey, "public-key", "", "id_ed25519")
+	cmd.Flags().StringVar(&pubkey, "public-key", "", "id_rsa")
 	cmd.Flags().StringVar(&arch, "arch", runtime.GOARCH, "ARCH")
 
 	return cmd

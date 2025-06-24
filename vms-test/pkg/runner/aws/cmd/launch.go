@@ -145,7 +145,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&amiID, "ami-id", "", "AMI ID to use (required)")
 	cmd.Flags().StringVar(&region, "region", "", "AWS region (required)")
 	cmd.Flags().StringVar(&instanceType, "instance-type", "t3.micro", "EC2 instance type")
-	cmd.Flags().StringVar(&publicKeyPath, "public-key", "id_ed25519.pub", "Path to SSH public key")
+	cmd.Flags().StringVar(&publicKeyPath, "public-key", "id_rsa.pub", "Path to SSH public key")
 	cmd.Flags().StringVar(&tagName, "tag", "", "Tag to apply to instance and key pair (required)")
 	cmd.Flags().StringVar(&vpcID, "vpc-id", "", "VPC ID to launch the instance into (required)")
 	cmd.Flags().StringVar(&subnetID, "subnet-id", "", "Subnet ID to use (optional, will auto-select one from the VPC)")

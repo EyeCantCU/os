@@ -66,7 +66,7 @@ func sshCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&user, "user", "u", "linky", "USER")
-	cmd.Flags().StringVarP(&sshKeyFile, "private-key", "i", "", "id_ed25519")
+	cmd.Flags().StringVarP(&sshKeyFile, "private-key", "i", "", "id_rsa")
 	cmd.Flags().StringVar(&knownHosts, "known-hosts", "", "known hosts file")
 
 	return cmd
@@ -128,7 +128,7 @@ func runRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&localFilePath, "file", "", "File to run remotely (required)")
 	cmd.Flags().StringVarP(&user, "user", "u", "linky", "USER")
 	cmd.Flags().StringVar(&knownHosts, "known-hosts", "", "known hosts file")
-	cmd.Flags().StringVarP(&sshKeyFile, "private-key", "i", "", "id_ed25519")
+	cmd.Flags().StringVarP(&sshKeyFile, "private-key", "i", "", "id_rsa")
 	cmd.Flags().BoolVar(&sudo, "sudo", false, "run as root")
 	cmd.MarkFlagRequired("file")
 
