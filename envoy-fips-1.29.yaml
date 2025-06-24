@@ -1,7 +1,7 @@
 package:
   name: envoy-fips-1.29
   version: 1.29.12
-  epoch: 0
+  epoch: 1
   description: Cloud-native high-performance edge/middle/service proxy
   copyright:
     - license: Apache-2.0
@@ -11,6 +11,8 @@ package:
   dependencies:
     provides:
       - envoy-fips=${{package.full-version}}
+    runtime:
+      - boringssl-fips-static-${{vars.boringssl}}-tools
 
 environment:
   contents:
@@ -18,16 +20,13 @@ environment:
       - bash
       - bazel-6
       - binutils
-      - boringssl-fips-static=0.1-r2
+      - boringssl-fips-static-${{vars.boringssl}}-compat
       - build-base
       - busybox
       - ca-certificates-bundle
       - clang~15
       - cmake
       - coreutils
-      # BoringSSL FIPS needs curl.
-      # See https://github.com/envoyproxy/envoy/blob/main/bazel/external/boringssl_fips.genrule_cmd#L66
-      - curl
       # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
       - gcc-12-default
       - git
@@ -43,9 +42,12 @@ environment:
       - ncurses~6.4_p20230722
       - openjdk-11
       - patch
-      - python3-dev
+      - python3-dev<3.13
       - samurai
       - wolfi-baselayout
+
+vars:
+  boringssl: "2023042800"
 
 pipeline:
   - uses: git-checkout
@@ -55,9 +57,12 @@ pipeline:
       expected-commit: 5c3dc559371181d5baa4a7533c36f2370fc97581
       destination: envoy
 
-  - runs: |
-      cp -f boringssl_fips.genrule_cmd envoy/bazel/external
+  - uses: patch
+    working-directory: envoy
+    with:
+      patches: ../0001-version-Print-FIPS-module-version.patch ../0002-tls-Add-support-for-building-envoy-against-newer-rel.patch
 
+  - runs: |
       export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
       mkdir -p .cache/bazel/_bazel_root
 
@@ -71,6 +76,9 @@ pipeline:
       # Choose boringssl-fips
       # See https://github.com/envoyproxy/envoy/blob/v1.27.0/bazel/BUILD#L475
       echo "build --define=boringssl=fips" >> user.bazelrc
+
+      # Use our pre-built boringssl-fips-static
+      echo "build --override_repository=boringssl_fips=/usr/lib/boringssl-fips-static" >> user.bazelrc
 
       bazel build --verbose_failures -c opt envoy
 
@@ -117,3 +125,13 @@ test:
     - runs: |
         envoy --version
         envoy --help
+    - runs: |
+        envoy_version=$(envoy --version | sed -n 's|.*/BoringSSL-FIPS-\(.*\)|\1|p')
+        [ "$envoy_version" = "${{vars.boringssl}}" ]
+        /usr/bin/bssl-test_fips
+        bssl_version=$(/usr/bin/bssl-test_fips | sed -n 's|^Module version: \(.*\)|\1|p')
+        [ "$bssl_version" = "${{vars.boringssl}}" ]
+    - uses: test/cmvp-fips-certification-check
+      with:
+        certificate-number: 4953
+        software-version: ${{vars.boringssl}}
