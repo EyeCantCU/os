@@ -1,7 +1,7 @@
 package:
   name: mongod-8.0
   version: "8.0.10"
-  epoch: 3
+  epoch: 4
   description: "The MongoDB Database"
   resources:
     cpu: 30
@@ -88,12 +88,115 @@ pipeline:
   - uses: strip
 
 subpackages:
-  - name: "mongos"
+  - name: "mongos-8.0"
     description: "mongo sharding"
+    dependencies:
+      provides:
+        - mongos=${{package.full-version}}
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mv build/install/bin/mongos ${{targets.subpkgdir}}/usr/bin
+
+  - name: "mongos-8.0-iamguarded-compat"
+    description: "mongos iamguarded compat"
+    dependencies:
+      runtime:
+        # Required by startup scripts
+        - bash
+        - coreutils
+        - posix-libc-utils
+        - merged-usrsbin
+        - mongo-${{vars.major-minor-version}}
+        - mongod-${{vars.major-minor-version}}
+        - mongos-${{vars.major-minor-version}}
+        - mongosh
+        - posix-libc-utils
+        - render-template
+        # These are needed, but must be specified in the image config to enable FIPS alternatives.
+        #- mongo-tools
+        #- wait-for-port
+        #- yq
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: mongodb-sharded
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded
+          mkdir -p /opt/iamguarded/licenses
+          mkdir -p /opt/iamguarded/scripts
+          mkdir -p /opt/iamguarded/etc
+          mkdir -p /opt/iamguarded/common/bin
+
+          # NOTE: These are intentionally "mongodb" and not "mongos" or "mongodb-sharded"
+          mkdir -p /opt/iamguarded/mongodb/bin
+          mkdir -p /opt/iamguarded/mongodb/logs
+          mkdir -p /opt/iamguarded/mongodb/tmp
+          mkdir -p /opt/iamguarded/mongodb/templates
+          mkdir -p /opt/iamguarded/mongodb/conf
+          mkdir -p /opt/iamguarded/mongodb/licenses
+          mkdir -p /opt/iamguarded/mongodb/data/db
+
+          ln -sf /usr/bin/render-template /opt/iamguarded/common/bin/render-template
+          ln -sf /usr/bin/wait-for-port /opt/iamguarded/common/bin/wait-for-port
+          ln -sf /usr/bin/yq /opt/iamguarded/common/bin/yq
+
+          # This script does some magic with env vars, templates, etc. etc.
+          # it is easier to run it than figure out everything that it touches.
+          /opt/iamguarded/scripts/mongodb-sharded/postunpack.sh
+      - runs: |
+          # Set the target directory for the symbolic links
+          target_dir="/opt/iamguarded/mongodb/bin/"
+
+          # Loop through the binaries in /usr/bin/
+          for binary_path in /usr/bin/mongo*; do
+              # Check if the path is a file and not a directory
+              if [ -f "$binary_path" ]; then
+                  # Extract the binary name from the path
+                  binary_name=$(basename "$binary_path")
+
+                  # Create the symbolic link
+                  ln -sf "$binary_path" "$target_dir$binary_name"
+
+                  echo "Created symbolic link for $binary_name"
+              fi
+          done
+          for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+            ln -sf /usr/bin/$binary /opt/iamguarded/mongodb/bin/$binary
+          done
+
+          ln -s /opt/iamguarded/scripts/mongodb-sharded/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
+          ln -s /opt/iamguarded/scripts/mongodb-sharded/run.sh ${{targets.contextdir}}/run.sh
+          ln -s /opt/iamguarded/scripts/liblog.sh ${{targets.contextdir}}/liblog.sh
+      - runs: |
+          # touch/mkdir these empty files and directories to quiet various startup messages per upstream
+          touch "${{targets.subpkgdir}}"/.dbshell
+          touch "${{targets.subpkgdir}}"/.mongorc.js
+          touch "${{targets.subpkgdir}}"/.mongoshrc.js
+          mkdir "${{targets.subpkgdir}}"/.mongodb
+          mkdir "${{targets.subpkgdir}}"/docker-entrypoint-initdb.d
+      - uses: iamguarded/finalize-compat
+        with:
+          package: mongodb-sharded
+          version: ${{vars.major-minor-version}}
+      # TODO(maxgio92): restore this hardlink, once Melange is released with:
+      # * https://github.com/chainguard-dev/melange/pull/205
+      - runs: rm -f ./build/install/LICENSE-Community.txt
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: mongodb-sharded
+            version: ${{vars.major-minor-version}}
+        - runs: |
+            run-script --version
+            run-script --help
+        - runs: |
+            for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+              test "$(readlink /opt/iamguarded/mongodb/bin/$binary)" = "/usr/bin/$binary"
+            done
 
   - name: "mongo-8.0"
     description: "mongo shell"
