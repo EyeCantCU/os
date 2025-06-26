@@ -81,6 +81,13 @@ disk_targets = $(foreach name,$(names),disk-$(name))
 .PHONY: $(disk_targets)
 $(disk_targets): disk-%: $(ARCH_OUT_D)/%/disk.raw
 
+qcow_targets = $(foreach name,$(names),qcow-$(name))
+.PHONY: $(qcow_targets)
+$(qcow_targets): qcow-%: $(ARCH_OUT_D)/%/disk.qcow2
+
+%.qcow2: %.raw
+	qemu-img convert -f raw -O qcow2 -c -o compression_type=zlib $< $@
+
 disk_debug_targets = $(foreach name,$(names),disk-debug-$(name))
 .PHONY: $(disk_debug_targets)
 $(disk_debug_targets): disk-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw
