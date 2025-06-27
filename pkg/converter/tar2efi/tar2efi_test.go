@@ -133,7 +133,7 @@ func TestConverter(t *testing.T) {
 		},
 	}, {
 		filename:     "testdata/generic.yaml",
-		expectedSize: 2 * GiB,
+		expectedSize: 3 * GiB,
 		// TODO(mattmoor): How do we want to test the generic image?
 	}, {
 		filename:     "testdata/gcp-docker.yaml",
