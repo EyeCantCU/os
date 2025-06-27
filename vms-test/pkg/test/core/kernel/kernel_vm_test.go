@@ -31,7 +31,7 @@ func TestErrorsInDmesg(t *testing.T) {
 	}
 	for i, line := range dmesgout {
 		if kernelOopsRe.MatchString(line) {
-			t.Logf("found kernel oops:")
+			t.Errorf("found kernel oops:")
 			trace, err := cutKernelTrace(i, dmesgout)
 			if err != nil {
 				t.Errorf("cutKernelTrace(%d, dmesg) = err %v, want nil\ndmesg[%d] = %q", i, err, i, dmesgout[i])
@@ -40,7 +40,7 @@ func TestErrorsInDmesg(t *testing.T) {
 			}
 		}
 		if kernelWarnRe.MatchString(line) {
-			t.Logf("found kernel warn:")
+			t.Errorf("found kernel warn:")
 			trace, err := cutKernelTrace(i, dmesgout)
 			if err != nil {
 				t.Errorf("cutKernelTrace(%d, dmesg) = err %v, want nil\ndmesg[%d] = %q", i, err, i, dmesgout[i])
