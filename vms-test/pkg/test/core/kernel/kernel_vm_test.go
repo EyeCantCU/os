@@ -21,7 +21,30 @@ import (
 var (
 	kernelOopsRe = regexp.MustCompile("] (BUG|Oops|Internal error)")
 	kernelWarnRe = regexp.MustCompile("] WARNING:")
+
+	// Ignored oops and warnings patterns. Matches against the entire trace.
+	// Use the inline modifier "(?s)" to activate dot-all mode, i.e. to make
+	// "." match newlines as well.
+	ignoredPatterns = []*regexp.Regexp{
+		// Ignore failure to initialize ftrace on aarch64. The pattern
+		// intentionally does not match on x86_64 which works fine,
+		// accomplished by matching on the Program Counter (PC) register
+		// not found on x86_64 (called Instruction Pointer (IP/EIP/RIP)
+		// there).
+		// https://github.com/chainguard-dev/wolfi-vm/issues/494
+		regexp.MustCompile("(?s)WARNING:.*pc : ftrace_bug.*Call trace:.*ftrace_process_locs"),
+	}
 )
+
+func shouldIgnoreTrace(trace []string) bool {
+	traceText := strings.Join(trace, "\n")
+	for _, pattern := range ignoredPatterns {
+		if pattern.MatchString(traceText) {
+			return true
+		}
+	}
+	return false
+}
 
 func TestErrorsInDmesg(t *testing.T) {
 	ctx := vmtest.Context(t)
@@ -31,20 +54,26 @@ func TestErrorsInDmesg(t *testing.T) {
 	}
 	for i, line := range dmesgout {
 		if kernelOopsRe.MatchString(line) {
-			t.Errorf("found kernel oops:")
 			trace, err := cutKernelTrace(i, dmesgout)
 			if err != nil {
 				t.Errorf("cutKernelTrace(%d, dmesg) = err %v, want nil\ndmesg[%d] = %q", i, err, i, dmesgout[i])
+			} else if shouldIgnoreTrace(trace) {
+				t.Log("ignored known kernel oops:")
+				t.Log(strings.Join(trace, "\n"))
 			} else {
+				t.Errorf("found kernel oops:")
 				t.Log(strings.Join(trace, "\n"))
 			}
 		}
 		if kernelWarnRe.MatchString(line) {
-			t.Errorf("found kernel warn:")
 			trace, err := cutKernelTrace(i, dmesgout)
 			if err != nil {
 				t.Errorf("cutKernelTrace(%d, dmesg) = err %v, want nil\ndmesg[%d] = %q", i, err, i, dmesgout[i])
+			} else if shouldIgnoreTrace(trace) {
+				t.Log("ignored known kernel warning:")
+				t.Log(strings.Join(trace, "\n"))
 			} else {
+				t.Errorf("found kernel warn:")
 				t.Log(strings.Join(trace, "\n"))
 			}
 		}
