@@ -16,8 +16,9 @@ The following options are part of this version of the test configuration specifi
 	* **x86_64**: This field is a list of vm configurations on x86_64.
 	* **aarch64**: This field is a list of vm configurations on aarch64.
 		* **launch** (optional): If specified, this binary will be called to launch the VM under test rather than the “runner/$cloud launch” command. Arguments provided to the binary will be the same arguments that would have been provided to the runner. The 'RUNNER' environment variable points to the binary that would have been run.
+		* **user_data** (optional): If specified, the file content at the given path will be passed as "user data"/"custom data"/"meta data" during instance launch. Accepts a path relative to the test config.
 		* **tests**: This key contains a list of test configurations to be run on the VM.
-			* **group** (exclusive with name): This is the name of a test group, all memebers of which should be run.
+			* **group** (exclusive with name): This is the name of a test group, all members of which should be run.
 			* **name** (exclusive with group): This is the name of an individual test which should be run. Specifying individual tests in a test group as $group/$name is permitted. If this test is not part of any test group, location is required.
 			* **vmuser** (optional): This the name of the user to connect to the VM as, if different from top level definition.
 			* **location** (optional): This is the location on the filesystem (relative to the file containing the test configuration) of a folder containing a go package defining a test. It will be compiled in the same manner as built-in tests are compiled. The compiler tag 'vmtest' can be used to detect when being compiled for execution on the target.
