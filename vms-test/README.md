@@ -1,6 +1,3 @@
-# vms-test
-This repository houses a test harness for Chainguard vms.
-
 # Build test runners
 
 ```
@@ -282,8 +279,9 @@ Example of using GCE
 
   * Terminate
 
-    Note: In GCE, using deafult instance create and delete behavior, the boot disk is also deleted with the request. We aren't yet creating networks per test and thus the default VPC in the project is being used. There is therefore no additional cleanup in this basic flow.
+    Note: In GCE, using default instance create and delete behavior, the boot disk is also deleted with the request. We aren't yet creating networks per test and thus the default VPC in the project is being used. There is therefore no additional cleanup in this basic flow.
 
     ```
     $ ./runner/gcp terminate --name test-vm --project zmarano-chainguard
+    2025/04/11 09:22:47 Instance test-vm deleted successfully.
     ```
