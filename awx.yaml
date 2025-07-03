@@ -3,7 +3,7 @@
 package:
   name: awx
   version: 24.6.1
-  epoch: 9
+  epoch: 10
   description: AWX provides a web-based user interface, REST API, and task engine built on top of Ansible
   copyright:
     - license: Apache-2.0
@@ -83,6 +83,7 @@ environment:
     LC_ALL: en_US.UTF-8
     AWX_LOGGING_MODE: stdout
     VENV_BASE: /var/lib/awx/venv
+    NPM_CONFIG_LEGACY_PEER_DEPS: true
 
 pipeline:
   - uses: git-checkout
@@ -94,9 +95,18 @@ pipeline:
   # This patch fixes two issues, the primary issue is documented here https://github.com/ansible/awx/issues/15484#issuecomment-2331674345
   # the other issue is related to xmlsec which is fixed with this https://github.com/xmlsec/python-xmlsec/issues/257#issuecomment-2063433563
   # The default-settings.patch fixes missing env variable for the base virtual environment for AWX
+  # The js-security-updates.patch fixes JavaScript vulnerabilities: SNYK-JS-AXIOS-9403194, SNYK-JS-FOLLOWREDIRECTS-6444610, SNYK-JS-PATHTOREGEXP-7925106
   - uses: patch
     with:
-      patches: fix-pip.patch default-settings.patch
+      patches: fix-pip.patch default-settings.patch js-security-updates.patch
+
+  # Regenerate package-lock.json to match updated package.json dependencies and fix compatibility issues
+  - runs: |
+      cd awx/ui
+      rm -f package-lock.json
+      # Fix ajv compatibility by downgrading ajv-keywords to compatible version
+      npm install ajv@6.12.6 ajv-keywords@3.5.2 --save-dev --legacy-peer-deps
+      npm install --package-lock-only --legacy-peer-deps
 
   - runs: |
       pip3.11 install -vv build
@@ -111,6 +121,13 @@ pipeline:
       CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec -r requirements/requirements_git.txt
       # This is important otherwise application breaks with missing libpq error
       $VENV_BASE/awx/bin/pip install "psycopg[binary,pool]==3.1.18"
+
+      # Install favicons dependency in ui_next after it's cloned but before build
+      make awx/ui_next/src || true
+      if [ -d "awx/ui_next/src" ]; then
+        (cd awx/ui_next/src && npm install favicons --save --legacy-peer-deps || true)
+      fi
+
       make sdist
       $VENV_BASE/awx/bin/pip install dist/awx.tar.gz
       rm -rf $VENV_BASE/awx/bin/__pycache*
