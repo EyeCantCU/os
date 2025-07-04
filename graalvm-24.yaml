@@ -1,0 +1,525 @@
+package:
+  name: graalvm-24
+  version: "24.0.1"
+  epoch: 0
+  description: GraalVM ${{vars.major-version}} Java development kit
+  copyright:
+    - license: GPL-2.0-with-classpath-exception
+  resources:
+    cpu: 65
+    memory: 128Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-ce
+
+vars:
+  java-home: /usr/lib/jvm/java-24-graalvm
+  boot-jdk: /usr/lib/jvm/java-24-openjdk
+  mxbuild: /home/build/graal/sdk/mxbuild
+  googletest-version: v1.14.0
+  googletest-sha512: 765c326ccc1b87a01027385e69238266e356361cd4ee3e18e3c9d137a5d11fa5d657c164d02dd1be8fe693c8e10f2b580588dbfa57d27f070e2750f50d3e662c
+  # https://www.graalvm.org/release-notes/JDK_24
+  graal-version: 24.2.1
+  graal-commit: 5d94c2ee4e65e6a0ad564a588d47d76ed003bb7b
+  ruby-version: '3.3' # Must align with Ruby version noted in Graal release
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+data:
+  - name: runtimes
+    items:
+      ce: ""
+      ce-nodejs: " with Node.js"
+
+environment:
+  contents:
+    packages:
+      - alsa-lib-dev
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - cups-dev
+      - curl-dev
+      - file
+      - fontconfig-dev
+      - freetype-dev
+      - gfortran
+      - giflib-dev
+      - glibc-iconv
+      - lcms2-dev
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libx11-dev
+      - libxext-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxt-dev
+      - libxtst-dev
+      - maven
+      - mx
+      - ncurses-dev
+      - openjdk-${{vars.major-version}}-default-jdk
+      - pcre2-dev
+      - readline-dev
+      - ruby-${{vars.ruby-version}}
+      - xz-dev
+      - yaml-dev
+      - zip
+  environment:
+    # This is needed to work around the error date 1970-01-01T00:00:00Z is not within the valid range 1980-01-01T00:00:02Z to 2099-12-31T23:59:59Z
+    SOURCE_DATE_EPOCH: 315532900
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/openjdk/jdk${{vars.major-version}}u
+      tag: jdk-${{package.version}}-ga
+      expected-commit: a9cfe9e82ac0bb22b1027210fd3ca926d93a809a
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/oracle/graal
+      tag: vm-${{vars.graal-version}}
+      expected-commit: ${{vars.graal-commit}}
+      destination: graal
+
+  - uses: patch
+    with:
+      patches: never-fail-version-check.patch
+
+  - name: Extract the googletest version from the source doc and Verify
+    runs: |
+      googletest_version=$(sed -n 's/.*https:\/\/github\.com\/google\/googletest\/releases\/tag\/\(v[0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' doc/building.md)
+      if [ "$googletest_version" != "${{vars.googletest-version}}" ]; then
+        echo "Error: googletest version mismatch. Expected ${{vars.googletest-version}}, got $googletest_version"
+        exit 1
+      fi
+
+  - working-directory: /home/build/googletest
+    pipeline:
+      - uses: fetch
+        with:
+          uri: https://github.com/google/googletest/archive/${{vars.googletest-version}}.tar.gz
+          expected-sha512: ${{vars.googletest-sha512}}
+
+  - runs: chmod +x configure
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --disable-precompiled-headers \
+        --disable-warnings-as-errors \
+        --enable-dtrace=no \
+        --prefix=${{vars.java-home}} \
+        --with-boot-jdk=${{vars.boot-jdk}} \
+        --with-debug-level=release \
+        --with-freetype=system \
+        --with-giflib=system \
+        --with-gtest="/home/build/googletest" \
+        --with-jtreg=no \
+        --with-jvm-variants=server \
+        --with-lcms=system \
+        --with-libjpeg=system \
+        --with-libpng=system \
+        --with-native-debug-symbols=internal \
+        --with-vendor-bug-url=https://chainguard.dev/contact \
+        --with-vendor-name=Chainguard \
+        --with-vendor-url=https://chainguard.dev \
+        --with-vendor-vm-bug-url=https://chainguard.dev/contact \
+        --with-version-opt="cgr-r${{package.epoch}}" \
+        --with-version-pre="no" \
+        --with-version-string="" \
+        --with-zlib=system
+
+  - runs: |
+      # Create Graal builder image
+      make graal-builder-image
+
+      # Build GraalVM
+      cd graal/vm
+
+      # Use graal builder JDK
+      export JAVA_HOME="/home/build/build/linux-${{build.arch}}-server-release/images/graal-builder-jdk"
+
+      # Retrieve all Graal projects
+      mx --env=ce-complete sforceimports
+
+subpackages:
+  # Native image depends on gcc, make, glibc-dev, and zlib-dev
+  # Additionally, it requires static libraries to produce native
+  # executables so we do not split them away
+  - range: runtimes
+    name: ${{package.name}}-${{range.key}}
+    description: GraalVM ${{vars.major-version}}${{range.value}}
+    dependencies:
+      runtime:
+        - alsa-lib
+        - freetype
+        - gcc
+        - giflib
+        - glibc-dev
+        - java-cacerts
+        - lcms2
+        - libfontconfig1
+        - libjpeg-turbo
+        - libx11
+        - libxext
+        - libxi
+        - libxrender
+        - libxtst
+        - make
+        - ttf-dejavu
+        - zlib-dev
+    pipeline:
+      - working-directory: graal/vm
+        runs: |
+          # Use graal builder JDK
+          export JAVA_HOME="/home/build/build/linux-${{build.arch}}-server-release/images/graal-builder-jdk"
+
+          # Clean tree
+          mx clean --aggressive
+
+          # Build GraalVM
+          CXXFLAGS="-Wno-template-body" mx --env=${{range.key}} build
+
+          # Find arch-dependent output dir
+          arch_dir="${{vars.mxbuild}}/linux-${{build.goarch}}"
+          if [ ! -d "$arch_dir" ]; then
+            arch_dir="${{vars.mxbuild}}/linux-${{build.arch}}"
+          fi
+
+          # Find GraalVM
+          # - CE is output to *_COMMUNITY_*
+          # - CE + runtime is output to *_CE_*
+          for graalvm_dir in \
+            "GRAALVM_CE_JAVA${{vars.major-version}}/graalvm-ce-openjdk-${{package.version}}" \
+            "GRAALVM_COMMUNITY_JAVA${{vars.major-version}}/graalvm-community-openjdk-${{package.version}}"
+          do
+            graalvm_dist="${arch_dir}/${graalvm_dir}"
+            if [ -d $graalvm_dist.* ]; then
+              mkdir -p ${{targets.contextdir}}/${{vars.java-home}}
+              cp -r $graalvm_dist.*/* ${{targets.contextdir}}/${{vars.java-home}}/
+            fi
+          done
+          rm ${{targets.contextdir}}/${{vars.java-home}}/lib/src.zip
+
+          # copy to shared java cacerts store
+          rm -f ${{targets.contextdir}}/${{vars.java-home}}/lib/security/cacerts
+          ln -s /etc/ssl/certs/java/cacerts \
+            ${{targets.contextdir}}/${{vars.java-home}}/lib/security/cacerts
+          # symlink for `java-common` to work (which expects jre in $JAVA_HOME/jre)
+          ln -s . ${{targets.contextdir}}/${{vars.java-home}}/jre
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-${{range.key}}-default-jdk
+            - ${{package.name}}-${{range.key}}-jmods
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            extra-library-paths: ${{vars.java-home}}/lib/server
+        # Test a basic Hello World
+        - working-directory: basic
+          runs: |
+            javac HelloWorld.java
+            java HelloWorld | grep -qi "Hello World!"
+        # Test a basic HTTP connection
+        - working-directory: basic
+          runs: |
+            javac RequestTest.java
+            java RequestTest | grep -qi "Successfully connected to example.org"
+        # Test modules
+        - working-directory: advanced/module-project
+          runs: |
+            mkdir -p output
+            javac -d output --module-source-path modules $(find modules -name "*.java")
+
+            # Create a jar with the compiled classes
+            jar --verbose --create --file app.jar \
+              --main-class dev.chainguard.module.main.Main \
+              --module-version 1.0 \
+              -C output/test.modules . \
+              -C output/main.app .
+
+            # Test the jar
+            java -jar app.jar
+
+            # Test jlink
+            rm -rf test-project-jre
+            jlink --verbose --module-path "app.jar:$JAVA_HOME/jmods" \
+              --add-modules test.modules \
+              --output test-project-jre
+
+            # Test custom JRE
+            test-project-jre/bin/java -jar app.jar
+        # Test JVMCI
+        - runs: |
+            cat > Counter.java <<'EOF'
+            public class Counter {
+              public static void main(String[] args) throws Exception {
+                int sum = 0;
+                for (int i = 0; i < 10; i++) sum += i;
+                System.out.println(sum);
+              }
+            }
+            EOF
+            javac Counter.java
+            # Use JVMCI and log compilation
+            java -XX:+UnlockExperimentalVMOptions \
+                -XX:+UseJVMCICompiler \
+                -XX:+UnlockDiagnosticVMOptions \
+                -XX:+LogCompilation \
+                Counter
+        # Test NodeJS
+        - runs: |
+            if [ ${{range.key}} = "ce-nodejs" ]; then
+              node <<'EOF'
+            console.log(Polyglot.eval("js", "\"Hello, GraalJS!\""));
+            EOF
+            fi
+        # Test native image
+        - runs: |
+            cat > Hello.java <<'EOF'
+            public class Hello {
+              public static void main(String[] args) {
+                System.out.println("Hello from native image!");
+              }
+            }
+            EOF
+            javac Hello.java
+            native-image Hello -H:Name=hello
+            ./hello | grep -q "Hello from native image!"
+
+  - range: runtimes
+    name: ${{package.name}}-${{range.key}}-dbg
+    description: GraalVM ${{vars.major-version}}${{range.value}} Java debug symbols
+    pipeline:
+      - uses: split/debug
+        with:
+          package: ${{package.name}}-${{range.key}}
+    dependencies:
+      runtime:
+        - ${{package.name}}-${{range.key}}
+    test:
+      pipeline:
+        - runs: |
+            symbols=$(find /usr/lib/debug/${{vars.java-home}} -type 'f' -name "*.debug" | wc -l)
+            if [ $symbols -eq 0 ]; then
+              echo "No debug symbols found!" && exit 1
+            fi
+            echo "Debug symbols were found"
+
+  - range: runtimes
+    name: ${{package.name}}-${{range.key}}-jmods
+    description: GraalVM ${{vars.major-version}}${{range.value}} jmods
+    dependencies:
+      runtime:
+        - binutils
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.java-home}}
+          mv ${{targets.outdir}}/${{package.name}}-${{range.key}}/${{vars.java-home}}/jmods \
+             ${{targets.contextdir}}/${{vars.java-home}}
+    test:
+      pipeline:
+        - runs: |
+            jmods=$(find ${{vars.java-home}}/jmods -type 'f' -name "*.jmod" | wc -l)
+            if [ $jmods -eq 0 ]; then
+              echo "No jmods found!" && exit 1
+            fi
+            echo "$jmods jmods were found"
+
+  - range: runtimes
+    name: ${{package.name}}-${{range.key}}-default-jdk
+    description: Use the GraalVM ${{vars.major-version}}${{range.value}} JVM as the default JVM with the JDK installed
+    dependencies:
+      runtime:
+        - ${{package.name}}-${{range.key}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/jvm
+          ln -s $(basename ${{vars.java-home}}) ${{targets.contextdir}}/usr/lib/jvm/default-jvm
+
+          # Symlink binaries provided by GraalVM
+          # Substitutes java-common
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for path in ${{targets.outdir}}/${{package.name}}-${{range.key}}/${{vars.java-home}}/bin/*; do
+            bin=$(basename $path)
+            ln -s ../lib/jvm/default-jvm/bin/$bin ${{targets.contextdir}}/usr/bin/$bin
+          done
+    test:
+      pipeline:
+        - runs: |
+            jvm="$(readlink -f /usr/lib/jvm/default-jvm)"
+            echo "Java home: ${{vars.java-home}}"
+            echo "Default JVM: $jvm"
+            if [ $jvm != "${{vars.java-home}}" ]; then
+              echo "Default JVM does not point to correct Java home!"
+              exit 1
+            fi
+            echo "Default JVM set correctly"
+
+  - name: ${{package.name}}-graalpy
+    description: GraalPy ${{vars.graal-version}}
+    options:
+      no-depends: true
+      no-provides: true
+    dependencies:
+      provides:
+        - graalpy=${{vars.graal-version}}
+      runtime:
+        - bash
+        - gcc
+        - glibc-dev
+        - make
+        - zlib-dev
+    pipeline:
+      - working-directory: graalpython
+        runs: |
+          # Use graal builder JDK
+          export JAVA_HOME="/home/build/build/linux-${{build.arch}}-server-release/images/graal-builder-jdk"
+
+          # Clean tree
+          mx clean --aggressive
+
+          # Build GraalPy
+          mx python-svm
+
+          # Install GraalPy
+          mkdir -p ${{targets.contextdir}}/usr/share/graalpy
+          if [ -d ${{vars.mxbuild}}/linux-${{build.goarch}} ]; then
+            cp -r ${{vars.mxbuild}}/linux-${{build.goarch}}/PYTHON_NATIVE_STANDALONE_SVM_JAVA${{vars.major-version}}/graalpy-community-${{vars.graal-version}}-linux-${{build.goarch}}/* \
+              ${{targets.contextdir}}/usr/share/graalpy
+          else
+            cp -r ${{vars.mxbuild}}/linux-${{build.arch}}/PYTHON_NATIVE_STANDALONE_SVM_JAVA${{vars.major-version}}/graalpy-community-${{vars.graal-version}}-linux-${{build.arch}}/* \
+              ${{targets.contextdir}}/usr/share/graalpy
+          fi
+
+          # Symlink binaries provided by GraalPy
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for path in ${{targets.contextdir}}/usr/share/graalpy/bin/*; do
+            bin=$(basename $path)
+            ln -s ../share/graalpy/bin/$bin ${{targets.contextdir}}/usr/bin/$bin
+          done
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            extra-library-paths: /usr/share/graalpy/lib/llvm-toolchain/lib/${{build.arch}}-unknown-linux-gnu
+
+  - name: ${{package.name}}-graalpy-venv
+    description: Default virtual environment for the GraalPy ${{vars.graal-version}} image
+    options:
+      no-depends: true
+      no-provides: true
+    dependencies:
+      provides:
+        - graalpy-venv=${{vars.graal-version}}
+      runtime:
+        - ${{package.name}}-graalpy
+    pipeline:
+      - runs: |
+          mkdir -p /app
+          mkdir -p /usr/share/graalpy
+
+          # Copy GraalPy to rootfs
+          cp -r ${{targets.outdir}}/${{package.name}}-graalpy/usr/share/graalpy/* /usr/share/graalpy/
+
+          # Create virtual environment
+          /usr/share/graalpy/bin/python3 -m venv create /app/graalenv
+
+          # Install virtual environment
+          mkdir -p ${{targets.contextdir}}/app
+          mv /app/graalenv ${{targets.contextdir}}/app/
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-truffleruby
+    description: High perf implementation of Ruby built with GraalVM ${{vars.major-version}}
+    options:
+      no-depends: true
+      no-provides: true
+    dependencies:
+      provides:
+        - truffleruby=${{vars.graal-version}}
+      # Dependencies are noted here:
+      # https://github.com/oracle/truffleruby?tab=readme-ov-file#dependencies
+      runtime:
+        - bash
+        - gcc
+        - glibc-dev
+        - glibc-locale-en
+        - make
+        - openssl-dev
+        - yaml-dev
+        - zlib-dev
+    pipeline:
+      - working-directory: truffleruby
+        runs: |
+          # Use graal builder JDK
+          export JAVA_HOME="/home/build/build/linux-${{build.arch}}-server-release/images/graal-builder-jdk"
+
+          # Clean tree
+          mx clean --aggressive
+
+          # Build TruffleRuby
+          mx --env=native build
+
+          # Install TruffleRuby
+          mkdir -p ${{targets.contextdir}}/usr/share/truffleruby
+          if [ -d ${{vars.mxbuild}}/linux-${{build.goarch}} ]; then
+            cp -r ${{vars.mxbuild}}/linux-${{build.goarch}}/RUBY_NATIVE_STANDALONE_SVM_JAVA${{vars.major-version}}/truffleruby-community-${{vars.graal-version}}-linux-${{build.goarch}}/* \
+              ${{targets.contextdir}}/usr/share/truffleruby
+          else
+            cp -r ${{vars.mxbuild}}/linux-${{build.arch}}/RUBY_NATIVE_STANDALONE_SVM_JAVA${{vars.major-version}}/truffleruby-community-${{vars.graal-version}}-linux-${{build.arch}}/* \
+              ${{targets.contextdir}}/usr/share/truffleruby
+          fi
+
+          # Symlink binaries provided by TruffleRuby
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for path in ${{targets.contextdir}}/usr/share/truffleruby/bin/*; do
+            bin=$(basename $path)
+            ln -s ../share/truffleruby/bin/$bin ${{targets.contextdir}}/usr/bin/$bin
+          done
+      - uses: strip
+    test:
+      environment:
+        environment:
+          LANG: "en_US.UTF-8"
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            extra-library-paths: /usr/share/truffleruby/lib/sulong/native/lib
+        - runs: |
+            cat > hello.rb <<'EOF'
+            puts 'Hello, TruffleRuby!'
+            EOF
+            truffleruby ./hello.rb | grep "Hello, TruffleRuby!"
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+update:
+  enabled: true
+  shared: true
+  github:
+    identifier: openjdk/jdk24u
+    strip-prefix: jdk-
+    strip-suffix: -ga
+    tag-filter-contains: -ga
+    use-tag: true
