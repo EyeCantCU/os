@@ -3,13 +3,15 @@ package:
   name: request-5510
   # we need specifically 2.17.2 and pg16.x https://github.com/chainguard-dev/image-requests/issues/5510#issuecomment-30037141422
   version: "2.17.2"
-  epoch: 0
+  epoch: 1
   description: A time-series database for high-performance real-time analytics packaged as a Postgres extension.
   # Outside of the "tsl" directory, source code in a given file is licensed under the Apache License Version 2.0
   # We are only building the opensource bits here.
   copyright:
     - license: Apache-2.0
   dependencies:
+    replaces:
+      - postgresql-${{vars.pg-version}}-base # We are replacing the postgres config on this package
     runtime:
       - postgresql-${{vars.pg-version}}
       - postgresql-${{vars.pg-version}}-client
@@ -21,6 +23,7 @@ environment:
     packages:
       - build-base
       - busybox
+      - postgresql-${{vars.pg-version}}
       - postgresql-${{vars.pg-version}}-dev
 
 vars:
@@ -43,6 +46,10 @@ pipeline:
 
   - uses: cmake/install
 
+  - runs: |
+      # This is necessary so the default postgres config will load the timescaledb extension on startup
+      sed -r "s/[#]*\s*(shared_preload_libraries)\s*=\s*'(.*)'/\1 = 'timescaledb,\2'/;s/,'/'/" /usr/share/postgresql${{vars.pg-version}}/postgresql.conf.sample | tee "${{targets.destdir}}/usr/share/postgresql${{vars.pg-version}}/postgresql.conf.sample"
+
 subpackages:
   - name: ${{package.name}}-oci-entrypoint-pg${{vars.pg-version}}
     description: "docker OCI entrypoint"
@@ -57,7 +64,10 @@ subpackages:
           expected-commit: d6339b0f6f8cb0c41c4eb2087034557fda7fb2f1
       - runs: |
           # Necessary due to `sed` in postgres packages which moves this directory to `/var/lib/postgres/initdb` in the entrypoint script
-          mkdir -p ${{targets.contextdir}}/var/lib/postgres/initdb/ ${{targets.contextdir}}/usr/local/bin
+          mkdir -p \
+            "${{targets.contextdir}}/var/lib/postgres/initdb/" \
+            "${{targets.contextdir}}/usr/local/bin" \
+            "${{targets.contextdir}}/usr/share/postgresql${{vars.pg-version}}"
           ln -s /var/lib/postgres/initdb ${{targets.contextdir}}/docker-entrypoint-initdb.d
           install -Dpm0755 docker-entrypoint-initdb.d/* ${{targets.contextdir}}/var/lib/postgres/initdb/
           ln -s /usr/bin/timescaledb-tune ${{targets.contextdir}}/usr/local/bin/timescaledb-tune
@@ -94,28 +104,31 @@ test:
       runs: |
         postgres --version | grep -F -e "${{vars.pg-version}}"
         psql --version | grep -F -e "${{vars.pg-version}}"
+    - name: Test CLI tools
+      runs: |
+        timescaledb-tune --version
+        timescaledb-parallel-copy --help
     - name: Check extension control file
       runs: |
         stat $(pg_config --sharedir)/extension/timescaledb.control
     - name: Create database and load extension
       runs: |
         TEST_DB="$(mktemp -d)"
-        rm -rf "${TEST_DB}" # let $PGUSER create it
         TMP_LOGFILE="$(mktemp)"
-        rm -rf "${TMP_LOGFILE}" # same here
+        chown -v wolfi:wolfi "${TEST_DB}" "${TMP_LOGFILE}"
 
         sudo -u "${PGUSER}" initdb -D "${TEST_DB}"
-        echo "shared_preload_libraries = 'timescaledb'" | tee "${TEST_DB}/postgresql.conf"
         sudo -u "${PGUSER}" pg_ctl -D "${TEST_DB}" -o "-c unix_socket_directories='/tmp'" -l "${TMP_LOGFILE}" start
         trap 'cat $TMP_LOGFILE' EXIT
         createdb -h /tmp testdb
+        psql -h /tmp -d testdb -c "select * from pg_settings where name = 'shared_preload_libraries'" | grep -F -e "timescaledb"
+        psql -h /tmp -d testdb -c "CREATE EXTENSION timescaledb;"
+        psql -h /tmp -d testdb -c "CREATE DATABASE timescaledbtest;"
+        psql -h /tmp -d testdb -c "CREATE TABLE conditions (time TIMESTAMPTZ NOT NULL, temp REAL NOT NULL);"
+        psql -h /tmp -d testdb -c "SELECT create_hypertable('conditions', 'time');"
+        psql -h /tmp -d testdb -c "INSERT INTO conditions (time, temp) VALUES (NOW(), 72.5), (NOW() - INTERVAL '1 hour', 71.8);"
         psql -h /tmp -d testdb -c "CREATE TABLE test_table (time TIMESTAMPTZ, value INT);"
-        psql -d testdb -c "CREATE EXTENSION timescaledb;"
         sudo -u "${PGUSER}" pg_ctl -D "${TEST_DB}" -m fast stop
-    - name: Test CLI tools
-      runs: |
-        timescaledb-tune --version
-        timescaledb-parallel-copy --help
 
 update:
   enabled: true
