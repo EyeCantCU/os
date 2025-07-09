@@ -1,0 +1,103 @@
+package:
+  name: apm-server-8.18
+  version: "8.18.3"
+  epoch: 0
+  description: Elastic APM is an application performance monitoring system built on the Elastic Stack
+  copyright:
+    - license: Elastic-2.0
+  dependencies:
+    provides:
+      - apm-server=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/apm-server
+      tag: v${{package.version}}
+      expected-commit: 687ef40492472ee2ebd6f3efe82a9f9d02f304f8
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/usr/share/apm-server
+      install -Dm644 apm-server.yml ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+      # https://github.com/elastic/apm-server/blob/5bab00ed4411b845e90fe821e9bb98a0381a35f5/packaging/docker/Dockerfile#L25-L26
+      sed -i 's/127.0.0.1:8200/0.0.0.0:8200/' ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+      sed -i 's/localhost:9200/elasticsearch:9200/' ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+
+  - uses: go/build
+    with:
+      packages: ./x-pack/apm-server
+      output: apm-server
+      ldflags: |
+        -X github.com/elastic/beats/v7/libbeat/version.commit=$(git rev-parse HEAD)
+        -X github.com/elastic/beats/v7/libbeat/version.buildTime=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+      modroot: .
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binaries in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/share/apm-server
+          ln -sf /usr/bin/apm-server ${{targets.contextdir}}/usr/share/apm-server/apm-server
+    dependencies:
+      provides:
+        - apm-server-compat=${{package.full-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/apm-server
+    strip-prefix: v
+    tag-filter: v8.18.
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - jq
+        - wait-for-it
+        - curl
+        - mkcert
+  pipeline:
+    - name: "Test APM server startup"
+      runs: |
+        apm-server -e -c /usr/share/apm-server/apm-server.yml > log.txt 2>&1 &
+        APM_PID=$!
+
+        sleep 10
+
+        # Wait for the server to start
+        wait-for-it localhost:8200 --timeout=60
+
+        curl -s localhost:8200 | jq '.version' | grep "${{package.version}}"
+        # Kill the APM server process
+        kill $APM_PID
+        wait $APM_PID 2>/dev/null
+
+        # ssl test
+        mkcert -install
+        mkcert -cert-file apm-server.crt -key-file apm-server.key localhost
+
+        cat <<EOF > ssl-config.yml
+          apm-server:
+            host: "127.0.0.1:8200"
+            ssl:
+              enabled: true
+              certificate: apm-server.crt
+              key: apm-server.key
+          output.elasticsearch:
+              hosts: ["localhost:9200"]
+              ssl.enabled: false
+        EOF
+
+        apm-server -e -c ssl-config.yml > ssl-log.txt 2>&1 &
+        APM_PID=$!
+
+        sleep 10
+
+        # Wait for the server to start
+        wait-for-it localhost:8200 --timeout=240
+
+        curl -sk https://localhost:8200 | jq '.version' | grep "${{package.version}}"
+        kill $APM_PID
