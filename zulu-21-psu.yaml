@@ -1,8 +1,9 @@
 # DO NOT CHANGE/BUMP/PATCH etc. WITHOUT CHECKING IN WITH OUR AZUL/ZULU PARTNERSHIP TEAM
+#nolint:valid-pipeline-git-checkout-tag
 package:
-  name: zulu-21
-  version: 21.0.7
-  epoch: 1
+  name: zulu-21-psu
+  version: 21.0.8
+  epoch: 0
   description: Zulu ${{vars.major-version}} Java development kit
   copyright:
     - license: GPL-2.0-with-classpath-exception
@@ -24,6 +25,9 @@ package:
       - zlib
 
 vars:
+  zulu-version: 21.44+16
+  jtreg-version: 7.5+1
+  jtreg-hash: 0ca08a11ee19cb56b65cbf85715b147d6ce6c3077775f05d76a7af63b03b5925
   java-home: /usr/lib/jvm/java-21-zulu
   boot-jdk: /usr/lib/jvm/java-21-openjdk
 
@@ -77,8 +81,11 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/chainguard-dev/zulu-jdk21u
-      expected-commit: 39e10b2eec33f16d4f91982313e008fd418b3fbe
-      tag: ${{package.version}}
+      expected-commit: 09520c923898ac1a788dba3f739269384b65f8e7
+      branch: cpu
+
+  - runs: |
+      mv /home/build/zsrc/* /home/build/
 
   - working-directory: /home/build/googletest
     pipeline:
@@ -86,14 +93,6 @@ pipeline:
         with:
           uri: https://github.com/google/googletest/archive/v1.13.0.tar.gz
           expected-sha512: 70c0cfb1b4147bdecb467ecb22ae5b5529eec0abc085763213a796b7cdbd81d1761d12b342060539b936fa54f345d33f060601544874d6213fdde79111fa813e
-
-  - runs: mv /home/build/zsrc*/* /home/build/
-
-  # See Bug: https://bugs.openjdk.org/browse/JDK-8332297
-  # Patch source: https://github.com/openjdk/jdk/commit/9bfae8891e6efa58c557bd6dac61de111a16f71e
-  - uses: patch
-    with:
-      patches: JDK-8332297.patch
 
   - runs: chmod +x configure
 
@@ -121,17 +120,27 @@ pipeline:
         --with-libjpeg=system \
         --with-libpng=system \
         --with-native-debug-symbols=internal \
-        --with-vendor-bug-url=https://chainguard.dev/contact \
-        --with-vendor-name=Chainguard \
-        --with-vendor-url=https://chainguard.dev \
-        --with-vendor-vm-bug-url=https://chainguard.dev/contact \
-        --with-version-opt="cgr-r${{package.epoch}}" \
+        --with-vendor-bug-url=http://www.azul.com/support/ \
+        --with-vendor-name="Azul Systems, Inc." \
+        --with-vendor-url=http://www.azul.com/ \
+        --with-vendor-vm-bug-url=http://www.azul.com/support/ \
+        --with-version-build=5 \
         --with-version-pre="no" \
-        --with-version-string="21.42.20-sa-jdk21.0.7" \
+        --with-version-opt=LTS \
+        --with-vendor-version-string=zulu-${{vars.zulu-version}}-CG \
+        --enable-refined-build \
         --with-zlib=system
 
   - runs: |
       make jdk-image legacy-jre-image
+
+      # copy addons files to images
+      cp ${{package.srcdir}}/addons/DISCLAIMER build/*-server-release/images/jdk
+      cp ${{package.srcdir}}/addons/Welcome.html build/*-server-release/images/jdk
+      cp ${{package.srcdir}}/addons/readme.txt build/*-server-release/images/jdk
+      cp ${{package.srcdir}}/addons/DISCLAIMER build/*-server-release/images/jre
+      cp ${{package.srcdir}}/addons/Welcome.html build/*-server-release/images/jre
+      cp ${{package.srcdir}}/addons/readme.txt build/*-server-release/images/jre
 
       mkdir -p ${{targets.contextdir}}/${{vars.java-home}}
       cp -r build/*-server-release/images/jdk/* ${{targets.contextdir}}/${{vars.java-home}}
@@ -161,7 +170,7 @@ subpackages:
         - freetype
         - giflib
         - java-cacerts
-        - lcms2-dev
+        - lcms2
         - libfontconfig1
         - libjpeg-turbo
         - libx11
@@ -236,15 +245,24 @@ subpackages:
           mkdir -p ${{targets.contextdir}}/usr/lib/jvm
           ln -sf $(basename ${{vars.java-home}}) ${{targets.contextdir}}/usr/lib/jvm/default-jvm
 
-# DO NOT CHANGE/BUMP/PATCH etc. WITHOUT CHECKING IN WITH OUR AZUL/ZULU PARTNERSHIP TEAM
-# Azul will control updates to releases
 update:
   enabled: false
+  exclude-reason: "Wait for Azul to propose PRs in https://github.com/chainguard-dev/zulu-jdk21u/pulls"
+  version-transform:
+    - match: ^(.+)\+(\d+)$
+      replace: $1.$2
+  github:
+    identifier: chainguard-dev/zulu-jdk21u
+    use-tag: true
 
 test:
   environment:
     contents:
       packages:
+        - bash
+        - unzip
+        - zip
+        - make
         - ${{package.name}}-default-jdk
         - ${{package.name}}-jmods
   pipeline:
@@ -252,17 +270,17 @@ test:
       with:
         extra-library-paths: /usr/lib/jvm/java-21-zulu/lib/server/
     # Test a basic Hello World
-    - working-directory: basic
+    - working-directory: openjdk-21/basic
       runs: |
         javac HelloWorld.java
         java HelloWorld | grep -qi "Hello World!"
     # Test a basic HTTP connection
-    - working-directory: basic
+    - working-directory: openjdk-${{vars.major-version}}/basic
       runs: |
         javac RequestTest.java
         java RequestTest | grep -qi "Successfully connected to example.org"
     # Test modules
-    - working-directory: advanced/module-project
+    - working-directory: openjdk-${{vars.major-version}}/advanced/module-project
       runs: |
         mkdir output
         javac -d output --module-source-path modules $(find modules -name "*.java")
@@ -284,3 +302,21 @@ test:
 
         # Test custom JRE
         test-project-jre/bin/java -jar app.jar
+    - uses: fetch
+      with:
+        uri: https://github.com/openjdk/jtreg/archive/refs/tags/jtreg-${{vars.jtreg-version}}.tar.gz
+        expected-sha256: ${{vars.jtreg-hash}}
+        strip-components: 1
+    - runs: |
+        echo "Build jtreg..."
+        BUILD_ROOT=/home/build/build/images/jtreg bash make/build.sh --jdk ${{vars.java-home}}
+    - working-directory: zulu-certification-suite
+      runs: |
+        echo "Run jtreg tests..."
+        export TESTED_ZULU=${{vars.java-home}}
+        export JTREG_PATH=/home/build/build/images/jtreg
+        $TESTED_ZULU/bin/java -jar $JTREG_PATH/lib/jtreg.jar -verbose  -retain:all  \
+          -e:MAJOR_VERSION=${{vars.major-version}},JAVA_VERSION=${{package.version}},ZULU_VERSION=${{vars.zulu-version}},BRANDING=cg  \
+          -jdk:$TESTED_ZULU .
+    - runs: |
+        echo "✅ All tests passed"
