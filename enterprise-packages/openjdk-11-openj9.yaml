@@ -1,0 +1,274 @@
+package:
+  name: openjdk-11-openj9
+  version: "0.51.0"
+  epoch: 2
+  description: OpenJDK ${{vars.java-version}} with OpenJ9
+  copyright:
+    - license: EPL-2.0 OR Apache-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0 OR GPL-2.0-only WITH OpenJDK-assembly-exception-1.0
+  dependencies:
+    runtime:
+      - ${{package.name}}-default-policy
+      - crac-criu
+      - java-cacerts
+      - java-common
+      - libstdc++
+
+vars:
+  boot-jdk: "/usr/lib/jvm/java-11-openjdk"
+  java-home: "/usr/lib/jvm/java-11-openjdk-openj9"
+
+var-transforms:
+  - from: ${{package.name}}
+    match: openjdk-(\d+)-openj9
+    replace: $1
+    to: java-version
+  - from: ${{package.name}}
+    match: ^([^-]+)-\d+-(.+)$
+    replace: $1-$2
+    to: java-distro
+
+environment:
+  contents:
+    packages:
+      - alsa-lib-dev
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake-3
+      - cups-dev
+      - elfutils-dev
+      - file
+      - fontconfig-dev
+      - freetype-dev
+      - gcc-14-default
+      - giflib-dev
+      - lcms2-dev
+      - libdwarf-dev-20210528
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libx11-dev
+      - libxext-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxt-dev
+      - libxtst-dev
+      - nasm
+      - numactl-dev
+      - openjdk-${{vars.java-version}}-default-jdk
+      - openssl-dev
+      - zip
+
+pipeline:
+  - name: Checkout OpenJ9 for OpenJDK ${{vars.java-version}}
+    uses: git-checkout
+    with:
+      repository: https://github.com/ibmruntimes/openj9-openjdk-jdk${{vars.java-version}}
+      tag: openj9-${{package.version}}
+      expected-commit: 3e17c0897e96b7b1dbb3a1f55aa437576fc28bd4
+
+  - name: Make scripts executable
+    runs: chmod +x *.sh configure
+
+  - name: Fetch OpenJ9 and Eclipse OMR
+    runs: |
+      ./get_source.sh
+
+  - name: Configure OpenJDK ${{vars.java-version}} with OpenJ9
+    uses: autoconf/configure
+    with:
+      opts: |
+        --with-boot-jdk=${{vars.boot-jdk}} \
+        --prefix=${{vars.java-home}} \
+        --with-vendor-name=wolfi \
+        --with-vendor-url=https://wolfi.dev \
+        --with-vendor-bug-url=https://github.com/wolfi-dev/os/issues \
+        --with-version-opt="wolfi-r${{package.epoch}}" \
+        --disable-warnings-as-errors \
+        --disable-precompiled-headers \
+        --enable-criu-support \
+        --enable-ddr \
+        --enable-dtrace=no \
+        --with-openssl=system \
+        --with-zlib=system \
+        --with-debug-level=release \
+        --with-native-debug-symbols=internal \
+        --with-jvm-variants=server \
+        --with-jtreg=no  \
+        --with-libpng=system \
+        --with-jvm-variants=server \
+        --with-libjpeg=system \
+        --with-giflib=system \
+        --with-lcms=system \
+        --with-version-pre="no" \
+        --with-version-string=""
+
+  - name: Build JDK and JRE image
+    runs: |
+      # --with-cflags/--with-cxxflags seem to be ignored so disable warnings here
+      export CFLAGS="${CFLAGS/ -Wall/} -Wno-error=use-after-free -Wno-unused-result -Wno-error=address -Wno-error=unused-value -Wno-error=dangling-pointer="
+      export CXXFLAGS="${CFLAGS/ -Wall/} -Wno-error=use-after-free -Wno-unused-result -Wno-error=address -Wno-error=unused-value -Wno-error=dangling-pointer="
+
+      # Set -z notext for aarch64
+      # Allows read-only segments to contain dynamic relocations
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        export LDFLAGS="$LDFLAGS -Wl,-z,notext"
+      fi
+
+      # Build JDK and JRE image
+      make jdk-image legacy-jre-image
+
+  - name: Install OpenJDK ${{vars.java-version}} with OpenJ9
+    runs: |
+      mkdir -p "${{targets.contextdir}}"/${{vars.java-home}}
+      cp -r build/*-server-release/images/jdk/* "${{targets.contextdir}}"/${{vars.java-home}}
+      rm "${{targets.contextdir}}"/${{vars.java-home}}/lib/src.zip
+
+  - name: Link CRaC patched CRIU to JVM lib
+    runs: ln -sf /usr/sbin/crac-criu "${{targets.contextdir}}"/${{vars.java-home}}/lib/criu
+
+subpackages:
+  - name: "${{package.name}}-dbg"
+    description: "Java debug symbols for OpenJDK ${{vars.java-version}} with OpenJ9"
+    pipeline:
+      - name: Split Java debug symbols
+        uses: split/debug
+    dependencies:
+      runtime:
+        - ${{package.name}}
+
+  - name: "${{package.name}}-default-policy"
+    description: "Default policy for OpenJDK ${{vars.java-version}} with OpenJ9"
+    pipeline:
+      - name: Split security policy
+        runs: |
+          _java_security="${{vars.java-home}}/conf/security"
+          mkdir -p "${{targets.contextdir}}"/$_java_security
+
+          # Share policy between JRE/JDK, remove from JDK
+          rm ${{targets.destdir}}/$_java_security/java.security
+
+          # Move security policy
+          mv build/*-server-release/images/jre/conf/security/java.security \
+            "${{targets.contextdir}}"/$_java_security/java.security
+
+  - name: "${{package.name}}-jre"
+    description: "Java Runtime Environment for OpenJDK ${{vars.java-version}} with OpenJ9"
+    dependencies:
+      runtime:
+        - ${{package.name}}-default-policy
+        - crac-criu
+        - java-cacerts
+        - java-common
+        - libstdc++
+    pipeline:
+      - name: Install JRE
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/${{vars.java-home}}
+          cp -r build/*-server-release/images/jre/* "${{targets.contextdir}}"/${{vars.java-home}}
+
+          # symlink for `java-common` to work (which expects jre in ${{vars.java-home}}/jre)
+          ln -sf . "${{targets.contextdir}}/${{vars.java-home}}/jre"
+      - name: Link CRaC patched CRIU to JVM lib
+        runs: ln -sf /usr/sbin/crac-criu "${{targets.contextdir}}"/${{vars.java-home}}/lib/criu
+
+  - name: "${{package.name}}-jmods"
+    description: "jmods for OpenJDK ${{vars.java-version}} with OpenJ9"
+    dependencies:
+      provides:
+        - ${{vars.java-distro}}-jmods=${{package.full-version}}
+    pipeline:
+      - name: Split jmods
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/${{vars.java-home}}
+          mv "${{targets.destdir}}"/${{vars.java-home}}/jmods \
+             "${{targets.contextdir}}"/${{vars.java-home}}
+
+  - name: "${{package.name}}-doc"
+    description: "Documentation for OpenJDK ${{vars.java-version}} with OpenJ9"
+    pipeline:
+      - name: Split docs
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/${{vars.java-home}}
+          mv "${{targets.destdir}}"/${{vars.java-home}}/man \
+             "${{targets.contextdir}}"/${{vars.java-home}}
+
+  - name: "${{package.name}}-default-jvm"
+    description: "Use OpenJ9 with OpenJDK ${{vars.java-version}} as the default JVM"
+    dependencies:
+      runtime:
+        - ${{package.name}}-jre
+      provides:
+        - ${{vars.java-distro}}-default-jvm=1.${{vars.java-version}}
+    pipeline:
+      - name: Create link for default jvm
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/lib/jvm
+          ln -sf $(basename ${{vars.java-home}}) "${{targets.contextdir}}"/usr/lib/jvm/default-jvm
+
+  - name: "${{package.name}}-default-jdk"
+    description: "Use OpenJ9 with OpenJDK ${{vars.java-version}} as the default JVM with the JDK installed"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+      provides:
+        - ${{vars.java-distro}}-default-jdk=1.${{vars.java-version}}
+    pipeline:
+      - name: Create link for default JDK
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/lib/jvm
+          ln -sf $(basename ${{vars.java-home}}) "${{targets.contextdir}}"/usr/lib/jvm/default-jvm
+
+update:
+  enabled: true
+  github:
+    identifier: ibmruntimes/openj9-openjdk-jdk11
+    tag-filter: openj9-
+    strip-prefix: openj9-
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-default-jdk
+        - ${{package.name}}-jmods
+    environment:
+      JAVA_HOME: ${{vars.java-home}}
+  pipeline:
+    - name: Hello World
+      working-directory: basic
+      runs: |
+        javac HelloWorld.java
+        java HelloWorld | grep -qi "Hello World!"
+    - name: Test a basic HTTP connection
+      working-directory: basic
+      runs: |
+        javac RequestTest.java
+        java RequestTest | grep -qi "Successfully connected to example.org"
+    - name: Test modules
+      working-directory: advanced/module-project
+      runs: |
+        mkdir output
+        javac -d output --module-source-path modules $(find modules -name "*.java")
+
+        # Create a jar with the compiled classes
+        jar --verbose --create --file app.jar \
+          --main-class dev.chainguard.module.main.Main \
+          --module-version 1.0 \
+          -C output/test.modules . \
+          -C output/main.app .
+
+        # Test the jar
+        java -jar app.jar
+
+        # Test jlink
+        jlink --verbose --module-path "app.jar:$JAVA_HOME/jmods" \
+          --add-modules test.modules \
+          --output test-project-jre
+
+        # Test custom JRE
+        test-project-jre/bin/java -jar app.jar

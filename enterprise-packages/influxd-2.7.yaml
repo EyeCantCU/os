@@ -1,0 +1,215 @@
+package:
+  name: influxd-2.7
+  version: "2.7.12"
+  epoch: 3
+  description: Scalable datastore for metrics, events, and real-time analytics
+  copyright:
+    - license: MIT
+  dependencies:
+    provides:
+      - influxd=${{package.full-version}}
+    runtime:
+      - merged-usrsbin
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - curl
+      - gcc-14-default
+      - go
+      - rust
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/influxdata/influxdb
+      tag: v${{package.version}}
+      expected-commit: ec9dcde5d6f0e1c4d15ff2332127987a42ca30fc
+      destination: influxdb
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/hashicorp/go-retryablehttp@v0.7.7
+        golang.org/x/oauth2@v0.27.0
+      modroot: influxdb
+
+  - runs: |
+      cd influxdb
+      unset LDFLAGS
+
+      make generate-web-assets
+
+      make influxd
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mv bin/linux/influxd ${{targets.destdir}}/usr/bin
+
+      mkdir -p ${{targets.destdir}}/etc/defaults/influxdb2/
+      mv ../default-config.yml ${{targets.destdir}}/etc/defaults/influxdb2/config.yml
+
+  - uses: strip
+
+subpackages:
+  - name: influxd-oci-entrypoint
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mv entrypoint.sh ${{targets.subpkgdir}}/usr/bin/
+    dependencies:
+      runtime:
+        - bash
+        - busybox
+        - merged-usrsbin
+        - wolfi-baselayout
+        - yq
+
+  - name: ${{package.name}}-bitnami-compat
+    description: "compat package with bitnami/influxdb image"
+    dependencies:
+      runtime:
+        - bash
+        - coreutils
+        - curl
+        - findutils
+        - grep
+        - influx
+        - influxd
+        - libgcc
+        - merged-usrsbin
+        - procps
+        - sed
+        - wait-for-port # used in /opt/bitnami/scripts/libinfluxdb.sh
+        - wolfi-baselayout
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: influxdb
+          version-path: ${{vars.major-version}}/debian-12
+          commit: dd65081091e024b30238ae12a5143ca0115d7448
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/opt/bitnami/influxdb/bin
+          ln -sf /usr/bin/influxd ${{targets.subpkgdir}}/opt/bitnami/influxdb/bin/influxd
+          ln -sf /usr/bin/influx ${{targets.subpkgdir}}/opt/bitnami/influxdb/bin/influx
+
+          # copy etc to influxdb/etc.default
+          mkdir -p ${{targets.subpkgdir}}/opt/bitnami/influxdb/etc.default
+          install -m755 -Dt ${{targets.subpkgdir}}/opt/bitnami/influxdb/etc.default/defaults/influxdb2 ${{targets.destdir}}/etc/defaults/influxdb2/config.yml
+          chmod -R u+rwX,g+rwX,o+rw ${{targets.subpkgdir}}/opt/bitnami/
+
+          mkdir -p ${{targets.subpkgdir}}/bitnami/influxdb
+          chmod -R u+rwX,g+rwX,o+rw ${{targets.subpkgdir}}/bitnami/influxdb
+
+          mkdir -p ${{targets.subpkgdir}}/docker-entrypoint-initdb.d/
+
+          # Use package path while unpacking
+          find . -iname "*.sh" -exec sed 's#/opt/bitnami#${{targets.subpkgdir}}/opt/bitnami#g' -i {} \;
+            ${{targets.subpkgdir}}/opt/bitnami/scripts/influxdb/postunpack.sh
+          # Restore path
+          find ${{targets.subpkgdir}}/opt/bitnami -type f -exec sed 's#${{targets.subpkgdir}}##g' -i {} \;
+    test:
+      environment:
+        environment:
+          BITNAMI_APP_NAME: "influxd"
+        accounts:
+          users:
+            - username: influxdb
+              gid: 0
+              uid: 1001
+      pipeline:
+        - name: version tests
+          runs: |
+            /opt/bitnami/influxdb/bin/influxd version | grep ${{package.version}}
+        - name: Start the influxd server
+          uses: test/daemon-check-output
+          with:
+            start: |
+              env INFLUXDB_ADMIN_USER=marty \
+                  INFLUXDB_ADMIN_USER_PASSWORD=F1uxKapacit0r85 \
+                  INFLUXDB_ADMIN_ORG=InfluxData \
+                  INFLUXDB_ADMIN_BUCKET=telegraf \
+                  INFLUXDB_ADMIN_RETENTION=168 \
+                  INFLUXDB_ADMIN_USER_TOKEN=where-were-going-we-dont-need-roads \
+                  /opt/bitnami/scripts/influxdb/entrypoint.sh /opt/bitnami/scripts/influxdb/run.sh
+            timeout: 60
+            expected_output: |
+              Welcome to the Chainguard image for: influxd, providing compatibility with the Bitnami Helm Chart
+              Starting InfluxDB in background...
+              Deploying InfluxDB from scratch
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package with iamguarded/influxdb image"
+    dependencies:
+      runtime:
+        - bash
+        - coreutils
+        - curl
+        - findutils
+        - grep
+        - influx
+        - influxd
+        - libgcc
+        - merged-usrsbin
+        - procps
+        - sed
+        - wait-for-port
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: influxdb
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/influxdb/bin
+          ln -sf /usr/bin/influxd /opt/iamguarded/influxdb/bin/influxd
+          ln -sf /usr/bin/influx /opt/iamguarded/influxdb/bin/influx
+
+          # copy etc to influxdb/etc.default
+          mkdir -p /opt/iamguarded/influxdb/etc.default
+          install -m755 -Dt /opt/iamguarded/influxdb/etc.default/defaults/influxdb2 ${{targets.destdir}}/etc/defaults/influxdb2/config.yml
+          chmod -R u+rwX,g+rwX,o+rw /opt/iamguarded/
+
+          mkdir -p /iamguarded/influxdb
+          chmod -R u+rwX,g+rwX,o+rw /iamguarded/influxdb
+
+          mkdir -p ${{targets.subpkgdir}}/docker-entrypoint-initdb.d/
+
+          /opt/iamguarded/scripts/influxdb/postunpack.sh
+      - uses: iamguarded/finalize-compat
+        with:
+          package: influxdb
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - name: Test influxdb binaries through symlinks
+          runs: |
+            /opt/iamguarded/influxdb/bin/influxd version
+            /opt/iamguarded/influxdb/bin/influx version
+        - uses: iamguarded/test-compat
+          with:
+            package: influxdb
+            version: ${{vars.major-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: influxdata/influxdb
+    strip-prefix: v
+    tag-filter: v2.7.
+
+test:
+  pipeline:
+    # AUTOGENERATED
+    - runs: |
+        influxd --help
+        influxd version

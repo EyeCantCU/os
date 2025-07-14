@@ -1,0 +1,193 @@
+package:
+  name: apm-server-fips-9.0
+  version: "9.0.3"
+  epoch: 2
+  description: Elastic APM is an application performance monitoring system built on the Elastic Stack
+  copyright:
+    - license: Elastic-2.0
+  dependencies:
+    provides:
+      - apm-server-fips=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/apm-server
+      tag: v${{package.version}}
+      expected-commit: c60a82e53092e3c579a00205a7af57eeea08144a
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/usr/share/apm-server
+      install -Dm644 apm-server.yml ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+      # https://github.com/elastic/apm-server/blob/5bab00ed4411b845e90fe821e9bb98a0381a35f5/packaging/docker/Dockerfile#L25-L26
+      sed -i 's/127.0.0.1:8200/0.0.0.0:8200/' ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+      sed -i 's/localhost:9200/elasticsearch:9200/' ${{targets.contextdir}}/usr/share/apm-server/apm-server.yml
+
+  - uses: go/build
+    with:
+      packages: ./x-pack/apm-server
+      go-package: go-fips
+      output: apm-server
+      tags: grpcnotrace,requirefips,ms_tls13kdf,relaxfips
+      ldflags: |
+        -X github.com/elastic/beats/v7/libbeat/version.commit=$(git rev-parse HEAD)
+        -X github.com/elastic/beats/v7/libbeat/version.buildTime=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+      modroot: .
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binaries in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/share/apm-server
+          ln -sf /usr/bin/apm-server ${{targets.contextdir}}/usr/share/apm-server/apm-server
+    dependencies:
+      provides:
+        - apm-server-fips-compat=${{package.full-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/apm-server
+    strip-prefix: v
+    tag-filter: v9.0
+
+test:
+  environment:
+    environment:
+      ES_PIPE: "/tmp/elasticsearch"
+      ES_JAVA_HOME: /usr/lib/jvm/java-21-openjdk
+      xpack.security.transport.ssl.keystore.password: "MySuperSecureP@ssword123"
+      ELASTIC_USER: "elastictest"
+      ELASTIC_PASSWORD: "MySuperSecureP@ssword123"
+      ELASTICSEARCH_USERNAME: "elastictest"
+      ELASTICSEARCH_PASSWORD: "MySuperSecureP@ssword123"
+      ELASTICSEARCH_HOST: "http://localhost:9200"
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+      JAVA_TOOL_OPTIONS: "-Djava.class.path=/usr/share/java/bouncycastle-fips/bc-fips.jar"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
+    contents:
+      packages:
+        - curl
+        - elasticsearch-fips-8
+        - jq
+        - kibana
+        - mkcert
+        - shadow
+        - sudo
+        - wait-for-it
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Test APM server startup"
+      runs: |
+        apm-server -e -c /usr/share/apm-server/apm-server.yml > log.txt 2>&1 &
+        APM_PID=$!
+
+        sleep 10
+
+        # Wait for the server to start
+        wait-for-it localhost:8200 --timeout=60
+
+        curl -s localhost:8200 | jq '.version' | grep "${{package.version}}"
+        # Kill the APM server process
+        kill $APM_PID
+        wait $APM_PID 2>/dev/null
+
+        # ssl test
+        mkcert -install
+        mkcert -cert-file apm-server.crt -key-file apm-server.key localhost
+
+        cat <<EOF > ssl-config.yml
+          apm-server:
+            host: "127.0.0.1:8200"
+            ssl:
+              enabled: true
+              certificate: apm-server.crt
+              key: apm-server.key
+          output.elasticsearch:
+              hosts: ["localhost:9200"]
+              ssl.enabled: false
+        EOF
+
+        apm-server -e -c ssl-config.yml > ssl-log.txt 2>&1 &
+        APM_PID=$!
+
+        sleep 10
+
+        # Wait for the server to start
+        wait-for-it localhost:8200 --timeout=240
+
+        curl -sk --tls-max 1.2 https://localhost:8200 | jq '.version' | grep "${{package.version}}"
+        kill $APM_PID
+    - name: "Test Elasticsearch and Kibana integration"
+      runs: |
+        # allow running in bubblewrap and docker - ES_RUN blank for bubblewrap,
+        # set to "sudo -E -u elasticsearch" when running in docekr as root
+        ES_RUN=""
+        if [ "$(id -u)" -eq 0 ] ; then
+          useradd elasticsearch
+          ES_RUN="sudo -E -u elasticsearch"
+          sudo chown elasticsearch:elasticsearch -fR /usr/share/elasticsearch
+        fi
+
+        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
+        -storetype bcfks \
+        -providername BCFIPS \
+        -alias "localhost" \
+        -genkeypair \
+        -sigalg SHA512withRSA -keyalg RSA \
+        -dname CN="localhost" \
+        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD \
+        -providerpath /usr/share/java/bouncycastle-fips/bc-fips.jar -providerclass org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
+
+        $ES_RUN /usr/share/elasticsearch/bin/elasticsearch-keystore create -p <<EOF
+        "${KEYSTORE_PASSWORD}"
+        "${KEYSTORE_PASSWORD}"
+        EOF
+
+        $ES_RUN /usr/share/elasticsearch/bin/elasticsearch-users useradd "${ELASTIC_USER}" -p "${ELASTIC_PASSWORD}" -r superuser,kibana_system
+        # Create FIFO pipe for passing Elastic KeyStore password
+        mkfifo "${ES_PIPE}"
+        tail -f "${ES_PIPE}" | $ES_RUN /usr/share/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid > elasticsearch.log 2>&1 &
+        sleep 1
+
+        # Write password to pipe
+        cat > "${ES_PIPE}" << EOF
+        "${KEYSTORE_PASSWORD}"
+        EOF
+
+        wait-for-it localhost:9200 --timeout=60
+        STATUS=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" -u $ELASTIC_USER:$ELASTIC_PASSWORD | jq -r '.status')
+
+        if [ "$STATUS" == "green" ]; then
+          echo "Elasticsearch cluster is green."
+        else
+          echo "Elasticsearch cluster is not green. Status: $STATUS"
+        fi
+
+        echo -e "elasticsearch.username: \"$ELASTIC_USER\"\n\
+        elasticsearch.password: \"$ELASTIC_PASSWORD\"\n\
+        elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+
+        /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
+        wait-for-it localhost:5601 --timeout=60
+
+        apm-server -e -c /usr/share/apm-server/apm-server.yml \
+          -E output.elasticsearch.hosts=localhost:9200 \
+          -E output.elasticsearch.username=$ELASTIC_USER \
+          -E output.elasticsearch.password=$ELASTIC_PASSWORD \
+          -E output.elasticsearch.ssl.verification_mode="none" \
+          -E apm-server.host=localhost:8200 \
+          -E apm-server.kibana.host="localhost:5601" \
+          -E apm-server.kibana.path=/kibana \
+          -E apm-server.kibana.protocol="http" > log.txt 2>&1 &
+
+        # wait up to 3 minutes for publish_ready status to be true
+        for attempt in $(seq 1 30) ; do
+          if ! curl -s http://localhost:8200 | jq '.publish_ready' | grep true ; then
+            sleep 6
+          else
+            exit 0
+          fi
+        done
+        exit 1

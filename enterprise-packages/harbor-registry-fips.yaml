@@ -1,0 +1,95 @@
+package:
+  name: harbor-registry-fips
+  version: 3.0.0_alpha1
+  epoch: 31
+  description: An open source trusted cloud native registry project that stores, signs, and scans content (registry)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+      # for fips config & fips-provider
+      - openssl-config-fipshardened
+      # either melange SCA should provide these
+      # or we should make go-fips shared link on these
+      - so:libcrypto.so.3
+      - so:libssl.so.3
+
+environment:
+  environment:
+    DISTRIBUTION_DIR: "/usr/lib/go/src/github.com/docker/distribution"
+    GO111MODULE: "auto"
+
+var-transforms:
+  - from: ${{package.version}}
+    match: "_alpha"
+    replace: "-alpha."
+    to: mangled-package-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/distribution/distribution
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 576d93fee39c22ef1e4735d932ccef32ee49f7fd
+
+  # https://github.com/distribution/distribution/pull/4235/commits/f63a7449e5bde06c8da766ec1ea6f4fa9eee9dcd
+  - uses: patch
+    with:
+      patches: redis.patch
+
+  - uses: go/bump
+    with:
+      deps: |-
+        google.golang.org/protobuf@v1.33.0
+        github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.6.0
+        github.com/go-jose/go-jose/v3@v3.0.4
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/oauth2@v0.27.0
+        github.com/golang-jwt/jwt/v5@v5.2.2
+        golang.org/x/net@v0.38.0
+
+  - runs: |
+      # Adds source modules to $GOPATH
+      mkdir -p "${DISTRIBUTION_DIR}"
+      cp -rf . "${DISTRIBUTION_DIR}"
+
+  - uses: go/build
+    with:
+      packages: ./cmd/registry
+      output: harbor-registry
+      go-package: go-fips
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mkdir -p ${{targets.destdir}}/etc/registry
+
+      # Symlink to expected binary path
+      ln -sf /usr/bin/harbor-registry ${{targets.destdir}}/usr/bin/registry_DO_NOT_USE_GC
+      # Use example config as registry config
+      cp ./cmd/registry/config-example.yml ${{targets.destdir}}/etc/registry/config.yml
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - openssl-config-fipshardened
+  pipeline:
+    - runs: |
+        # The registry should start and begin listening before it's killed
+        harbor-registry --version
+        registry_DO_NOT_USE_GC serve /etc/registry/config.yml > out.log 2>&1 &
+        sleep 5
+        test $(curl -LI localhost:5000 -o /dev/null -w '%{http_code}\n' -s) == "200"
+        harbor-registry --help
+        registry_DO_NOT_USE_GC --version
+        registry_DO_NOT_USE_GC --help
+
+update:
+  manual: true
+  github:
+    identifier: distribution/distribution
+    strip-prefix: v
+  exclude-reason: |
+    Re-enable when 3.x.x lands a stable release

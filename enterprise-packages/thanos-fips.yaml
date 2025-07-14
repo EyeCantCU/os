@@ -1,0 +1,121 @@
+package:
+  name: thanos-fips
+  version: "0.39.1"
+  epoch: 0
+  description: Highly available Prometheus setup with long term storage capabilities.
+  copyright:
+    - license: Apache-2.0
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: ad743914dd34760557f0d440c3175aac209b6293
+      repository: https://github.com/thanos-io/thanos
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-viper/mapstructure/v2@v2.3.0
+
+  - uses: go/build
+    with:
+      go-package: go-fips-md5
+      packages: ./cmd/thanos
+      output: thanos
+      ldflags: >
+        -X main.version=$(git describe --abbrev=0 --always) -X main.buildDate=$(date +%FT%T%z) -X main.commit=$(git rev-parse HEAD) -X main.Branch=$(git describe --always --contains --all)
+
+
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p /opt/iamguarded/thanos/bin/
+          ln -sf /usr/bin/thanos /opt/iamguarded/thanos/bin/thanos
+      - uses: iamguarded/build-compat
+        with:
+          package: thanos
+          version: ${{vars.major-version}}
+      - uses: iamguarded/finalize-compat
+        with:
+          package: thanos
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - runs: |
+            stat /opt/iamguarded/thanos/bin/thanos
+            /opt/iamguarded/thanos/bin/thanos --version
+        - uses: iamguarded/test-compat
+          with:
+            package: thanos
+            version: ${{vars.major-version}}
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - rc*
+  github:
+    identifier: thanos-io/thanos
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        thanos --help
+        thanos --version
+        thanos query --help
+        thanos sidecar --help
+        thanos tools bucket verify --help
+    - name: Validate thanos with local filesystem
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/bucket-test
+          echo "placeholder" > /tmp/bucket-test/obj1.txt
+
+          cat <<EOF > /tmp/filesystem.yaml
+          type: FILESYSTEM
+          config:
+            directory: /tmp/bucket-test
+          EOF
+        start: thanos tools bucket verify --objstore.config-file=/tmp/filesystem.yaml
+        timeout: 30
+        expected_output: |
+          started verifying issue
+          loading bucket configuration
+          verify task completed
+    - name: Launch Thanos Query
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/data
+        start: thanos query --http-address=127.0.0.1:19192 --log.level=debug
+        timeout: 30
+        expected_output: |
+          starting query node
+          changing probe status
+          listening for requests and metrics
+          Listening on
+        post: |
+          if curl -sf --retry 5 http://127.0.0.1:19192/-/healthy; then
+            echo "Thanos query is healthy"
+          else
+            echo "Thanos query is not healthy"
+          fi

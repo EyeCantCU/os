@@ -1,0 +1,70 @@
+package:
+  name: descheduler-fips
+  version: "0.33.0"
+  epoch: 1
+  description: Descheduler for Kubernetes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    # REMOVE_POST_USRMERGE - https://github.com/orgs/wolfi-dev/discussions/40270
+    provides:
+      - ${{package.name}}-compat=${{package.full-version}}
+    runtime:
+      - merged-sbin
+      - wolfi-baselayout
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes-sigs/descheduler
+      tag: v${{package.version}}
+      expected-commit: 045fbb6a0411d492824d0830fdaf98b179f055d5
+
+  - uses: go/build
+    with:
+      packages: ./cmd/descheduler
+      ldflags: |
+        -X sigs.k8s.io/descheduler/pkg/version.version=${{package.version}}
+        -X sigs.k8s.io/descheduler/pkg/version.gitsha1=$(git rev-parse HEAD)
+        -X sigs.k8s.io/descheduler/pkg/version.buildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +"%Y-%m-%dT%H:%M:%SZ")
+        -X sigs.k8s.io/descheduler/pkg/version.gitbranch=$(git rev-parse --abbrev-ref HEAD)
+      go-package: go-fips
+      output: descheduler
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes-sigs/descheduler
+    strip-prefix: v
+  ignore-regex-patterns:
+    - descheduler-helm-chart.* # Not a release we care about
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+    - name: "Binary checks"
+      runs: |
+        descheduler version
+        descheduler --help
+    - name: "Functional test"
+      runs: |
+        # Scale the cluster further
+        kwokctl scale node --replicas 3
+
+        # Upstream repo contains examples, so lets use one of the example policies here to test with.
+        curl -fL -o policy.yaml https://raw.githubusercontent.com/kubernetes-sigs/descheduler/v${{package.version}}/examples/policy.yaml
+        descheduler --kubeconfig ~/.kube/config --policy-config-file policy.yaml
+
+        # Deploy the policy.
+        descheduler --kubeconfig ~/.kube/config --policy-config-file policy.yaml --v=4 2>&1 | tee /tmp/descheduler-output.log
+
+        # Verify that the anti-affinity plugin is processing nodes (functional check)
+        grep "Processing node" /tmp/descheduler-output.log || { echo "No node processing found, plugin may not be running"; exit 1; }
+
+        # Verify successful run metrics
+        grep "Number of evictions/requests" /tmp/descheduler-output.log || { echo "Eviction metrics not found"; exit 1; }

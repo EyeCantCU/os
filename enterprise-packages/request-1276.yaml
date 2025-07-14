@@ -1,0 +1,159 @@
+# Generated from https://pypi.org/project/cassandra-medusa/
+package:
+  name: request-1276
+  version: "0.24.1"
+  epoch: 1
+  description: Apache Cassandra backup and restore tool with customizations
+  copyright:
+    - license: Apache-2.0
+  options:
+    no-provides: true
+    no-depends: true
+  dependencies:
+    runtime:
+      - merged-bin
+      - python-${{vars.py-version}}-base
+      - wolfi-baselayout
+
+vars:
+  py-version: 3.11
+
+environment:
+  contents:
+    packages:
+      - py${{vars.py-version}}-build-base-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/thelastpickle/cassandra-medusa
+      tag: v${{package.version}}
+      expected-commit: 665b5ffc88c449223c123a84132ea9e922a2ac56
+
+  # Except from, "cves.patch", these are NOT a patches for CVE remediation. This is a once-off custom package and patches. Do not remove this as part of triaging CVE / build failures
+  - uses: patch
+    with:
+      patches: azure_storage.patch docker-entrypoint.patch google_storage.patch
+
+  - name: Spot check patches worked
+    runs: |
+      # if medusa/storage/azure_storage.py does not contain the line 'storage_account = ""' then the patch failed
+      if ! grep -q 'storage_account = ""' medusa/storage/azure_storage.py; then
+        echo "azure_storage.py patch check failed"
+        cat medusa/storage/azure_storage.py
+        exit 1
+      fi
+
+      if ! grep -q '_get_blob_hash(o)' medusa/storage/google_storage.py; then
+        echo "google_storage.py patch check failed"
+        cat medusa/storage/google_storage.py
+        exit 1
+      fi
+
+      if ! grep -q 'last_restore_file="${MEDUSA_TMP_DIR}/.last-restore"' k8s/docker-entrypoint.sh; then
+        echo "docker-entrypoint.sh patch check failed"
+        cat k8s/docker-entrypoint.sh
+        exit 1
+      fi
+
+  - name: Add custom code
+    runs: |
+      mkdir -p tests/c3
+      mv gcs_test.py tests/c3/gcs_test.py
+
+  - name: Python Build
+    runs: |
+      # fix CVE-2025-47273
+      sed -i 's/setuptools = "76\.1\.0"/setuptools = "78.1.1"/' pyproject.toml
+      # fix GHSA-8qvm-5x2c-j2w7
+      sed -i 's/protobuf = "5\.29\.3"/protobuf = "5.29.5"/' pyproject.toml
+
+      pip${{vars.py-version}} install wheel
+      # As of 0.23.0, this package is incompatible with poetry 2.0.
+      # See: https://github.com/thelastpickle/cassandra-medusa/commit/fd044f92d9a5ea245c61d1df9c58462de51496e4
+      pip${{vars.py-version}} install 'poetry>=1.0.0,<2.0.0'
+      # GHSA-h4gh-qq45-vh27: cryptography
+      poetry add "pyOpenSSL@^24.2.1"
+      poetry add "cryptography@^44.0.1"
+
+      poetry add "certifi==2024.7.4"
+      poetry add "dnspython==2.6.1"
+      poetry add "idna==3.7"
+      # GHSA-m5vv-6r4h-3vj9: azure-identity
+      poetry add "azure-identity==1.16.1"
+      # GHSA-9hjg-9r4m-mvj7: requests
+      poetry add "requests@^2.32.4"
+      poetry run pip freeze | grep -v cassandra-medusa > requirements.txt
+      POETRY_VIRTUALENVS_IN_PROJECT=true poetry install
+      poetry build
+
+      # Setup the virtualenv
+      python${{vars.py-version}} -m venv .venv
+
+      .venv/bin/pip${{vars.py-version}} install -I -r requirements.txt --no-compile
+      .venv/bin/pip${{vars.py-version}} install -I --no-compile dist/*.whl
+
+      # python-snappy is required to run medusa using $MEDUSA_MODE=GRPC.
+      .venv/bin/pip${{vars.py-version}} install -I python-snappy --no-compile
+
+      # Install poetry
+      .venv/bin/pip${{vars.py-version}} install 'poetry>=1.0.0,<2.0.0'
+      mkdir -p ${{targets.destdir}}/usr/bin
+      ln -s /home/cassandra/.venv/bin/poetry ${{targets.destdir}}/usr/bin/poetry
+
+      mkdir -p ${{targets.destdir}}/home/cassandra
+      mv .venv ${{targets.destdir}}/home/cassandra/
+
+      # edit the venv paths
+      sed -i "s|/home/build|/home/cassandra|g" ${{targets.destdir}}/home/cassandra/.venv/bin/*
+
+      # allow site-packages
+      sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/home/cassandra/.venv/pyvenv.cfg
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      ln -s /usr/share/medusa/.venv/bin/medusa ${{targets.destdir}}/usr/bin/medusa
+      cp k8s/medusa.sh ${{targets.destdir}}/usr/bin/medusa
+      chmod +x ${{targets.destdir}}/usr/bin/medusa
+
+      cp pyproject.toml ${{targets.destdir}}/home/cassandra
+      cp k8s/docker-entrypoint.sh ${{targets.destdir}}/home/cassandra
+      chmod +x ${{targets.destdir}}/home/cassandra/docker-entrypoint.sh
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binaries and docker entrypoints in the location expected by upstream helm charts"
+    dependencies:
+      runtime:
+        - bash
+        - busybox
+        - grpc-health-probe-fips
+        # The entrypoint script fails to start without bash and sleep (which comes from busybox)
+        - merged-bin
+        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/home/cassandra/"
+          ln -sf /usr/bin/medusa ${{targets.subpkgdir}}/home/cassandra/medusa
+
+update:
+  enabled: true
+  github:
+    identifier: thelastpickle/cassandra-medusa
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - python-${{vars.py-version}}-dev
+  pipeline:
+    - runs: |
+        medusa --version
+        poetry --version
+    - runs: |
+        set +e
+        fail() { echo "$@" 1>&2; exit 1; }
+        out=$(/home/cassandra/.venv/bin/python3 -m medusa.service.grpc.server 2>&1)
+        status=$?
+        echo "$out" | grep -q '/etc/medusa/medusa.ini' || fail "medusa.service.grpc.server output did not contain expected 'medusa.ini' message. Exit status $status: $out"
+        echo "medusa.service.grpc.server exited with expected error message"

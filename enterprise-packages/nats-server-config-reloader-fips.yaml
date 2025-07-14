@@ -1,0 +1,76 @@
+package:
+  name: nats-server-config-reloader-fips
+  version: "0.18.2"
+  epoch: 0
+  description: "NATS server configuration reloader utility"
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/nats-io/nack.git
+      tag: v${{package.version}}
+      expected-commit: d9c7e36fdde54e2d2f5d9a5d6437d66c098ab1f5
+
+  - uses: go/build
+    with:
+      packages: ./cmd/nats-server-config-reloader
+      output: nats-server-config-reloader
+      go-package: go-fips
+      ldflags: |
+        -X main.BuildTime=$(date -d@${SOURCE_DATE_EPOCH} -u +%Y-%m-%dT%H:%M:%S%z)
+        -X main.GitInfo=$(git rev-parse --abbrev-ref HEAD)-$(git rev-parse --short HEAD)$(git diff --quiet || echo "-dirty")
+        -X main.Version=${{package.version}}
+
+update:
+  enabled: true
+  github:
+    identifier: nats-io/nack
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - nats-server
+        - curl
+        - jq
+        - wait-for-it
+  pipeline:
+    - name: "Verify basic installation"
+      runs: |
+        nats-server-config-reloader --version 2>&1 | grep "${{package.version}}"
+        nats-server-config-reloader --help
+    - name: "Test nats-server-config-reloader with nats-server"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cat <<EOF > /tmp/nats-server.conf
+          pid_file: "/tmp/nats-server.pid"
+          http: 8222
+          EOF
+          nats-server -c /tmp/nats-server.conf -l /tmp/nats-server.log > /dev/null 2>&1 &
+          wait-for-it localhost:8222 --timeout=10
+        start: nats-server-config-reloader -config /tmp/nats-server.conf -pid /tmp/nats-server.pid > /dev/null 2>&1
+        timeout: 30
+        expected_output: |
+          Watching file: /tmp/nats-server.conf
+        post: |
+          #!/bin/sh -e
+          echo "Modifying config to reload..."
+          cat <<EOF > /tmp/nats-server.conf
+          pid_file: "/tmp/nats-server.pid"
+          http: 8222
+          debug: true
+          EOF
+          wait-for-it localhost:8222 --timeout=5
+          echo "Checking NATS server logs for reload confirmation..."
+          cat /tmp/nats-server.log
+          if ! grep -q "Reloaded: debug = true" /tmp/nats-server.log; then
+            echo "Error: Config reload for debug=true not detected in logs!"
+            exit 1
+          fi
+          echo "Config reload test passed successfully!"
+    - uses: test/go-fips-check

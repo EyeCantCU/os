@@ -1,0 +1,122 @@
+package:
+  name: monstache
+  version: "6.7.22"
+  epoch: 0
+  description: "A go daemon that syncs mongodb to elasticsearch in realtime"
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - merged-bin
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - go
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/rwynn/monstache
+      tag: v${{package.version}}
+      expected-commit: 40d345d1b6662e544f3ebd51fa42603fe8222856
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.35.0
+
+  - uses: go/build
+    with:
+      packages: .
+      output: monstache
+
+  - runs: |
+      mkdir -p /var/log/monstache
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: rwynn/monstache
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - elasticsearch-8
+        - go
+        - mongod
+        - mongosh
+        - sudo
+        - gettext
+    accounts:
+      groups:
+        - groupname: elasticsearch
+          gid: 1000
+      users:
+        - username: elasticsearch
+          gid: 1000
+          uid: 1000
+      # sudo still needs permissions for mongodb setup scripts
+      run-as: 0
+    environment:
+      ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+      MONGO_REPLICA_SET_NAME: rs0
+      MONGO_REPLICAS: localhost:27017
+      MONGO_REPLICA_SET_MEMBERS: "[{'_id':0,'host':'localhost:27017','priority':1}]"
+      MONGO_USER_ROOT_NAME: root-user
+      MONGO_USER_ROOT_PASSWORD: password
+  pipeline:
+    - uses: git-checkout
+      with:
+        repository: https://github.com/rwynn/monstache
+        tag: v${{package.version}}
+        expected-commit: 40d345d1b6662e544f3ebd51fa42603fe8222856
+    - name: Test CLI basics
+      runs: |
+        monstache --help
+    - name: Setup mongodb/elastic
+      runs: |
+        # Setup mongodb/elastic/monstache
+        # Run mongo setup scripts
+        ./mongo-run.sh
+
+        # Set permissions for elasticsearch dir
+        chown -R "elasticsearch:elasticsearch" /usr/share/elasticsearch
+
+        # Run elasticsearch
+        # Set discovery.type to 'single-node'
+        #   - Ref: https://github.com/rwynn/monstache/blob/b3c0dcf686e0e6b4a9ca5d24a3e63e184cb4429d/docker/test/docker-compose.test.yml#L99
+        # Disabling ssl/tls for go test
+        #   - Ref: https://github.com/rwynn/monstache/blob/rel6/monstache_test.go
+        #   - Ref: https://github.com/rwynn/monstache/issues/657#issuecomment-1332832670
+        sudo -E -u elasticsearch elasticsearch -d -Ediscovery.type=single-node \
+          -Expack.security.enabled=false \
+          -Expack.security.transport.ssl.enabled=false \
+          -Expack.security.http.ssl.enabled=false \
+          -p /tmp/elasticsearch.pid
+
+        # Check cluster health
+        curl --insecure -s http://localhost:9200/_cluster/health
+
+        # Create monstache config from template
+        # Ref: https://github.com/rwynn/monstache/blob/b3c0dcf686e0e6b4a9ca5d24a3e63e184cb4429d/docker/test/monstache.test.config.toml
+        envsubst < monstache.test.config.tmp > monstache.test.config.toml
+        cat monstache.test.config.toml
+    - name: "Test Monstache startup and sync"
+      uses: test/daemon-check-output
+      with:
+        start: |
+          monstache -f ./monstache.test.config.toml
+        timeout: 300
+        expected_output: |
+          Started monstache version ${{package.version}}
+          Successfully connected to Elasticsearch
+          Successfully connected to MongoDB
+          Listening for events
+        post: |
+          go test -v

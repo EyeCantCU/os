@@ -1,0 +1,196 @@
+package:
+  name: neuvector-fips
+  version: "5.4.5"
+  epoch: 0
+  description: "NeuVector Full Lifecycle Container Security Platform"
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gcc-14-default
+      - glibc-dev
+      - jansson-dev
+      - jemalloc-dev
+      - libnetfilter_queue-dev
+      - libnfnetlink-dev
+      - libpcap-dev
+      - pcre-dev
+      - pcre2-dev
+      - pkgconf
+      - userspace-rcu-dev
+      - vectorscan-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 51f9b4492aea9563fe2ddff8322d4668a6a4f822
+      repository: https://github.com/neuvector/neuvector.git
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      replaces: |-
+        github.com/samalba/dockerclient=github.com/Dentrax/dockerclient@v0.1.0 github.com/dgrijalva/jwt-go=github.com/golang-jwt/jwt/v4@v4.5.1 github.com/golang-jwt/jwt/v5=github.com/golang-jwt/jwt/v5@v5.2.2
+      show-diff: true
+
+subpackages:
+  - name: neuvector-upgrader-fips
+    description: "NeuVector Upgrader"
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./upgrader
+          output: upgrader
+          prefix: usr/local
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+
+  - name: neuvector-enforcer-fips
+    description: "NeuVector Enforcer"
+    dependencies:
+      runtime:
+        - busybox
+        - ca-certificates
+        - consul-fips
+        - curl
+        - ethtool
+        - iproute2
+        - iptables
+        - jq
+        - neuvector-cis-benchmarks
+        - neuvector-monitor
+        - neuvector-nstools
+        - openssl-config-fipshardened
+        - yq-fips
+    pipeline:
+      - runs: |
+          sed -i 's|interim/master.xxxx|v${{package.version}}|g' agent/version.go
+      - uses: go/build
+        with:
+          modroot: .
+          ldflags: "-X main.version=${{package.version}}"
+          packages: ./agent
+          output: agent
+          prefix: usr/local
+          go-package: go-fips-md5
+      - uses: go/build
+        with:
+          modroot: .
+          ldflags: "-X main.version=${{package.version}}"
+          packages: ./agent/workerlet/pathWalker
+          output: pathWalker
+          prefix: usr/local
+          go-package: go-fips-md5
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+
+          # Install scripts and templates used by agent
+          chmod +x agent/nvbench/*.sh
+          install -Dm755 agent/nvbench/*.sh ${{targets.contextdir}}/usr/local/bin/
+          install -Dm755 agent/nvbench/*.rem ${{targets.contextdir}}/usr/local/bin/
+          install -Dm755 agent/nvbench/*.tmpl ${{targets.contextdir}}/usr/local/bin/
+
+          # Build and install dp
+          export CFLAGS="$CFLAGS -DRCU_MEMBARRIER=true -I${PWD}/dp"
+          export LDFLAGS="$LDFLAGS -lurcu-memb -no-pie"
+
+          # We are overwriting the EXTRA_LDFLAGS here
+          # without this dp will fail to build due to referencing of -lhs path is different
+          # had to reorder -lstd++ to be after lhs and lm has to be after lhs due to how the build gets or generates the libraries
+          export CG_EXTRA_LDFLAGS="-lpcap -lpcre2-8 -ljansson -ljemalloc -pthread -lurcu -lurcu-cds -lrt -lnetfilter_queue -Wl,-rpath,'$$ORIGIN' -Wl,--disable-new-dtags -L/usr/lib -lhs -lm -lstdc++"
+
+          if [[ "${{build.arch}}" == "aarch64" ]]; then
+            make EXTRA_LDFLAGS="$CG_EXTRA_LDFLAGS" -C dp -f Makefile_arm64 LDFLAGS="$LDFLAGS" CFLAGS="$CFLAGS"
+          else
+            make EXTRA_LDFLAGS="$CG_EXTRA_LDFLAGS" -C dp CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
+          fi
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          install -Dm755 dp/dp ${{targets.contextdir}}/usr/local/bin/dp
+
+          # NV checks for this empty file to validate enforcer is running in container
+          touch ${{targets.contextdir}}/usr/local/bin/.nvcontainer
+
+          # Binaries expected by agent in /usr/local/bin
+          ln -sf /bin/consul ${{targets.contextdir}}/usr/local/bin/consul
+          ln -sf /usr/bin/iptables-xml ${{targets.contextdir}}/usr/local/bin/iptables-xml
+          ln -sf /usr/bin/tcpdump ${{targets.contextdir}}/usr/local/bin/tcpdump
+          ln -sf /usr/bin/yq ${{targets.contextdir}}/usr/local/bin/yq
+    test:
+      pipeline:
+        - runs: |
+            agent -v | grep "${{package.version}}"
+
+  - name: neuvector-controller-fips
+    description: "NeuVector Controller"
+    dependencies:
+      runtime:
+        - busybox
+        - ca-certificates
+        - consul-fips
+        - ethtool
+        - iproute2
+        - neuvector-cis-benchmarks
+        - neuvector-monitor
+        - neuvector-nstools
+        - neuvector-upgrader-fips
+        - opa-fips
+        - openssl-config-fipshardened
+        - pcre
+        - procps
+    pipeline:
+      - runs: |
+          sed -i 's|interim/master.xxxx|v${{package.version}}|g' controller/version.go
+      - uses: go/build
+        with:
+          modroot: .
+          ldflags: "-X main.Version=${{package.version}} -X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn"
+          packages: ./controller
+          output: controller
+          prefix: usr/local
+          go-package: go-fips-md5
+      - runs: |
+          # Create Folders
+          mkdir -p ${{targets.contextdir}}/etc
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          mkdir -p ${{targets.contextdir}}/etc/neuvector/templates
+
+          # Install pod template
+          cp templates/podTemplate.json ${{targets.contextdir}}/etc/neuvector/templates/podTemplate.json
+
+          # NV checks for this empty file to validate controller is running in container
+          touch ${{targets.contextdir}}/usr/local/bin/.nvcontainer
+
+          # Binaries expected by agent in /usr/local/bin
+          ln -sf /usr/bin/opa ${{targets.contextdir}}/usr/local/bin/opa
+          ln -sf /bin/consul ${{targets.contextdir}}/usr/local/bin/consul
+
+          # Copy busybox to /usr/bin/cat to work around neuvector controller hardening
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          cp /bin/busybox ${{targets.contextdir}}/usr/bin/cat
+    test:
+      pipeline:
+        - runs: |
+            controller --help 2>&1 |pcregrep -M 'START.*\nUsage'
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '.*\-.*'
+    - '.*fnb.*'
+    - '.*oc.*'
+  github:
+    identifier: neuvector/neuvector
+    tag-filter: v
+    strip-prefix: v
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage

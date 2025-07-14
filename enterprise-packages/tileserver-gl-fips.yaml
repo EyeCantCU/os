@@ -1,0 +1,201 @@
+package:
+  name: tileserver-gl-fips
+  version: "5.3.1"
+  epoch: 3
+  description: Vector and raster maps with GL styles. Server side rendering by MapLibre GL Native. Map tile server for MapLibre GL JS, Android, iOS, Leaflet, OpenLayers, GIS via WMTS, etc.
+  copyright:
+    - license: BSD-2-Clause
+  dependencies:
+    runtime:
+      - Xvfb
+      - busybox
+      - mesa
+      - mesa-glx
+      - nodejs-20
+      - npm
+      - openssl-config-fipshardened
+      - xkbcomp
+      - xkeyboard-config
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cairo-dev
+      - cmake
+      - curl-dev
+      - fribidi-dev
+      - gcc-14-default
+      - harfbuzz-dev
+      - icu-dev
+      - jq
+      - libglfw-dev
+      - libglvnd-dev
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - libuv-dev
+      - libvips-dev
+      - libwebp
+      - libwebp-dev
+      - libxft-dev
+      - mesa
+      - mesa-glx
+      - nodejs-20
+      - npm
+      - openssl-config-fipshardened
+      - pango-dev
+      - pixman-dev
+      - py3.11-pip
+      - python-3.11
+      - xorg-server-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/maptiler/tileserver-gl
+      tag: v${{package.version}}
+      expected-commit: cf52d6ede57198f9dff7692cffbeba8c3f9f85ed
+      destination: app
+
+  - working-directory: app
+    pipeline:
+      - uses: patch
+        with:
+          patches: ../CVE-2025-48387.patch
+
+  # install packages
+  - working-directory: app
+    runs: |
+      jq '. + {overrides: (.overrides // {} | . + {"brace-expansion": "1.1.12"})}' package.json > package.json.tmp && mv package.json.tmp package.json
+
+      npm install --omit=dev
+
+  # remove test code for resolve module that is triggering a false positive CVE scan
+  # see https://github.com/browserify/resolve/issues/319 for more details
+  - working-directory: app
+    runs: |
+      rm -fR node_modules/resolve/test
+
+  # build canvas from source code to use system libraries
+  - working-directory: app/node_modules/canvas
+    runs: |
+      npm install --build-from-source
+      # Clean up intermediate build files
+      find . -name "*.o" -type f -delete
+      find . -path "*/obj.target/*" -type f -delete
+
+  # reinstall sharp and remove any pre-built binary packages
+  - working-directory: app
+    runs: |
+      rm -fR node_modules/@img/sharp-*linuxmusl-* node_modules/@img/sharp-*linux-* node_modules/sharp
+      sharp_version="$(jq <package-lock.json -r ".packages[\"node_modules/sharp\"].version")"
+      npm install --install-from-source "sharp@${sharp_version}"
+      rm -fR node_modules/@img/sharp-*linuxmusl-* node_modules/@img/sharp-*linux-*
+
+  # check maplibre-gl-native package matches expected version
+  - working-directory: app
+    runs: |
+      version="$(jq <package-lock.json ".packages[\"node_modules/@maplibre/maplibre-gl-native\"].version" -r)"
+      if [ "$version" != "6.1.0" ] ; then
+        echo "Application version of maplibre-gl-native incorrect: $version"
+        # If this happens, update the tag for maplibre-native
+        exit 1
+      fi
+
+  # build maplibre-native node 20.x module
+  - uses: git-checkout
+    with:
+      repository: https://github.com/maplibre/maplibre-native.git
+      tag: node-v6.1.0
+      expected-commit: 6491d98b632d8783068c14925b816a371fa69686
+      destination: maplibre-native
+      recurse-submodules: true
+
+  # compile and replace mbgl.node binary as node-gyp can't be used for compilation
+  - working-directory: maplibre-native
+    runs: |
+      cmake . -DMLN_WITH_NODE=ON && make -C platform/node -j$(nproc) mbgl-node.abi-115
+      cp platform/node/lib/node-v115/mbgl.node ../app/node_modules/@maplibre/maplibre-gl-native/lib/node-v115/mbgl.node
+
+  # move required components of app to /usr/src/app
+  - working-directory: app
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/src/app
+      mv node_modules package.json package-lock.json public src ${{targets.destdir}}/usr/src/app/
+
+subpackages:
+  - name: tileserver-gl-fips-compat
+    description: "Compatibility package to allow replacing upstream image"
+    dependencies:
+      provides:
+        - ${{package.name}}-entrypoint=${{package.full-version}}
+      runtime:
+        - Xvfb
+        - busybox
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/bin"
+          install -m755 ./docker-entrypoint.sh "${{targets.subpkgdir}}/usr/bin/docker-entrypoint.sh"
+          mkdir -p "${{targets.subpkgdir}}/usr/src/app"
+          ln -s "/usr/bin/docker-entrypoint.sh" "${{targets.subpkgdir}}/usr/src/app/docker-entrypoint.sh"
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+
+update:
+  enabled: true
+  github:
+    identifier: maptiler/tileserver-gl
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - binutils
+        - curl
+        - file
+        - nodejs-20
+        - npm
+        - tileserver-gl-fips-compat
+  pipeline:
+    - uses: test/tw/ldd-check
+    - runs: |
+        # verify node uses fips, exit with code 1 otherwise
+        node -e 'require("process").exit(require("crypto").getFips() ? 0 : 1)'
+    - runs: |
+        /usr/src/app/docker-entrypoint.sh > "${{package.name}}".log 2>&1 &
+        SERVER_PID=$!
+
+        for attempt in 1 2 3 4 5; do
+          echo "Attempt $attempt: Checking if server is ready..."
+          if curl -s --head --fail http://localhost:8080/health; then
+            echo "Server is ready!"
+            break
+          fi
+          sleep $attempt
+        done
+
+        # Ensure the server started successfully
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+          echo "Server failed to start."
+          exit 1
+        fi
+
+        for attempt in 1 2 3 4 5; do
+          echo "Attempt $attempt: Trying to download map PNG file..."
+          if curl -v --fail http://localhost:8080/styles/basic-preview/512/10/537/358.png >/tmp/test.png; then
+            if file /tmp/test.png | grep PNG >/dev/null; then
+              echo "PNG file downloaded successfully"
+              exit 0
+            fi
+          fi
+          sleep $attempt
+        done
+
+        echo "Unable to retrieve map PNG file - type is $(file /tmp/test.png)"
+        ls -la /tmp/test.png
+        exit 1

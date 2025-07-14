@@ -1,0 +1,297 @@
+package:
+  name: pgpool2-4.5
+  version: "4.5.7"
+  epoch: 2
+  description: Middleware that works between PostgreSQL servers and a PostgreSQL database client.
+  copyright:
+    - license: BSD-3-Clause AND MIT
+  dependencies:
+    provides:
+      - pgpool2=${{package.full-version}}
+    runtime:
+      - postgresql-17
+      - postgresql-17-client
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bison
+      - build-base
+      - busybox
+      - flex
+      - gcc-14-default
+      - libtool
+      - openssl-dev
+      - postgresql-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: \.
+    replace: _
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pgpool/pgpool2
+      tag: V${{vars.mangled-package-version}}
+      expected-commit: 57b7c5ad6984eaff1371fe3145b082bd98a56460
+
+  # Patch to fix compilation errors for pgproto
+  - uses: patch
+    with:
+      patches: /home/build/fix_compile_error.patch
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --sysconfdir=/etc/pgpool2 --with-openssl
+
+  # build src/parser explicitly to avoid build failures due to missing parser files with -j flag
+  - runs: |
+      make -C src/parser V=1
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+  - runs: |
+      mkdir -p "${{targets.contextdir}}/var/run/pgpool"
+
+subpackages:
+  - name: ${{package.name}}-dev
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      provides:
+        - pgpool2-dev=${{package.full-version}}
+      runtime:
+        - ${{package.name}}
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-compat
+    description: "Compatibility package for Upstream pgpool image"
+    dependencies:
+      provides:
+        - pgpool2-compat=${{package.full-version}}
+    pipeline:
+      - name: "Symlink all pgpool binaries to /opt/pgpool-II/bin"
+        runs: |
+          mkdir -p ${{targets.subpkgdir}}/opt/pgpool-II/bin
+          for bin_path in ${{targets.destdir}}/usr/bin/*; do
+            bin=$(basename ${bin_path})
+            ln -s "/usr/bin/${bin}" "${{targets.subpkgdir}}/opt/pgpool-II/bin/${bin}"
+          done
+
+          # Link sample files
+          mkdir -p "${{targets.contextdir}}/opt/pgpool-II/etc"
+          # Create symlinks from /etc/pgpool2/* to /opt/pgpool-II/etc/
+          for sample_path in ${{targets.destdir}}/etc/pgpool2/*;do
+            sample=$(basename ${sample_path})
+            ln -s "/etc/pgpool2/${sample}" "${{targets.subpkgdir}}/opt/pgpool-II/etc/${sample}"
+          done
+
+  - name: ${{package.name}}-bitnami-compat
+    dependencies:
+      provides:
+        - pgpool2-bitnami-compat=${{package.full-version}}
+      runtime:
+        - busybox
+        - coreutils
+        - merged-usrsbin
+        - openldap
+        - postgresql-client
+        - wolfi-baselayout
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: pgpool
+          version-path: 4/debian-12
+      # copy the patch file to patch the output form bitnami/compat and apply it
+      - runs: |
+          cp bitnami-compat-remove-os-flavour.patch "${{targets.contextdir}}/"
+      - uses: patch
+        working-directory: "${{targets.contextdir}}"
+        with:
+          patches: bitnami-compat-remove-os-flavour.patch
+      # remove patch file to prevent it from being packaged
+      - runs: |
+          rm "${{targets.contextdir}}/bitnami-compat-remove-os-flavour.patch"
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/opt/bitnami/pgpool/bin"
+          # symlink all binaries to /opt/bitnami/pgpool/bin
+          for bin in \
+            pcp_attach_node pcp_detach_node pcp_health_check_stats pcp_node_count \
+            pcp_node_info pcp_pool_status pcp_proc_count pcp_proc_info pcp_promote_node \
+            pcp_recovery_node pcp_stop_pgpool pcp_watchdog_info \
+            pg_enc pg_md5 pgpool pgpool_setup pgproto watchdog_setup wd_cli \
+          ; do
+            ln -s "/usr/bin/${bin}" "${{targets.contextdir}}/opt/bitnami/pgpool/bin/${bin}"
+          done
+
+          # copy etc to pgpool/etc
+          mkdir -p "${{targets.contextdir}}/opt/bitnami/pgpool/etc"
+          cp -pr "${{targets.destdir}}/etc/pgpool2/." "${{targets.contextdir}}/opt/bitnami/pgpool/etc/"
+
+          # copy etc to pgpool/etc.default
+          mkdir -p "${{targets.contextdir}}/opt/bitnami/pgpool/etc.default"
+          cp -pr "${{targets.destdir}}/etc/pgpool2/." "${{targets.contextdir}}/opt/bitnami/pgpool/etc.default/"
+
+          # link postgres binaries to /opt/bitnami/postgresql/bin
+          mkdir -p "${{targets.contextdir}}/opt/bitnami/postgresql/bin"
+          for bin in \
+            pg_dump pg_dumpall pg_restore psql \
+          ; do
+            ln -s "/usr/bin/${bin}" "${{targets.contextdir}}/opt/bitnami/postgresql/bin/${bin}"
+          done
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - runs: |
+            test -f /opt/bitnami/pgpool/bin/pgpool
+            test -f /opt/bitnami/postgresql/bin/psql
+        - uses: bitnami/validate-welcome-message
+          with:
+            app-name: pgpool
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "Compatibility package for iamguarded variant of pgpool2"
+    dependencies:
+      provides:
+        - pgpool2-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - busybox
+        - coreutils
+        - openldap
+        - postgresql-client
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: pgpool2
+          version: ${{vars.major-version}}
+      - name: "Create Symlinks for pgpool binaries"
+        runs: |
+          mkdir -p "/opt/iamguarded/pgpool/bin"
+          # symlink all pgpool, pcp_* binaries to /opt/iamguarded/pgpool/bin
+          for bin in \
+            pcp_attach_node pcp_detach_node pcp_health_check_stats pcp_node_count \
+            pcp_node_info pcp_pool_status pcp_proc_count pcp_proc_info pcp_promote_node \
+            pcp_recovery_node pcp_stop_pgpool pcp_watchdog_info \
+            pg_enc pg_md5 pgpool pgpool_setup pgproto watchdog_setup wd_cli \
+          ; do
+            ln -s "/usr/bin/${bin}" "/opt/iamguarded/pgpool/bin/${bin}"
+          done
+
+          # copy etc to pgpool/etc
+          mkdir -p "/opt/iamguarded/pgpool/etc"
+          cp -pr "${{targets.destdir}}/etc/pgpool2/." "/opt/iamguarded/pgpool/etc/"
+
+          # copy etc to pgpool/etc.default
+          mkdir -p "/opt/iamguarded/pgpool/etc.default"
+          cp -pr "${{targets.destdir}}/etc/pgpool2/." "/opt/iamguarded/pgpool/etc.default/"
+
+          # link postgres binaries to /opt/iamguarded/postgresql/bin
+          mkdir -p "/opt/iamguarded/postgresql/bin"
+          for bin in \
+            pg_dump pg_dumpall pg_restore psql \
+          ; do
+            ln -s "/usr/bin/${bin}" "/opt/iamguarded/postgresql/bin/${bin}"
+          done
+      - uses: iamguarded/finalize-compat
+        with:
+          package: pgpool2
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        accounts:
+          users:
+            - username: iamguarded
+              uid: 1001
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - ${{package.name}}
+            - busybox
+            - coreutils
+            - sudo
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: pgpool2
+            version: ${{vars.major-version}}
+        - runs: |
+            test -f /opt/iamguarded/pgpool/bin/pgpool
+            test -f /opt/iamguarded/postgresql/bin/psql
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - _RPM
+  version-transform:
+    - match: "_"
+      replace: .
+  github:
+    identifier: pgpool/pgpool2
+    strip-prefix: V
+    use-tag: true
+    tag-filter-prefix: V4_5
+
+test:
+  environment:
+    contents:
+      packages:
+        - postgresql
+        - postgresql-client
+        - shadow
+        - sudo-rs
+    environment:
+      PGDATA: /tmp/test_db
+      PGUSER: wolfi
+      PGPASSWORD: custompassword
+  pipeline:
+    - name: "Test binaries"
+      runs: |
+        pgpool --version
+        pgpool --help
+    - name: "Test with postgresql"
+      runs: |
+        useradd $PGUSER
+        sudo -u $PGUSER initdb -D /tmp/test_db
+        sudo -u $PGUSER pg_ctl -D /tmp/test_db -l /tmp/logfile start
+        createdb customdatabase
+        psql customdatabase -c "CREATE TABLE IF NOT EXISTS test_table (id INTEGER, str TEXT); INSERT INTO test_table VALUES(1, 'Test value');"
+        # 28b48ce7ae1f2db6539f7ed94728d992 = custompassword
+        echo "wolfi:28b48ce7ae1f2db6539f7ed94728d992" >/etc/pgpool2/pcp.conf
+        cp /etc/pgpool2/pool_hba.conf.sample /etc/pgpool2/pool_hba.conf
+        cat >/etc/pgpool2/pgpool.conf <<EOF
+        listen_addresses = '*'
+        port = 55432
+        backend_hostname0 = 'localhost'
+        backend_port0 = 5432
+        EOF
+        pgpool >/dev/null 2>&1 &
+        # connect via pgpool and validate connection ; retry in case pgpool is not up yet
+        for attempt in $(seq 1 10) ; do
+          if ! psql -Uwolfi -h127.0.0.1 -p55432 customdatabase -c "SELECT * FROM test_table" \
+            | grep 'Test value' ; then
+            sleep 3
+          else
+            pkill pgpool
+            exit 0
+          fi
+        done
+        echo "Unable to query data"
+        exit 1

@@ -1,0 +1,82 @@
+# This is a separate package for the google guest agent manager
+# and plugin system. It's not packaged inside google guest agent
+# since it has it's own repo and update cadence. Eventually
+# the projects will be combined. See:
+# https://github.com/GoogleCloudPlatform/google-guest-agent
+# https://github.com/GoogleCloudPlatform/guest-agent?tab=readme-ov-file#overview
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+package:
+  name: google-guest-agent-manager
+  # Upstream has not tagged releases this it the commit I pulled from
+  version: "0_git20250714"
+  epoch: 0
+  description: "google guest agent manager"
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - busybox
+      - coreutils
+      - go
+      - protobuf-dev
+      - protoc
+      - protoc-gen-go
+      - protoc-gen-go-grpc
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '0_git([0-9]{8})'
+    replace: '$1.${{package.epoch}}'
+    to: google-guest-agent-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/GoogleCloudPlatform/google-guest-agent.git
+      branch: main
+      expected-commit: 4e1407fe89949a876bbb11b95dc6e56ece7e4b80
+
+  - runs: |
+      make gen-pbgo
+
+  - runs: |
+      # https://github.com/GoogleCloudPlatform/guest-agent/blob/main/packaging/google-guest-agent.spec#L65C27-L65C68
+      VERSION=${{vars.google-guest-agent-version}} make -j$(nproc) V=1 cmd/google_guest_agent/google_guest_agent \
+          cmd/ggactl/ggactl_plugin \
+          cmd/google_guest_compat_manager/google_guest_compat_manager \
+          cmd/core_plugin/core_plugin \
+          cmd/gce_metadata_script_runner/gce_metadata_script_runner \
+          cmd/metadata_script_runner_compat/gce_compat_metadata_script_runner
+
+      # https://github.com/GoogleCloudPlatform/guest-agent/blob/main/packaging/google-guest-agent.spec#L88
+      mkdir -p ${{targets.destdir}}/usr/lib/google/guest_agent
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      install -p -m 0755 cmd/gce_metadata_script_runner/gce_metadata_script_runner ${{targets.destdir}}/usr/bin/gce_metadata_script_runner
+      install -p -m 0755 cmd/google_guest_agent/google_guest_agent ${{targets.destdir}}/usr/bin/google_guest_agent_manager
+      install -p -m 0755 cmd/ggactl/ggactl_plugin ${{targets.destdir}}/usr/bin/ggactl_plugin
+      install -p -m 0755 cmd/google_guest_compat_manager/google_guest_compat_manager ${{targets.destdir}}/usr/bin/google_guest_compat_manager
+      install -p -m 0755 cmd/core_plugin/core_plugin ${{targets.destdir}}/usr/lib/google/guest_agent/core_plugin
+      install -p -m 0755 cmd/metadata_script_runner_compat/gce_compat_metadata_script_runner ${{targets.destdir}}/usr/bin/gce_compat_metadata_script_runner
+
+test:
+  environment:
+    contents:
+      packages:
+        - binutils
+  pipeline:
+    - runs: |
+        google_guest_agent_manager --help
+        buildversion=0_git$(readelf -p .go.buildinfo /usr/bin/google_guest_agent_manager | grep '\-ldflags="-X main.version=.*"' | grep -oE '[0-9]{8}\.[0-9]+')
+        buildversion="${buildversion/./-r}"
+        [ "$buildversion" = "${{package.full-version}}" ]
+
+update:
+  enabled: true
+  git: {}
+  schedule:
+    period: weekly
+    reason: "No branching or tags upstream"

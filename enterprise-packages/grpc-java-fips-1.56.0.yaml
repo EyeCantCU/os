@@ -1,0 +1,112 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: grpc-java-fips-1.56.0
+  version: 1.56.0
+  epoch: 2
+  description: The Java gRPC implementation. HTTP/2 based RPC
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - grpc-java-fips=${{package.full-version}}
+
+vars:
+  java-version: "8"
+  test-java-version: "11"
+  hadoop-version: "3.3"
+  py-version: "3.11"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - openjdk-${{vars.java-version}}-default-jdk
+      - protobuf-dev
+      - snappy-dev
+  environment:
+    GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx2048m"
+
+pipeline:
+  - uses: auth/github
+    with:
+      repo: chainguard-dev/ecosystems-grpc-java
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/chainguard-dev/ecosystems-grpc-java.git
+      expected-commit: 79ea911d8373ed10e38d2b58b2ece962b14ed645
+      branch: fips-${{package.version}}
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/java/grpc
+      ./gradlew -PskipAndroid=true -PskipCodegen=true -Dmaven.repo.local=./.m2/repository build publishToMavenLocal -x test -x javadoc
+      for dir in . protobuf stub core api netty services all; do
+        cp -av "$dir/build/libs/"* "${{targets.destdir}}/usr/share/java/grpc/"
+      done
+
+subpackages:
+  - name: ${{package.name}}-m2
+    description: Maven repository for gRPC Java ${{package.version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share/m2/repository
+          cp -av ./.m2/repository/* ${{targets.contextdir}}/usr/share/m2/repository/
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-m2
+        - bcfips-policy-140-3-j${{vars.test-java-version}}
+        - gradle
+        - openjdk-${{vars.test-java-version}}-default-jdk
+        - openssl-config-fipshardened
+        - wait-for-it
+    environment:
+      CLASSPATH: "/usr/share/java/bouncycastle-fips/*:/usr/share/java/grpc/*"
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+      JDK_JAVA_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips -Djavax.net.ssl.trustStoreType=FIPS --add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED"
+  pipeline:
+    - uses: auth/github
+      with:
+        repo: chainguard-dev/ecosystems-grpc-java
+    - uses: git-checkout
+      with:
+        repository: https://github.com/chainguard-dev/ecosystems-grpc-java.git
+        expected-commit: 79ea911d8373ed10e38d2b58b2ece962b14ed645
+        branch: fips-${{package.version}}
+    - name: "Use our gRPC"
+      working-directory: ./examples/example-tls
+      runs: |
+        sed -i "s/grpcVersion = .*/grpcVersion = '${{package.version}}-cg0'/g" ./build.gradle
+        # May need to revisit this and just build the compiler
+        sed -i "s/io.grpc:protoc-gen-grpc-java:\${grpcVersion}/io.grpc:protoc-gen-grpc-java:${{package.version}}/g" ./build.gradle
+    - name: "Install TLS test distribution"
+      working-directory: ./examples/example-tls
+      runs: gradle --no-daemon installDist -Dmaven.repo.local=/usr/share/m2/repository
+    - name: "TLS gRPC test"
+      working-directory: ./examples/example-tls
+      runs: |
+        # Start server
+        nohup java -classpath "/usr/share/java/bouncycastle-fips/*:$PWD/build/install/example-tls/lib/*" io.grpc.examples.helloworldtls.HelloWorldServerTls 50440 ../../testing/src/main/resources/certs/server1.pem ../../testing/src/main/resources/certs/server1.key > /dev/null 2>&1 &
+
+        # Wait for it
+        wait-for-it localhost:50440
+
+        # Connect with client
+        java -classpath "/usr/share/java/bouncycastle-fips/*:$PWD/build/install/example-tls/lib/*" io.grpc.examples.helloworldtls.HelloWorldClientTls localhost 50440 ../../testing/src/main/resources/certs/ca.pem &> output.txt
+
+        # Check for greeting
+        if ! cat output.txt | grep "Greeting: Hello localhost"; then
+           echo "Failed to connect to server"
+           cat output.txt
+           exit 1
+        fi
+
+update:
+  enabled: false
+  manual: true

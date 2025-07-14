@@ -1,0 +1,79 @@
+package:
+  name: kafka_exporter-fips
+  version: "1.9.0"
+  epoch: 5
+  description: "Kafka exporter for Prometheus"
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/danielqsj/kafka_exporter
+      tag: v${{package.version}}
+      expected-commit: 8ec24078707d4d3b349e71522ebd7f179746072d
+
+  - name: Downgrade Go to 1.23 for FIPS
+    runs: |
+      # we are temporary using go 1.23 because go-fips-1.24 is not available yet
+      sed -i 's/go 1\.24\(\.[0-9]*\)\?/go 1.23/' go.mod
+      go mod tidy
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/net@v0.38.0
+
+  - uses: go/build
+    with:
+      packages: .
+      output: kafka_exporter
+      go-package: go-fips
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: danielqsj/kafka_exporter
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - kafka-3.9 # versions > 3.9 remove zookeeper-server-start.sh and a bunch of other files
+        - uuidgen
+    environment:
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        kafka_exporter --version
+        kafka_exporter --help
+    - name: "Test with Kafka"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cd /usr/lib/kafka
+          bin/zookeeper-server-start.sh config/zookeeper.properties > zookeeper_start.log 2>&1 &
+          mv config/server.properties.original config/server.properties
+          bin/kafka-server-start.sh config/server.properties > kafka_start.log 2>&1 &
+          sleep 5
+          TOPIC_NAME="test-topic-$(uuidgen)"
+          PARTITIONS=1
+          REPLICATION_FACTOR=1
+          # Create a Kafka topic
+          bin/kafka-topics.sh --create --topic "${TOPIC_NAME}" --partitions "${PARTITIONS}" --replication-factor "${REPLICATION_FACTOR}" --if-not-exists --bootstrap-server localhost:9092
+          # Produce a test message
+          echo "Hello Kafka" | bin/kafka-console-producer.sh --broker-list localhost:9092 --topic "${TOPIC_NAME}"
+        start: kafka_exporter --kafka.server=0.0.0.0:9092
+        timeout: 15
+        expected_output: |
+          Starting kafka_exporter
+          Listening on
+        post: |
+          sleep 5 # Wait awhile until the Kafka metrics are scraped
+          curl http://localhost:9308/metrics | grep kafka_topic_partitions

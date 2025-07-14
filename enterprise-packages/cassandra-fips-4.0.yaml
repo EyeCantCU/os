@@ -1,0 +1,119 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: cassandra-fips-4.0
+  version: 4.0.15
+  epoch: 3
+  description: Open Source NoSQL Database
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - coreutils
+      - openjdk-${{vars.java-version}}-default-jvm
+      - python-${{vars.py-version}} # needed for cqlsh
+      - jemalloc
+    provides:
+      - cassandra-fips=${{package.full-version}}
+
+vars:
+  py-version: 3.11
+  java-version: 11
+
+environment:
+  contents:
+    packages:
+      - ant
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - gh
+      - git
+      - jq
+      - openjdk-${{vars.java-version}}-default-jdk
+      - py${{vars.py-version}}-google-cloud-sdk
+      - python-${{vars.py-version}}
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    CASSANDRA_USE_JDK11: true
+
+pipeline:
+  - uses: auth/github
+    with:
+      repo: chainguard-dev/ecosystems-cassandra
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/chainguard-dev/ecosystems-cassandra
+      expected-commit: 1e28f4dc118f35744f09f69a4a91ceae5a466a43
+      branch: fips-${{package.version}}
+
+  - uses: patch
+    with:
+      # Bumps snakeyaml, jackson-databind and commons-lang3 to mitigate a bunch of CVEs
+      patches: bumpdeps.patch
+
+  - runs: |
+      ant artifacts -Dversion=${{package.version}}
+
+      # Install cassandra from the tarball in build/dist into the destdir in /usr/share/java/cassandra
+      mkdir -p "${{targets.destdir}}"/usr/share/java/cassandra
+      tar --strip-components 1 -C "${{targets.destdir}}"/usr/share/java/cassandra -xzf build/apache-cassandra-${{package.version}}-bin.tar.gz
+
+      # Symlink everything in the cassandra bin directory into /usr/bin
+      mkdir -p "${{targets.destdir}}"/usr/bin/
+
+      for f in /home/build/build/dist/bin/*; do
+        filename=$(basename "$f")
+        ln -sf  /usr/share/java/cassandra/bin/"$filename" "${{targets.destdir}}"/usr/bin/"$filename"
+      done
+
+      mkdir -p ${{targets.destdir}}/var/lib/cassandra
+      mkdir -p ${{targets.destdir}}/var/log/cassandra
+
+      ln -sT /var/lib/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/data
+      ln -sT /var/log/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/logs
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - cassandra-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          install -d ${{targets.subpkgdir}}/etc/cassandra
+          mkdir -p ${{targets.subpkgdir}}/opt
+          ln -s /usr/share/java/cassandra ${{targets.subpkgdir}}/opt/cassandra
+
+update:
+  enabled: false
+  manual: true
+  schedule:
+    period: daily
+    reason: Currently we maintain single branch. And 'cg' tool doesn't support to access private repos as of now. See, https://github.com/chainguard-dev/internal-dev/issues/9318.
+  git: {}
+
+test:
+  environment:
+    contents:
+      packages:
+        - openjdk-${{vars.java-version}}-default-jdk
+    environment:
+      LANG: en_US.UTF-8
+      CASSANDRA_HOME: /opt/cassandra
+      CASSANDRA_CONF: /opt/cassandra/conf
+      CASSANDRA_LOGS_DIR: /opt/cassandra/logs
+      PATH: /usr/sbin:/sbin:/usr/bin:/bin:/opt/cassandra/bin/
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS"
+  pipeline:
+    - runs: apk fix openjdk-${{vars.java-version}} # FIXME: Band-aid for "Module jdk.compiler not found" issue when running "java-fips/algorithms" pipeline.
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - runs: |
+        cqlsh --version
+        cqlsh.py --version
+        stop-server -h

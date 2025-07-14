@@ -1,0 +1,289 @@
+package:
+  name: liberica-24
+  version: "24.0.1.11"
+  epoch: 0
+  description: Liberica ${{vars.major-version}} Java development kit
+  copyright:
+    - license: GPL-2.0-with-classpath-exception
+  dependencies:
+    runtime:
+      - alsa-lib
+      - freetype
+      - giflib
+      - java-cacerts
+      - lcms2
+      - libfontconfig1
+      - libjpeg-turbo
+      - libx11
+      - libxext
+      - libxi
+      - libxrender
+      - libxtst
+      - ttf-dejavu
+      - zlib
+
+vars:
+  java-home: /usr/lib/jvm/java-23-liberica
+  boot-jdk: /usr/lib/jvm/java-23-openjdk
+  googletest-version: v1.14.0
+
+var-transforms:
+  # The first release of a version stream lacks minor/patch segments (e.g.
+  # 24+37) so we need two transforms for mangled-package-version. Until
+  # https://github.com/chainguard-dev/melange/issues/1774 is addressed, we will
+  # need to manually swap the order of these when appropriate.
+  - from: ${{package.version}}
+    match: ^(\d+).0.0\.(\d+)$
+    replace: $1+$2
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+.\d+.\d+)\.(\d+)$
+    replace: $1+$2
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - alsa-lib-dev
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cups-dev
+      - file
+      - fontconfig-dev
+      - freetype-dev
+      - giflib-dev
+      - lcms2-dev
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libx11-dev
+      - libxext-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxt-dev
+      - libxtst-dev
+      - openjdk-23-default-jdk
+      - zip
+  environment:
+    # This is needed to work around the error date 1970-01-01T00:00:00Z is not within the valid range 1980-01-01T00:00:02Z to 2099-12-31T23:59:59Z
+    SOURCE_DATE_EPOCH: 315532900
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://github.com/bell-sw/Liberica/releases/download/${{vars.mangled-package-version}}/bellsoft-jdk${{vars.mangled-package-version}}-src-full.tar.gz
+      expected-sha512: cfb98d784a054eb67699105a00fdece5553b214be6360cde63bea25548213f9e6a0cc536807de9ec5a8bf918bcee0b83aedbd52548146de9928f1d46c9bf07d3
+
+  - name: Extract the googletest version from the source doc and Verify
+    runs: |
+      googletest_version=$(sed -n 's/.*https:\/\/github\.com\/google\/googletest\/releases\/tag\/\(v[0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' doc/building.md)
+      if [ "$googletest_version" != "${{vars.googletest-version}}" ]; then
+        echo "Error: googletest version mismatch. Expected ${{vars.googletest-version}}, got $googletest_version"
+        exit 1
+      fi
+
+  - working-directory: /home/build/googletest
+    pipeline:
+      - uses: fetch
+        with:
+          uri: https://github.com/google/googletest/archive/${{vars.googletest-version}}.tar.gz
+          expected-sha512: 765c326ccc1b87a01027385e69238266e356361cd4ee3e18e3c9d137a5d11fa5d657c164d02dd1be8fe693c8e10f2b580588dbfa57d27f070e2750f50d3e662c
+
+  - name: Fix usage of C-style isnan() for C++
+    uses: patch
+    with:
+      patches: fix-build-isnan.patch
+
+  - runs: chmod +x configure
+
+  # Note that despite using --with-extra-cflags, --with-extra-cxxflags, and
+  # --with-extra-ldflags, the configure still produces warnings like:
+  # https://chainguard.dev/contact/18747
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --disable-precompiled-headers \
+        --disable-warnings-as-errors \
+        --enable-dtrace=no \
+        --prefix=${{vars.java-home}} \
+        --with-boot-jdk=${{vars.boot-jdk}} \
+        --with-debug-level=release \
+        --with-extra-cflags="$CFLAGS" \
+        --with-extra-cxxflags="$CXXFLAGS" \
+        --with-extra-ldflags="$LDFLAGS" \
+        --with-freetype=system \
+        --with-giflib=system \
+        --with-gtest="/home/build/googletest" \
+        --with-jtreg=no \
+        --with-jvm-variants=server \
+        --with-lcms=system \
+        --with-libjpeg=system \
+        --with-libpng=system \
+        --with-native-debug-symbols=internal \
+        --with-vendor-bug-url=https://chainguard.dev/contact \
+        --with-vendor-name=Chainguard \
+        --with-vendor-url=https://chainguard.dev \
+        --with-vendor-vm-bug-url=https://chainguard.dev/contact \
+        --with-version-opt="cgr-r${{package.epoch}}" \
+        --with-version-pre="no" \
+        --with-version-string="" \
+        --with-zlib=system
+
+  - runs: |
+      make jdk-image legacy-jre-image
+
+      mkdir -p ${{targets.contextdir}}/${{vars.java-home}}
+      cp -r build/*-server-release/images/jdk/* ${{targets.contextdir}}/${{vars.java-home}}
+      rm ${{targets.contextdir}}/${{vars.java-home}}/lib/src.zip
+
+      # copy to shared java cacerts store
+      rm -f ${{targets.contextdir}}/${{vars.java-home}}/lib/security/cacerts
+      ln -s /etc/ssl/certs/java/cacerts \
+        ${{targets.contextdir}}/${{vars.java-home}}/lib/security/cacerts
+      # symlink for `java-common` to work (which expects jre in $JAVA_HOME/jre)
+      ln -s . ${{targets.contextdir}}/${{vars.java-home}}/jre
+
+subpackages:
+  - name: ${{package.name}}-dbg
+    description: Liberica ${{vars.major-version}} Java debug symbols
+    pipeline:
+      - uses: split/debug
+    dependencies:
+      runtime:
+        - ${{package.name}}
+
+  - name: ${{package.name}}-jre
+    description: Liberica ${{vars.major-version}} Java runtime environment
+    dependencies:
+      runtime:
+        - alsa-lib
+        - freetype
+        - giflib
+        - java-cacerts
+        - libfontconfig1
+        - libjpeg-turbo
+        - libx11
+        - libxext
+        - libxi
+        - libxrender
+        - libxtst
+        - ttf-dejavu
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.java-home}}
+          cp -r build/*-server-release/images/jre/* ${{targets.contextdir}}/${{vars.java-home}}
+
+          # copy to shared java cacerts store
+          rm -f ${{targets.contextdir}}/${{vars.java-home}}/lib/security/cacerts
+          cp /etc/ssl/certs/java/cacerts \
+            ${{targets.contextdir}}/${{vars.java-home}}/lib/security/cacerts
+
+          # symlink for `java-common` to work (which expects jre in ${{vars.java-home}}/jre)
+          ln -sf . ${{targets.contextdir}}/${{vars.java-home}}/jre
+
+  - name: ${{package.name}}-jmods
+    description: Liberica ${{vars.major-version}} jmods
+    dependencies:
+      provides:
+        - liberica-jmods=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.java-home}}
+          mv ${{targets.destdir}}/${{vars.java-home}}/jmods \
+             ${{targets.contextdir}}/${{vars.java-home}}
+
+  - name: ${{package.name}}-demos
+    description: Liberica ${{vars.major-version}} demos
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.java-home}}
+          mv ${{targets.destdir}}/${{vars.java-home}}/demo \
+             ${{targets.contextdir}}/${{vars.java-home}}
+
+  - name: ${{package.name}}-default-jvm
+    description: Use the Liberica ${{vars.major-version}} JVM as the default JVM
+    dependencies:
+      runtime:
+        - java-common-jre
+        - ${{package.name}}-jre
+      provides:
+        - liberica-default-jvm=1.${{vars.major-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/jvm
+          ln -s $(basename ${{vars.java-home}}) ${{targets.contextdir}}/usr/lib/jvm/default-jvm
+
+  - name: ${{package.name}}-default-jdk
+    description: Use the Liberica ${{vars.major-version}} JVM as the default JVM with the JDK installed
+    dependencies:
+      runtime:
+        - java-common
+        - ${{package.name}}
+      provides:
+        - liberica-default-jdk=1.${{vars.major-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/jvm
+          ln -s $(basename ${{vars.java-home}}) ${{targets.contextdir}}/usr/lib/jvm/default-jvm
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-default-jdk
+        - ${{package.name}}-jmods
+  pipeline:
+    # Test a basic Hello World
+    - working-directory: basic
+      runs: |
+        javac HelloWorld.java
+        java HelloWorld | grep -qi "Hello World!"
+    # Test a basic HTTP connection
+    - working-directory: basic
+      runs: |
+        javac RequestTest.java
+        java RequestTest | grep -qi "Successfully connected to example.org"
+    # Test modules
+    - working-directory: advanced/module-project
+      runs: |
+        mkdir output
+        javac -d output --module-source-path modules $(find modules -name "*.java")
+
+        # Create a jar with the compiled classes
+        jar --verbose --create --file app.jar \
+          --main-class dev.chainguard.module.main.Main \
+          --module-version 1.0 \
+          -C output/test.modules . \
+          -C output/main.app .
+
+        # Test the jar
+        java -jar app.jar
+
+        # Test jlink
+        jlink --verbose --module-path "app.jar:$JAVA_HOME/jmods" \
+          --add-modules test.modules \
+          --output test-project-jre
+
+        # Test custom JRE
+        test-project-jre/bin/java -jar app.jar
+
+update:
+  enabled: true
+  version-transform:
+    # The first version of a release lacks minor/patch segments (e.g. 24+37)
+    - match: ^(\d+)\+(\d+)$
+      replace: $1.0.0.$2
+    - match: ^(.+)\+(\d+)$
+      replace: $1.$2
+  github:
+    identifier: bell-sw/Liberica
+    tag-filter: "24"
+    use-tag: true
