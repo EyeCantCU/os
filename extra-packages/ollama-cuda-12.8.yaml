@@ -1,0 +1,89 @@
+package:
+  name: ollama-cuda-12.8
+  description: Ollama CUDA support component
+  version: "0.9.6"
+  epoch: 0
+  copyright:
+    - license: MIT
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      - cuda-toolkit-${{vars.cuda_version}}
+      - ollama-cpu # depends on `libggml-base`
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda_version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda_major_version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cuda-toolkit-${{vars.cuda_version}}-dev
+      - gcc-12-default
+      - nvidia-cuda-cccl-${{vars.cuda_version}}
+  environment:
+    PATH: /usr/local/cuda-${{vars.cuda_version}}/bin:$PATH
+    CMAKE_CUDA_COMPILER: /usr/local/cuda-${{vars.cuda_version}}/bin/nvcc
+    CPATH: /usr/local/cuda-${{vars.cuda_version}}/include:$CPATH
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ollama/ollama
+      tag: v${{package.version}}
+      expected-commit: 43107b15b9bcff51ef1c5391c273fd1a747f6d0a
+
+  - name: Build CUDA component
+    runs: |
+      set -e
+      # Remove the runtime dependencies from installation so CMake doesn't install
+      # lots of system dependencies into the target path.
+      sed -i 's/PRE_INCLUDE_REGEXES.*/PRE_INCLUDE_REGEXES = ""/' CMakeLists.txt
+
+  - uses: cmake/configure
+    with:
+      opts: --preset "CUDA ${{vars.cuda_major_version}}" -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda_version}}/bin/nvcc
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - name: Remove base/CPU shared object provided by `ollama-cpu`
+    runs: |
+      rm -f ${{targets.destdir}}/usr/lib/ollama/libggml*.so
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package for `ollama/ollama:latest`
+    pipeline:
+      - name: Install CUDA deps into `/usr/lib/ollama`
+        runs: |
+          install -Dpm0644 -t ${{targets.subpkgdir}}/usr/lib/ollama/cuda_v${{vars.cuda_major_version}}/ /usr/local/cuda-${{vars.cuda_version}}/lib64/libcublas*
+          install -Dpm0644 -t ${{targets.subpkgdir}}/usr/lib/ollama/cuda_v${{vars.cuda_major_version}}/ /usr/local/cuda-${{vars.cuda_version}}/lib64/libcudart*
+
+test:
+  environment:
+    contents:
+      packages:
+        - cuda-toolkit-${{vars.cuda_version}}
+  pipeline:
+    - name: LDD check
+      uses: test/tw/ldd-check
+      with:
+        packages: ${{package.name}}
+        extra-library-paths: /usr/local/cuda-${{vars.cuda_version}}/lib64:/usr/local/cuda-${{vars.cuda_version}}/lib64/stubs:/usr/lib/ollama
+
+update:
+  enabled: true
+  github:
+    identifier: ollama/ollama
+    strip-prefix: v

@@ -1,0 +1,208 @@
+package:
+  name: nemo
+  version: "2.3.2"
+  epoch: 1
+  description: A scalable generative AI framework built for researchers and developers working on Large Language Models, Multimodal, and Speech AI
+  copyright:
+    - license: Apache-2.0
+  target-architecture:
+    - x86_64
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      - python-${{vars.py-version}}-base
+
+vars:
+  cuda-version: '12.4'
+  cudnn-version: '9'
+  py-version: '3.11'
+  cuda-major-version: '12'
+
+environment:
+  environment:
+    # @SUSTAINING: this will need to be manually updated every update based off of upstream project
+    CAUSAL_CONV_TAG: 'v1.2.2.post1'
+    # Avoids attempting to download a pre-compiled whl
+    CAUSAL_CONV1D_FORCE_BUILD: TRUE
+    NEMO_RUN_TAG: "34259bd3e752fef94045a9a019e4aaf62bd11ce2"
+    TE_TAG: "7d576ed25266a17a7b651f2c12e8498f67e0baea"
+    MODELOPT_VERSION: "0.19.0"
+    MCORE_TAG: "core_r0.10.0"
+    APEX_TAG: "810ffae374a2b9cb4b5c5e28eaeca7d7998fca0c"
+    MAMBA_TAG: "2.2.4"
+    PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/cudnn-${{vars.cudnn-version}}/bin
+    CUDNN_INCLUDE_DIR: /usr/local/cudnn-${{vars.cudnn-version}}/include/
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    CUDNN_HOME: /usr/local/cudnn-${{vars.cudnn-version}}
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - ffmpeg-cuda-dev
+      - freetype-dev
+      - gcc-12-default
+      - go
+      - libsndfile-dev
+      - ninja-build
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-cupti-${{vars.cuda-version}}-dev
+      - nvidia-cudnn-${{vars.cudnn-version}}-cuda-${{vars.cuda-major-version}}-dev
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - openmp-17
+      - py${{vars.py-version}}-cython
+      - py${{vars.py-version}}-hatchling
+      - py${{vars.py-version}}-installer
+      - py${{vars.py-version}}-packaging
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-pybind11
+      - py${{vars.py-version}}-setuptools-scm
+      # pin setuptools to work around:
+      #  https://github.com/chainguard-dev/enterprise-packages/issues/22689
+      - py${{vars.py-version}}-setuptools<80
+      - py${{vars.py-version}}-torch-2.6-cuda-${{vars.cuda-version}}-dev
+      - py${{vars.py-version}}-torchvision-0.21-cuda-${{vars.cuda-version}}
+      - py${{vars.py-version}}-typing-extensions
+      - py${{vars.py-version}}-wheel
+      - python-${{vars.py-version}}
+      - python-${{vars.py-version}}-dev
+      - rust
+      - rustup
+      - samurai
+      - swig
+
+pipeline:
+  - working-directory: /home/build/nemo.git
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/NVIDIA/NeMo.git
+          tag: v${{package.version}}
+          expected-commit: f98ef1db604da24c089d02a00d17d018794b1a23
+
+  - runs: |
+      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin"
+
+      # Setup the virtualenv
+      mkdir -p /usr/share/nemo
+
+      # Using python instead of uv as the --system-site-packages as uv will not
+      # take system site packages into account when running commands like uv pip list or uv pip install
+      python${{vars.py-version}} -m venv --system-site-packages /usr/share/nemo/.venv
+
+      source /usr/share/nemo/.venv/bin/activate
+
+  - working-directory: /home/build/causal-conv1d
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/Dao-AILab/causal-conv1d
+          branch: ${CAUSAL_CONV_TAG}
+      - runs: |
+          source /usr/share/nemo/.venv/bin/activate
+          # pin setuptools to work around:
+          #  https://github.com/chainguard-dev/enterprise-packages/issues/22689
+          pip install --no-build-isolation 'setuptools<80'
+          pip install --no-build-isolation .
+
+  - working-directory: /home/build/mamba
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/state-spaces/mamba
+          branch: v${MAMBA_TAG}
+      - runs: |
+          source /usr/share/nemo/.venv/bin/activate
+          pip install --no-build-isolation .
+
+  - working-directory: /home/build/megatron
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/NVIDIA/Megatron-LM.git
+          branch: ${MCORE_TAG}
+      - runs: |
+          source /usr/share/nemo/.venv/bin/activate
+          pip install --no-build-isolation .
+          cd megatron/core/datasets
+          export CXXFLAGS="${CXXFLAGS} -Wno-maybe-uninitialized"
+          make
+
+  - working-directory: /home/build/apex
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/NVIDIA/apex.git
+      - runs: |
+          source /usr/share/nemo/.venv/bin/activate
+          pip install --no-build-isolation .
+
+  - runs: |
+      # within venv
+      source /usr/share/nemo/.venv/bin/activate
+
+      pip install nemo_run@git+https://github.com/NVIDIA/NeMo-Run.git@${NEMO_RUN_TAG}
+      pip install --no-build-isolation unstructured==0.14.9
+      pip install --no-build-isolation llama-index==0.12.41
+      pip install --no-build-isolation onnxscript@git+https://github.com/microsoft/onnxscript
+      pip install --no-build-isolation nvidia-resiliency-ext
+      pip install --no-build-isolation num2words setuptools==78.1.1 numpy pybind11
+
+      # being fetched from NVIDIA PyPi channel, these are opensource projects that can be eventually built from source
+      pip install --no-cache-dir --no-build-isolation --extra-index-url https://pypi.nvidia.com transformer-engine
+      pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com nvidia-modelopt[torch]~=${MODELOPT_VERSION}
+
+      cd nemo.git
+
+      pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com ".[all]"
+      pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com -r requirements/requirements_deploy.txt
+      # Dropped for now as we are working through the best approach to provide vllm;
+      # pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com -r requirements/requirements_vllm.txt
+      pip install --no-build-isolation --extra-index-url https://pypi.nvidia.com -r tools/ctc_segmentation/requirements.txt
+
+      # Bumps cryptography version to address GHSA-h4gh-qq45-vh27 and GHSA-79v4-65xg-pq4
+      pip install cryptography==44.0.1
+
+      # Bump protobuf to address GHSA-8qvm-5x2c-j2w7
+      pip install protobuf==4.25.8
+
+      # Bump protobuf to address GHSA-phhr-52qp-3mj4
+      pip install transformers==4.52.1
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/nemo
+      mv /usr/share/nemo/.venv ${{targets.destdir}}/usr/share/nemo/
+      rm -rf ${{targets.destdir}}/usr/share/nemo/.venv/bin/__pycache*
+      # allow site-packages
+      sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/usr/share/nemo/.venv/pyvenv.cfg
+
+  - runs: |
+      # This test code triggers malware scan failures
+      # We also remove it in our py3-psutil apks.
+      rm -rf ${{targets.destdir}}/usr/share/nemo/.venv/lib/python${{vars.py-version}}/site-packages/psutil/tests
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/NeMo
+    tag-filter: v2.
+    strip-prefix: v
+
+test:
+  pipeline:
+    - runs: |
+        export PATH=/usr/share/nemo/.venv/bin:$PATH
+        TEST_SCRIPT=nemo_quickstart.py
+        # These pass locally and at the image level, but fail in elastic
+        #if ! python $TEST_SCRIPT > output.out 2>&1; then
+        #    echo "Failed to run '$TEST_SCRIPT'."
+        #    cat output.out
+        #    exit 1
+        #else
+        #    echo "Script tested successfully."
+        #    exit 0
+        #fi

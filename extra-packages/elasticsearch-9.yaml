@@ -1,0 +1,400 @@
+package:
+  name: elasticsearch-9
+  version: "9.0.3"
+  epoch: 0
+  description: Free and Open Source, Distributed, RESTful Search Engine
+  copyright:
+    - license: AGPL-3.0 AND SSPL-1.0 AND Elastic-2.0
+      license-path: licenses/AGPL-3.0+SSPL-1.0+ELASTIC-LICENSE-2.0.txt
+    - license: Apache-2.0
+      license-path: licenses/APACHE-LICENSE-2.0.txt
+    - license: Elastic-2.0
+      license-path: licenses/ELASTIC-LICENSE-2.0.txt
+  resources:
+    cpu: 6
+    memory: 30Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-config
+      - bash # some helper scripts use bash
+      - coreutils # eck operator init container runs date with iso format
+      - curl # eck operator init container does a health check
+      - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+      - merged-usrsbin
+      - openjdk-24-default-jdk
+      - wolfi-baselayout
+    provides:
+      - elasticsearch=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - libudev
+      - openjdk-24-default-jdk
+      - wolfi-base
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/elasticsearch
+      tag: v${{package.version}}
+      expected-commit: cc7302afc8499e83262ba2ceaa96451681f0609d
+
+  - uses: auth/gradle
+
+  - runs: |
+      # If you need to bump any dependency, maybe because for some CVE,
+      # then we also need re-generate the verification metadata and add it as a patch.
+      # ./gradlew --write-verification-metadata sha256 precommit
+      export LANG=en_US.UTF-8
+
+      ./gradlew localDistro -Dbuild.snapshot=false -Dlicense.key="x-pack/license-tools/src/test/resources/public.key"
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/logs
+
+      # https://github.com/elastic/elasticsearch/blob/d87b93f3174e82a86f4fad0ea8b85ac7b454f96d/plugins/examples/settings.gradle#L59-L76
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        BUILD_DIR="linux-aarch64-tar"
+      else
+        BUILD_DIR="linux-tar"
+      fi
+
+      find distribution/archives
+      install -dm777 ${{targets.destdir}}/usr/share/elasticsearch/
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/bin ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/lib ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/config ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/modules ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
+      cp distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
+
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
+      # Set permissions to read/write the config dir
+      chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
+        name=$(basename $i)
+        ln -sf /usr/share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+      done
+
+      # We get this from elasticsearch-config
+      mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
+      sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
+
+subpackages:
+  - name: ${{package.name}}-config
+    description: Creates a usable elasticsearch.yml config
+    dependencies:
+      provides:
+        - elasticsearch-config=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share/elasticsearch/config
+          install -m644 elasticsearch.yml ${{targets.contextdir}}/usr/share/elasticsearch/config/elasticsearch.yml
+
+  - name: ${{package.name}}-bitnami
+    description: ElasticSearch for Bitnami
+    dependencies:
+      provides:
+        - elasticsearch-bitnami=${{package.full-version}}
+      runtime:
+        - bash # some helper scripts use bash
+        - busybox
+        - coreutils # eck operator init container runs date with iso format
+        - curl # eck operator init container does a health check
+        - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+        - merged-usrsbin
+        - openjdk-24-default-jdk
+        - posix-libc-utils # required for helm install
+        - wolfi-baselayout
+        - yq
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: elasticsearch
+          version-path: ${{vars.major-version}}/debian-12
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # I know this is awful, but Bitnami doesn't like symlinks
+          cp -r ${{targets.destdir}}/usr/share/elasticsearch/* ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default
+          cp -r ${{targets.contextdir}}/opt/bitnami/elasticsearch/config/* \
+            ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default/
+
+          # Use subpackage path while unpacking
+          find . -iname "*.sh" -exec sed 's#/opt/bitnami#${{targets.contextdir}}/opt/bitnami#g' -i {} \;
+            ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/postunpack.sh || true
+          # Restore path
+          find ${{targets.contextdir}}/opt/bitnami -type f -exec sed 's#${{targets.contextdir}}##g' -i {} \;
+
+          # Set java home
+          sed -i 's|export JAVA_HOME=/opt/bitnami/java|export JAVA_HOME=/usr/lib/jvm/java-24-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+          sed -i 's|export ES_JAVA_HOME=/opt/bitnami/java|export ES_JAVA_HOME=/usr/lib/jvm/java-24-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+
+          # Set wide permissions
+          chmod -R 775 ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # Remove non-bitnami entrypoint script
+          rm ${{targets.contextdir}}/opt/bitnami/elasticsearch/bin/docker-entrypoint.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for i in ${{targets.contextdir}}/opt/bitnami/elasticsearch/bin/*; do
+            name=$(basename $i)
+            ln -sf /opt/bitnami/elasticsearch/bin/$name ${{targets.contextdir}}/usr/bin/$name
+          done
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/data
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/plugins
+    # TODO: convert tests to make use of "daemon-check-output"
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: elasticsearch
+              gid: 1000
+          users:
+            - username: elasticsearch
+              uid: 1000
+              gid: 1000
+          run-as: 0
+        contents:
+          packages:
+            - bash
+            - busybox
+            - coreutils
+            - sudo
+            - wolfi-base
+            - yq
+        environment:
+          ES_JAVA_HOME: /usr/lib/jvm/java-24-openjdk
+          ES_USER: elasticsearch
+          KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+          SHELL: /bin/bash
+      pipeline:
+        - name: "Setup Elasticsearch configuration for Bitnami"
+          runs: |
+            set -x
+
+            chown -R "${ES_USER}:${ES_USER}" /opt/bitnami/elasticsearch
+
+            keytool -v -keystore /opt/bitnami/elasticsearch/config/server.keystore \
+            -alias "localhost" \
+            -genkeypair \
+            -sigalg SHA512withRSA -keyalg RSA \
+            -dname CN="localhost" \
+            -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
+            cat >/opt/bitnami/elasticsearch/config/elasticsearch.yml <<EOF
+            cluster.name: "docker-cluster"
+            network.host: 0.0.0.0
+            node.store.allow_mmap: false
+            EOF
+
+            # Run the bitnami elasticsearch binary
+            sudo -E -u $ES_USER /opt/bitnami/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid
+            kill $(cat /tmp/elasticsearch.pid)
+
+  - name: ${{package.name}}-iamguarded
+    description: ElasticSearch for Iamguarded
+    dependencies:
+      provides:
+        - elasticsearch-iamguarded=${{package.full-version}}
+      runtime:
+        - bash # some helper scripts use bash
+        - busybox
+        - coreutils # eck operator init container runs date with iso format
+        - curl # eck operator init container does a health check
+        - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+        - merged-usrsbin
+        - openjdk-24-default-jdk
+        - posix-libc-utils # required for helm install
+        - wolfi-baselayout
+        - yq
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: elasticsearch
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/elasticsearch
+
+          # I know this is awful, but iamguarded init scripts do not like symlinks
+          cp -r ${{targets.destdir}}/usr/share/elasticsearch/* /opt/iamguarded/elasticsearch
+
+          mkdir -p /opt/iamguarded/elasticsearch/config.default
+          cp -r /opt/iamguarded/elasticsearch/config/* \
+            /opt/iamguarded/elasticsearch/config.default/
+
+          bash /opt/iamguarded/scripts/elasticsearch/postunpack.sh
+
+          # Set java home
+          sed -i 's|export JAVA_HOME=/opt/iamguarded/java|export JAVA_HOME=/usr/lib/jvm/java-24-openjdk|' /opt/iamguarded/scripts/elasticsearch/run.sh
+          sed -i 's|export ES_JAVA_HOME=/opt/iamguarded/java|export ES_JAVA_HOME=/usr/lib/jvm/java-24-openjdk|' /opt/iamguarded/scripts/elasticsearch/run.sh
+
+          # Set wide permissions
+          chmod -R 775 /opt/iamguarded/elasticsearch
+
+          # Remove non-iamguarded entrypoint script
+          rm /opt/iamguarded/elasticsearch/bin/docker-entrypoint.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for i in /opt/iamguarded/elasticsearch/bin/*; do
+            name=$(basename $i)
+            ln -sf /opt/iamguarded/elasticsearch/bin/$name ${{targets.contextdir}}/usr/bin/$name
+          done
+
+          mkdir -p /iamguarded/elasticsearch/data
+          mkdir -p /iamguarded/elasticsearch/plugins
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+      - uses: iamguarded/finalize-compat
+        with:
+          package: elasticsearch
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: elasticsearch
+              gid: 1000
+          users:
+            - username: elasticsearch
+              uid: 1000
+              gid: 1000
+          run-as: 0
+        contents:
+          packages:
+            - bash
+            - busybox
+            - coreutils
+            - sudo
+            - wolfi-base
+            - yq
+        environment:
+          ES_JAVA_HOME: /usr/lib/jvm/java-24-openjdk
+          ES_USER: elasticsearch
+          KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+          SHELL: /bin/bash
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: elasticsearch
+            version: ${{vars.major-version}}
+        - name: "Setup Elasticsearch configuration for Iamguarded"
+          runs: |
+            set -x
+
+            chown -R "${ES_USER}:${ES_USER}" /opt/iamguarded/elasticsearch
+
+            keytool -v -keystore /opt/iamguarded/elasticsearch/config/server.keystore \
+            -alias "localhost" \
+            -genkeypair \
+            -sigalg SHA512withRSA -keyalg RSA \
+            -dname CN="localhost" \
+            -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
+            cat >/opt/iamguarded/elasticsearch/config/elasticsearch.yml <<EOF
+            cluster.name: "docker-cluster"
+            network.host: 0.0.0.0
+            node.store.allow_mmap: false
+            EOF
+
+            # Run the iamguarded elasticsearch binary
+            sudo -E -u $ES_USER /opt/iamguarded/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid
+            kill $(cat /tmp/elasticsearch.pid)
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/elasticsearch
+    strip-prefix: v
+    tag-filter: v9.
+
+# This test is mostly commented out because elasticsearch requires changing kernel
+# settings to run properly. The host must run this command first:
+# ```
+# sysctl -w vm.max_map_count=262144
+# ```
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: elasticsearch
+          gid: 1000
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 1000
+      run-as: 0
+    contents:
+      packages:
+        - bash
+        - coreutils
+        - curl
+        - elasticsearch-config
+        - sudo
+    environment:
+      ES_JAVA_HOME: /usr/lib/jvm/java-24-openjdk
+      ES_USER: elasticsearch
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+      SHELL: /bin/bash
+  pipeline:
+    - name: "Check for LICENSE.txt"
+      runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
+    - name: "Setup Elasticsearch configuration"
+      runs: |
+        set -x
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
+        -alias "localhost" \
+        -genkeypair \
+        -sigalg SHA512withRSA -keyalg RSA \
+        -dname CN="localhost" \
+        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
+        cat >/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
+        cluster.name: "docker-cluster"
+        network.host: 0.0.0.0
+        node.store.allow_mmap: false
+        EOF
+
+        # Ignore the error, vm.max_map_count needs to be increased.
+        sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid
+
+        # # Reset the password
+        ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')
+        curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+        curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+            {
+              "name": "John Doe",
+              "age": 30,
+              "about": "I love to go rock climbing"
+            }' || exit 1
+        curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+
+        kill $(cat /tmp/elasticsearch.pid)

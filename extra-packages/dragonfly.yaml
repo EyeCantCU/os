@@ -1,0 +1,130 @@
+package:
+  name: dragonfly
+  version: "1.31.1"
+  epoch: 0
+  description: A modern replacement for Redis and Memcached
+  copyright:
+    - license: BUSL-1.1
+  resources:
+    cpu: 8
+    memory: 16Gi
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - bison
+      - boost-dev
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake-3
+      - libtool
+      - libunwind-dev
+      - liburing-dev
+      - libxml2-dev
+      - ninja
+      - openssl-dev
+      - patch
+      - python3
+      - zstd-dev
+  environment:
+    # https://github.com/wolfi-dev/os/issues/34075
+    CXXFLAGS: -fdelete-null-pointer-checks
+  accounts:
+    groups:
+      - groupname: dfly
+        gid: 10000
+    users:
+      - username: dfly
+        uid: 10000
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/dragonflydb/dragonfly
+      tag: v${{package.version}}
+      expected-commit: 49095cc9fdefb4c10f4a4982a10711cd2bba8d1c
+      recurse-submodules: true
+
+  - working-directory: helio
+    uses: patch
+    with:
+      patches: ../fix-build-force-to-use-system-liburing.patch
+
+  - runs: |
+      ./helio/blaze.sh -release
+
+  - runs: |
+      ninja -v -C build-opt dragonfly
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mv build-opt/dragonfly ${{targets.destdir}}/usr/bin
+
+  - uses: strip
+
+subpackages:
+  - name: dragonfly-oci-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mv tools/docker/entrypoint.sh ${{targets.subpkgdir}}/usr/bin
+          chmod +x ${{targets.subpkgdir}}/usr/bin/entrypoint.sh
+
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          mv tools/docker/healthcheck.sh ${{targets.subpkgdir}}/usr/local/bin
+          chmod +x ${{targets.subpkgdir}}/usr/local/bin/healthcheck.sh
+    dependencies:
+      runtime:
+        - busybox
+        - openssl
+        # needed for the healthcheck.sh script
+        - netcat-openbsd
+        - net-tools
+        - redis-cli
+        - redis-benchmark-7.2
+        - su-exec
+
+update:
+  enabled: true
+  github:
+    identifier: dragonflydb/dragonfly
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - dragonfly-oci-compat
+        - redis-cli
+  pipeline:
+    - name: "check --help output"
+      runs: |
+        dragonfly --help | grep "dragonfly: a modern in-memory store."
+    - name: "start dragonfly and check startup log"
+      uses: test/daemon-check-output
+      with:
+        start: dragonfly
+        timeout: 10
+        expected_output: |
+          Logs will be written to the first available of the following paths:
+    - name: "verify SET and GET using redis-cli"
+      runs: |
+        dragonfly --logtostderr &
+        DFLY_PID=$!
+        sleep 2
+
+        redis-cli SET foo bar
+        VALUE=$(redis-cli GET foo)
+
+        if [ "$VALUE" != "bar" ]; then
+          echo "Functional test failed: expected 'bar', got '$VALUE'"
+          kill $DFLY_PID
+          exit 1
+        fi
+
+        echo "Functional test passed: got '$VALUE'"
+        kill $DFLY_PID
