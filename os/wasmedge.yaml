@@ -1,0 +1,90 @@
+package:
+  name: wasmedge
+  version: 0.14.1
+  epoch: 5
+  description: WasmEdge is a lightweight, high-performance, and extensible WebAssembly runtime for cloud native, edge, and decentralized applications.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+
+vars:
+  llvm-vers: 19
+
+environment:
+  contents:
+    packages:
+      - boost
+      - boost-dev
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang-${{vars.llvm-vers}}
+      - cmake
+      - gcc-14-default
+      - libLLVM-${{vars.llvm-vers}}
+      - libxml2-dev
+      - llvm-${{vars.llvm-vers}}
+      - llvm-${{vars.llvm-vers}}-dev
+      - llvm-lld-${{vars.llvm-vers}}
+      - llvm-lld-${{vars.llvm-vers}}-dev
+      - llvm-lld-${{vars.llvm-vers}}-static
+      - rapidjson-dev
+      - samurai
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/WasmEdge/WasmEdge
+      tag: ${{package.version}}
+      expected-commit: 2900031c24f3c49ad3596244dba4c5723048c8ad
+
+  - uses: patch
+    with:
+      # The default cmake file doesn't find our build of llvm for some reason, this patch fixes it.
+      patches: llvm-include.patch
+
+  - runs: |
+      ln -s /usr/lib/llvm-19/lib/LLVMgold.so /usr/lib/ # I cannot convince ld to find this here
+      CC=clang CXX=clang++ cmake -B build -G Ninja \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DWASMEDGE_BUILD_TESTS=ON \
+        -DCMAKE_CXX_FLAGS="-Wno-error=unused-parameter -Wno-deprecated-declarations" \
+        -DLLVM_INCLUDE_DIRS="/usr/lib/llvm-${{vars.llvm-vers}}/include"
+      cmake --build build
+      DESTDIR="${{targets.destdir}}" cmake --install build
+
+subpackages:
+  - name: wasmedge-dev
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+update:
+  enabled: true
+  github:
+    identifier: WasmEdge/WasmEdge
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Verify WasmEdge installation
+      runs: |
+        wasmedge --version || exit 1
+    - name: WasmEdge Basic WebAssembly Execution
+      runs: |
+        wasm=$(cat <<'EOF'
+        0061736d0100000001070160027f7f017f030201000707010373756d00000a09010700200020016a0b
+        EOF
+        )
+        echo $wasm | xxd -r -p > sum.wasm
+        result=$(wasmedge --reactor sum.wasm sum 1 2)
+        if [ "$result" != "3" ]; then
+          echo "Test failed: Expected result 3, got $result"
+          exit 1
+        fi

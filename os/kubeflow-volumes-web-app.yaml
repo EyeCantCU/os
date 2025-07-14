@@ -1,0 +1,106 @@
+package:
+  name: kubeflow-volumes-web-app
+  version: "1.10.0"
+  epoch: 4
+  description: Kubeflow volumes web app component
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - py3-gunicorn
+      - py3-setuptools
+      - python3
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - nodejs-16
+      - npm
+      - openssl
+      - openssl-provider-legacy
+      - py3-pip
+      - py3-setuptools
+      - py3-wheel
+      - python3
+      - python3-dev
+      - wolfi-base
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubeflow/kubeflow
+      tag: v${{package.version}}
+      expected-commit: 90e987bf87d3e7c900926310b00bfa16b59e41eb
+
+  - uses: patch
+    with:
+      patches: upgrade-urllib3.patch upgrade-jinja2.patch
+
+  - runs: |
+      # Build the backend common libs into a wheel
+      cd components/crud-web-apps/common/backend
+      # Remove the version requirement on gevent. This was introduced in this PR: https://github.com/kubeflow/kubeflow/pull/7231/files
+      # The dependency was pinned due to a build issue on ppc64le: https://github.com/kubeflow/kubeflow/issues/7226
+      sed -i -E 's/gevent[^"]+/gevent/g' setup.py
+      python3 setup.py bdist_wheel
+      pip3 install . --prefix=/usr --root="${{targets.destdir}}"
+
+      # Upgrade requests to fix GHSA-9hjg-9r4m-mvj7
+      pip3 install --upgrade "requests>=2.32.4" --prefix=/usr --root="${{targets.destdir}}"
+
+      # Build the frontend common packages
+      cd ../frontend/kubeflow-common-lib
+      npm ci
+      npm run build
+
+      # Build the frontend and copy the common package into it
+      cd ../../../volumes/frontend
+      npm ci
+      mv ../../common/frontend/kubeflow-common-lib/dist/kubeflow node_modules/
+
+      # This usually uses node 12, but it works with this.
+      export NODE_OPTIONS=--openssl-legacy-provider
+      npm run build -- --output-path=./dist/default --configuration=production
+
+      # Now move it all into place
+      mkdir -p "${{targets.destdir}}/usr/share/kubeflow-volumes-web-app/"
+
+      # Move the backend
+      mv ../backend/apps "${{targets.destdir}}/usr/share/kubeflow-volumes-web-app/"
+      mv ../backend/entrypoint.py "${{targets.destdir}}/usr/share/kubeflow-volumes-web-app/"
+
+      # Move the frontend
+      mv ../frontend/dist/default "${{targets.destdir}}/usr/share/kubeflow-volumes-web-app/apps/default/static"
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: kubeflow/kubeflow
+    use-tag: true
+    # There were some malformed early tags
+    tag-filter: v1
+    strip-prefix: v
+
+test:
+  pipeline:
+    - runs: |
+        python3 -c "import urllib3"
+        python3 -c "import werkzeug"
+        flask --version
+        flask --help
+        normalizer --version
+        normalizer --help
+        pyrsa-decrypt --help
+        pyrsa-encrypt --help
+        pyrsa-keygen --help
+        pyrsa-priv2pub --help
+        pyrsa-sign --help
+        pyrsa-verify --help
+        wsdump --help
+    - uses: test/tw/ldd-check

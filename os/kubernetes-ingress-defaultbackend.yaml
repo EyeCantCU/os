@@ -1,0 +1,88 @@
+package:
+  name: kubernetes-ingress-defaultbackend
+  version: "1.36.1"
+  epoch: 0
+  description: "A simple web server that respond 404 common used in kubernetes ingress, serve pages 404 at root and 200 at /healthz"
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go
+      - wolfi-baselayout
+  environment:
+    CGO_ENABLED: 0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes/ingress-gce
+      tag: v${{package.version}}
+      expected-commit: 7ab241bd7f9461e9aea343dbe8c8ddaac30b2d3c
+
+  - uses: go/build
+    with:
+      packages: ./cmd/404-server
+      output: defaultbackend
+      vendor: true
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes/ingress-gce
+    use-tag: true
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+  pipeline:
+    - runs: |
+        defaultbackend --help
+    - name: Basic functional test for endpoints
+      runs: |
+        defaultbackend > /dev/null 2>&1 &
+        wait-for-it localhost:8080 -t 10
+        curl -LI --retry 5 http://localhost:8080/
+        curl -f -LI --retry 5 http://localhost:8080/healthz
+    - runs: |
+        defaultbackend > defaultbackend.log 2>&1 &
+
+        sleep 5
+
+        # Use a retry mechanism to check if the health endpoint is available
+        for i in $(seq 1 5); do
+          if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/healthz | grep -q "^200$"; then
+            echo "Server is up"
+            break
+          else
+            echo "Server not ready, retrying..."
+            sleep 2
+          fi
+          echo "The server did not return the expected 200"
+          exit 1
+        done
+    - name: Test that the expected 404 Response is returned
+      runs: |
+        defaultbackend > defaultbackend.log 2>&1 &
+
+        sleep 5
+
+        for i in $(seq 1 5); do
+          if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ | grep -q "^404$"; then
+            echo "Server returned the expected 404"
+            exit 0
+          else
+            echo "Server not ready, retrying..."
+            sleep 2
+          fi
+          echo "The server did not return the expected 404"
+          exit 1
+        done

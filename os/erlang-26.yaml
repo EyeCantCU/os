@@ -1,0 +1,104 @@
+package:
+  name: erlang-26
+  version: "26.2.5.13"
+  epoch: 0
+  description: General-purpose programming language and runtime environment
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      # mnesia depends on the ca-certificates bundle
+      - ca-certificates-bundle
+    provides:
+      - erlang=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - ncurses-dev
+      - openssl-dev
+      - perl-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/erlang/otp.git
+      tag: OTP-${{package.version}}
+      expected-commit: 0ac548b57c0491196c27e39518b5f6acf9326c1e
+
+  - runs: |
+      export CPPFLAGS="-D_BSD_SOURCE $CPPFLAGS"
+
+      ./otp_build autoconf
+      ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --mandir=/usr/share/man \
+        --infodir=/usr/share/info \
+        --host="$CHOST" \
+        --build="$CBUILD" \
+        --enable-threads \
+        --enable-shared-zlib \
+        --enable-ssl=dynamic-ssl-lib \
+        --enable-jit
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - runs: |
+      # Remove examples and test certificates to avoid false positives in security scans
+      find "${{targets.contextdir}}"/usr/lib/erlang -path "*/examples/*" -name "*.pem" -type f -exec rm -rf {} +
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: "headers for erlang"
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+      provides:
+        - erlang-dev=${{package.full-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: erlang/otp
+    strip-prefix: OTP-
+    use-tag: true
+    tag-filter: OTP-26
+
+test:
+  pipeline:
+    - runs: |
+        erl -eval 'erlang:display(erlang:system_info(otp_release)), halt().'  -noshell
+        ct_run --version
+        ct_run --help
+        dialyzer --version
+        dialyzer --help
+        erl --version
+        erl --help
+        erlc -v
+        typer --version
+        typer --help
+    - runs: |
+        cat <<EOF > "hello.erl"
+        -module(hello).
+        -export([hello_wolfi/0]).
+
+        hello_wolfi() -> io:fwrite("hello, wolfi\n").
+        EOF
+
+        erlc hello.erl
+
+        erl -noshell -pa . -eval "hello:hello_wolfi()." -s init stop
+    - uses: test/tw/ldd-check

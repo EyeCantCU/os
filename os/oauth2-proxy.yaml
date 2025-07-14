@@ -1,0 +1,99 @@
+package:
+  name: oauth2-proxy
+  version: "7.9.0"
+  epoch: 2
+  description: Reverse proxy and static file server that provides authentication using various providers to validate accounts by email, domain or group.
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go
+      - openssl
+      - wolfi-baselayout
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://github.com/oauth2-proxy/oauth2-proxy/archive/refs/tags/v${{package.version}}.tar.gz
+      expected-sha256: a9c5884c1366d7597a42cdcea9b3c16778d4866fb3bfee3077ec4b8cdd95443f
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
+
+  - uses: go/build
+    with:
+      packages: .
+      output: oauth2-proxy
+      ldflags: -X github.com/oauth2-proxy/oauth2-proxy/v7/pkg/version.Version=${{package.version}}
+
+  - runs: |
+      # Make sure there is at least an empty key file.
+      # This is useful for GCP App Engine custom runtime builds, because you cannot use multiline variables in their app.yaml, so you have to build the
+      # key into the container and then tell it where it is by setting OAUTH2_PROXY_JWT_KEY_FILE=/etc/ssl/private/jwt_signing_key.pem in app.yaml instead.
+      mkdir -p "${{targets.destdir}}/etc/ssl/private/"
+      touch "${{targets.destdir}}/etc/ssl/private/jwt_signing_key.pem"
+
+update:
+  enabled: true
+  github:
+    identifier: oauth2-proxy/oauth2-proxy
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - dex
+        - curl
+  pipeline:
+    - name: "Test static file serving"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cat <<EOF > dex.yaml
+          issuer: http://127.0.0.1:5556/dex
+
+          connectors:
+          - type: mockCallback
+            id: mock
+            name: Example
+
+          storage:
+            type: sqlite3
+            config:
+              file: dex.db
+
+          web:
+            http: 0.0.0.0:5556
+
+          staticClients:
+          - id: oauth2-proxy
+            redirectURIs:
+            - 'http://127.0.0.1:4180/oauth2/callback'
+            name: 'oauth2-proxy'
+            secret: proxy
+          EOF
+          dex serve dex.yaml > /dev/null 2>&1 &
+          sleep 10
+        start: |
+          oauth2-proxy --provider oidc \
+            --provider-display-name "My OIDC Provider" \
+            --client-id oauth2-proxy \
+            --client-secret proxy \
+            --redirect-url http://127.0.0.1:4180/oauth2/callback \
+            --oidc-issuer-url http://127.0.0.1:5556/dex \
+            --cookie-secure=false \
+            --cookie-secret=$(head -c 16 /dev/urandom | base64) \
+            --email-domain kilgore.trout \
+            --upstream file://$PWD/#/static/
+        timeout: 60
+        expected_output: "Performing OIDC Discovery..."
+        post: |
+          curl http://127.0.0.1:4180/static | grep -i "Authenticate using kilgore.trout"

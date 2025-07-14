@@ -1,0 +1,142 @@
+package:
+  name: druid
+  version: "33.0.0"
+  epoch: 5
+  description: Apache Druid is a high performance real-time analytics database.
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 8
+    memory: 16Gi
+  dependencies:
+    runtime:
+      - bash
+      - busybox
+      - openjdk-17-default-jvm
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - maven
+      - openjdk-17-default-jdk
+      - py3-pyyaml
+      - python3
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/druid.git
+      tag: druid-${{package.version}}
+      expected-commit: 84b59b984b69ebc34e0c971ad207b69384941c0b
+
+  - uses: maven/pombump
+
+  - uses: maven/pombump
+    with:
+      patch-file: extensions/druid-pac4j/pombump-deps.yaml
+      pom: extensions-core/druid-pac4j/pom.xml
+
+  - runs: |
+      mvn -B -ff -q \
+      install \
+      -Pdist,bundle-contrib-exts \
+      -Pskip-static-checks,skip-tests \
+      -Dmaven.javadoc.skip=true -T1C
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/java/druid
+      tar -zxf distribution/target/apache-druid-${{package.version}}-bin.tar.gz --strip-components=1 -C ${{targets.destdir}}/usr/share/java/druid
+
+  - runs: |
+      # deduplicate jars
+      distribution/docker/deduplicate_jars.sh ${{targets.destdir}}/usr/share/java/druid
+
+      # deduplicate_jars makes symlinks, which would be fine, but they're absolute.
+      # it is meant to be run from /, so adjust things for it.
+      ddir=${{targets.destdir}}
+      cd "$ddir"
+      tmpf=$(mktemp)
+      trap "rm -f $tmpf" EXIT
+      find usr/share/java/druid -name "*.jar" -type l > "$tmpf"
+      while read src ; do
+         dest=$(readlink "$src") || {
+           echo "failed to readlink on '$src'"
+           exit 1
+         }
+         case "$dest" in
+             $ddir/*) ndest="/${dest#$ddir/}";;
+             *) continue;;
+         esac
+         [ -f "./${ndest}" -o -L "./${ndest}" ] || {
+           echo "$src was dangling symlink to $dest"
+           exit 1
+         }
+         echo "adjusting $src from $dest to $ndest"
+         ln -sf "${ndest}" "$src" || {
+           echo "failed [$?] ln -sf $ndest $src"
+           exit 1
+         }
+      done <"$tmpf"
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to copy the entrypoint scripts"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}
+          cp distribution/docker/druid.sh ${{targets.subpkgdir}}/druid.sh
+          cp distribution/docker/peon.sh ${{targets.subpkgdir}}/peon.sh
+
+          mkdir -p ${{targets.subpkgdir}}/opt
+          ln -s /usr/share/java/druid ${{targets.subpkgdir}}/opt/druid
+    dependencies:
+      runtime:
+        - iproute2
+
+test:
+  environment:
+    contents:
+      packages:
+        - python3
+        - perl
+        - curl
+  pipeline:
+    - uses: test/daemon-check-output
+      with:
+        start: env DRUID_LOG_DIR=/tmp/druid-logs /usr/share/java/druid/bin/start-nano-quickstart
+        expected_output: |
+          Starting Apache Druid
+        post: |
+          if grep -q -r java.lang.NoClassDefFoundError /tmp/druid-logs; then
+            echo "FATAL: found java.lang.NoClassDefFoundError in logs"
+            exit 1
+          fi
+          set -- curl -L --fail http://localhost:8888/
+          n=0
+          rc=1
+          max=60
+          while [ $n -lt $max ] && n=$((n+1)); do
+            sleep 1
+            "$@" > stdout.log 2>stderr.log && rc=0 && break
+            echo "[$n/$max] curl http://localhost:8888/ returned $?"
+          done
+          [ $n -eq $max ] && {
+            echo "FATAL: gave up on http://localhost:8888/ after $max tries"
+            exit 1
+          }
+          echo "$* returned success after $n/$max tries"
+          grep -q "Apache Druid" stdout.log &&
+            echo "PASS: found Apache Druid in curl output" || {
+            echo "FATAL: output of '$*' did not contain \"Apache Druid\"";
+            exit 1;
+          }
+
+update:
+  enabled: true
+  github:
+    identifier: apache/druid
+    use-tag: true
+    tag-filter: druid-
+    strip-prefix: druid-

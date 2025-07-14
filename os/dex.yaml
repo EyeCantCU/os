@@ -1,0 +1,99 @@
+package:
+  name: dex
+  # When bumping the version check if the GHSA mitigations below can be removed.
+  version: "2.43.1"
+  epoch: 2
+  description: OpenID Connect (OIDC) identity and OAuth 2.0 provider with pluggable connectors
+  copyright:
+    - license: Apache-2.0
+  checks:
+    disabled:
+      - srv
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - go
+      - wolfi-baselayout
+
+pipeline:
+  # We can't use go/install because this requires a specific go version
+  - uses: git-checkout
+    with:
+      repository: https://github.com/dexidp/dex
+      tag: v${{package.version}}
+      expected-commit: 6e602d3315ea09d0cdeef6b51e61f2fd4ae52502
+      destination: dex
+
+  - runs: |
+      cd dex
+
+      # These build commands are adapted from the upstream `make release-binary` target.
+      export GOBIN="$GOPATH/bin"
+      LD_FLAGS="-w -X main.version=v${{package.version}} -extldflags \"-static\""
+
+      go build -o "$GOBIN/dex" -v -ldflags "$LD_FLAGS" ./cmd/dex
+      go build -o "$GOBIN/docker-entrypoint" -v -ldflags "$LD_FLAGS" ./cmd/docker-entrypoint
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mkdir -p ${{targets.destdir}}/srv/dex
+      mkdir -p ${{targets.destdir}}/etc/dex
+      mkdir -p ${{targets.destdir}}/var/dex
+
+      mv "$GOBIN/dex" ${{targets.destdir}}/usr/bin/
+      mv "$GOBIN/docker-entrypoint" ${{targets.destdir}}/usr/bin/
+      mv web ${{targets.destdir}}/srv/dex/
+      mv config.docker.yaml ${{targets.destdir}}/etc/dex/
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: dexidp/dex
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+  pipeline:
+    - runs: |
+        dex --help
+        dex version
+    - uses: test/daemon-check-output
+      with:
+        start: dex serve /etc/dex/config.docker.yaml
+        setup: |
+          cat > /etc/dex/config.docker.yaml << EOF
+          issuer: http://localhost:5556/dex
+          storage:
+            type: memory
+          web:
+            http: 0.0.0.0:5556
+          staticClients:
+            - id: example-app
+              redirectURIs: ["http://localhost:5555/callback"]
+              name: "Example App"
+              secret: ZXhhbXBsZS1hcHAtc2VjcmV0
+          connectors:
+            - type: mockCallback
+              id: mock
+              name: Example
+          oauth2:
+            skipApprovalScreen: true
+          EOF
+        timeout: 30
+        expected_output: |
+          msg="listening on" server=http address=0.0.0.0:5556
+          msg="keys rotated" next_rotation
+        post: |
+          wait-for-it localhost:5556 --timeout=60
+          curl -i http://localhost:5556/dex/healthz | grep -qi "ok"

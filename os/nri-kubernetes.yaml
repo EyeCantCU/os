@@ -1,0 +1,87 @@
+package:
+  name: nri-kubernetes
+  version: "3.43.1"
+  epoch: 0
+  description: New Relic integration for Kubernetes
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/newrelic/nri-kubernetes
+      tag: v${{package.version}}
+      expected-commit: 9d5fbaf825411eb7177238ac4d7c3bdb9c8b074f
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-viper/mapstructure/v2@v2.3.0
+
+  - uses: go/build
+    with:
+      packages: ./cmd/nri-kubernetes
+      output: nri-kubernetes
+      ldflags: |
+        -X main.integrationVersion="${{package.version}}"
+        -X main.gitCommit="$(git rev-parse HEAD)"
+        -X main.buildDate="$(date -d@$SOURCE_DATE_EPOCH +%Y%m%d-%H:%M:%S)"
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - python3
+  pipeline:
+    - name: "Set up mock metrics endpoint with request logging"
+      runs: |
+        mkdir -p /tmp/test-configs
+        # Start the metrics server in background
+        nohup python3 test_metrics_server.py > /tmp/metrics.log 2>&1 &
+        sleep 5
+    - name: "Create nri-kubernetes configuration"
+      runs: |
+        mkdir -p /etc/newrelic-infra/integrations.d
+        cp test-configs/nri-kubernetes.yml /etc/newrelic-infra/integrations.d/
+        cp test-configs/nri-kubernetes-config.yml /etc/newrelic-infra/
+    - name: "Test metrics endpoint and validate interaction"
+      runs: |
+        if curl -s http://localhost:8080/metrics | grep -q "test_metric"; then
+          echo "Mock metrics endpoint is accessible"
+        else
+          echo "Failed to access mock metrics endpoint"
+          cat /tmp/metrics.log
+          exit 1
+        fi
+
+        # Run nri-kubernetes
+        timeout 10 /usr/bin/nri-kubernetes --verbose > /dev/null 2>&1 &
+        NRIPID=$!
+        sleep 5
+
+        # Check if we received any requests
+        if [ -f /tmp/request.log ] && grep -q "/metrics" /tmp/request.log; then
+          echo "Verified: nri-kubernetes accessed the metrics endpoint"
+          echo "Request details:"
+          cat /tmp/request.log
+        else
+          echo "Error: No requests received from nri-kubernetes"
+          exit 1
+        fi
+
+update:
+  enabled: true
+  github:
+    identifier: newrelic/nri-kubernetes
+    strip-prefix: v
+    tag-filter: v
+    use-tag: true

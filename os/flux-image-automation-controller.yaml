@@ -1,0 +1,96 @@
+package:
+  name: flux-image-automation-controller
+  version: "0.41.2"
+  epoch: 1
+  description: GitOps Toolkit controller that patches container image tags in Git
+  copyright:
+    - license: Apache-2.0
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - clang-16
+      - gcc
+      - go
+      - lld-16
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: f80db5841c25bcbcb2a8f58e77a070326845d3d5
+      repository: https://github.com/fluxcd/image-automation-controller
+      tag: v${{package.version}}
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/usr/bin
+      CGO_ENABLED=1 CGO_LDFLAGS="-static -fuse-ld=lld" go build \
+        -ldflags "-w" \
+        -tags 'netgo,osusergo,static_build' \
+        -trimpath -o "${{targets.destdir}}"/usr/bin/image-automation-controller .
+
+subpackages:
+  - name: flux-image-automation-controller-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          # The upstream helm chart assumes the binary is in /.
+          ln -sf /usr/bin/image-automation-controller ${{targets.subpkgdir}}/usr/local/bin/image-automation-controller
+    dependencies:
+      runtime:
+        - flux-image-automation-controller
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    pipeline:
+      - runs: |
+          mkdir -p /opt/iamguarded/fluxcd-image-automation-controller/bin/
+          ln -sf /usr/bin/image-automation-controller /opt/iamguarded/fluxcd-image-automation-controller/bin/image-automation-controller
+      - uses: iamguarded/build-compat
+        with:
+          package: flux-image-automation-controller
+          version: ${{vars.major-version}}
+      - uses: iamguarded/finalize-compat
+        with:
+          package: flux-image-automation-controller
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - runs: |
+            stat /opt/iamguarded/fluxcd-image-automation-controller/bin/image-automation-controller
+        - uses: iamguarded/test-compat
+          with:
+            package: flux-image-automation-controller
+            version: ${{vars.major-version}}
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - api/
+  github:
+    identifier: fluxcd/image-automation-controller
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+  pipeline:
+    # the image-automation-controller when passing the -h flag exit with error code 2
+    - runs: |
+        set +e
+        image-automation-controller -h
+        if [ $? -ne 2 ]; then
+          echo "expected 2, got $?"
+          exit 1
+        fi

@@ -1,0 +1,120 @@
+package:
+  name: sqlite
+  version: "3.50.2"
+  epoch: 0
+  description: "C library which implements an SQL database engine"
+  copyright:
+    - license: blessing
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - readline-dev
+
+# ref: https://www.sqlite.org/download.html
+# For version 3.X.Y the filename encoding is 3XX0Y00.
+# 3.40.1 => 3400100 => https://www.sqlite.org/2022/sqlite-autoconf-3400100.tar.gz
+var-transforms:
+  - from: ${{package.version}}
+    # transform 3.47.0 to 3470000 and 3.47.2 to 3470200 and similarly
+    match: ^(\d+)\.(\d+)\.(\d+)$
+    # replace here is appending 0 minor version and then appending two more zeros after patch version.
+    replace: ${1}${2}0${3}00
+    to: sqlite-download-version
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://www.sqlite.org/2025/sqlite-autoconf-${{vars.sqlite-download-version}}.tar.gz
+      expected-sha256: 84a616ffd31738e4590b65babb3a9e1ef9370f3638e36db220ee0e73f8ad2156
+
+  - name: Configure
+    runs: |
+      _amalgamation="-DSQLITE_ENABLE_FTS4 \
+        -DSQLITE_ENABLE_FTS3_PARENTHESIS \
+        -DSQLITE_ENABLE_FTS3 \
+        -DSQLITE_ENABLE_FTS5 \
+        -DSQLITE_ENABLE_COLUMN_METADATA \
+        -DSQLITE_SECURE_DELETE \
+        -DSQLITE_ENABLE_UNLOCK_NOTIFY \
+        -DSQLITE_ENABLE_RTREE \
+        -DSQLITE_ENABLE_GEOPOLY \
+        -DSQLITE_USE_URI \
+        -DSQLITE_ENABLE_DBSTAT_VTAB \
+        -DSQLITE_MAX_VARIABLE_NUMBER=250000"
+      export CFLAGS="$CFLAGS $_amalgamation"
+
+      ./configure \
+         --host=${{host.triplet.gnu}} \
+         --prefix=/usr \
+         --soname=legacy \
+         --enable-threadsafe \
+         --enable-readline \
+         --enable-static \
+         --enable-load-extension \
+         --enable-fts3
+
+      make -j$(nproc) V=1
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+subpackages:
+  - name: "sqlite-dev"
+    description: "sqlite headers"
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - sqlite
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+  - name: "sqlite-doc"
+    description: "sqlite documentation"
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - name: "sqlite-libs"
+    description: "sqlite library"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr
+          mv "${{targets.destdir}}"/usr/lib "${{targets.subpkgdir}}"/usr/
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 4877
+
+test:
+  pipeline:
+    - name: "version check"
+      runs: |
+        sqlite3 --version
+        sqlite3 help
+    - name: "basic test"
+      runs: |
+        sqlite3 /tmp/test.db "CREATE TABLE test (id INT, name TEXT); INSERT INTO test VALUES (1, 'hello'); SELECT * FROM test;"
+        for i in $(seq 2 100); do
+          sqlite3 /tmp/test.db "INSERT INTO test VALUES ($i, '$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 13)');"
+        done
+        sqlite3 /tmp/test.db "SELECT * FROM test;"
+    - name: "more sqlite tests"
+      runs: |
+        sqlite3 -header -csv /tmp/test.db "SELECT * FROM test LIMIT 5;"
+        sqlite3 /tmp/test.db "SELECT * FROM test WHERE id > 50 LIMIT 5;"
+        sqlite3 /tmp/test.db ".schema"
+        sqlite3 /tmp/test.db "SELECT COUNT(*) FROM test;"

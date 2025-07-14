@@ -1,0 +1,139 @@
+package:
+  name: firefox
+  version: "140.0.4"
+  epoch: 0
+  description: Firefox web browser
+  copyright:
+    - license: GPL-3.0-only AND LGPL-2.1-only AND LGPL-3.0-only AND MPL-2.0
+  options:
+    # Firefox bundles libraries
+    no-provides: true
+  dependencies:
+    runtime:
+      - mesa
+      - mesa-glx
+      - pciutils-libs
+  resources:
+    cpu: 30
+    memory: 60Gi
+
+vars:
+  llvm-vers: 19
+
+environment:
+  contents:
+    packages:
+      - alsa-lib
+      - alsa-lib-dev
+      - bash
+      - build-base
+      - busybox
+      - cairo-dev
+      - cbindgen
+      - clang-${{vars.llvm-vers}}
+      - dbus-dev
+      - dbus-glib-dev
+      - dbus-libs
+      - expat-dev
+      - fribidi-dev
+      - glib-dev
+      - gnutar
+      - gtk-3
+      - gtk-3-dev
+      - harfbuzz-dev
+      - libice-dev
+      - libnotify-dev
+      - libsm-dev
+      - libxcomposite-dev
+      - libxcursor-dev
+      - libxdamage-dev
+      - libxfixes-dev
+      - libxft-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxtst-dev
+      - llvm-${{vars.llvm-vers}}
+      - llvm-lld-${{vars.llvm-vers}}
+      - m4
+      - nasm
+      - nodejs
+      - pango-dev
+      - pulseaudio-dev
+      - py3.11-pip # Matches Mach's recommended maximum Python version
+      - python-3.11-dev # (3.12 definitely didn't work at the time of setting this)
+      - rust
+      - wasi-sdk-libclang-rt-builtins
+      - wasi-sdk-sysroot
+      - wget
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://ftp.mozilla.org/pub/firefox/releases/${{package.version}}/source/firefox-${{package.version}}.source.tar.xz
+      expected-sha256: 4027beb34f43ce4da8c0053a1d740ec6a2e766dc8b700216316aa7adcc59e377
+
+  - runs: |
+      # Craft the name of the final distfile.
+      distfile="obj-${{cross.triplet.gnu.glibc}}/dist/firefox-${{package.version}}.en-US.linux-${{build.arch}}.tar.xz"
+
+      # Copy the library into the directory for the clang we're using currently
+      mkdir -p /usr/lib/clang/${{vars.llvm-vers}}/lib/wasi/
+      cp /usr/lib/clang/lib/wasi/libclang_rt.builtins-wasm32.a /usr/lib/clang/${{vars.llvm-vers}}/lib/wasi/
+
+      # The instructions (and what we used before), used bootstrap script,
+      # but the script does not work with wolfi, and does not really work
+      # with release repositories, so just extract what it does and do it
+      # manually.
+      # https://firefox-source-docs.mozilla.org/setup/linux_build.html
+
+      # Don't set CPPFLAGS, bootstrap only accepts a single flag
+      unset CPPFLAGS
+
+      # Answer y to all prompts, and use the application
+      # as browser to reduce any imcompatibilities with the build system. One
+      # might be able to switch this to 'browser_artifact_mode' that uses
+      # prebuilt artifacts.
+      # This fails because it does not love wolfi like we do, but keep on
+      # going.
+      set +x
+      ! ./mach --no-interactive bootstrap --application-choice browser
+      set -e
+
+      # Explicitly point to wasi-sysroot, so it picks up the wasi stuff.
+      # For some reason it does not pick it up by default? :shrug:
+      ./mach configure --with-wasi-sysroot=/usr/share/wasi-sysroot
+
+      # Well, alllrighty then, let's build...
+      ./mach build
+
+      # Assuming all goes well, package it up.
+      ./mach package
+      ./mach release
+
+      # Add some symlinks as other distros seem to do.
+      mkdir -p ${{targets.destdir}}/usr/lib
+      mkdir -p ${{targets.destdir}}/usr/bin
+      tar -xvf ${distfile} -C ${{targets.destdir}}/usr/lib
+      ln -s /usr/lib/firefox/firefox ${{targets.destdir}}/usr/bin/firefox
+      ln -s /usr/bin/firefox ${{targets.destdir}}/usr/bin/firefox-bin
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 5506
+
+test:
+  pipeline:
+    - runs: |
+        /usr/bin/firefox-bin --version
+        /usr/bin/firefox --version
+        # Just takes a screenshot of google.com.
+        /usr/bin/firefox-bin -screenshot https://www.google.com
+        firefox --version
+        firefox --help
+        firefox-bin --version
+        firefox-bin --help
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/usr/lib/firefox"

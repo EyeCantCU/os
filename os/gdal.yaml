@@ -1,0 +1,315 @@
+package:
+  name: gdal
+  version: "3.11.3"
+  epoch: 1
+  description: GDAL is an open source MIT licensed translator library for raster and vector geospatial data formats.
+  copyright:
+    - license: MIT
+  dependencies:
+    provider-priority: 0
+  resources:
+    # https://go/wolfi-rsc/gdal
+    cpu: 40
+    memory: 28Gi
+
+data:
+  - name: py-versions
+    items:
+      3.10: "310"
+      3.11: "311"
+      3.12: "312"
+      3.13: "313"
+
+environment:
+  environment:
+    # IMPORTANT NOTE: WE WANT TO BUILD WITH PYTHON NUMPY BINDINGS. GDAL_PYTHON_BINDINGS_WITHOUT_NUMPY ENV VARIABLE SHOULD ALWAYS BE SET TO "NO".
+    GDAL_PYTHON_BINDINGS_WITHOUT_NUMPY: "NO"
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+  contents:
+    packages:
+      - ant
+      - apache-arrow-dev
+      - armadillo-dev
+      - arpack-dev
+      - autoconf
+      - automake
+      - bash
+      - basisu-dev
+      - bison
+      - blosc-dev
+      - brunsli-dev
+      - build-base
+      - bzip2-dev
+      - ca-certificates-bundle
+      - cmake
+      - coreutils
+      - curl-dev
+      - dotnet-sdk
+      - expat-dev
+      - geos-dev
+      - giflib-dev
+      - glibc-iconv
+      - hdf5-dev
+      - imath-dev
+      - jsoncpp-dev
+      - lerc-dev
+      - libdeflate-dev
+      - libgeotiff-dev
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - libtirpc-dev
+      - libwebp-dev
+      - libxml2-dev
+      - lz4-dev
+      - mariadb-dev
+      - nlohmann-json
+      - odbc-cpp-wrapper-dev
+      - openblas-dev
+      - opencl-dev
+      - openexr-dev
+      - openjdk-17-default-jdk
+      - openjpeg-dev
+      - openssl-dev
+      - pcre2-dev
+      - poppler
+      - poppler-dev
+      - postgresql
+      - postgresql-17-dev
+      - postgresql-dev
+      - proj-dev
+      - py3-supported-numpy
+      - py3-supported-python
+      - py3-supported-python-dev
+      - py3-supported-setuptools
+      - qhull-dev
+      - sqlite-dev
+      - swig
+      - tiff-dev
+      - xz-dev
+      - zlib-dev
+      - zstd-dev
+      - zstd-static
+
+pipeline:
+  - uses: fetch
+    with:
+      expected-sha256: 54638f6990f84c16142d93c9daaafaf1eab0a6a61538162095c334de086ef91f
+      uri: https://github.com/OSGeo/gdal/releases/download/v${{package.version}}/gdal-${{package.version}}.tar.gz
+
+  # Prefer gdal's FindZSTD which chooses shared linking, rather than
+  # zstd-dev newly shipped cmake module. This preserves shared linking
+  # against zstd, like it was done by gdal prior to merge of zstd-dev
+  # and zstd-cmake.
+  - runs: |
+      rm -rf /usr/lib/cmake/zstd
+
+  - name: "Cleanup unimportant scripts"
+    runs: |
+      rm scripts/*.ps1 # Powershell - Windows
+      rm scripts/*.bat # Batch - Windows
+      rm scripts/detect_*.sh # Only used during building/developing
+      rm scripts/setdevenv.sh # Only used during building/developing
+      # Make sure the remaining ones are executable
+      chmod a+x scripts/*
+
+subpackages:
+  - range: py-versions
+    name: gdal-py${{range.key}}
+    description: ${{package.name}} for Python ${{range.key}}
+    dependencies:
+      provides:
+        - gdal
+      runtime:
+        - libpq
+        - libarrow
+        - giflib
+        - openexr-libopenexr
+        - imath
+        - hdf5
+        - libparquet
+        - libarrow_dataset
+        - openjpeg
+      provider-priority: ${{range.value}}
+    pipeline:
+      - uses: cmake/configure
+        with:
+          opts: |
+            -DPython_LOOKUP_VERSION=${{range.key}} \
+            -DPython_ROOT=/usr/lib/python${{range.key}} \
+            -DOGR_ENABLE_DRIVER_PG=ON \
+            -DOGR_ENABLE_DRIVER_PG_PLUGIN=ON \
+            -DPostgreSQL_INCLUDE_DIR=/usr/include \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGDAL_FIND_PACKAGE_PROJ_MODE=MODULE \
+            -DGDAL_USE_TIFF_INTERNAL=ON \
+            -DGDAL_USE_GEOTIFF_INTERNAL=ON \
+            -DBUILD_JAVA_BINDINGS=ON \
+            -DOGR_ENABLE_DRIVER_XODR_PLUGIN=TRUE \
+            -DGDAL_ENABLE_PLUGINS=ON \
+            -DBUILD_PYTHON_BINDINGS=ON \
+            -DBUILD_TESTING=OFF
+      - uses: cmake/build
+      - uses: cmake/install
+      - uses: strip
+      - runs: |
+          cmake \
+            --build output \
+            --target clean
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: "gdal"
+            real-pkg-name: "${{subpkg.name}}"
+
+  - range: py-versions
+    name: gdal-py${{range.key}}-dev
+    description: ${{package.name}}-dev for Python ${{range.key}}
+    dependencies:
+      provides:
+        - gdal-dev
+      provider-priority: ${{range.value}}
+    pipeline:
+      - uses: split/dev
+        with:
+          package: gdal-py${{range.key}}
+    test:
+      pipeline:
+        - runs: gdal-config --version
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: "gdal-dev"
+            real-pkg-name: "${{subpkg.name}}"
+
+  - range: py-versions
+    name: py${{range.key}}-gdal
+    description: ${{package.name}} installed for Python ${{range.key}}
+    dependencies:
+      provides:
+        - py3-gdal
+      provider-priority: ${{range.value}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/
+          mv ${{targets.outdir}}/gdal-py${{range.key}}/usr/lib/python3* ${{targets.contextdir}}/usr/lib/
+    test:
+      environment:
+        contents:
+          packages:
+            - py${{range.key}}-numpy
+      pipeline:
+        - runs: |
+            python${{range.key}} -c "from osgeo import gdal_array"
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: "py3-gdal"
+            real-pkg-name: "${{subpkg.name}}"
+
+  - name: py3-supported-gdal
+    description: Meta package providing ${{package.name}} for supported Python versions.
+    dependencies:
+      runtime:
+        - py3.10-gdal
+        - py3.11-gdal
+        - py3.12-gdal
+        - py3.13-gdal
+
+  - range: py-versions
+    name: gdal-tools-py${{range.key}}
+    description: ${{package.name}} tools for Python ${{range.key}}
+    dependencies:
+      provides:
+        - gdal-tools
+      provider-priority: ${{range.value}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv ${{targets.outdir}}/gdal-py${{range.key}}/usr/bin/* ${{targets.contextdir}}/usr/bin/
+          cp -r scripts/* ${{targets.contextdir}}/usr/bin/
+    test:
+      pipeline:
+        - runs: |
+            gdal_contour --help
+            gdal_create --version | grep ${{package.version}}
+            gdal_create --help
+            gdal_footprint --version | grep ${{package.version}}
+            gdal_footprint --help
+            gdal_grid --version | grep ${{package.version}}
+            gdal_grid --help
+            gdal_rasterize --version | grep ${{package.version}}
+            gdal_rasterize --help
+            gdal_translate --version | grep ${{package.version}}
+            gdal_translate --help
+            gdal_viewshed --version | grep ${{package.version}}
+            gdal_viewshed --help
+            gdaladdo --version | grep ${{package.version}}
+            gdaladdo --help
+            gdalbuildvrt --version | grep ${{package.version}}
+            gdalbuildvrt --help
+            gdaldem --help
+            gdalenhance --version | grep ${{package.version}}
+            gdalinfo --version
+            gdalinfo --help
+            gdallocationinfo --version | grep ${{package.version}}
+            gdalmanage --version
+            gdalmanage --help
+            gdalmdiminfo --version | grep ${{package.version}}
+            gdalmdiminfo --help
+            gdalmdimtranslate --version | grep ${{package.version}}
+            gdalmdimtranslate --help
+            gdalsrsinfo --version | grep ${{package.version}}
+            gdalsrsinfo --help
+            gdaltindex --version | grep ${{package.version}}
+            gdaltindex --help
+            gdaltransform --version | grep ${{package.version}}
+            gdaltransform --help
+            gdalwarp --version | grep ${{package.version}}
+            gdalwarp --help
+            gnmanalyse --version | grep ${{package.version}}
+            gnmmanage --version | grep ${{package.version}}
+            nearblack --version | grep ${{package.version}}
+            nearblack --help
+            ogr2ogr --version | grep ${{package.version}}
+            ogr2ogr --help
+            ogrinfo --version | grep ${{package.version}}
+            ogrinfo --help
+            ogrlineref --help
+            ogrtindex --help
+            sozip --version | grep ${{package.version}}
+            sozip --help
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: "gdal-tools"
+            real-pkg-name: "${{subpkg.name}}"
+
+  - range: py-versions
+    name: gdal-py${{range.key}}-doc
+    description: gdal-py${{range.key}} docs
+    pipeline:
+      - runs: |
+          mandir="${{targets.outdir}}/gdal-py${{range.key}}/usr/share/man"
+          targetdir="${{targets.contextdir}}/usr/share/man"
+          if [ -d "$mandir" ]; then
+            mkdir -p "$targetdir"
+            mv "$mandir"/* "$targetdir/"
+          fi
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 881
+
+test:
+  pipeline:
+    - uses: test/virtualpackage
+      with:
+        virtual-pkg-name: "gdal"

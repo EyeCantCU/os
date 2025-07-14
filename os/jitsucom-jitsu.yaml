@@ -1,0 +1,137 @@
+package:
+  name: jitsucom-jitsu
+  version: "2.10.0"
+  epoch: 2
+  description: Jitsu is an open-source Segment alternative. Fully-scriptable data ingestion engine for modern data teams. Set-up a real-time data pipeline in minutes, not days
+  copyright:
+    - license: MIT
+  target-architecture:
+    - x86_64
+  dependencies:
+    runtime:
+      - bash
+      - curl
+      - libvips
+      - netcat-openbsd
+      - nodejs-18
+      - openssl
+      - procps
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - esbuild
+      - gcc-12
+      - gcc-12-default
+      - jq
+      - make
+      - node-gyp
+      - nodejs-18
+      - npm
+      - openssl
+      - pnpm
+      - posix-libc-utils
+      - py3-setuptools
+      - python3
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 16f4c11814a0ce6f30af6166e71b60c60bf42682
+      repository: https://github.com/jitsucom/jitsu
+      tag: jitsu2-v${{package.version}}
+
+  - uses: patch
+    with:
+      patches: consolidated-cve-remedation.patch
+
+  - runs: |
+      # CVE-2025-30218, CVE-2025-49005
+      (cd webapps/console && npm pkg set dependencies.next=^15.3.3)
+      pnpm install -r --unsafe-perm
+      export NEXTJS_STANDALONE_BUILD=1
+
+      # Without this, we run into a strange error:
+      # "Module not found: Error: Can't resolve './build' in '/home/build/node_modules/.pnpm/zstd-napi@0.0.6/node_modules/zstd-napi'"
+      (cd $(find node_modules -type d -name zstd-napi -print -quit) && npm run-script build)
+
+      pnpm build
+
+subpackages:
+  - name: ${{package.name}}-console
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/app
+          mkdir -p ${{targets.contextdir}}/app/webapps
+          mkdir -p ${{targets.contextdir}}/app/webapps/console/public
+          mkdir -p ${{targets.contextdir}}/app/webapps/console/.next/static
+
+          npm -g install prisma@$(cat webapps/console/package.json | jq -r '.dependencies.prisma') -prefix ${{targets.contextdir}}/usr/local/
+
+          # Remove all callouts to "cron" since it is not being used here and causes breakage
+          # introduced in this commit: https://github.com/jitsucom/jitsu/commit/c9c781fa0f46414bc9fd63767c44e8010614dd5d#diff-ff5878f38438ed7c50e9ba556a4312ea11c93922c8eeb25f81dd102754d6221aR13
+          cat ./docker-start-console.sh | grep -v cron > ${{targets.contextdir}}/app/docker-start-console.sh
+          chmod +x ${{targets.contextdir}}/app/docker-start-console.sh
+
+          cp ./webapps/console/prisma/schema.prisma ${{targets.contextdir}}/app/
+          cp -r ./webapps/console/.next/standalone/* ${{targets.contextdir}}/app/
+
+          # remove esbuild which is build time dependency we don't need to ship it in the final package
+          rm -rf ${{targets.contextdir}}/app/node_modules/.pnpm/@esbuild+linux-x64@0.20.2
+          cp -r ./webapps/console/.next/static/* ${{targets.contextdir}}/app/webapps/console/.next/static
+          cp -r ./webapps/console/public/* ${{targets.contextdir}}/app/webapps/console/public
+
+          # remove musl deps that end up polluting our SCA-generated dependencies with unresolveable deps.
+          find ${{targets.contextdir}}/app/node_modules -type d -name '*musl*' -exec rm -rf {} + 2>/dev/null || true
+
+          # Remove any musl-related .node files
+          find ${{targets.contextdir}} -type f -name '*.node' -exec sh -c 'ldd "$1" 2>&1 | grep -q musl && rm -f "$1"' _ {} \; 2>/dev/null || true
+          find ${{targets.contextdir}} -type f -name '*.node' -exec sh -c 'ldd "$1" 2>&1 | grep -q libvips-cpp && rm -f "$1"' _ {} \; 2>/dev/null || true
+
+          # Remove musl shared libraries
+          find ${{targets.contextdir}} -type f -name '*musl*.so*' -delete
+    test:
+      pipeline:
+        - name: Verify runtime dependencies exist
+          runs: |
+            bash --version
+            node --version
+        - name: Verify image entrypoint exists
+          runs: |
+            [ -f /app/docker-start-console.sh ] || exit 1
+            [ -x /app/docker-start-console.sh ] || exit 1
+
+  - name: ${{package.name}}-rotor
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/app
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          cp -r ./services/rotor/dist/* ${{targets.contextdir}}/app/
+          cp docker-entrypoint.sh ${{targets.contextdir}}/usr/local/bin/docker-entrypoint.sh
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      environment:
+        contents:
+          packages:
+            - busybox
+            - nodejs-18
+      pipeline:
+        - name: Verify rotor service files
+          runs: |
+            # Check that rotor service files exist
+            [ -f /usr/local/bin/docker-entrypoint.sh ] || exit 1
+            [ -x /usr/local/bin/docker-entrypoint.sh ] || exit 1
+
+update:
+  enabled: true
+  github:
+    identifier: jitsucom/jitsu
+    strip-prefix: jitsu2-v

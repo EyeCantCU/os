@@ -1,0 +1,117 @@
+package:
+  name: flux-kustomize-controller
+  version: "1.6.1"
+  epoch: 0
+  description: The GitOps Toolkit Kustomize reconciler
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - git
+      - gnupg
+      - gnupg-gpgconf
+      - gnupg-utils
+      - gnupg-wks-client
+      - gpg
+      - gpg-agent
+      - gpg-wks-server
+      - gpgsm
+      - gpgv
+      - openssh-client
+      - tzdata
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go
+  environment:
+    CGO_ENABLED: "0"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 8ec4a6e91f5bb7c0e2faaee4eafde2e25e8c4778
+      repository: https://github.com/fluxcd/kustomize-controller
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      ldflags: -X main.Version=${{package.version}}
+      output: kustomize-controller
+      packages: .
+
+subpackages:
+  - name: ${{package.name}}-bitnami-compat
+    description: "compat package with bitnami/flux image"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/fluxcd-kustomize-controller/bin/
+          ln -sf /usr/bin/kustomize-controller ${{targets.contextdir}}/opt/bitnami/fluxcd-kustomize-controller/bin/kustomize-controller
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - ${{package.name}}
+      pipeline:
+        - uses: test/kwok/cluster
+        - name: "start ${{package.name}} and test"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl apply -f https://github.com/fluxcd/flux2/releases/latest/download/install.yaml
+              kubectl wait --for=condition=Ready nodes --all
+            start: /opt/bitnami/fluxcd-kustomize-controller/bin/kustomize-controller --health-addr :9441 --metrics-addr :8081 > /dev/null 2>&1
+            timeout: 30
+            expected_output: |
+              starting manager
+              kustomize.toolkit.fluxcd.io
+              Serving metrics server
+              Starting Controller
+              Starting workers
+            post: |
+              #!/bin/sh -e
+              set -o pipefail
+              curl -s localhost:8081/metrics  | grep rest_client_requests_total
+              curl -v localhost:9441/healthz 2>&1 | grep -i "200 OK"
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    pipeline:
+      - runs: |
+          mkdir -p /opt/iamguarded/fluxcd-kustomize-controller/bin/
+          ln -sf /usr/bin/kustomize-controller /opt/iamguarded/fluxcd-kustomize-controller/bin/kustomize-controller
+      - uses: iamguarded/build-compat
+        with:
+          package: flux-kustomize-controller
+          version: ${{vars.major-version}}
+      - uses: iamguarded/finalize-compat
+        with:
+          package: flux-kustomize-controller
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - runs: |
+            stat /opt/iamguarded/fluxcd-kustomize-controller/bin/kustomize-controller
+        - uses: iamguarded/test-compat
+          with:
+            package: flux-kustomize-controller
+            version: ${{vars.major-version}}
+
+update:
+  ignore-regex-patterns:
+    - api/
+  enabled: true
+  github:
+    identifier: fluxcd/kustomize-controller
+    strip-prefix: v
+    tag-filter: v
+    use-tag: true

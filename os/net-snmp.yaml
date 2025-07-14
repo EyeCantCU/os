@@ -1,0 +1,241 @@
+package:
+  name: net-snmp
+  version: 5.9.4
+  epoch: 40
+  description: Simple Network Management Protocol
+  copyright:
+    - license: Net-SNMP
+  dependencies:
+    runtime:
+      - merged-usrsbin
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - file
+      - linux-headers
+      - openssl-dev
+      - perl-dev
+      - perl-net-snmp
+      - perl-tk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/net-snmp/net-snmp.git
+      tag: v${{package.version}}
+      expected-commit: 7d38b8299e26708ee92c9fe1628e5a000bc23e17
+
+  - runs: |
+      export lt_cv_sys_max_cmd_len=8192
+
+      ./configure \
+      	--build=$CBUILD \
+      	--host=$CHOST \
+      	--prefix=/usr \
+      	--sbindir=/usr/bin \
+      	--sysconfdir=/etc \
+      	--mandir=/usr/share/man \
+      	--infodir=/usr/share/info \
+      	--with-default-snmp-version="3" \
+      	--with-sys-contact="root@unknown" \
+      	--with-sys-location="unknown" \
+      	--with-logfile="/var/log/net-snmpd.log" \
+      	--enable-ucd-snmp-compatibility \
+      	--with-persistent-directory="/var/lib/net-snmp" \
+      	--with-openssl \
+      	--enable-pic \
+      	--enable-ipv6 \
+      	--enable-shared \
+      	--enable-as-needed \
+      	--enable-blumenthal-aes \
+      	--with-perl-modules="INSTALLDIRS=vendor" \
+      	--disable-embedded-perl
+      # embedded-perl seems to create TEXTREL's
+      make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+subpackages:
+  - name: net-snmp-doc
+    pipeline:
+      - uses: split/manpages
+    description: net-snmp manpages
+    test:
+      pipeline:
+        - uses: test/docs
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: net-snmp-dev
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - net-snmp
+        - openssl-dev
+        - wolfi-baselayout
+    description: net-snmp dev
+    # TODO: https://github.com/chainguard-dev/melange/issues/944
+    options:
+      no-provides: true
+    test:
+      pipeline:
+        - runs: |
+            net-snmp-config --version
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+  - name: net-snmp-libs
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/snmp
+          mv "${{targets.destdir}}"/usr/lib/libnetsnmp.so.* "${{targets.subpkgdir}}"/usr/lib/
+          mv "${{targets.destdir}}"/usr/share/snmp/mibs "${{targets.subpkgdir}}"/usr/share/snmp/
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+    description: The NET-SNMP runtime client libraries
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: net-snmp-agent-libs
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib
+          mv "${{targets.destdir}}"/usr/lib/libnetsnmpagent*.so.* \
+          "${{targets.destdir}}"/usr/lib/libnetsnmphelpers*.so.* \
+          "${{targets.destdir}}"/usr/lib/libnetsnmpmibs*.so.* \
+          "${{targets.destdir}}"/usr/lib/libnetsnmptrapd*.so.* \
+          "${{targets.subpkgdir}}"/usr/lib/
+    description: The NET-SNMP runtime agent libraries
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: net-snmp-perl
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib \
+          "${{targets.subpkgdir}}"/usr/bin \
+          "${{targets.subpkgdir}}"/usr/share/snmp
+
+          mv "${{targets.destdir}}"/usr/bin/mib2c-update \
+          	"${{targets.destdir}}"/usr/bin/mib2c \
+          	"${{targets.destdir}}"/usr/bin/snmp-bridge-mib \
+          	"${{targets.destdir}}"/usr/bin/net-snmp-cert \
+          	"${{targets.destdir}}"/usr/bin/traptoemail \
+          	"${{targets.subpkgdir}}"/usr/bin/
+          mv "${{targets.destdir}}"/usr/lib/perl* "${{targets.subpkgdir}}"/usr/lib/
+          mv "${{targets.destdir}}"/usr/share/snmp/mib2c* \
+          	"${{targets.destdir}}"/usr/share/snmp/*.pl \
+          	"${{targets.subpkgdir}}"/usr/share/snmp/
+    description: The perl NET-SNMP module and the mib2c tool
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - runs: |
+            mib2c version
+            traptoemail -h
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: net-snmp-gui
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mv "${{targets.destdir}}"/usr/bin/tkmib "${{targets.subpkgdir}}"/usr/bin/
+    description: An interactive graphical MIB browser for SNMP
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - net-snmp-perl
+        - perl-tk
+        - wolfi-baselayout
+    test:
+      pipeline:
+        - runs: |
+            tkmib -h
+
+  - name: net-snmp-tools
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          for i in "${{targets.destdir}}"/usr/bin/*; do
+            case "${i##*/}" in
+              snmpd|snmptrapd) ;;
+              *) mv "$i" ${{targets.subpkgdir}}/usr/bin ;;
+            esac
+          done
+    description: Network management utilities using SNMP
+    test:
+      pipeline:
+        - runs: |
+            agentxtrap -h
+            encode_keychange -h
+            ipf-mod.pl --version
+            ipf-mod.pl --help
+            net-snmp-create-v3-user --version
+            net-snmp-create-v3-user --help
+            snmpbulkget --version
+            snmpbulkwalk --version
+            snmpconf -h
+            snmpdelta --version
+            snmpdf --version
+            snmpget --version
+            snmpgetnext --version
+            snmpinform --version
+            snmpnetstat --version
+            snmpping --version
+            snmpps --version
+            snmpset --version
+            snmpstatus --version
+            snmptable --version
+            snmptest --version
+            snmptrap --version
+            snmpusm --version
+            snmpvacm --version
+            snmpwalk --version
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - verfix
+  github:
+    identifier: net-snmp/net-snmp
+    strip-prefix: v
+    tag-filter-prefix: v
+    use-tag: true
+
+test:
+  pipeline:
+    # AUTOGENERATED
+    - runs: |
+        snmpd --version
+        snmptrapd --version
+        snmptrapd --help
+    - uses: test/tw/ldd-check

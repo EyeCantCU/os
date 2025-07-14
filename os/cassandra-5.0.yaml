@@ -1,0 +1,174 @@
+package:
+  name: cassandra-5.0
+  version: "5.0.4"
+  epoch: 1
+  description: Open Source NoSQL Database
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - curl
+      - jemalloc
+      - python-${{vars.py-version}} # needed for cqlsh
+    provides:
+      - cassandra=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+vars:
+  py-version: 3.11
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - ant
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go # for documentation generation
+      - openjdk-${{vars.java-version}}-default-jdk
+      - py${{vars.py-version}}-build
+      - py${{vars.py-version}}-cython-bin
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-setuptools
+      - python-${{vars.py-version}}-dev
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/cassandra
+      expected-commit: b81163b04b1d99036730ff233595d7bfb88611d1
+      tag: cassandra-${{package.version}}
+
+  - uses: patch
+    with:
+      patches: fix-doc-build.patch
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      pom: ./.build/parent-pom-template.xml
+
+  - runs: |
+      ant -Drat.skip=true artifacts -Dversion=${{package.version}}
+
+      # Install cassandra from the tarball in build/dist into the destdir in /usr/share/java/cassandra
+      mkdir -p "${{targets.destdir}}"/usr/share/java/cassandra
+      tar --strip-components 1 -C "${{targets.destdir}}"/usr/share/java/cassandra -xzf build/apache-cassandra-${{package.version}}-bin.tar.gz
+
+      # Symlink everything in the cassandra bin directory into /usr/bin
+      mkdir -p "${{targets.destdir}}"/usr/bin/
+
+      for f in /home/build/build/dist/bin/*; do
+        filename=$(basename "$f")
+        ln -sf  /usr/share/java/cassandra/bin/"$filename" "${{targets.destdir}}"/usr/bin/"$filename"
+      done
+
+      mkdir -p ${{targets.destdir}}/var/lib/cassandra
+      mkdir -p ${{targets.destdir}}/var/log/cassandra
+
+      ln -sT /var/lib/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/data
+      ln -sT /var/log/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/logs
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - cassandra-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc
+          ln -sf /opt/cassandra/conf ${{targets.subpkgdir}}/etc/cassandra
+          mkdir -p ${{targets.subpkgdir}}/opt
+          ln -sf /usr/share/java/cassandra ${{targets.subpkgdir}}/opt/cassandra
+
+  - name: cqlsh-${{vars.major-minor-version}}
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-cassandra-driver
+        - py${{vars.py-version}}-wcwidth
+      provides:
+        - cqlsh=${{package.full-version}}
+    pipeline:
+      - name: "Install python module"
+        working-directory: pylib
+        uses: py/pip-build-install
+        with:
+          python: python${{vars.py-version}}
+      - name: "Install cqlsh executable"
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          cp ./bin/cqlsh.py ${{targets.contextdir}}/usr/bin/cqlsh
+          python=python${{vars.py-version}}
+          sed -i "1s,.*,#!/usr/bin/$python,g" ${{targets.contextdir}}/usr/bin/cqlsh
+          head -n 1 ${{targets.contextdir}}/usr/bin/cqlsh
+    test:
+      pipeline:
+        - runs: |
+            cqlsh --version
+
+update:
+  enabled: true
+  github:
+    identifier: apache/cassandra
+    use-tag: true
+    tag-filter-prefix: cassandra-5.0
+    strip-prefix: cassandra-
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - coreutils
+        - procps
+        - shadow
+        - ${{package.name}}-compat
+        - openjdk-${{vars.java-version}}-default-jvm
+    environment:
+      LANG: en_US.UTF-8
+      CASSANDRA_HOME: /opt/cassandra
+      CASSANDRA_CONF: /opt/cassandra/conf
+      CASSANDRA_LOGS_DIR: /opt/cassandra/logs
+      PATH: /usr/sbin:/sbin:/usr/bin:/bin:/opt/cassandra/bin/
+  pipeline:
+    - runs: |
+        cqlsh --help
+        cqlsh.py --version
+        cqlsh.py --help
+        stop-server -h
+    - name: "Test Cassandra server startup"
+      uses: test/daemon-check-output
+      with:
+        start: |
+          cassandra -R -f
+        timeout: 120
+        expected_output: |
+          Startup complete
+        post: |
+          # Basic connectivity test
+          nodetool status | grep -q "UN"
+
+          # Run CQL operations
+          cqlsh -e "CREATE KEYSPACE IF NOT EXISTS test_ks
+            WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};"
+
+          cqlsh -e "CREATE TABLE IF NOT EXISTS test_ks.test_table
+            (id uuid PRIMARY KEY, value text);"
+
+          cqlsh -e "INSERT INTO test_ks.test_table (id, value)
+            VALUES (uuid(), 'test_value');"
+
+          # Verify data
+          cqlsh -e "SELECT value FROM test_ks.test_table;" | grep -q "test_value"
+
+          # Check node tools
+          nodetool info | grep -q "Native Transport active"

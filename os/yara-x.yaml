@@ -1,0 +1,82 @@
+package:
+  name: yara-x
+  version: "1.4.0"
+  epoch: 0
+  description: "A rewrite of YARA in Rust."
+  copyright:
+    - license: BSD-3-Clause
+  resources:
+    memory: 6Gi
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - ca-certificates-bundle
+      - cargo-c
+      - gcc-14-default
+      - openssl-dev
+      - perl
+      - rust
+      - wolfi-base
+  environment:
+    RUSTFLAGS: "-C opt-level=3"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/VirusTotal/yara-x
+      expected-commit: dc1b5bd78c989a79e230072505be5595e984d152
+      tag: v${{package.version}}
+
+  - uses: rust/cargobump
+
+  - name: Build base yara tool
+    uses: cargo/build
+    with:
+      output: yr
+
+  - runs: |
+      cargo cinstall -p yara-x-capi --features=native-code-serialization --release --prefix=${{targets.destdir}}/usr --pkgconfigdir=${{targets.destdir}}/usr/lib/pkgconfig --includedir=${{targets.destdir}}/usr/include --libdir=${{targets.destdir}}/usr/lib --manifest-path capi/Cargo.toml
+
+      # this is required because the yara_x_capi.pc will end up with /home/build/melange-out/yara-x each of the paths
+      # this causes an issue during install and when attempting to build using the library api.
+      # this just removes that path from the file
+      sed -i 's|/home/build/melange-out/yara-x||g' ${{targets.destdir}}/usr/lib/pkgconfig/yara_x_capi.pc
+
+update:
+  enabled: true
+  github:
+    identifier: VirusTotal/yara-x
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - gcc-14-default
+        - git
+        - glibc-dev
+        - go
+        - pkgconf-dev
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/pkgconf
+    - runs: |
+        cat <<EOF > test.c
+        #include <yara_x.h>
+        int main() {
+            YRX_RULES* rules;
+            yrx_compile("rule dummy { condition: true }", &rules);
+            yrx_rules_destroy(rules);
+        }
+        EOF
+
+        gcc test.c `pkg-config --cflags yara_x_capi` -o test `pkg-config --libs yara_x_capi`
+    - runs: |
+        yr --help
+        yr --version | grep ${{package.version}}
+    - runs: |
+        git clone https://github.com/chainguard-dev/malcontent.git
+        cd malcontent
+        time -v go run cmd/mal/mal.go --min-risk critical --min-file-risk critical scan yr /usr

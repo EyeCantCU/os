@@ -1,0 +1,175 @@
+package:
+  name: kubeflow-pipelines-visualization-server
+  version: "2.5.0"
+  epoch: 4
+  description: Machine Learning Pipelines for Kubeflow
+  copyright:
+    - license: Apache-2.0
+  target-architecture:
+    - x86_64 # Since tensorflow-data-validation is not available for aarch64 yet
+  dependencies:
+    runtime:
+      - py${{vars.py-version}}-google-cloud-sdk
+      - py${{vars.py-version}}-packaging
+      - py${{vars.py-version}}-typing-extensions
+      - python-${{vars.py-version}}
+
+vars:
+  py-version: 3.11
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - ca-certificates-bundle
+      - py${{vars.py-version}}-build-base-dev
+      - py${{vars.py-version}}-crcmod
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-pip-tools-bin
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubeflow/pipelines
+      tag: ${{package.version}}
+      expected-commit: d07cf1c7f9bd163091986de9bb723c4078c498b1
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/app
+      cp -r backend/src/apiserver/visualization/* ${{targets.destdir}}/usr/share/app/
+      cd ${{targets.destdir}}/usr/share/app/
+
+      # Reset and regenerate requirements.txt from our modified-requirements.in
+      # Necessary to properly (and more easily) patch CVEs and resolve build failures
+      rm requirements.txt
+      pip-compile --output-file=requirements.txt --resolver=backtracking /home/build/modified-requirements.in
+
+      # To avoid file collisions during test/install time, list all Python packages that are already installed by system apks,
+      # and filter requirements.txt to remove any packages that are already present.
+
+      python3.11 -c "import pkg_resources; print('\n'.join(sorted([p.project_name.replace('_', '-').lower() for p in pkg_resources.working_set])))" > /tmp/python-installed.txt
+      grep -vFf /tmp/python-installed.txt requirements.txt > requirements.filtered.txt
+      mv requirements.filtered.txt requirements.txt
+
+      # May be helpful in debugging transitive dependency changes
+      cat requirements.txt
+
+      pip install --root=${{targets.destdir}} --prefix=/usr --root-user-action ignore -r requirements.txt
+      find ${{targets.destdir}} -name "*.pyc" -exec rm -rf '{}' +
+
+      # Ensure we use the hotfix (see modified-requirements.in)
+      sed -i '1 i\import pyarrow_hotfix' server.py
+
+  - uses: strip
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - "sdk-"
+  github:
+    identifier: kubeflow/pipelines
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - bash
+        - py${{vars.py-version}}-typing-extensions
+  pipeline:
+    - runs: |
+        #!/bin/bash
+        set -x
+
+        # start the server
+        export HOME=/usr/share/app
+        cd $HOME
+        /usr/bin/python server.py > /dev/null 2>&1 &
+        sleep 5
+
+        # simulate the upstream unit test suite: https://github.com/kubeflow/pipelines/blob/master/backend/src/apiserver/visualization/test_server.py
+
+        BASE_URL="http://localhost:8888"
+
+        # Function to print error message and exit on failure
+        exit_on_failure() {
+          echo "$1" # Print error message
+          exit 1    # Exit with error status
+        }
+
+        # Function to perform a curl request and check the expected status
+        do_test() {
+          local url=$1
+          local method=$2
+          local data=$3
+          local expected_status=$4
+
+          if [ "$method" = "POST" ]; then
+            response=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$url" --data "$data")
+          else
+            response=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$url")
+          fi
+
+          if [ "$response" != "$expected_status" ]; then
+            exit_on_failure "Test failed at $url. Expected HTTP status $expected_status, got $response."
+          fi
+        }
+
+        # Test: healthcheck
+        do_test "${BASE_URL}/" "GET" "" "200"
+
+        # Test: create_visualization_fails_when_nothing_is_provided
+        do_test "${BASE_URL}/" "POST" "" "400"
+
+        # Test: create_visualization_fails_when_missing_type
+        do_test "${BASE_URL}/" "POST" "source=gs://ml-pipeline/data.csv" "400"
+
+        # Test: create_visualization_fails_when_missing_source
+        do_test "${BASE_URL}/" "POST" "type=test" "400"
+
+        # Test: create_visualization_passes_when_missing_source_and_type_is_custom
+        do_test "${BASE_URL}/" "POST" "type=custom" "200"
+
+        # Test: create_visualization_fails_when_invalid_json_is_provided
+        do_test "${BASE_URL}/" "POST" "type=test&source=gs://ml-pipeline/data.csv&arguments={" "400"
+
+        # Test: create_visualization
+        do_test "${BASE_URL}/" "POST" "type=test&source=gs://ml-pipeline/data.csv" "200"
+
+        echo "All tests passed."
+        ipython --version
+        ipython --help
+        ipython3 --version
+        ipython3 --help
+        jupyter --version
+        jupyter --help
+        jupyter-kernel --version
+        jupyter-kernel --help
+        jupyter-kernelspec --version
+        jupyter-kernelspec --help
+        jupyter-migrate --version
+        jupyter-migrate --help
+        jupyter-nbconvert --version
+        jupyter-nbconvert --help
+        jupyter-run --version
+        jupyter-run --help
+        jupyter-troubleshoot --version
+        jupyter-troubleshoot --help
+        jupyter-trust --version
+        jupyter-trust --help
+        markdown_py --version
+        markdown_py --help
+        normalizer --version
+        normalizer --help
+        pygmentize -V
+        pygmentize --help
+        pyrsa-decrypt --help
+        pyrsa-encrypt --help
+        pyrsa-keygen --help
+        pyrsa-priv2pub --help
+        pyrsa-sign --help
+        pyrsa-verify --help
+        tf_upgrade_v2 --help
+        tflite_convert --help
+        toco --help
+        toco_from_protos --help
