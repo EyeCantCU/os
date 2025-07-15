@@ -1,0 +1,106 @@
+package:
+  name: consul-1.18
+  version: 1.18.2
+  epoch: 38
+  description: Consul is a distributed, highly available, and data center aware solution to connect and configure applications across dynamic, distributed infrastructure.
+  copyright:
+    - license: BUSL-1.1
+  dependencies:
+    provides:
+      - consul=${{package.full-version}}
+    runtime:
+      - merged-bin
+      - wolfi-baselayout
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/hashicorp/consul
+      tag: v${{package.version}}
+      expected-commit: 9fc827caf808b6ef1dc8c0748c3c4dce95d5b33a
+      destination: ${{package.name}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/hashicorp/go-retryablehttp@v0.7.7
+        github.com/go-jose/go-jose/v3@v3.0.4
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/oauth2@v0.27.0
+        github.com/golang-jwt/jwt/v4@v4.5.2
+        golang.org/x/net@v0.38.0
+      modroot: consul-1.18
+
+  - working-directory: ${{package.name}}
+    pipeline:
+      - runs: |
+          make linux
+      - runs: |
+          mkdir -p ${{targets.destdir}}/usr/bin
+
+          # The docker-entrypoint.sh expects the binary to be in /bin so put it there
+          # Post usrmerge, binaries in /usr/bin will appear in /bin too
+          mv ./pkg/bin/linux_*/consul ${{targets.destdir}}/usr/bin/consul
+      - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mv ${{package.name}}/.release/docker/docker-entrypoint.sh "${{targets.subpkgdir}}/usr/bin/"
+    dependencies:
+      provides:
+        - consul-oci-entrypoint=${{package.full-version}}
+      runtime:
+        - busybox
+        - consul-${{vars.major-minor-version}}
+        - dumb-init
+        - libcap-utils
+        - merged-bin
+        - su-exec
+        - wolfi-baselayout
+    test:
+      pipeline:
+        - name: "Verify entrypoint file by executing consul for version check"
+          runs: CONSUL_DISABLE_PERM_MGMT=1 /usr/bin/docker-entrypoint.sh --version | grep ${{package.version}}
+
+  - name: ${{package.name}}-oci-entrypoint-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -s /usr/bin/docker-entrypoint.sh "${{targets.subpkgdir}}/usr/local/bin/"
+    dependencies:
+      provides:
+        - consul-oci-entrypoint-compat=${{package.full-version}}
+      runtime:
+        - consul-${{vars.major-minor-version}}-oci-entrypoint
+        - merged-bin
+        - wolfi-baselayout
+    test:
+      pipeline:
+        - name: "Verify symlink exists"
+          runs: test -L /usr/local/bin/docker-entrypoint.sh
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v1.18.
+
+test:
+  pipeline:
+    - runs: consul --version | grep ${{package.version}}

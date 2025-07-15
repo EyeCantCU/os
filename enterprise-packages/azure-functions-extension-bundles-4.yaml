@@ -1,0 +1,104 @@
+package:
+  name: azure-functions-extension-bundles-4
+  version: "4.24.1"
+  epoch: 1
+  description: Several Azure Function extensions bundled in the same package to provide non-.NET function apps the ability to reference and use Azure Function extension packages written in C#.
+  target-architecture:
+    - x86_64
+  copyright:
+    - license: MIT
+    - license: Apache-2.0
+    - license: BSD-3-Clause
+    - license: BSD-2-Clause
+    - license: Zlib
+    - license: GPL-2.0
+    - license: MPL-2.0
+    - license: Intel
+    - license: PROPRIETARY # Proprietary is https://www.nuget.org/packages/Microsoft.Data.SqlClient.SNI/6.0.2/License for Microsoft.Data.SqlClient.SNI nuget package runtime dependency, and https://github.com/confluentinc/librdkafka/blob/c024ac13daf98667de2b8724986e97f489644c15/LICENSES.txt#L89 and https://github.com/confluentinc/librdkafka/blob/c024ac13daf98667de2b8724986e97f489644c15/LICENSES.txt#L494 for librdkafka library runtime dependency
+  dependencies:
+    runtime:
+      - cyrus-sasl
+      - libstdc++
+
+environment:
+  environment:
+    # Microsoft build process checks this variable to package the bundle for release.
+    BUILD_BUILDID: "Wolfi"
+  contents:
+    packages:
+      - azure-functions-templates
+      - bash
+      - busybox
+      - dotnet-8-sdk
+      - patchelf
+      - wget
+      - zip
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Azure/azure-functions-extension-bundles.git
+      tag: ${{package.version}}
+      expected-commit: 397bf65cf764050bb5864d56045c10095353f8de
+
+  - name: Enable bundles build on linux
+    uses: patch
+    with:
+      patches: ./enable_linux_build.patch
+
+  - name: Retrieve the necessary templates into build folder
+    runs: |
+      mkdir -p ./templatesArtifacts
+      mv /usr/share/templates/ExtensionBundle.v4.Templates.4.0.1.zip ./templatesArtifacts/
+
+  - working-directory: /home/build/build
+    pipeline:
+      - name: Build the bundles
+        runs: |
+          dotnet run skip:PackageNetCoreV3Bundle,PackageNetCoreV3BundlesWindows,CreateRUPackage,CreateCDNStoragePackage,CreateCDNStoragePackageWindows,CreateCDNStoragePackageLinux,BuildBundleBinariesForWindows,PackageBundle,PackageBundlesWindows,GenerateVulnerabilityReport,RunVulnerabilityReport
+
+  - name: Install the bundles
+    runs: |
+      mkdir -p "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle
+      mv build_temp/Microsoft.Azure.Functions.ExtensionBundle."${{package.version}}"_linux-x64 "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"
+      find "${{targets.destdir}}"/FuncExtensionBundles/ -type f -exec chmod 644 {} \;
+      # Remove unnecessary binaries
+      rm -rf "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin/runtimes/linux-arm64
+      rm -rf "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin/runtimes/osx*
+      rm -rf "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin/runtimes/win*
+      rm "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin/runtimes/linux-x64/native/alpine-librdkafka.so
+      rm "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin/runtimes/linux-x64/native/centos*
+      rm "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin_v3/linux-x64/alpine-librdkafka.so
+      rm "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin_v3/linux-x64/centos*
+      # librdkafka.so requires an older version of libsasl2, which we do not support
+      # librdkafka comes from the confluent.kafka transitive dependency (from azure-functions-kafka-extension)
+      # bumping the confluent.kafka in azure-functions-kafka-extension breaks the build, since the code is meant to run on 2.4.0
+      # decided to patch the elf to point to the newer version of libsasl
+      patchelf --replace-needed libsasl2.so.2 libsasl2.so.3 "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin/runtimes/linux-x64/native/librdkafka.so
+      patchelf --replace-needed libsasl2.so.2 libsasl2.so.3 "${{targets.destdir}}"/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/"${{package.version}}"/bin_v3/linux-x64/librdkafka.so
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '-Preview'
+  github:
+    identifier: Azure/azure-functions-extension-bundles
+    use-tag: true
+    tag-filter-prefix: 4.
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Check extension bundles exist
+      runs: |
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/bundle.json
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/extensions.csproj
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/bin/extensions.dll
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/bin/extensions.json
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/bin/extensions.pdb
+    - name: Check bundle templates exist
+      runs: |
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/StaticContent/v1/templates/templates.json
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/StaticContent/v2/templates/templates.json
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/StaticContent/v1/bindings/bindings.json
+        test -f /FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle/${{package.version}}/StaticContent/v2/bindings/userPrompts.json

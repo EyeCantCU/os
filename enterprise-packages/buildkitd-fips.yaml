@@ -1,0 +1,93 @@
+package:
+  name: buildkitd-fips
+  version: "0.23.2"
+  description: "concurrent, cache-efficient, and Dockerfile-agnostic builder toolkit"
+  epoch: 0
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - buildctl-fips
+      - runc-fips
+    provides:
+      - buildkit-fips=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go-fips
+      - libseccomp-dev
+      - libseccomp-static
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/moby/buildkit
+      tag: v${{package.version}}
+      expected-commit: 40b2ede0ac0a37030f9959b4a28e9c6c8ea036e7
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      modroot: .
+      packages: ./cmd/buildkitd
+      tags: osusergo,netgo,static_build,seccomp
+      output: buildkitd
+      ldflags: |
+        -X github.com/moby/buildkit/version.Version=${{package.version}}
+        -X github.com/moby/buildkit/version.Revision=r${{package.epoch}}
+        -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      modroot: .
+      packages: ./cmd/buildctl
+      output: buildctl
+      ldflags: |
+        -X github.com/moby/buildkit/version.Version=${{package.version}}
+        -X github.com/moby/buildkit/version.Revision=r${{package.epoch}}
+        -X github.com/moby/buildkit/version.Package=github.com/moby/buildkit
+
+  - runs: |
+      cp ./examples/buildctl-daemonless/buildctl-daemonless.sh ${{targets.destdir}}/usr/bin/ # https://github.com/moby/buildkit/blob/4c93208b9db9f8936b17c33bc93d19fc1bbf5266/Dockerfile#L152
+
+subpackages:
+  - name: buildctl-fips
+    description: "buildkit client"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mv ${{targets.destdir}}/usr/bin/buildctl ${{targets.subpkgdir}}/usr/bin/buildctl
+    test:
+      pipeline:
+        - runs: |
+            buildctl --version
+            buildctl --help
+
+update:
+  enabled: true
+  github:
+    identifier: moby/buildkit
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        if [ -n "$XDG_RUNTIME_DIR" ]; then
+            buildctl-daemonless.sh --version
+            buildctl-daemonless.sh --help
+        fi
+        buildkitd --version
+        buildkitd --help
+    - name: "start daemon"
+      uses: test/daemon-check-output
+      with:
+        start: "/usr/bin/buildkitd"
+        timeout: 60
+        expected_output: |
+          running server

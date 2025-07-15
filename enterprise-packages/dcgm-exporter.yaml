@@ -1,0 +1,76 @@
+package:
+  name: dcgm-exporter
+  version: "4.2.3.4.2.0"
+  epoch: 0
+  description: NVIDIA GPU metrics exporter for Prometheus leveraging DCGM
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - DCGM
+
+environment:
+  contents:
+    packages:
+      - libcap-utils
+  environment:
+    # See https://github.com/wolfi-dev/os/issues/34568
+    GCC_SPEC_FILE: /home/build/openssf.spec
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '^(\d+).(\d+).(\d+).(\d+).(\d+).(\d+)$'
+    replace: '$1.$2.$3-$4.$5.$6'
+    to: mangled-package-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 9378144a2febda0c61f80130fbd11d69ff98e7b6
+      repository: https://github.com/NVIDIA/dcgm-exporter
+      tag: ${{vars.mangled-package-version}}
+
+  - runs: |
+      gccdir="$(GCC_SPEC_FILE=/dev/null gcc --print-search-dirs | grep ^install: | cut -d' ' -f2)"
+      sed -r 's/-z now//' < "$gccdir/openssf.spec" > /home/build/openssf.spec
+
+  - runs: |
+      make generate update-version
+
+  - uses: go/build
+    with:
+      ldflags: -X main.BuildVersion=${{vars.mangled-package-version}}
+      output: dcgm-exporter
+      packages: ./cmd/dcgm-exporter
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/etc
+      cp -r etc ${{targets.contextdir}}/etc/dcgm-exporter
+
+subpackages:
+  - name: ${{package.name}}-privileged
+    description: "entrypoint compat package for dcgm-exporter"
+    dependencies:
+      replaces:
+        - ${{package.name}}
+    options:
+      no-depends: true
+      no-provides: true
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          cp ${{targets.destdir}}/usr/bin/dcgm-exporter ${{targets.contextdir}}/usr/bin/dcgm-exporter
+          # this avoids need of shipping shell utils entrypoint etc.
+          setcap cap_sys_admin=+ep ${{targets.contextdir}}/usr/bin/dcgm-exporter
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/dcgm-exporter
+  version-transform:
+    - match: ^(\d+(\.\d+)*)-(\d+(\.\d+)*)$
+      replace: ${1}.${3}
+
+test:
+  pipeline:
+    - runs: stat /usr/bin/dcgm-exporter

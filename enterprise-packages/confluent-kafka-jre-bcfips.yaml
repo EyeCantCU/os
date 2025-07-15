@@ -1,0 +1,177 @@
+# NOTE: This is a Java application which appears to support FIPS, and we've done
+# everything we can to configure it accordingly. However, similar to Apache
+# kafka, it still requires disabling 'approved' mode. For that reason, and for
+# such cases, we don't use -fips in the package name, instead referring to it as
+# an image with the bcfips jre installed.
+# This was requested for a custom image for c3.ai, but we've had interest from
+# other prospects. This is essentially the same as 'kafka-jre-bcfips', but
+# builds the confluent variation.
+#nolint:git-checkout-must-use-github-updates
+package:
+  name: confluent-kafka-jre-bcfips
+  # Upstream versioning is too weird that we need to work-around it.
+  # Release Monitor returns the latest version as `7.7.0-314-ccs` format:
+  # https://release-monitoring.org/api/v2/versions/?project_id=371656
+  # In order to make the `update:` section happy:
+  # 1. We need to transform it by replacing the last `-` with `.` to match
+  # with the `version:` field.
+  # 2. Created a new variable `mangled-package-version` to append `-ccs` to the
+  # version.
+  version: "8.2.0.10"
+  epoch: 0
+  description: Community edition of Confluent Kafka.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash # Required by kafka - uses shebangs to launch the image.
+      - busybox
+      - confluent-common-docker
+      - confluent-common-docker-ub
+      - confluent-common-docker-base
+      - confluent-docker-utils
+      - confluent-kafka-images-kafka
+      - openjdk-17-default-jvm-bcfips
+      - openjdk-17-jre-bcfips
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - gradle
+      - openjdk-17
+      - sbt
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+    LANG: en_US.UTF-8
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '\.(\d+)$'
+    replace: "-$1-ccs"
+    to: mangled-package-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: edd6def80be8a8f82c5c949c638a8d634016ae0d
+      repository: https://github.com/confluentinc/kafka
+      tag: v${{vars.mangled-package-version}}
+
+  - uses: patch
+    with:
+      patches: CVE-2025-48734.patch
+
+  - runs: |
+      export JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF8
+
+      gradle clean releaseTarGz
+
+      nohup /usr/lib/kafka/bin/zookeeper-server-start.sh /usr/lib/kafka/config/zookeeper.properties > ${{targets.destdir}}/usr/lib/kafka/logs/zookeeper.out 2> zookeeper.err < /dev/null &
+      tar -xzvf core/build/distributions/kafka_*-${{vars.mangled-package-version}}.tgz
+
+      mkdir -p ${{targets.destdir}}/usr/lib/kafka/logs
+      mkdir -p ${{targets.destdir}}/etc/kafka
+      mkdir -p ${{targets.destdir}}/var/lib/kafka/data
+
+      mv kafka_*-${{vars.mangled-package-version}}/bin ${{targets.destdir}}/usr/lib/kafka
+      mv kafka_*-${{vars.mangled-package-version}}/libs ${{targets.destdir}}/usr/lib/kafka
+      mv kafka_*-${{vars.mangled-package-version}}/config ${{targets.destdir}}/usr/lib/kafka
+
+      # Install required runtime scripts
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for file in $(find ./bin -type f -exec grep -lE '^#!(/usr/bin/env |/bin/)' {} \;); do
+        filename=$(basename "$f")
+        install -D -m755 "$file" ${{targets.destdir}}/usr/bin/"$filename"
+      done
+
+      # Create a symlink for the kafka libs since upstream images expect it to be in /usr/share/java/kafka:
+      # https://github.com/confluentinc/kafka/blob/b66558da5d6b33c2fba9f424131575b948e6f611/bin/kafka-run-class.sh#L197
+      mkdir -p ${{targets.destdir}}/usr/share/java/kafka
+      # ln -sf /usr/lib/kafka/libs/* ${{targets.destdir}}/usr/share/java/kafka/
+
+      # symlink every file in /usr/lib/kafka/libs to /usr/share/java/kafka
+      for file in "${{targets.destdir}}"/usr/lib/kafka/libs/*; do
+        ln -sf /usr/lib/kafka/libs/$(basename $file) ${{targets.destdir}}/usr/share/java/kafka/$(basename $file)
+      done
+
+      # /etc/confluent/docker/ensure runs kafka-storage whereas upstream only provides kafka-storage.sh for some reason.
+      echo "#!/usr/bin/env bash" > ${{targets.destdir}}/usr/bin/kafka-storage
+      echo "exec \"\$0.sh\" \"\$@\"" >> ${{targets.destdir}}/usr/bin/kafka-storage
+      chmod +x ${{targets.destdir}}/usr/bin/kafka-storage
+
+      # Clean up windows
+      rm -rf ${{targets.destdir}}/usr/lib/kafka/bin/*.bat
+
+      # Load bcfips
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/lib/kafka/libs/
+
+      # Also load bcfips into /usr/share/java/kafka since kafka-run-class.sh looks for it there.
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/java/kafka/
+
+      # Disable FIPS approved only mode
+      mv java.security ${{targets.destdir}}/usr/lib/kafka/config/
+
+test:
+  environment:
+    environment:
+      LANG: en_US.UTF-8
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+      KAFKA_LOG4J_OPTS: "-Dlog4j2.configurationFile=file:/usr/lib/kafka/config/tools-log4j2.yaml"
+  pipeline:
+    - runs: |
+        cd /usr/lib/kafka
+
+        # Configure KRaft storage to initialize cluster metadata
+        bin/kafka-storage.sh format --config config/server.properties --cluster-id $(bin/kafka-storage.sh random-uuid) --standalone
+
+        # Start Kafka
+        nohup bin/kafka-server-start.sh config/server.properties > /dev/null 2>&1 &
+        KAFKA_PID=$!
+        sleep 5
+
+        TOPIC_NAME="test-topic"
+        PARTITIONS=1
+        REPLICATION_FACTOR=1
+
+        # Create a Kafka topic
+        bin/kafka-topics.sh --create --topic "${TOPIC_NAME}" --partitions "${PARTITIONS}" --replication-factor "${REPLICATION_FACTOR}" --if-not-exists --bootstrap-server localhost:9092
+
+        # Produce a test message
+        echo "Hello Kafka" | bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}"
+
+        # Consume the message
+        consumed_message=$(timeout 10 bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}" --from-beginning --max-messages 1)
+
+        # Verify the message
+        if [[ "${consumed_message}" == "Hello Kafka" ]]; then
+          echo "Successfully produced and consumed a test message."
+        else
+          echo "Failed to verify the consumed message."
+        fi
+
+        # Clean up the test topic
+        bin/kafka-topics.sh --delete --topic "${TOPIC_NAME}" --bootstrap-server localhost:9092
+
+        # Kill Kafka
+        kill "${KAFKA_PID}"
+
+# Need to use Git poller as confluent blocks GitHub API requests from GH runners
+update:
+  enabled: true
+  schedule:
+    period: daily
+    reason: Confluent Kafka cut a high number of tags every day.
+  git:
+    strip-prefix: v
+    strip-suffix: -ccs
+  ignore-regex-patterns:
+    - -rc.* # Not a release
+    - -incubating-candidate.* # Not a release
+    - fetch # Random bad tag
+    - show # Random bad tag
+  version-transform:
+    - match: ^(\d+\.\d+\.\d+)\-(\d+)$
+      replace: $1.$2

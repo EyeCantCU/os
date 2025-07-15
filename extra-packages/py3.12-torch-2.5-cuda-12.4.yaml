@@ -1,0 +1,160 @@
+package:
+  name: py3.12-torch-2.5-cuda-12.4
+  version: 2.5.1
+  epoch: 4
+  description: Tensors and Dynamic neural networks in Python with strong GPU acceleration
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  resources:
+    cpu: 64
+    memory: 192Gi
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      - cuda-toolkit-${{vars.cuda-version}}
+      # For some reason this isn't detected
+      - libgomp
+      - nvidia-cudnn-9-cuda-12
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+      - openmp-17
+      - py3.12-astunparse
+      - py3.12-filelock
+      - py3.12-fsspec
+      - py3.12-jinja2
+      - py3.12-markupsafe
+      - py3.12-mpmath
+      - py3.12-networkx
+      - py3.12-numpy
+      - py3.12-pyyaml
+      - py3.12-requests
+      - py3.12-setuptools
+      - py3.12-sympy
+      - py3.12-typing-extensions
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.(\d+)$'
+    replace: 'cu$1$2'
+    to: cuda-pyvariant
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake-3
+      - coreutils
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - gcc-12-default
+      - git
+      - glibc-dev
+      - libffi-dev
+      - libgomp
+      - libjpeg-dev
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvidia-cudnn-9-cuda-12-dev
+      # Cuda
+      - nvidia-driver
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - openmp-17-dev
+      - openssl-dev
+      - patchelf
+      - posix-libc-utils
+      - py3.12-astunparse
+      - py3.12-build
+      - py3.12-installer
+      - py3.12-numpy
+      - py3.12-pip
+      - py3.12-pyyaml
+      - py3.12-requests
+      - py3.12-setuptools
+      - py3.12-typing-extensions
+      - py3.12-wheel
+      - python-3.12
+      - python-3.12-dev
+      - samurai
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pytorch/pytorch.git
+      tag: v${{package.version}}
+      expected-commit: a8d6afb511a69687bbb2b7e88a3cf67917e1697e
+      recurse-submodules: true
+
+  - uses: patch
+    with:
+      patches: cstdint.patch pytorch-2.4-remove-cmake-ninja.patch
+
+  - name: Python Build
+    runs: |
+      export PYTORCH_BUILD_VERSION="${{package.version}}+${{vars.cuda-pyvariant}}"
+      export PYTORCH_BUILD_NUMBER=0
+      export CC=/usr/bin/gcc-12
+      export CXX=/usr/bin/g++-12
+      export CUDA_HOME=/usr/local/cuda-12.4
+      export CUDA_NVCC_EXECUTABLE=/usr/local/cuda-12.4/bin/nvcc
+      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin"
+      export CMAKE_CUDA_ARCHITECTURES=all
+      export USE_CUDA=1
+      export USE_CUDNN=1
+      export USE_SYSTEM_NCCL=1
+      export NCCL_LIB_DIR=/usr/lib
+      export NCCL_INCLUDE_DIR=/usr/include
+      export CUDNN_HOME="/usr/local/cudnn-9"
+      export CUDNN_LIBRARY="/usr/local/cudnn-9/lib64"
+      export CUDNN_INCLUDE_DIR="/usr/local/cudnn-9/include"
+      export TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
+      export TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
+      export CUDA_VERSION="${{vars.cuda-version}}"
+      export MAX_JOBS="$(nproc --ignore=2)"
+
+      # see pytorch doc on GLIBCXX_USE_CXX11_ABI at
+      # https://github.com/pytorch/pytorch/blob/b4b1480b0634a5fb7e116053464301d192e2583a/README.md?plain=1#L236
+      # and https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_dual_abi.html
+      export _GLIBCXX_USE_CXX11_ABI=1
+
+      # Disable some warnings
+      export CFLAGS="$CFLAGS -Wno-error=nonnull -Wno-nonnull"
+      export CXXFLAGS="$CXXFLAGS -Wno-error=nonnull -Wno-nonnull"
+
+      python3.12 -m build --no-isolation
+      python3.12 -m pip install --verbose \
+        --no-index --no-build-isolation --no-deps \
+        --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/*.whl
+      sitepkgd=$(python3.12 -c 'import site; print(site.getsitepackages()[0])')
+      python3.12 -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
+
+update:
+  enabled: true
+  github:
+    identifier: pytorch/pytorch
+    strip-prefix: v
+    tag-filter: v2.5.
+
+test:
+  environment:
+    environment:
+      CUDNN_HOME: "/usr/local/cudnn-9"
+      CUDA_HOME: "/usr/local/cuda-${{vars.cuda-version}"
+  pipeline:
+    - uses: python/import
+      with:
+        python: python3.12
+        import: torch

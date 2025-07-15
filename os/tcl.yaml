@@ -1,0 +1,114 @@
+package:
+  name: tcl
+  version: "9.0.2"
+  epoch: 0
+  description: The Tcl scripting language
+  copyright:
+    - license: TCL
+  dependencies:
+    runtime:
+      - sqlite-libs
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - sqlite-dev
+      - tzdata
+      - zip
+      - zlib-dev
+
+pipeline:
+  - uses: fetch
+    with:
+      expected-sha256: e074c6a8d9ba2cddf914ba97b6677a552d7a52a3ca102924389a05ccb249b520
+      uri: https://downloads.sourceforge.net/project/tcl/Tcl/${{package.version}}/tcl${{package.version}}-src.tar.gz
+
+  - uses: patch
+    with:
+      patches: include_stdint.patch
+
+  - uses: autoconf/configure
+    with:
+      dir: unix
+      opts: |
+        --host=${{host.triplet.gnu}} \
+        --build=${{host.triplet.gnu}} \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --mandir=/usr/share/man \
+        --localstatedir=/var \
+        --with-system-sqlite \
+        --enable-64bit
+
+  - uses: autoconf/make
+    with:
+      dir: unix
+
+  - runs: |
+      cd unix
+      # export LD_LIBRARY_PATH="$_builddir"
+      make INSTALL_ROOT=${{targets.destdir}} install install-private-headers
+
+      export TCL_VERSION=${{package.version}}
+
+      ln -sf tclsh${TCL_VERSION%.*} ${{targets.destdir}}/usr/bin/tclsh
+      install -Dm644 ../license.terms ${{targets.destdir}}/usr/share/licenses/tcl/LICENSE
+      chmod u+w ${{targets.destdir}}/usr/lib/libtcl${TCL_VERSION%.*}.so
+
+      # tclsh requires a number of files to be in place, copied over from the
+      # libraries directory. Otherwise core functionality will not work.
+      mkdir -p ${{targets.destdir}}/usr/library
+      cp -r ../library/*.tcl ${{targets.destdir}}/usr/library
+
+  - uses: strip
+
+subpackages:
+  - name: tcl-doc
+    pipeline:
+      - uses: split/manpages
+    description: tcl manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - name: tcl-dev
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - tcl
+        - tzdata
+    description: tcl dev
+    test:
+      pipeline:
+        - uses: test/pkgconf
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 4941
+
+test:
+  pipeline:
+    - name: "Return and validate version"
+      runs: |
+        # tclsh does not respond to a --version from the command line. This is
+        # a work-around: https://stackoverflow.com/questions/9200108/get-the-version-of-tcl-from-the-command-line
+        ACTUAL_VERSION=$(echo 'puts [info patchlevel];exit 0' | tclsh)
+
+        if [ "$ACTUAL_VERSION" != ${{package.version}} ]; then
+            echo "Error: Tcl version is $ACTUAL_VERSION, expected ${{package.version}}"
+            exit 1
+        fi
+    - name: "Check tclsh can execute a basic command"
+      runs: |
+        if ! tclsh -c 'puts "Hello, Tcl!"; exit 0'; then
+            echo "Error: tclsh failed to execute a basic command"
+            exit 1
+        fi
+    - uses: test/tw/ldd-check

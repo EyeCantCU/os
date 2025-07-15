@@ -1,0 +1,129 @@
+package:
+  name: zookeeper-fips-3.9
+  version: "3.9.4.0"
+  epoch: 0
+  description: Distributed, highly available, robust, fault-tolerant system for distributed coordination
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash # some helper scripts use bash
+      - bcfips-policy-140-3-j17
+      - openjdk-17-default-jvm
+      - openssl-config-fipshardened
+      - xmlstarlet
+    provides:
+      - zookeeper-fips=${{package.full-version}}
+      - ${{package.name}}-policy-140-3=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: \.(\d+)$
+    replace: "-$1"
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: short-package-version
+
+environment:
+  contents:
+    packages:
+      - bcfips-policy-140-3-j17
+      - bouncycastle-fips~2.1
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - maven
+      - openjdk-17-default-jdk
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/zookeeper
+      tag: release-${{vars.mangled-package-version}}
+      expected-commit: ad204864b54c7660b176a4cacc26e9d757d2b552
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+      pom: pom.xml
+
+  - runs: |
+      # Patch commons-io version GHSA-78wr-2p64-hpwj/CVE-2024-47554
+      # -Dcommons-io.version=2.14.0 moved from 2.11.0 https://github.com/apache/zookeeper/blob/release-3.9.2/pom.xml#L574C5-L574C52
+      mvn install -DskipTests -Dnetty.version=4.1.118.Final -Dcommons-io.version=2.14.0
+      tar -xf zookeeper-assembly/target/apache-zookeeper-${{vars.short-package-version}}-bin.tar.gz
+
+      # Cleanup Windows files
+      rm -rf apache-zookeeper-${{vars.short-package-version}}-bin/bin/*.cmd
+
+      # Install Zookeeper
+      mkdir -p ${{targets.destdir}}/usr/share/java/zookeeper
+      mv apache-zookeeper-${{vars.short-package-version}}-bin/lib ${{targets.destdir}}/usr/share/java/zookeeper/
+      mv apache-zookeeper-${{vars.short-package-version}}-bin/bin ${{targets.destdir}}/usr/share/java/zookeeper/
+      mv apache-zookeeper-${{vars.short-package-version}}-bin/conf ${{targets.destdir}}/usr/share/java/zookeeper/
+
+      # Load bcfips
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/java/zookeeper/lib/
+
+      # Needed for the test to be able to run
+      chmod 733 ${{targets.destdir}}/usr/share/java/zookeeper/conf
+      chmod 755 ${{targets.destdir}}/usr/share/java/zookeeper/bin
+
+test:
+  environment:
+    contents:
+      packages:
+        - uuidgen
+    environment:
+      LANG: en_US.UTF-8
+      JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS"
+      ZK_HOME: "/usr/share/java/zookeeper"
+  pipeline:
+    - runs: |
+        # Go to installed dir
+        cd "${ZK_HOME}"
+
+        # Use sample config
+        cp conf/zoo_sample.cfg conf/zoo.cfg
+
+        # Start Zookeeper
+        bin/zkServer.sh start-foreground &
+
+        # Grab PID
+        ZOOKEEPER_PID=$!
+
+        # Start the CLI and check output
+        bin/zkCli.sh | grep "Welcome to ZooKeeper!"
+
+        # Create a node
+        bin/zkCli.sh create /test-$(uuidgen) '$(uuidgen)'
+
+        # Kill Zookeeper
+        kill "${ZOOKEEPER_PID}"
+    - runs: |
+        # Installing openjdk-17-default-jvm currently overwrites some files in
+        # openjdk-17, breaking javac execution which is required by
+        # java-fips/algorithms; fix the package here (ignoring spurious
+        # permissions errors), and check javac executes
+        apk fix openjdk-17 || false
+        /usr/lib/jvm/java-17-openjdk/bin/javac --version
+    - uses: java-fips/algorithms
+      with:
+        java-version: 17
+
+update:
+  enabled: true
+  version-transform:
+    - match: ^(\d+)\.(\d+)\.(\d+)-(\d+)$
+      replace: $1.$2.$3.$4
+  github:
+    tag-filter: release-3.9
+    identifier: apache/zookeeper
+    strip-prefix: release-
+    use-tag: true

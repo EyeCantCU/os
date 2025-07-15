@@ -1,0 +1,82 @@
+package:
+  name: management-api-for-apache-cassandra-4.0
+  version: "0.1.105"
+  epoch: 0
+  description: RESTful / Secure Management Sidecar for Apache Cassandra
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - merged-bin
+      - procps
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - maven
+      - openjdk-11-default-jdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/k8ssandra/management-api-for-apache-cassandra
+      expected-commit: 996babcfdfccb40786c16dbb142ce024c43c80ee
+      tag: v${{package.version}}
+
+  # We can't (currently), use pombump, as this repo places license info as code comments,
+  # embedded in the pom.xml files. pombump currently isn't able to handle this.
+  - uses: patch
+    with:
+      patches: |
+        20250519-consolidated-cve-patches.patch
+
+  - runs: |
+      MAAC_PATH="${{targets.destdir}}"/opt/management-api
+      mkdir -p "${{targets.destdir}}"/usr/local/bin
+      mkdir -p "${{targets.destdir}}"/opt/management-api
+      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+      mvn -q -ff package -Dskip.surefire.tests -DskipTests -DskipOpenApi
+
+      cp ./cassandra/scripts/docker-entrypoint.sh "${{targets.destdir}}"/usr/local/bin/
+      find . -type f -name "datastax-*.jar" -exec mv -t $MAAC_PATH -i '{}' +
+      chmod +x "${{targets.destdir}}"/usr/local/bin/docker-entrypoint.sh
+
+subpackages:
+  - name: management-api-for-apache-cassandra-4.0-compat
+    options:
+      # This package only contains symlinks, we don't want it to introduce any
+      # new depends as a result of chasing those symlinks.
+      no-depends: true
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/opt/management-api
+          ln -s /opt/management-api/datastax-mgmtapi-agent-4.x-0.1.0-SNAPSHOT.jar ${{targets.subpkgdir}}/opt/management-api/datastax-mgmtapi-agent.jar
+          ln -s /opt/management-api/datastax-mgmtapi-server-0.1.0-SNAPSHOT.jar ${{targets.subpkgdir}}/opt/management-api/datastax-mgmtapi-server.jar
+          ln -sf /usr/local/bin/docker-entrypoint.sh ${{targets.subpkgdir}}/docker-entrypoint.sh
+    test:
+      pipeline:
+        - runs: |
+            which --help
+    dependencies:
+      runtime:
+        - merged-bin
+        - wolfi-baselayout
+
+update:
+  enabled: true
+  github:
+    identifier: k8ssandra/management-api-for-apache-cassandra
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - management-api-for-apache-cassandra-compat
+        - openjdk-11-default-jvm
+  pipeline:
+    - runs: |
+        java -jar /opt/management-api/datastax-mgmtapi-server.jar --help

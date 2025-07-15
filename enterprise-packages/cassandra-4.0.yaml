@@ -1,0 +1,91 @@
+package:
+  name: cassandra-4.0
+  version: "4.0.18"
+  epoch: 2
+  description: Open Source NoSQL Database
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - curl # required by application
+      - jemalloc
+      - python-${{vars.py-version}} # needed for cqlsh
+    provides:
+      - cassandra=${{package.full-version}}
+
+vars:
+  py-version: 3.11
+  java-version: 11
+
+environment:
+  contents:
+    packages:
+      - ant
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - openjdk-${{vars.java-version}}-default-jdk
+      - python-${{vars.py-version}}
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    CASSANDRA_USE_JDK11: true
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/cassandra
+      expected-commit: 422b8a6cbd6cae2aa8551e668e3a9c6dc92858c4
+      tag: cassandra-${{package.version}}
+
+  - uses: patch
+    with:
+      # Bumps snakeyaml, jackson-databind and commons-lang3 to mitigate a bunch of CVEs
+      patches: bumpdeps.patch
+
+  - runs: |
+      ant artifacts -Dversion=${{package.version}}
+
+      # Install cassandra from the tarball in build/dist into the destdir in /usr/share/java/cassandra
+      mkdir -p "${{targets.destdir}}"/usr/share/java/cassandra
+      tar --strip-components 1 -C "${{targets.destdir}}"/usr/share/java/cassandra -xzf build/apache-cassandra-${{package.version}}-bin.tar.gz
+
+      # Symlink everything in the cassandra bin directory into /usr/bin
+      mkdir -p "${{targets.destdir}}"/usr/bin/
+
+      for f in /home/build/build/dist/bin/*; do
+        filename=$(basename "$f")
+        ln -sf  /usr/share/java/cassandra/bin/"$filename" "${{targets.destdir}}"/usr/bin/"$filename"
+      done
+
+      mkdir -p ${{targets.destdir}}/var/lib/cassandra
+      mkdir -p ${{targets.destdir}}/var/log/cassandra
+
+      ln -sT /var/lib/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/data
+      ln -sT /var/log/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/logs
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - cassandra-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          install -d ${{targets.subpkgdir}}/etc/cassandra
+          mkdir -p ${{targets.subpkgdir}}/opt
+          ln -sf /usr/share/java/cassandra ${{targets.subpkgdir}}/opt/cassandra
+
+update:
+  enabled: true
+  github:
+    identifier: apache/cassandra
+    use-tag: true
+    tag-filter-prefix: cassandra-4.0
+    strip-prefix: cassandra-
+
+test:
+  pipeline:
+    - runs: |
+        cqlsh --version
+        cqlsh.py --version
+        stop-server -h

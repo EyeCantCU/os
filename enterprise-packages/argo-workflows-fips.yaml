@@ -1,0 +1,159 @@
+package:
+  name: argo-workflows-fips
+  version: "3.6.10"
+  epoch: 2
+  description: Workflow engine for Kubernetes.
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - nodejs-20
+      - openssl
+      # Executing just compiled binaries
+      - openssl-config-fipshardened
+      - python3
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 459c19db6e9dd86dd757c21644404cb784863fae
+      repository: https://github.com/argoproj/argo-workflows
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/cloudflare/circl@v1.6.1
+        github.com/go-viper/mapstructure/v2@v2.3.0
+
+  - runs: |
+      # Generate yarn UI
+      OPENSSL_CONF=/dev/null JOBS=max yarn --cwd ui install
+      OPENSSL_CONF=/dev/null JOBS=max yarn --cwd ui build
+      # Install staticfiles for build time
+      go install bou.ke/staticfiles@dd04075
+      # Pack yarn UI into golang binary
+      /home/build/.cache/go/bin/staticfiles -o server/static/files.go ui/dist/app
+
+  - uses: go/build
+    with:
+      packages: ./cmd/argo
+      output: argo
+      ldflags: |
+        -X github.com/argoproj/argo-workflows/v3.version=$(git describe --exact-match --tags --abbrev=0  2> /dev/null || echo untagged)
+        -X github.com/argoproj/argo-workflows/v3.buildDate=$(date -u ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+        -X github.com/argoproj/argo-workflows/v3.gitCommit=$(git rev-parse HEAD || echo unknown)
+        -X github.com/argoproj/argo-workflows/v3.gitTreeState=$(if [ -z "`git status --porcelain`" ]; then echo "clean" ; else echo "dirty"; fi)
+      go-package: go-fips-md5
+
+  - uses: strip
+
+subpackages:
+  - name: "argo-workflows-known-hosts-fips"
+    description: "known hosts file for argo workflows"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc/ssh
+          cp hack/ssh_known_hosts ${{targets.subpkgdir}}/etc/ssh/
+      - uses: strip
+
+  - name: "argo-workflow-controller-fips"
+    description: "Argo workflow controller"
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/workflow-controller
+          output: workflow-controller
+          ldflags: |
+            -X github.com/argoproj/argo-workflows/v3.version=$(git describe --exact-match --tags --abbrev=0  2> /dev/null || echo untagged)
+            -X github.com/argoproj/argo-workflows/v3.buildDate=$(date -u ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+            -X github.com/argoproj/argo-workflows/v3.gitCommit=$(git rev-parse HEAD || echo unknown)
+            -X github.com/argoproj/argo-workflows/v3.gitTreeState=$(if [ -z "`git status --porcelain`" ]; then echo "clean" ; else echo "dirty"; fi)
+          go-package: go-fips-md5
+      - uses: strip
+    test:
+      pipeline:
+        - runs: |
+            workflow-controller version
+            workflow-controller --help
+
+  - name: "argo-workflow-executor-fips"
+    description: "Argo workflow executor"
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/argoexec
+          output: argoexec
+          ldflags: |
+            -X github.com/argoproj/argo-workflows/v3.version=$(git describe --exact-match --tags --abbrev=0  2> /dev/null || echo untagged)
+            -X github.com/argoproj/argo-workflows/v3.buildDate=$(date -u ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+            -X github.com/argoproj/argo-workflows/v3.gitCommit=$(git rev-parse HEAD || echo unknown)
+            -X github.com/argoproj/argo-workflows/v3.gitTreeState=$(if [ -z "`git status --porcelain`" ]; then echo "clean" ; else echo "dirty"; fi)
+          go-package: go-fips-md5
+      - uses: strip
+    test:
+      pipeline:
+        - runs: |
+            argoexec version
+            argoexec --help
+
+  - name: argo-workflow-controller-compat-fips
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/workflow-controller ${{targets.subpkgdir}}/workflow-controller
+    dependencies:
+      runtime:
+        - argo-workflow-controller-fips
+
+  - name: argo-workflow-executor-compat-fips
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/argoexec ${{targets.subpkgdir}}/argoexec
+    dependencies:
+      runtime:
+        - argo-workflow-executor-fips
+
+  - name: argo-workflow-cli-fips
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /
+          # Argocli serves the server https://github.com/argoproj/argo-workflows/blob/master/Dockerfile#L110
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/argo ${{targets.subpkgdir}}/argo
+    dependencies:
+      runtime:
+        - argo-workflows-fips
+
+update:
+  enabled: true
+  github:
+    identifier: argoproj/argo-workflows
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - openssl-config-fipshardened
+        - argo-workflow-cli-fips
+        - argo-workflow-controller-compat-fips
+        - argo-workflow-controller-fips
+        - argo-workflow-executor-compat-fips
+        - argo-workflow-executor-fips
+  pipeline:
+    - runs: |
+        # Test compat packages and full paths
+        /usr/bin/argo --help
+        /usr/bin/argoexec --help
+        /usr/bin/workflow-controller --help
+        /argo --help
+        /workflow-controller --help
+        /argoexec --help

@@ -1,0 +1,143 @@
+package:
+  name: ghidra
+  version: "11.4"
+  epoch: 0
+  description: Ghidra is a software reverse engineering framework
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - coreutils
+      - libx11
+      - openjdk-${{vars.java-version}}-default-jdk
+      - py${{vars.py-version}}-pip
+      - python-${{vars.py-version}}
+      - xauth
+
+vars:
+  ghidra-dir: "/usr/share/ghidra"
+  java-version: "21"
+  py-version: "3.13"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gradle
+      - libstdc++-6
+      - libstdc++-6-dev
+      - openjdk-${{vars.java-version}}-default-jdk
+      - py${{vars.py-version}}-pip
+      - python-${{vars.py-version}}
+      - zip
+  environment:
+    RELEASE_NAME: PUBLIC
+    SOURCE_DATE_EPOCH: 315532800
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NationalSecurityAgency/ghidra
+      tag: Ghidra_${{package.version}}_build
+      expected-commit: aed1cf1c4e060af395af241f0e6027be783b9591
+
+  # This is a temporary patch to update dependencies specifically for 11.3.1
+  # An upstream PR to update these dependencies can be found here:
+  # https://github.com/NationalSecurityAgency/ghidra/pull/7954
+  - uses: patch
+    with:
+      patches: build.patch
+
+  - name: Update release name
+    runs: |
+      sed -i "s/application\.release\.name=DEV/application.release.name=${RELEASE_NAME}/" Ghidra/application.properties
+      cat Ghidra/application.properties | grep application.release.name
+
+  - name: Fetch dependencies
+    runs: gradle -I gradle/support/fetchDependencies.gradle
+
+  # Ensure our dependendies are easily accessible for later copying
+  # Without copying these to `<Ghidra directory>/Ghidra/patch`,
+  # Ghidra will crash immediately (e.g., commons-lang3 Classes will be missing)
+  - name: Prepare dependencies
+    runs: gradle -g dependencies/gradle prepdev
+
+  # Build with the local dependencies (uncompressed since we'd just unzip anyway)
+  - name: Build Ghidra
+    runs: gradle -g dependencies/gradle assembleAll
+
+  - name: Install Ghidra
+    runs: |
+      mkdir -p ${{targets.contextdir}}/usr/share
+      cp -a ./build/dist/${{package.name}}_${{package.version}}_"${RELEASE_NAME}" ${{targets.contextdir}}${{vars.ghidra-dir}}
+      find dependencies/gradle -name "*.jar" -type f -exec cp {} ${{targets.contextdir}}${{vars.ghidra-dir}}/Ghidra/patch/ \;
+
+  - name: Create symlinks
+    runs: |
+      mkdir -p ${{targets.contextdir}}/usr/bin
+      ln -sf ${{vars.ghidra-dir}}/ghidraRun ${{targets.contextdir}}/usr/bin/ghidraRun
+      ln -sf ${{vars.ghidra-dir}}/support/analyzeHeadless ${{targets.contextdir}}/usr/bin/analyzeHeadless
+      ln -sf ${{vars.ghidra-dir}}/support/pyghidraRun ${{targets.contextdir}}/usr/bin/pyghidraRun
+
+  # Remove bundled ensurepip resources (including __init__.py)
+  # to resolve CVEs and avoid cmd:python2 shebang interpolation
+  - name: Remove Jython ensurepip
+    runs: rm -rf ${{targets.contextdir}}${{vars.ghidra-dir}}/Ghidra/Features/Jython/data/jython-2.7.4/Lib/ensurepip/*
+
+  # These example files used for Ghidra training classes will always register ld-linux-x86-64.so.2 requirements,
+  # even on aarch64, so we need to remove them
+  # https://github.com/NationalSecurityAgency/ghidra/tree/master/GhidraDocs/GhidraClass
+  - name: Remove training examples
+    runs: |
+      rm -rf ${{targets.contextdir}}${{vars.ghidra-dir}}/docs/GhidraClass
+
+update:
+  enabled: true
+  github:
+    identifier: NationalSecurityAgency/ghidra
+    strip-prefix: "Ghidra_"
+    strip-suffix: "_build"
+    tag-filter: "Ghidra_"
+
+test:
+  environment:
+    environment:
+      GHIDRA_INSTALL_DIR: ${{vars.ghidra-dir}}
+  pipeline:
+    - runs: |
+        set -x
+        # Check if the launchers landed in the correct spot
+        ls -hal /usr/bin | grep -E "ghidraRun|analyzeHeadless|pyghidraRun"
+        test -x "${GHIDRA_INSTALL_DIR}"/ghidraRun
+        test -x "${GHIDRA_INSTALL_DIR}"/support/analyzeHeadless
+        test -x "${GHIDRA_INSTALL_DIR}"/support/pyghidraRun
+        test -x /usr/bin/ghidraRun
+        test -x /usr/bin/analyzeHeadless
+        test -x /usr/bin/pyghidraRun
+
+        # Test PyGhidra installation script
+        # Handle indefinite venv activation hangs by exiting immediately
+        /usr/bin/pyghidraRun <<EOF
+        yes
+        yes
+        exit
+        EOF
+
+        # Manually install PyGhidra
+        python3 -m pip install --no-index -f  "${GHIDRA_INSTALL_DIR}"/Ghidra/Features/PyGhidra/pypkg/dist pyghidra
+
+        # See if PyGhidra can be imported
+        export PATH="/usr/lib/jvm/java-21-openjdk/bin:$PATH"
+        python3 test.py
+
+        # Check if analyzeHeadless runs
+        /usr/bin/analyzeHeadless || :
+
+        # Run a small analysis
+        # This ensures that the .jars in the patch directory work
+        mkdir -p ~/GhidraTestProject
+        /usr/bin/analyzeHeadless ~/GhidraTestProject Test -import /bin/bash

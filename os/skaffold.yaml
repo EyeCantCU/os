@@ -1,0 +1,61 @@
+package:
+  name: skaffold
+  version: "2.16.1"
+  epoch: 0
+  description: Easy and Repeatable Kubernetes Development
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 95fb592deb61a4e290edca4925bd7c9c2fa93f6c
+      repository: https://github.com/GoogleContainerTools/skaffold
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      packages: github.com/GoogleContainerTools/skaffold/v2/cmd/skaffold
+      modroot: .
+      output: skaffold
+      ldflags: |
+        -X github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/version.version=${{package.version}}
+        -X github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/version.buildDate=$(date -u -d "@$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")
+        -X github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/version.gitCommit=$(git rev-parse HEAD)
+      tags: timetzdata,osusergo,netgo,static_build,release
+      vendor: true
+
+update:
+  enabled: true
+  github:
+    identifier: GoogleContainerTools/skaffold
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - crane
+        - curl
+        - git
+        - kubectl
+        - go
+        - wait-for-it
+  pipeline:
+    - runs: |
+        skaffold --help
+        skaffold version | grep ${{package.version}}
+    - uses: test/kwok/cluster
+    - runs: |
+        git clone --depth=1 -b v${{package.version}} https://github.com/GoogleContainerTools/skaffold
+        crane registry serve --address :5000 > /dev/null 2>&1 &
+        wait-for-it -t 10 --strict localhost:5000 -- echo "Registry is up"
+        cd skaffold/examples/ko
+        skaffold dev --default-repo=localhost:5000 --kube-context=$(kubectl config current-context) > skaffold.log 2>&1 &
+        while ! grep -qi "Deployments stabilized" "skaffold.log"; do sleep 1; done
+        if timeout 120s bash -c "until grep -q 'Deployments stabilized' 'skaffold.log'; do sleep 1; done"; then
+          kubectl wait pod -l app=ko --for=condition=Ready --timeout=60s
+        else
+          echo "Timeout of 120 seconds reached without detecting stabilization."
+        fi

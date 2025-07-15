@@ -1,0 +1,139 @@
+package:
+  name: neon
+  version: "8923"
+  epoch: 0
+  description: "Serverless Postgres. We separated storage and compute to offer autoscaling, branching, and bottomless storage."
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 32
+    memory: 24Gi
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bison
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang
+      - cmake
+      - coreutils
+      - curl-dev
+      - flex
+      - icu
+      - icu-dev
+      - libcurl-openssl4
+      - libpq-16
+      - libseccomp-dev
+      - libtool
+      - openssl-dev
+      - patchelf
+      - perl
+      - pkgconf
+      - poetry
+      - postgresql-16-client
+      - postgresql-16-dev
+      - protobuf
+      - protobuf-dev
+      - protoc
+      - readline-dev
+      - rustup
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/neondatabase/neon
+      tag: release-${{package.version}}
+      expected-commit: a72eaf701e75196cb9fd4d2e6add1bb85c8aca3a
+      recurse-submodules: true
+
+  - runs: |
+      rustup install stable
+      ARCH=$(uname -m)
+      export PATH="$HOME/.rustup/toolchains/stable-${ARCH}-unknown-linux-gnu/bin:$PATH"
+
+      BUILD_TYPE=release make -j$(nproc) -s
+
+      mkdir -p "${{targets.destdir}}"/usr/bin
+      for f in pg_sni_router pageserver pagectl safekeeper storage_broker proxy neon_local; do
+        mv target/release/$f "${{targets.destdir}}"/usr/bin
+      done
+
+      # This has to be used in conjunction with the POSTGRES_DISTRIB_DIR env var to tell
+      # neon where to find the postgres binaries.
+      # POSTGRES_DISTRIB_DIR=/usr/libexec
+      mkdir -p "${{targets.destdir}}"/usr/libexec/neon
+
+      # The postgresql libraries/binaries need RPATH adjustment
+      # because they're installed under non-standard paths.
+      #
+      # Unfortunately we cannot use /etc/ld.so.conf.d/ snippets here
+      # because each psql binary should load their corresponding
+      # versioned libpq.so.  If we rely on the /etc/ld.so.conf.d/
+      # mechanism, ld will always load the first libpq.so it finds,
+      # which e.g. ends up being v14.
+      find pg_install/ -mindepth 1 -maxdepth 1 -type d -name "v*" | while read -r dir; do
+        verdir=$(basename "${dir}")
+        mv "${dir}" "${{targets.destdir}}"/usr/libexec/neon/"${verdir}"
+        find "${{targets.destdir}}"/usr/libexec/neon/"${verdir}" -type f | while read -r obj; do
+          # Are we looking at an ELF file?
+          if head -c 4 "${obj}" | grep -qF $'\x7FELF'; then
+            # Unfortunately we need to use the full path here (instead
+            # of '$ORIGIN/../lib', for example) because the
+            # libraries/binaries are installed under several nested
+            # directories.
+            patchelf --set-rpath /usr/libexec/neon/"${verdir}"/lib "${obj}"
+          fi
+        done
+      done
+
+  - uses: strip
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - ".*proxy.*"
+    - compute-.*
+  github:
+    identifier: neondatabase/neon
+    strip-prefix: release-
+    use-tag: true
+
+test:
+  pipeline:
+    # Will fail see https://github.com/wolfi-dev/os/issues/34360
+    # - uses: test/pkgconf
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/usr/libexec/neon/v14/lib:/usr/libexec/neon/v15/lib:/usr/libexec/neon/v16/lib:/usr/libexec/neon/v17/lib"
+    - name: Test neon_local command
+      runs: |
+        neon_local --version
+        neon_local --help
+    - name: Test pagectl command
+      runs: |
+        pagectl --help
+        pagectl --version
+    - name: Test pageserver command
+      runs: |
+        pageserver --version
+        pageserver --help
+    - name: Test pg_sni_router command
+      runs: |
+        pg_sni_router --version
+        pg_sni_router --help
+    - name: Test proxy command
+      runs: |
+        proxy --version
+        proxy --help
+    - name: Test safekeeper command
+      runs: |
+        safekeeper --help
+        safekeeper --version
+    - name: Test storage_broker command
+      runs: |
+        storage_broker --version
+        storage_broker --help

@@ -1,0 +1,106 @@
+# This is an unguarded package for a customer that is expected to have CVEs. Leave pinned to 4.0.2
+package:
+  name: multus-cni-fips-4.0.2
+  version: 4.0.2
+  epoch: 22
+  description: A CNI meta-plugin for multi-homed pods in Kubernetes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - multus-cni-fips=${{package.full-version}}
+
+# This package contains cni binaries. They can be copied out of Wolfi
+# onto older host-os During build-time link against an older glibc, to
+# ensure go-fips built cni remain ABI compatible with old foreign
+# host-os.
+environment:
+  contents:
+    packages:
+      - oldglibc~2.28
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/k8snetworkplumbingwg/multus-cni
+      tag: v${{package.version}}
+      expected-commit: f03765681fe81ee1e0633ee1734bf48ab3bccf2b
+
+  # Addresses an issue where multus delegates to itself, breaking networking
+  # Issue: https://github.com/k8snetworkplumbingwg/multus-cni/issues/1324
+  - uses: patch
+    with:
+      patches: fix-self-delegation.patch
+
+  - uses: go/bump
+    with:
+      deps: |-
+        google.golang.org/grpc@v1.56.3
+        google.golang.org/protobuf@v1.33.0
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.38.0
+
+  - uses: go/build
+    with:
+      packages: ./cmd/multus
+      ldflags: -X 'gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.version=${{package.version}}'
+      output: multus
+      go-package: go-fips
+
+  - uses: go/build
+    with:
+      packages: ./cmd/multus-daemon
+      ldflags: -X 'gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.version=${{package.version}}'
+      output: multus-daemon
+      go-package: go-fips
+
+  - uses: go/build
+    with:
+      packages: ./cmd/multus-shim
+      ldflags: -X 'gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.version=${{package.version}}'
+      output: multus-shim
+      go-package: go-fips
+
+  - uses: go/build
+    with:
+      packages: ./cmd/install_multus
+      ldflags: -X 'gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.version=${{package.version}}'
+      output: install_multus
+      go-package: go-fips
+
+  - uses: go/build
+    with:
+      packages: ./cmd/thin_entrypoint
+      ldflags: -X 'gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/multus.version=${{package.version}}'
+      output: thin_entrypoint
+      go-package: go-fips
+
+update:
+  enabled: false
+  exclude-reason: Unguarded package
+
+test:
+  environment:
+    contents:
+      packages:
+        # Re-uses the compact package from non-fips version.
+        - multus-cni-compat
+  pipeline:
+    - runs: |
+        multus -version
+        multus-daemon -h
+        multus-shim -h
+        multus --version
+        multus --help
+        multus-daemon --help
+        multus-shim --version
+        multus-shim --help
+        thin_entrypoint version
+        thin_entrypoint help
+    - name: "Check compat paths"
+      runs: |
+        /usr/src/multus-cni/bin/multus -version
+        /usr/src/multus-cni/bin/multus-shim -version
+        /usr/src/multus-cni/bin/multus-daemon -help
+        /thin_entrypoint --multus-log-level info
+    - uses: test/go-fips-check

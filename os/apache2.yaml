@@ -1,0 +1,378 @@
+package:
+  name: apache2
+  version: "2.4.64"
+  epoch: 0
+  description: "Apache HTTP Server"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ${{package.name}}-config
+      - libgcc
+      - lua5.4
+      - merged-usrsbin
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - apr-util-dev
+      - autoconf
+      - automake
+      - brotli-dev
+      - build-base
+      - libapr-dev
+      - libxml2-dev
+      - lua5.4-dev
+      - nghttp2-dev
+      - openssl-dev
+      - pcre2-dev
+      - readline-dev
+      - wolfi-base
+      - zlib-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: build-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 7e926454793abd7d71b6afc8bd1ec1648752c6ad
+      repository: https://github.com/apache/httpd
+      tag: ${{package.version}}
+
+  - runs: |
+      set -x
+      ./buildconf --with-apr=/usr/bin/apr-1-config
+      mv configure.in configure.ac
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --prefix=/ \
+        --enable-layout=Debian \
+        --sysconfdir=/etc/apache2 \
+        --enable-so \
+        --enable-suexec \
+        --with-suexec-caller=www-data \
+        --with-suexec-docroot=/var/www \
+        --with-suexec-logfile=/var/log/apache2/suexec.log \
+        --with-suexec-bin=/usr/bin/suexec \
+        --with-suexec-uidmin=99 \
+        --with-suexec-gidmin=99 \
+        --with-apr=/usr/bin/apr-1-config \
+        --with-apr-util=/usr/bin/apu-1-config \
+        --with-pcre=/usr \
+        --enable-mods-shared=all \
+        --enable-mpms-shared=all \
+        --with-mpm=prefork \
+        --enable-ssl \
+        --with-ssl \
+        --enable-proxy \
+        --enable-cache \
+        --enable-disk-cache \
+        --enable-mem-cache \
+        --enable-file-cache \
+        --enable-ldap \
+        --enable-authnz-ldap \
+        --enable-cgid \
+        --enable-cgi \
+        --enable-authn-anon \
+        --enable-authn-alias \
+        --disable-imagemap \
+        --enable-proxy-connect \
+        --enable-proxy-http \
+        --enable-proxy-ftp \
+        --enable-deflate \
+        --enable-dbd \
+        --enable-exception-hook \
+        --enable-dav \
+        --enable-dav-fs \
+        --enable-dav-lock \
+        --sbindir=/usr/bin
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+  - uses: fetch
+    with:
+      uri: https://raw.githubusercontent.com/docker-library/httpd/master/${{vars.build-version}}/alpine/httpd-foreground
+      expected-sha256: 003f4ca165cf0daa9721c907259d3ef6a7fd9017453079780c1ae91de96fa777
+      extract: false
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: "Apache HTTP Server (development headers)"
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - apr-util-dev
+        - merged-usrsbin
+        - perl
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-doc
+    description: "Apache HTTP Server (documentation)"
+    pipeline:
+      - uses: split/manpages
+      - runs: |
+          set -x
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/doc/apache2
+          mv "${{targets.destdir}}"/usr/share/apache2/default-site/htdocs/manual "${{targets.subpkgdir}}"/usr/share/doc/apache2/
+    test:
+      pipeline:
+        - uses: test/docs
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-utils
+    description: "Apache HTTP Server (utilities)"
+    pipeline:
+      - runs: |
+          set -x
+          # Move utilities to usr/bin
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          for i in checkgid fcgistarter htcacheclean rotatelogs ab htdbm htdigest htpasswd httxt2dbm logresolve; do
+            mv "${{targets.destdir}}"/usr/bin/$i "${{targets.subpkgdir}}"/usr/bin/
+          done
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-data
+    description: "Apache HTTP Server (data files)"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/apache2
+          mv "${{targets.destdir}}"/usr/share/apache2/icons "${{targets.subpkgdir}}"/usr/share/apache2/
+          mv "${{targets.destdir}}"/usr/share/apache2/error "${{targets.subpkgdir}}"/usr/share/apache2/
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-config
+    description: ${{package.name}} configuration files
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/etc/apache2
+          mkdir -p "${{targets.contextdir}}"/etc/apache2/extra
+          mv "${{targets.destdir}}"/etc/apache2/httpd.conf "${{targets.contextdir}}"/etc/apache2/httpd.conf
+          mv "${{targets.destdir}}"/etc/apache2/extra/httpd-ssl.conf "${{targets.contextdir}}"/etc/apache2/extra/httpd-ssl.conf
+    test:
+      pipeline:
+        - runs: |
+            stat /etc/apache2/httpd.conf
+            stat /etc/apache2/extra/httpd-ssl.conf
+
+  # This subpackage is to keep the backwards compatibility with the compat image.
+  # By having this subpackage, it allows packages that depend on apache2 config files
+  # (i.e., httpd.conf, httpd-ssl.conf) to be installed without having conflict with
+  # the ${{package.name}}-config and ${{package.name}}-compat subpackages. Some packages
+  # needs particular config adjustments in the httpd.conf file, and this subpackage
+  # allows them to be installed without having to modify the ${{package.name}}-compat
+  # subpackage if the package has a runtime dependency on it.
+  - name: ${{package.name}}-config-compat
+    description: ${{package.name}} configuration files for compat
+    dependencies:
+      replaces:
+        - ${{package.name}}-config
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/etc/apache2
+          mkdir -p "${{targets.contextdir}}"/etc/apache2/extra
+
+          cp "${{targets.destdir}}"/etc/apache2/original/httpd.conf "${{targets.subpkgdir}}"/etc/apache2
+          cp -r "${{targets.destdir}}"/etc/apache2/original/extra/ "${{targets.subpkgdir}}"/etc/apache2
+
+          # Modify User/Group and verify changes are applied.
+          sed -ri \
+            -e 's!^(\s*User)\s+daemon\s*$!\1 www-data!g' \
+            -e 's!^(\s*Group)\s+daemon\s*$!\1 www-data!g' \
+            "${{targets.subpkgdir}}"/etc/apache2/httpd.conf
+
+          # Modify CustomLog/ErrorLog and verify changes are applied
+          sed -ri \
+            -e 's!^(\s*CustomLog)\s+\S+!\1 /proc/self/fd/1!g' \
+            -e 's!^(\s*ErrorLog)\s+\S+!\1 /proc/self/fd/2!g' \
+            -e 's!^(\s*TransferLog)\s+\S+!\1 /proc/self/fd/1!g' \
+            "${{targets.subpkgdir}}"/etc/apache2/httpd.conf \
+            "${{targets.subpkgdir}}"/etc/apache2/extra/httpd-ssl.conf;
+
+          # Modify module config to match upstream docker
+          sed -ri \
+             -e '/LoadModule mpm_prefork_module/s/^/#/g' \
+             -e '/LoadModule mpm_event_module/s/^#//g' \
+             "${{targets.subpkgdir}}"/etc/apache2/httpd.conf
+
+          ### Modify other paths to match upstream default config
+          sed -ri \
+            -e 's!^(\s*ServerRoot)\s+\S+!\1 "/usr/local/apache2"!g' \
+            -e 's|usr/lib/apache2/modules|modules|g' \
+            -e 's|etc/apache2/mime.types|conf/mime.types|g' \
+            -e 's|usr/share/apache2/default-site/htdocs|usr/local/apache2/htdocs|g' \
+            -e 's|usr/lib/cgi-bin|usr/local/apache2/cgi-bin|g' \
+            -e 's|etc/apache2/extra|conf/extra|g' \
+            -e 's|etc/apache2/magic|conf/magic|g' \
+            "${{targets.subpkgdir}}"/etc/apache2/httpd.conf \
+            "${{targets.subpkgdir}}"/etc/apache2/extra/httpd-ssl.conf;
+
+          ### Modify other paths
+          sed -ri \
+            -e 's|etc/|usr/local/apache2/conf/|g' \
+            -e 's|/var/run/apache2/|usr/local/apache2/logs/|g' \
+            "${{targets.subpkgdir}}"/etc/apache2/extra/httpd-ssl.conf;
+
+          ### Add Include directive for additional configs
+          echo "IncludeOptional /etc/apache2/conf.d/*.conf" >> "${{targets.subpkgdir}}"/etc/apache2/httpd.conf
+
+  - name: ${{package.name}}-compat
+    description: "Config compatibility to upstream docker image"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-config-compat
+        - busybox # the httpd-foreground script calls `rm`
+        - merged-usrsbin
+        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          set -x
+
+          # Create necessary folders
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/apache2/
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/apache2/conf
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/apache2/var/run/apache2
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/apache2/logs
+
+          # Install the `httpd-foreground` script from the fetch step above to the compat subpackage
+          install -Dm755 /home/build/httpd-foreground ${{targets.contextdir}}/usr/local/bin/httpd-foreground
+          # Create symlinks
+          ln -s /etc/apache2/httpd.conf "${{targets.subpkgdir}}"/usr/local/apache2/conf/
+          ln -s /etc/apache2/extra "${{targets.subpkgdir}}"/usr/local/apache2/conf/
+          ln -s /etc/apache2/mime.types "${{targets.subpkgdir}}"/usr/local/apache2/conf/
+          ln -s /etc/apache2/magic "${{targets.subpkgdir}}"/usr/local/apache2/conf/
+          ln -s /usr/lib/apache2/modules/ "${{targets.subpkgdir}}"/usr/local/apache2/
+          ln -s /usr/share/apache2/default-site/htdocs "${{targets.subpkgdir}}"/usr/local/apache2/
+          ln -s /usr/lib/cgi-bin/ "${{targets.subpkgdir}}"/usr/local/apache2/
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - ${{package.name}}-config-compat
+      pipeline:
+        - runs: |
+            # Verify config is as expected upstream docker instance
+            grep -E '^\s*User www-data$' /usr/local/apache2/conf/httpd.conf;
+            grep -E '^\s*Group www-data$' /usr/local/apache2/conf/httpd.conf;
+
+            grep -E '^\s*ErrorLog /proc/self/fd/2$' /usr/local/apache2/conf/httpd.conf;
+            grep -E '^\s*ErrorLog /proc/self/fd/2$' /usr/local/apache2/conf/extra/httpd-ssl.conf;
+            grep -E '^\s*CustomLog /proc/self/fd/1' /usr/local/apache2/conf/httpd.conf;
+            grep -E '^\s*CustomLog /proc/self/fd/1' /usr/local/apache2/conf/extra/httpd-ssl.conf;
+            grep -E '^\s*TransferLog /proc/self/fd/1$' /usr/local/apache2/conf/extra/httpd-ssl.conf;
+            if ! id -u "www-data" > /dev/null 2>&1; then
+              adduser -D -H "www-data"
+            fi
+
+            httpd -M
+
+            echo "<html><body><h1>Apache Test Page</h1></body></html>" > /usr/local/apache2/htdocs/test.html
+
+            # Start httpd using the custom configuration
+            echo "Starting httpd..."
+            httpd -DFOREGROUND > /dev/null 2>&1 &
+            httpd_pid=$!
+
+            # Give httpd some time to start
+            sleep 5
+
+            # Test if httpd is running
+            if pgrep httpd > /dev/null; then
+                echo "PASS: Apache (httpd) is running."
+            else
+                echo "FAIL: Apache (httpd) is not running."
+                kill "$httpd_pid"
+                exit 1
+            fi
+
+            # Test serving the page using curl
+            echo "Testing the page with curl..."
+            curl -v http://localhost/test.html 2>&1 | tee /tmp/curl_output.log
+
+            if grep "200 OK" /tmp/curl_output.log > /dev/null; then
+                echo "PASS: Page served successfully."
+            else
+                echo "FAIL: Could not retrieve the page. Check curl output:"
+                cat /tmp/curl_output.log
+            fi
+
+            # Stop httpd
+            echo "Stopping httpd..."
+            kill "$httpd_pid"
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - runs: |
+        apachectl -v
+        httpd -v
+        httpd -M
+
+        echo "<html><body><h1>Apache Test Page</h1></body></html>" > /usr/share/apache2/default-site/htdocs/test.html
+
+        # Start httpd using the custom configuration
+        echo "Starting httpd..."
+        httpd -DFOREGROUND > /dev/null 2>&1 &
+        httpd_pid=$!
+
+        # Give httpd some time to start
+        sleep 5
+
+        # Test if httpd is running
+        if pgrep httpd > /dev/null; then
+            echo "PASS: Apache (httpd) is running."
+        else
+            echo "FAIL: Apache (httpd) is not running."
+            kill "$httpd_pid"
+            exit 1
+        fi
+
+        # Test serving the page using curl
+        echo "Testing the page with curl..."
+        curl -v http://localhost/test.html 2>&1 | tee /tmp/curl_output.log
+
+        if grep "200 OK" /tmp/curl_output.log > /dev/null; then
+            echo "PASS: Page served successfully."
+        else
+            echo "FAIL: Could not retrieve the page. Check curl output:"
+            cat /tmp/curl_output.log
+        fi
+
+        # Stop httpd
+        echo "Stopping httpd..."
+        kill "$httpd_pid"
+    - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  github:
+    identifier: apache/httpd
+    use-tag: true
+  ignore-regex-patterns:
+    - .*-candidate

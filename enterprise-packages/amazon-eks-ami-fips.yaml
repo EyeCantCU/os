@@ -1,0 +1,145 @@
+package:
+  name: amazon-eks-ami-fips
+  version: "20250627"
+  epoch: 0
+  description: Packer configuration for building a custom EKS AMI
+  url: https://github.com/awslabs/amazon-eks-ami
+  copyright:
+    - license: MIT-0
+  dependencies:
+    runtime:
+      # Many of these appear to be "nice-to-haves" rather than a must
+      - aws-cli-2
+      - cloud-provider-aws-fips-ecr-credential-provider
+      #- aws-cfn-bootstrap
+      #- chrony
+      - conntrack-tools
+      - containerd-fips
+      - ec2-instance-connect
+      - ethtool
+      - iptables
+      - ipvsadm
+      - jq
+      - kubelet-fips
+      - nerdctl-fips
+      - nfs-utils
+      #- mdadm
+      - pigz
+      - procps
+      - runc-fips
+      - socat
+      - unzip
+      - wget
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - coreutils
+      - systemd-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/awslabs/amazon-eks-ami
+      tag: v${{package.version}}
+      expected-commit: a4e5f59d1770c9bce87f3f9b7ef54dbd573e75dc
+
+  - runs: |
+      make -C nodeadm generate
+
+  - uses: go/build
+    with:
+      modroot: nodeadm
+      packages: ./cmd/nodeadm/main.go
+      output: nodeadm
+      go-package: go-fips
+
+  # TODO
+  #
+  # install-efa.sh
+  # install-neuron-driver
+  # sudo dnf install -y aws-neuronx-dkms aws-neuronx-tools
+  # install-nvidia-driver.sh
+  #
+  # Limiting deeper C-states
+  # intel_idle.max_cstate=1 processor.max_cstate=1
+  #
+  # Configure clock sources
+  # Disable weak ciphers ssh
+  - name: Package packer actions from https://github.com/awslabs/amazon-eks-ami/tree/main/templates/al2023
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/system
+      cp -r templates/al2023/runtime/rootfs/etc/systemd/system ${{targets.destdir}}/usr/lib/systemd/
+
+      # Ugly, but should work, at least without a reboot
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/system/containerd.service.d
+      cat <<EOF >${{targets.destdir}}/usr/lib/systemd/system/containerd.service.d/10-cache-pause-container.conf
+      [Service]
+      ExecStartPost=cache-pause-container -i public.ecr.aws/eks-distro/kubernetes/pause:3.10
+      EOF
+
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/preset/
+      cat <<EOF >${{targets.destdir}}/usr/lib/systemd/preset/50-${{package.name}}.preset
+      enable nodeadm-config.service
+      enable nodeadm-run.service
+      enable ebs-initialize-bin@kubelet.service
+      enable cni-cache-reset.service
+      enable containerd.service
+      EOF
+
+      mkdir -p ${{targets.destdir}}/etc
+      cp -r templates/al2023/runtime/rootfs/etc/sysctl* ${{targets.destdir}}/etc
+      cp -r templates/al2023/runtime/rootfs/etc/nerdctl/ ${{targets.destdir}}/etc
+      cp -r templates/al2023/runtime/rootfs/etc/logrotate* ${{targets.destdir}}/etc
+
+      mkdir -p ${{targets.destdir}}/etc/udev/rules.d/
+      touch ${{targets.destdir}}/etc/udev/rules.d/99-vpc-policy-routes.rules
+
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/networkd.conf.d
+      cat << EOF >${{targets.destdir}}/usr/lib/systemd/networkd.conf.d/80-release.conf
+      # Do not clobber any routes or rules added by CNI.
+      [Network]
+      ManageForeignRoutes=no
+      ManageForeignRoutingPolicyRules=no
+      EOF
+
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/network/99-default.link.d
+      cat << EOF >${{targets.destdir}}/usr/lib/systemd/network/99-default.link.d/10-${{package.name}}.conf
+      [Link]
+      MACAddressPolicy=none
+      EOF
+
+      mkdir -p ${{targets.destdir}}/etc/kubernetes/manifests
+      mkdir -p ${{targets.destdir}}/var/lib/kubernetes
+      mkdir -p ${{targets.destdir}}/var/lib/kubelet
+      mkdir -p ${{targets.destdir}}/opt/cni/bin
+
+      mkdir -p ${{targets.destdir}}/etc/eks/image-credential-provider
+      ln -s ../../../usr/bin/ecr-credential-provider ${{targets.destdir}}/etc/eks/image-credential-provider/ecr-credential-provider
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      cp templates/shared/runtime/bin/* ${{targets.destdir}}/usr/bin/
+
+      # Fix coredns that wants real upstream servers in resolv.conf
+      mkdir -p ${{targets.destdir}}/usr/lib/tmpfiles.d/
+      echo "L+ /etc/resolv.conf - - - - ../run/systemd/resolve/resolv.conf" >> ${{targets.destdir}}/usr/lib/tmpfiles.d/50-coredns.conf
+
+update:
+  enabled: true
+  github:
+    identifier: awslabs/amazon-eks-ami
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - systemd
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        for sf in nodeadm-config.service nodeadm-run.service ebs-initialize-bin@.service cni-cache-reset.service kubelet.service; do
+          systemctl list-unit-files | grep $sf > /dev/null
+        done

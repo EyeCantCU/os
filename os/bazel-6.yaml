@@ -1,0 +1,126 @@
+package:
+  name: bazel-6
+  version: 6.5.0
+  epoch: 4
+  description: Bazel is an open-source build and test tool
+  resources:
+    cpu: 16
+    memory: 16Gi
+  dependencies:
+    provides:
+      - bazel=${{package.full-version}}
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gcc
+      - gcc-14-default
+      - libstdc++-6
+      - libstdc++-6-dev
+      - openjdk-11
+      - python3
+      - zip
+
+pipeline:
+  - uses: fetch
+    with:
+      expected-sha256: fc89da919415289f29e4ff18a5e01270ece9a6fe83cb60967218bac4a3bb3ed2
+      uri: https://github.com/bazelbuild/bazel/releases/download/${{package.version}}/bazel-${{package.version}}-dist.zip
+      extract: false
+      delete: false
+
+  - runs: unzip bazel-${{package.version}}-dist.zip
+
+  - runs: |
+      mkdir -p $HOME/.cache/bazel/_bazel_root
+      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+
+      EMBED_LABEL=${{package.version}}-${{package.epoch}} \
+        EXTRA_BAZEL_ARGS=--tool_java_runtime_version=local_jdk \
+        ./compile.sh
+      ./output/bazel clean --expunge
+      mkdir -p ${{targets.destdir}}/usr/bin
+      cp ./output/bazel ${{targets.destdir}}/usr/bin/
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '^[^6]'
+  release-monitor:
+    identifier: 15227
+    version-filter-contains: 6.
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - git
+        - python3
+        - openjdk-21
+        - openjdk-21-default-jdk
+        - gcc
+  pipeline:
+    - name: "Verify bazel version"
+      runs: |
+        bazel --version
+    - name: "Test workspace creation and basic build"
+      runs: |
+        mkdir -p test-workspace
+        cd test-workspace
+        cat > WORKSPACE <<'EOF'
+        workspace(name = "test_workspace")
+        EOF
+
+        cat > BUILD <<'EOF'
+        genrule(
+          name = "hello",
+          outs = ["hello.txt"],
+          cmd = "echo 'Hello, Wolfi!' > $@",
+        )
+        EOF
+
+        bazel build //:hello
+        test -f bazel-bin/hello.txt
+    - name: "Test Java project build"
+      runs: |
+        mkdir -p java-test/src/main/java/hello
+        cd java-test
+
+        cat > WORKSPACE <<'EOF'
+        workspace(name = "java_test")
+        EOF
+
+        cat > BUILD <<'EOF'
+        java_binary(
+          name = "hello",
+          srcs = ["src/main/java/hello/Hello.java"],
+          main_class = "hello.Hello",
+        )
+        EOF
+
+        cat > src/main/java/hello/Hello.java <<'EOF'
+        package hello;
+        public class Hello {
+          public static void main(String[] args) {
+            System.out.println("Hello from Java!");
+          }
+        }
+        EOF
+
+        bazel build //:hello
+    - name: "Test query capabilities"
+      runs: |
+        cd java-test
+        bazel query //...
+        bazel query 'deps(//:hello)'
+    - name: "Test clean command"
+      runs: |
+        cd java-test
+        bazel clean --expunge

@@ -1,0 +1,180 @@
+package:
+  name: docker-fips
+  version: "28.3.2"
+  epoch: 0
+  description: A meta package for Docker Engine and Docker CLI
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - btrfs-progs
+      # Include busybox because dockerd-oci-entrypoint is a shell script that execs the input params given.
+      - busybox
+      - ca-certificates
+      - docker-cli-buildx-fips
+      - docker-cli-fips
+      - docker-compose-fips
+      - dockerd-fips
+      - e2fsprogs
+      - e2fsprogs-extra
+      - fuse-overlayfs
+      - git
+      - ip6tables
+      - iproute2
+      # docker dind also needs a couple of runtime dependencies mentioned here (https://github.com/moby/moby/blob/0eecd59153c03ced5f5ddd79cc98f29e4d86daec/project/PACKAGERS.md#runtime-dependencies) below are those dependencies.
+      - iptables
+      - openssh-client
+      - openssl
+      - pigz
+      - procps
+      - shadow-subids # equivalent of shadow-uidmap in wolfi
+      - xfsprogs
+      - xz
+      - zfs
+  checks:
+    disabled:
+      # docker is a meta package pulling in several subpackages at runtime
+      - empty
+
+environment:
+  contents:
+    packages:
+      - bash
+      - btrfs-progs-dev
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - containerd-fips
+      - coreutils
+      - go-fips
+      - libseccomp-dev
+      - libtool
+      - linux-headers
+      - lvm2-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/moby/moby
+      tag: v${{package.version}}
+      expected-commit: e77ff99ede5ee5952b3a9227863552ae6e5b6fb1
+
+  - runs: |
+      # moby/moby uses a non-standard `vendor.mod` and helper scripts instead
+      # of the standard `go.mod`. the only way to modify dependencies is to
+      # manually change them in the provided `vendor.mod`. To ensure we don't
+      # pin to older dependencies when this package auto updates, we temp change the
+      # vendor.mod file to go.mod to use go/bump so we don't have to use a tool like sed.
+
+      mv vendor.mod go.mod
+      mv vendor.sum go.sum
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/cloudflare/cfssl@v1.6.5
+        github.com/hashicorp/go-memdb@v1.3.5
+        github.com/opencontainers/image-spec@v1.1.1
+        github.com/opencontainers/runtime-spec@v1.2.1
+        github.com/rootless-containers/rootlesskit/v2@v2.3.4
+        github.com/golang-jwt/jwt/v5@v5.2.2
+
+  - runs: |
+      # setting back to original so we can run moby specific hack
+      mv go.mod vendor.mod
+      mv go.sum vendor.sum
+
+      ./hack/vendor.sh
+
+      # Replicate the environment setup performed by docker
+      export DOCKER_BUILDTAGS="seccomp"
+
+      ./hack/make.sh dynbinary
+
+  # Independently managed from moby/moby, but contains many utility scripts needed for the official docker images.
+  # TODO: Figure out a way to autobump this as required
+  # https://github.com/docker-library/docker/tree/master
+  - working-directory: /home/docker-library
+    pipeline:
+      - uses: fetch
+        with:
+          uri: https://github.com/docker-library/docker/archive/273a2df601253b25e8e98dda8f6675346d7338b8.zip
+          expected-sha256: 6ce21996f0b98a850d01de6f8f9f79e54c8a72a83fabfde6e228d2c43e2567d6
+          extract: false
+      - runs: |
+          unzip -q 273a2df601253b25e8e98dda8f6675346d7338b8.zip
+          mv */** .
+
+  # Docker is vehemenetly against stripping the resulting binary
+  # Ref: https://github.com/moby/moby/blob/d8a51d2887cbc465ab8d76ed98f7a86996ab3c22/project/PACKAGERS.md#stripping-binaries
+  # - uses: strip
+  - runs: |
+      # this exists to appease yam
+
+subpackages:
+  - name: dockerd-fips
+    description: "Docker Engine (dockerd)"
+    dependencies:
+      runtime:
+        # https://github.com/docker/docker/blob/master/project/PACKAGERS.md#runtime-dependencies
+        - btrfs-progs
+        - e2fsprogs
+        - e2fsprogs-extra
+        - ip6tables
+        - iptables
+        - openssl
+        - xfsprogs
+        - xz
+        - pigz
+        - zfs
+        - containerd-fips
+        - ctr-fips
+        - tini-static
+    pipeline:
+      - runs: |
+          install -Dm755 bundles/dynbinary-daemon/docker-proxy ${{targets.destdir}}/usr/bin/docker-proxy
+          install -Dm755 bundles/dynbinary-daemon/dockerd ${{targets.destdir}}/usr/bin/dockerd
+          ln -sf /sbin/tini-static ${{targets.destdir}}/usr/bin/docker-init
+
+  - name: dockerd-service-fips
+    description: "Systemd services for docker"
+    dependencies:
+      runtime:
+        - dockerd-fips
+        - containerd-service-fips
+        - systemd
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/systemd/system/
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/systemd/system-preset/
+          install -Dm644 contrib/init/systemd/docker.socket "${{targets.subpkgdir}}"/usr/lib/systemd/system/
+          install -Dm644 contrib/init/systemd/docker.service "${{targets.subpkgdir}}"/usr/lib/systemd/system/
+          sed -i "s|\[Service\]|[Service]\nEnvironment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"|g" "${{targets.subpkgdir}}"/usr/lib/systemd/system/docker.service
+          echo "enable docker.service" > "${{targets.subpkgdir}}/usr/lib/systemd/system-preset/81-docker.preset"
+          echo "enable docker.socket" >> "${{targets.subpkgdir}}/usr/lib/systemd/system-preset/81-docker.preset"
+
+          # Create docker group
+          mkdir -p ${{targets.contextdir}}/usr/lib/sysusers.d/
+          cat <<EOF >${{targets.contextdir}}/usr/lib/sysusers.d/${{package.name}}.conf
+          g docker 125
+          EOF
+
+update:
+  enabled: true
+  github:
+    identifier: moby/moby
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Smoke check
+      runs: |
+        docker -v
+        dockerd --version
+        docker-init --version
+        docker-init -h
+        docker-proxy --version
+        docker-proxy --help
+        dockerd --help

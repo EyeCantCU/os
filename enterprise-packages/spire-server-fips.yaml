@@ -1,0 +1,99 @@
+package:
+  name: spire-server-fips
+  version: "1.12.4"
+  epoch: 0
+  description: The SPIFFE Runtime Environment (SPIRE) server
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+
+environment:
+  contents:
+    packages:
+      - git
+      - go-fips
+      - libcap-utils
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 2433513d5ee218a78b14d9a6916b7fd4c15cf56c
+      repository: https://github.com/spiffe/spire
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-viper/mapstructure/v2@v2.3.0
+
+  - uses: go/remove-cgo-enabled-0
+    with:
+      seds: |
+        s,-s -w,-w,g
+
+  - runs: |
+      # Spire's build assumes a specific Go version, defined in the repo's
+      # .go-version file; if the expected version isn't installed, it's
+      # downloaded. We'll just tell it to build with the version of Go we're
+      # using to avoid this.
+      goversion=$(go version | cut -d ' ' -f3)
+      goversion=${goversion:2}
+      # There's a bug in the spire build script that strips the .0
+      # as presumably previous Go compilers omitted it
+      # Just add an extra one to work around
+      case "$goversion" in
+          *.0)
+              goversion="${goversion}.0"
+              ;;
+      esac
+      echo ${goversion} > .go-version
+      cat .go-version
+
+      make bin/spire-agent
+      make bin/spire-server
+      make bin/oidc-discovery-provider
+      install -Dm755 ./bin/spire-server "${{targets.destdir}}/usr/bin/spire-server"
+
+  - uses: strip
+
+subpackages:
+  - name: spire-agent-fips
+    description: The SPIFFE Runtime Environment (SPIRE) agent
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          install -Dm755 ./bin/spire-agent "${{targets.subpkgdir}}/usr/bin/spire-agent"
+    test:
+      pipeline:
+        - runs: |
+            spire-agent --version
+            spire-agent --help
+
+  - name: spire-oidc-discovery-provider-fips
+    description: The SPIFFE Runtime Environment (SPIRE) agent
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          install -Dm755 ./bin/oidc-discovery-provider "${{targets.subpkgdir}}/usr/bin/oidc-discovery-provider"
+          setcap cap_net_bind_service=+ep "${{targets.subpkgdir}}/usr/bin/oidc-discovery-provider"
+    test:
+      pipeline:
+        - runs: |
+            oidc-discovery-provider --version
+            oidc-discovery-provider --help
+
+update:
+  enabled: true
+  github:
+    identifier: spiffe/spire
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        spire-server --help
+    - runs: |
+        spire-server --version

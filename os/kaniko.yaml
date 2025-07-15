@@ -1,0 +1,94 @@
+package:
+  name: kaniko
+  version: "1.25.0"
+  epoch: 0
+  description: Build Container Images In Kubernetes
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/chainguard-dev/kaniko
+      tag: v${{package.version}}
+      expected-commit: 37afb27d847300f5baeef648b0bafcf31e35a178
+
+  - uses: go/build
+    with:
+      output: executor
+      packages: ./cmd/executor
+      ldflags: -X github.com/chainguard-dev/kaniko/pkg/version.Version=v${{package.version}}
+
+subpackages:
+  - name: kaniko-warmer
+    pipeline:
+      - uses: go/build
+        with:
+          output: warmer
+          packages: ./cmd/warmer
+          ldflags: -X github.com/chainguard-dev/kaniko/pkg/version.Version=v${{package.version}}
+    test:
+      pipeline:
+        - runs: |
+            warmer --help
+
+  - name: kaniko-compat
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /kaniko/
+          mkdir -p ${{targets.subpkgdir}}/kaniko/
+          ln -sf /usr/bin/executor ${{targets.subpkgdir}}/kaniko/
+
+  - name: kaniko-warmer-compat
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /kaniko/
+          mkdir -p ${{targets.subpkgdir}}/kaniko/
+          ln -sf /usr/bin/warmer ${{targets.subpkgdir}}/kaniko/
+
+update:
+  enabled: true
+  github:
+    identifier: chainguard-dev/kaniko
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - coreutils
+        - docker
+        - git
+  pipeline:
+    - name: "Verify executor binary and version"
+      runs: |
+        executor version
+        executor --help
+    - name: "Test executor basic functionality"
+      runs: |
+        # Create a simple Dockerfile
+        cat > Dockerfile << 'EOF'
+        FROM scratch
+        EOF
+
+        # Build a simple image
+        # We need --force when running under non-containerized environments (e.g. QEMU)
+        executor \
+          --force \
+          --context dir://. \
+          --dockerfile Dockerfile \
+          --no-push \
+          --tarPath test.tar
+
+        # Verify the tar was created
+        test -f test.tar

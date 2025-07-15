@@ -1,0 +1,241 @@
+package:
+  name: harbor-fips-2.12
+  version: "2.12.4"
+  epoch: 3
+  description: An open source trusted cloud native registry project that stores, signs, and scans content
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - harbor-fips=${{package.full-version}}
+    runtime:
+      - ca-certificates-bundle
+
+environment:
+  environment:
+    GCC_SPEC_FILE: "no-hardening.spec"
+  contents:
+    packages:
+      - nodejs
+      - npm
+      - py3-setuptools
+      - python3
+      - swagger~0.30.5
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/goharbor/harbor
+      tag: v${{package.version}}
+      expected-commit: 6b4981d4dd46a20481be5a3a7cdf435bc20f4dcb
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/harbor
+
+      # Copy views, migrations, and icons
+      cp -rf ./src/core/views ${{targets.destdir}}/harbor/views
+      cp -rf ./make/migrations ${{targets.destdir}}/harbor/migrations
+      cp -rf ./icons ${{targets.destdir}}/harbor/icons
+
+      # Generate API
+      swagger generate server --template-dir=tools/swagger/templates --exclude-main --additional-initialism=CVE --additional-initialism=GC --additional-initialism=OIDC -f api/v2.0/swagger.yaml -A harbor --target src/server/v2.0
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+        github.com/gorilla/csrf@v1.7.3
+        helm.sh/helm/v3@v3.18.4
+      modroot: ./src
+
+  - uses: go/build
+    with:
+      packages: ./core
+      output: harbor-core
+      modroot: ./src
+      deps: github.com/go-openapi/errors github.com/go-openapi/runtime
+      go-package: go-fips
+
+  - runs: ln -sf /usr/bin/harbor-core ${{targets.destdir}}/harbor/harbor_core
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-db
+    description: PostgreSQL database for Harbor
+    dependencies:
+      provides:
+        - harbor-db=${{package.full-version}}
+      runtime:
+        - postgresql-14-base
+        - postgresql-14-client-base
+        - postgresql-15
+        - postgresql-15-client
+        - postgresql-15-contrib
+        - bash
+        - busybox
+        - bc
+        - glibc-locale-en
+        - gzip
+        - findutils
+        - net-tools
+        - openssl-config-fipshardened
+        - posix-libc-utils
+        - util-linux
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mkdir -p ${{targets.contextdir}}/var/lib/postgres/initdb
+
+          # Copy scripts and initial db
+          cp ./make/photon/db/*.sh ${{targets.contextdir}}/usr/bin/
+          cp ./make/photon/db/initial-registry.sql ${{targets.contextdir}}/var/lib/postgres/initdb/
+
+          # Fixup paths
+          sed -i "s|\$PWD|/usr/bin|g" ${{targets.contextdir}}/usr/bin/*.sh
+          sed -i "s|^PGBINOLD=.*|PGBINOLD=/usr/libexec/postgresql\${PG_VERSION_OLD}|g" ${{targets.contextdir}}/usr/bin/*.sh
+          sed -i "s|/docker-entrypoint-initdb.d|/var/lib/postgres/initdb|g" ${{targets.contextdir}}/usr/bin/*.sh
+
+          # Ensure scripts are executable
+          chmod +x ${{targets.contextdir}}/usr/bin/*.sh
+
+          # Symlink healthcheck to root (hardcoded in Helm chart)
+          ln -sf /usr/bin/docker-healthcheck.sh ${{targets.contextdir}}/docker-healthcheck.sh
+    test:
+      pipeline:
+        - runs: |
+            [[ -x /usr/bin/docker-entrypoint.sh ]]
+            [[ -x /usr/bin/upgrade.sh ]]
+            [[ -x /usr/bin/initdb.sh ]]
+            [[ -x /usr/bin/docker-healthcheck.sh ]]
+            [[ -f /docker-healthcheck.sh ]]
+            [[ -f /var/lib/postgres/initdb/initial-registry.sql ]]
+
+  - name: ${{package.name}}-jobservice
+    description: harbor jobservice
+    dependencies:
+      provides:
+        - harbor-fips-jobservice=${{package.full-version}}
+      runtime:
+        - ca-certificates-bundle
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./jobservice
+          output: harbor-jobservice
+          modroot: ./src
+          go-package: go-fips
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/harbor
+          ln -sf /usr/bin/harbor-jobservice ${{targets.subpkgdir}}/harbor/harbor_jobservice
+    test:
+      pipeline:
+        - runs: |
+            # jobservice fails outside environment, verify adaptor for harbor registered
+            /harbor/harbor_jobservice 2>/dev/null | grep "harbor registered"
+
+  - name: ${{package.name}}-portal
+    description: harbor portal
+    dependencies:
+      provides:
+        - harbor-fips-portal=${{package.full-version}}
+      runtime:
+        - harbor-portal-nginx-config
+        - nginx
+        - openssl-config-fipshardened
+    pipeline:
+      - runs: |
+          # Copy over swagger configuration
+          cp api/v2.0/swagger.yaml src/portal/swagger.yaml
+          cd src/portal
+
+          # Build portal
+          npm install --unsafe-perm
+          npm run generate-build-timestamp
+          node --max_old_space_size=2048 'node_modules/@angular/cli/bin/ng' build --configuration production
+
+          # Generate swagger.json
+          npm install js-yaml@4.1.0
+          node -e "const yaml = require('js-yaml'); const fs = require('fs'); const swagger = yaml.load(fs.readFileSync('swagger.yaml', 'utf8')); fs.writeFileSync('swagger.json', JSON.stringify(swagger));"
+
+          # Copy license
+          cp ../../LICENSE dist
+
+          # Build swagger UI
+          cd app-swagger-ui
+          npm install --unsafe-perm
+          npm run build
+          cd ../
+
+          # Install
+          mkdir -p ${{targets.subpkgdir}}/usr/share/nginx/html
+          cp -rf dist/* ${{targets.subpkgdir}}/usr/share/nginx/html
+          cp swagger.json ${{targets.subpkgdir}}/usr/share/nginx/html
+          cp -rf app-swagger-ui/dist/* ${{targets.subpkgdir}}/usr/share/nginx/html
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - shadow
+      pipeline:
+        - runs: |
+            useradd nginx
+            mkdir -p /var/lib/nginx/logs
+            mkdir -p /var/lib/nginx/tmp
+            # The endpoint created by nginx is forbidden in CI
+            nginx -g "daemon off;" & sleep 5; kill $!
+
+  - name: ${{package.name}}-registryctl
+    description: harbor registryctl
+    dependencies:
+      provides:
+        - harbor-fips-registryctl=${{package.full-version}}
+      runtime:
+        - harbor-registry-fips
+        - ca-certificates-bundle
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./registryctl
+          output: harbor-registryctl
+          modroot: ./src
+          go-package: go-fips
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc/registryctl
+          mkdir -p ${{targets.subpkgdir}}/harbor
+          ln -sf /usr/bin/harbor-registryctl ${{targets.subpkgdir}}/harbor/harbor_registryctl
+    test:
+      pipeline:
+        - runs: |
+            harbor-registryctl --help
+
+  - name: ${{package.name}}-redis-compat
+    description: Compat package for running redis with harbor
+    dependencies:
+      provides:
+        - harbor-redis-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mkdir -p ${{targets.subpkgdir}}/etc
+
+          cp ./make/photon/redis/docker-healthcheck ${{targets.subpkgdir}}/usr/bin/
+          cp ./make/photon/redis/redis.conf ${{targets.subpkgdir}}/etc/
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/docker-healthcheck
+            stat /etc/redis.conf
+
+test:
+  pipeline:
+    - runs: |
+        harbor-core --help
+
+update:
+  enabled: true
+  github:
+    identifier: goharbor/harbor
+    strip-prefix: v
+    tag-filter: v2.12.

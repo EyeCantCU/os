@@ -1,0 +1,130 @@
+package:
+  name: kubernetes-event-exporter
+  version: "1.7"
+  epoch: 44
+  description: Export Kubernetes events to multiple destinations with routing and filtering
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - merged-usrsbin
+      - wolfi-baselayout
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go
+  environment:
+    CGO_ENABLED: 0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/resmoio/kubernetes-event-exporter
+      tag: v${{package.version}}
+      expected-commit: 2668c4309da33fd47ee0846923b8aa2107b87f88
+
+  - uses: go/bump
+    with:
+      deps: |-
+        google.golang.org/grpc@v1.56.3
+        github.com/sirupsen/logrus@v1.9.3
+        google.golang.org/protobuf@v1.33.0
+        github.com/hashicorp/go-retryablehttp@v0.7.7
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.38.0
+      modroot: .
+
+  - uses: go/build
+    with:
+      modroot: .
+      packages: .
+      output: kubernetes-event-exporter
+      ldflags: -X 'github.com/resmoio/kubernetes-event-exporter/pkg/version.Version=${{package.version}}'
+
+subpackages:
+  - name: kubernetes-event-exporter-bitnami-compat
+    description: "compat package with bitnami/kubernetes-event-exporter image"
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: kubernetes-event-exporter
+          version-path: 1/debian-12
+    test:
+      pipeline:
+        - runs: |
+            run-script --version
+            run-script --help
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: ${{package.name}}
+          version: ${{vars.major-version}}
+      - uses: iamguarded/finalize-compat
+        with:
+          package: ${{package.name}}
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: ${{package.name}}
+            version: ${{vars.major-version}}
+        - runs: |
+            run-script --version
+            run-script --help
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - kubernetes-e.*t-exporter-* # there are some misspellings in the upstream tags so using a wildcard here
+  github:
+    identifier: resmoio/kubernetes-event-exporter
+    strip-prefix: v
+
+test:
+  environment:
+    environment:
+      KUBERNETES_SERVICE_HOST: test-example.net
+      KUBERNETES_SERVICE_PORT: 8081
+  pipeline:
+    - name: "Create mock data"
+      runs: |
+        mkdir -p /var/run/secrets/kubernetes.io/serviceaccount
+        echo "dummy-token" > /var/run/secrets/kubernetes.io/serviceaccount/token
+        echo -e "log:\n  level: info\nsinks:\n  - name: stdout\n    kind: stdout\n" > /tmp/test-config.yaml
+    - name: "Test --help"
+      runs: |
+        kubernetes-event-exporter --help || (echo "Help command failed!" && exit 1)
+    - name: "Start and validate logs"
+      runs: |
+        kubernetes-event-exporter -conf /tmp/test-config.yaml > /tmp/event-exporter.log 2>&1 &
+        EXPORTER_PID=$!
+        sleep 5
+        # Check logs for expected output
+        if grep -q "Listening on" /tmp/event-exporter.log /tmp/event-exporter.log; then
+          echo "Test passed: Found expected log output."
+        else
+          echo "Test failed: Did not find expected log output."
+          cat /tmp/event-exporter.log
+          kill $EXPORTER_PID
+          exit 1
+        fi

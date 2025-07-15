@@ -1,0 +1,125 @@
+package:
+  name: metallb-fips
+  version: "0.15.2"
+  epoch: 1
+  description: "A network load-balancer implementation for Kubernetes using standard routing protocols"
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go-fips
+      - wolfi-base
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/metallb/metallb
+      tag: v${{package.version}}
+      expected-commit: 942c2fe54a75ac6353d3099eeebff33b6b8fe3f0
+
+  - uses: go/build
+    with:
+      packages: ./controller
+      output: metallb-controller
+      go-package: go-fips
+
+  - uses: go/build
+    with:
+      packages: ./frr-tools/metrics
+      output: metallb-frr-metrics
+      go-package: go-fips
+
+  - uses: go/build
+    with:
+      packages: ./speaker
+      output: metallb-speaker
+      go-package: go-fips
+
+  - uses: strip
+
+subpackages:
+  - name: metallb-controller-fips
+    pipeline:
+      - runs: |
+          install -Dm755 "${{targets.destdir}}"/usr/bin/metallb-controller "${{targets.subpkgdir}}"/usr/bin/metallb-controller
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+            - metallb-controller-fips
+            - openssl-config-fipshardened
+      pipeline:
+        - name: Check controller runs
+          runs: |
+            metallb-controller --help
+            error_message="open /var/run/secrets/kubernetes.io/serviceaccount/namespace: no such file or directory"
+            if ! metallb-controller | jq -r 'select(.error) .error' | grep -q "${error_message}"; then
+                exit 1
+            fi
+            echo "verified error message when not running in kubernetes"
+        - uses: test/go-fips-check
+
+  - name: metallb-frr-fips
+    pipeline:
+      - runs: |
+          install -Dm755 "${{targets.destdir}}"/usr/bin/metallb-frr-metrics "${{targets.subpkgdir}}"/usr/bin/metallb-frr-metrics
+          install frr-tools/reloader/frr-reloader.sh "${{targets.subpkgdir}}"/usr/bin/frr-reloader.sh
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+            - metallb-frr-fips
+            - openssl-config-fipshardened
+      pipeline:
+        - name: Check frr runs
+          runs: |
+            # doesn't throw any error when invoked directly so just run --help
+            metallb-frr-metrics --help
+        - uses: test/go-fips-check
+
+  - name: metallb-frr-compat-fips
+    pipeline:
+      - runs: |
+          # symlinks are required for compatibility with the metallb helm chart - does some cp stuff in init contaienrs
+          install -Dm755 "${{targets.destdir}}"/usr/bin/metallb-frr-metrics "${{targets.subpkgdir}}"/frr-metrics
+          install frr-tools/reloader/frr-reloader.sh "${{targets.subpkgdir}}"/frr-reloader.sh
+
+  - name: metallb-speaker-fips
+    pipeline:
+      - runs: |
+          # Ref: https://github.com/metallb/metallb/blob/main/speaker/Dockerfile
+          install -Dm755 "${{targets.destdir}}"/usr/bin/metallb-speaker "${{targets.subpkgdir}}"/usr/bin/metallb-speaker
+    dependencies:
+      runtime:
+        - bash # required by frr-reloader.sh
+        - metallb-frr-fips
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+            - metallb-speaker-fips
+            - openssl-config-fipshardened
+      pipeline:
+        - name: Check speaker runs
+          runs: |
+            metallb-speaker --help
+            error_message="open /var/run/secrets/kubernetes.io/serviceaccount/namespace: no such file or directory"
+            if ! metallb-speaker | jq -r 'select(.error) .error' | grep -q "${error_message}"; then
+                exit 1
+            fi
+            echo "verified error message when not running in kubernetes"
+        - uses: test/go-fips-check
+
+update:
+  enabled: true
+  github:
+    identifier: metallb/metallb
+    strip-prefix: v
+    tag-filter: v

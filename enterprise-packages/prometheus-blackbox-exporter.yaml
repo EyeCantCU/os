@@ -1,0 +1,101 @@
+package:
+  name: prometheus-blackbox-exporter
+  version: "0.27.0"
+  epoch: 0
+  description: Blackbox prober exporter
+  copyright:
+    - license: Apache-2.0
+  # REMOVE_POST_USRMERGE - https://github.com/orgs/wolfi-dev/discussions/40270
+  options:
+    no-provides: true # else melange auto-magically adds a provides cmd:blackbox_exporter
+  dependencies:
+    provides:
+      - ${{package.name}}-compat=${{package.full-version}}
+    runtime:
+      - merged-bin
+      - wolfi-baselayout
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - curl
+      - go
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/prometheus/blackbox_exporter
+      tag: v${{package.version}}
+      expected-commit: 46ea0224f57b708fdff317f8872765a77ef64034
+
+  - runs: |
+      make common-build
+
+  - runs: |
+      sed -i '/_ "net\/http\/pprof"/d' main.go
+      git diff
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/usr/bin
+      mkdir -p "${{targets.destdir}}"/etc/blackbox_exporter
+      install -Dm755 blackbox_exporter "${{targets.destdir}}"/usr/bin/blackbox_exporter
+      install -Dm644 blackbox.yml "${{targets.destdir}}"/etc/blackbox_exporter/config.yml
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    description: "iamguarded compat package for ${{package.name}}"
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: prometheus-blackbox-exporter
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/blackbox-exporter/bin
+          ln -sf /usr/bin/blackbox_exporter /opt/iamguarded/blackbox-exporter/bin/blackbox_exporter
+      - uses: iamguarded/finalize-compat
+        with:
+          package: prometheus-blackbox-exporter
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - runs: stat /opt/iamguarded/blackbox-exporter/bin/blackbox_exporter
+        - uses: iamguarded/test-compat
+          with:
+            package: prometheus-blackbox-exporter
+            version: ${{vars.major-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: prometheus/blackbox_exporter
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - prometheus-blackbox-exporter-compat
+  pipeline:
+    - runs: |
+        # run the blackbox_exporter in the background and test if there is any connection for :9115
+        /bin/blackbox_exporter --config.file /etc/blackbox_exporter/config.yml &
+        # find the PID
+        PID=$!
+        # wait for the blackbox_exporter to start
+        sleep 5
+        # check if the blackbox_exporter is running by checking :9115 connection
+        netstat -tuln | grep 9115
+        # kill the blackbox_exporter
+        kill $PID
+        blackbox_exporter --version
+        blackbox_exporter --help

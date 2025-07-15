@@ -1,0 +1,101 @@
+#nolint:git-checkout-must-use-github-updates
+package:
+  name: confluent-docker-utils
+  version: "0.0.162"
+  epoch: 1
+  description: This package provides Docker Utility Belt (dub) and Confluent Platform Utility Belt (cub).
+  copyright:
+    - license: Apache-2.0
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      - py${{vars.py-version}}-setuptools # To fix `No module named 'distutils'`
+
+vars:
+  # This will compile with py3.13, however tests will fail with errors:
+  # 'ModuleNotFoundError: No module named 'pipes'
+  # - https://github.com/jupyter/nbclassic/issues/308
+  # Upstream may have to make some code changes to be compatible with py3.13.
+  py-version: 3.12
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - cython
+      - py${{vars.py-version}}-build-base-dev
+      - py${{vars.py-version}}-gpep517
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 5f72278a2a36b47b5dc0ccabcb5e154bde4b9e20
+      repository: https://github.com/confluentinc/confluent-docker-utils
+      tag: v${{package.version}}
+
+  - runs: |
+      # Workaround to fix `AttributeError: cython_sources` issue
+      # https://github.com/yaml/pyyaml/issues/724#issuecomment-1638587228
+      echo 'PyYAML==6.0.1' >> requirements.txt
+
+      # urllib3: CVE-2025-50182 GHSA-48p4-8xcf-vxj5, CVE-2025-50181 GHSA-pq67-6m6q-mj2v
+      echo 'urllib3>=2.5.0' >> requirements.txt
+
+  - runs: |
+      python3=python${{vars.py-version}}
+      $python3 -m gpep517 build-wheel \
+        --wheel-dir dist \
+        --output-fd 3 3>&1 >&2
+      $python3 -m installer \
+        -d "${{targets.destdir}}" \
+        dist/*.whl
+      install -Dm644 LICENSE \
+        "${{targets.destdir}}"/usr/share/licenses/${{package.name}}/LICENSE
+
+  - runs: |
+      python3=python${{vars.py-version}}
+      # `--use-deprecated=legacy-resolver` is used force ignore the dependency check.
+      # `docker-compose` was requiring `PyYAML<6` and also `PyYAML==5.4.1` was causing
+      # `AttributeError: cython_sources` issue.
+      $python3 -m pip install --root=${{targets.destdir}} --prefix=/usr --prefer-binary --use-deprecated=legacy-resolver -r requirements.txt
+      $python3 -m pip install --root=${{targets.destdir}} --prefix=/usr setuptools
+      find ${{targets.destdir}} -name "*.pyc" -exec rm -rf '{}' +
+
+  - runs: |
+      python3=python${{vars.py-version}}
+      _py3ver=$($python3 -c 'import sys; print("{}.{}".format(sys.version_info.major, sys.version_info.minor))')
+      mkdir -p ${{targets.destdir}}/usr/lib/python"$_py3ver"/site-packages/confluent/docker_utils
+      cp -r confluent/docker_utils/* ${{targets.destdir}}/usr/lib/python"$_py3ver"/site-packages/confluent/docker_utils/
+
+  - uses: strip
+
+update:
+  enabled: true
+  # It is necessary to use release monitor
+  # because it is required to be included
+  # in the allowed IP list to use Github
+  release-monitor:
+    identifier: 371723
+
+test:
+  pipeline:
+    - runs: |
+        cub -h
+        dub -h
+        cub --help
+        distro --help
+        docker-compose --version
+        docker-compose --help
+        dub --help
+        jp.py --help
+        jsonschema --version
+        jsonschema --help
+        normalizer --version
+        normalizer --help
+    - uses: test/tw/ldd-check
+    - uses: python/import
+      with:
+        import: confluent.docker_utils
+    - uses: test/tw/ldd-check

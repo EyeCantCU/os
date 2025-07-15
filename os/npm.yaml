@@ -1,0 +1,171 @@
+# downgraded to 11.2.0 until https://github.com/npm/cli/issues/8216 is resolved
+package:
+  name: npm
+  version: "11.4.2"
+  epoch: 0
+  description: "the npm package manager for javascript, mainline"
+  copyright:
+    - license: Artistic-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - rsync
+      - wolfi-base
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://registry.npmjs.org/npm/-/npm-${{package.version}}.tgz
+      expected-sha512: f90c1ec8b207b625d6edb6693aef23dacb39c38e4217fe8c46a973f119cab392ac0de23fe3f07e583188dae9fd9108b3845ad6f525b598742bd060ebad60bff3
+      delete: true
+
+  - runs: |
+      # Wrapper scripts written in Bash and CMD.
+      rm bin/npm bin/npx bin/*.cmd
+      rm README.md
+
+      # HTML docs
+      rm -rf docs
+
+  - working-directory: /home/build/node_modules
+    runs: |
+      find . -type f \( \
+             -name '.*' -o \
+             -name '*.cmd' -o \
+             -name '*.bat' -o \
+             -name '*.map' -o \
+             -name '*.md' -o \
+             \( -name '*.ts' -a ! -name '*.d.ts' \) -o \
+             -name 'AUTHORS*' -o \
+             -name 'LICENSE*' -o \
+             -name 'license' -o \
+             -name 'node-gyp' -o \
+             -name 'Makefile' -o \
+             -name 'README*' -o \
+             -name 'readme.markdown' \) -delete
+
+      rm -rf ./*/.git* ./*/doc ./*/docs ./*/examples ./*/scripts ./*/test
+      rm -rf node_modules/node-gyp
+
+      find . -type f -executable  -exec chmod -x {} \;
+
+  - working-directory: /home/build/man
+    runs: |
+      for f in man5/folders.5 man5/install.5 man7/*.7; do
+        sec=${f##*.}
+        name=$(basename $f .$sec)
+        title=$(echo "$name" | tr '[:lower:]' '[:upper:]')
+
+        sed -Ei "s/^\.TH \"$title\"/.TH \"NPM-$title\"/" "$f"
+        mv "$f" "${f%/*}/npm-$name.$sec"
+      done
+
+  - runs: |
+      destdir="${{targets.destdir}}"/usr/lib/node_modules/npm
+      install -dDm755 "$destdir"
+      rsync -av --exclude melange-out /home/build/ "$destdir"
+      chmod 755 "$destdir"
+
+  - working-directory: ${{targets.destdir}}/usr/bin
+    runs: |
+      ln -s ../lib/node_modules/npm/bin/npm-cli.js npm
+      ln -s ../lib/node_modules/npm/bin/npx-cli.js npx
+
+  - working-directory: ${{targets.destdir}}/usr/share
+    runs: |
+      mv "${{targets.destdir}}"/usr/lib/node_modules/npm/man man
+      ln -s ../../../share/man "${{targets.destdir}}"/usr/lib/node_modules/npm/man
+
+subpackages:
+  - name: "npm-doc"
+    description: "npm documentation"
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -v # ignore versions that start contain a -v, e.g. arborist-v7.2.1, libnpmfund-v4.2.0
+  github:
+    identifier: npm/cli
+    strip-prefix: v
+    tag-filter: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - nodejs
+        - python3
+    environment:
+      HOME: /home/build
+  pipeline:
+    - runs: |
+        npm --version
+        npm install -g cowsay
+        cowsay Yay! It works!
+        npm help
+        npx --version
+        npx --help
+    - runs: |
+        # Reproduce https://github.com/npm/cli/issues/8216: create a
+        # package-lock.json and then attempt to use a registry at a non-/
+        # prefix with `npm install`
+
+        cat << EOF > proxy.py
+        import http.server
+        import socketserver
+        import urllib.request
+
+        class MyProxy(http.server.SimpleHTTPRequestHandler):
+
+            def do_GET(self):
+                if not self.path.startswith("/prefix"):
+                  self.send_response(404)
+                  self.end_headers()
+                  self.wfile.write(b"Unprefixed!\n")
+                  return
+                path = self.path.replace("/prefix", "")
+                url = f"https://registry.npmjs.org/{path}"
+                self.send_response(200)
+                self.end_headers()
+                self.copyfile(urllib.request.urlopen(url), self.wfile)
+
+        PORT = 7777
+
+        httpd = None
+
+        try:
+            httpd = socketserver.TCPServer(('', PORT), MyProxy)
+            print(f"Proxy at: http://localhost:{PORT}")
+            httpd.serve_forever()
+        finally:
+            if httpd:
+                httpd.shutdown()
+        EOF
+
+        # Run a proxy which strips "prefix/" from URLs, which should work as an
+        # NPM registry rooted at /prefix
+        python3 proxy.py > /dev/null 2>&1 &
+        sleep 1
+
+        # Create a package-lock.json
+        npm install rightpad
+        # Ensure npm will find something to do
+        rm -rf node_modules .npm
+
+        # Set our registry
+        npm config set registry http://localhost:7777/prefix/
+
+        # npm will use the scheme of `resolved` regardless of registry setting,
+        # so avoid the need to terminate SSL in our proxy
+        sed -i 's/https/http/' package-lock.json
+
+        # Attempt an install
+        npm install --loglevel silly

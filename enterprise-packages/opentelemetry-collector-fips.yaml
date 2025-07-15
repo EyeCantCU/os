@@ -1,0 +1,79 @@
+package:
+  name: opentelemetry-collector-fips
+  version: "0.129.0"
+  epoch: 0
+  description: OpenTelemetry Collector
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openssl-config-fipshardened
+      - so:libcrypto.so.3
+      - so:libssl.so.3
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - curl
+      - go-fips-md5
+      - openssl-config-fipshardened
+      - yq
+
+pipeline:
+  - runs: |
+      set -x
+
+      # Use the build config from the official otel-core release
+      # https://github.com/open-telemetry/opentelemetry-collector-releases/blob/main/distributions/otelcol/manifest.yaml
+      # The manifest is updated as part of the release process and so should match the
+      # lastest version released from open-telemetry/opentelemetry-collector
+      curl --fail -o builder-config.yaml https://raw.githubusercontent.com/open-telemetry/opentelemetry-collector-releases/v${{package.version}}/distributions/otelcol/manifest.yaml
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/open-telemetry/opentelemetry-collector
+      tag: v${{package.version}}
+      expected-commit: 8c7e0b7708eeb02f012282f74c6723a58f9cbf2a
+
+  # We need to disable the "-s" ldflags for the build to be FIPS.
+  - uses: go/remove-cgo-enabled-0
+    with:
+      files: cmd/builder/internal/builder/main.go
+      seds: |
+        s,-s -w,-w,g
+
+  - uses: go/build
+    with:
+      packages: .
+      modroot: ./cmd/builder
+      output: ocb
+      go-package: go-fips-md5
+
+  - runs: |
+      set -x
+      # Use the builder to compile opentelemetry-collector
+      yq eval '.replaces += ["golang.org/x/oauth2 => golang.org/x/oauth2 v0.28.0"]' builder-config.yaml -i
+      yq eval '.replaces += ["golang.org/x/crypto => golang.org/x/crypto v0.35.0"]' builder-config.yaml -i
+      yq eval '.replaces += ["golang.org/x/net => golang.org/x/net v0.38.0"]' builder-config.yaml -i
+      yq eval '.replaces += ["github.com/golang-jwt/jwt/v5 => github.com/golang-jwt/jwt/v5 v5.2.2"]' builder-config.yaml -i
+      ${{targets.destdir}}/usr/bin/ocb --config=builder-config.yaml
+
+
+      install -Dm755 ./_build/otelcol "${{targets.destdir}}"/usr/bin/otelcol
+      rm -f ${{targets.destdir}}/usr/bin/ocb
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: open-telemetry/opentelemetry-collector
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
+
+test:
+  pipeline:
+    - runs: otelcol --version
+    - uses: test/go-fips-check

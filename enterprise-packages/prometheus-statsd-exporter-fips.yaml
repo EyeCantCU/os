@@ -1,0 +1,74 @@
+package:
+  name: prometheus-statsd-exporter-fips
+  version: 0.28.0
+  epoch: 11
+  description: StatsD exporter for Prometheus
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  PKG: "github.com/prometheus/common"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: c0a390a2c43f77863278615b47d46e886bdca726
+      repository: https://github.com/prometheus/statsd_exporter
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.38.0
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: .
+      output: statsd_exporter
+      ldflags: |
+        -X ${{vars.PKG}}/version.Revision=$(git rev-parse --short HEAD)
+        -X ${{vars.PKG}}/version.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%Y-%m-%dT%H:%M:%SZ')
+        -X ${{vars.PKG}}/version.Branch=$(git branch --show-current)
+        -X ${{vars.PKG}}/version.Version=v${{package.version}}
+
+test:
+  environment:
+    contents:
+      packages:
+        - netcat-openbsd
+        - curl
+        - wait-for-it
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        statsd_exporter --version
+        statsd_exporter --help
+    - name: "Test statsd_exporter basic functionality"
+      uses: test/daemon-check-output
+      with:
+        start: statsd_exporter --statsd.listen-udp=:9125 --web.listen-address=:9102
+        timeout: 10
+        expected_output: |
+          Starting StatsD -> Prometheus Exporter
+          Accepting StatsD Traffic
+          Accepting Prometheus Requests
+        post: |
+          wait-for-it 127.0.0.1:9102 -t 10
+
+          # Send a test StatsD metric
+          echo "example.metric:1|c" | nc -u -w0 127.0.0.1 9125
+
+          # Short wait for processing
+          sleep 2
+
+          # Check that metric shows up in Prometheus endpoint
+          curl -sf http://127.0.0.1:9102/metrics | grep "example_metric"
+
+update:
+  enabled: true
+  github:
+    identifier: prometheus/statsd_exporter
+    strip-prefix: v

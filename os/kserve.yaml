@@ -1,0 +1,158 @@
+package:
+  name: kserve
+  version: "0.15.2"
+  epoch: 2
+  description: "Standardized Serverless ML Inference Platform on Kubernetes"
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  py-version: 3.11 # Upstream https://github.com/kserve/kserve/blob/release-0.15/python/storage-initializer.Dockerfile uses python-3.11
+
+environment:
+  contents:
+    packages:
+      - go
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-poetry
+      - py${{vars.py-version}}-poetry-bin
+      - python-${{vars.py-version}}-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kserve/kserve
+      tag: v${{package.version}}
+      expected-commit: d623ea29e4a7312e509829f9104209cd6f820268
+
+  # kserve project puts this at the bottom of the go.mod so updating it with go/bump isn't possible
+  - runs: |
+      sed -i 's|replace golang.org/x/net => golang.org/x/net v0.33.0|replace golang.org/x/net => golang.org/x/net v0.36.0|g' go.mod
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
+      modroot: qpext
+
+  - uses: patch
+    with:
+      patches: bump-python-version.patch
+
+data:
+  - name: go-components
+    items:
+      agent: "."
+      router: "."
+      manager: "."
+      qpext: "qpext"
+
+subpackages:
+  - range: go-components
+    name: kserve-${{range.key}}
+    pipeline:
+      - uses: go/build
+        working-directory: ${{range.value}}
+        with:
+          modroot: .
+          packages: ./cmd/${{range.key}}
+          output: ${{range.key}}
+
+  - range: go-components
+    name: kserve-${{range.key}}-compat
+    dependencies:
+      runtime:
+        - kserve-${{range.key}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/"
+          ln -s ../usr/bin/${{range.key}} "${{targets.contextdir}}/${{range.key}}"
+    test:
+      environment:
+        contents:
+          packages:
+            - busybox
+      pipeline:
+        - name: "check paths"
+          runs: |
+            [ -x /${{range.key}} -a -f /${{range.key}} ]
+
+  - name: kserve-storage-controller
+    options:
+      no-commands: true
+    pipeline:
+      - name: poetry-build-storage-controller
+        working-directory: ./python/kserve
+        runs: |
+          # Due to bump-python-version.patch, we need to re-lock dependencies
+          poetry lock
+
+          # Install dependencies and build the package using poetry
+          # NB: exclude 'ray' extras since that brings unwanted cuda/nv deps
+          poetry install --no-interaction --no-root --extras "storage"
+
+          # cryptography: CVE-2024-12797 GHSA-79v4-65xg-pq4g
+          poetry add \
+            "cryptography=^44.0.1"
+
+          # h11: CVE-2025-43859 GHSA-vqfr-h8mv-ghfj
+          poetry add \
+            "h11=^0.16.0"
+
+          # protobuf: CVE-2025-4565 GHSA-8qvm-5x2c-j2w7
+          poetry add \
+            "protobuf=^4.25.8"
+
+          # urllib3: CVE-2025-50182 GHSA-48p4-8xcf-vxj5, CVE-2025-50181 GHSA-pq67-6m6q-mj2v
+          poetry add \
+            "urllib3=^2.5.0"
+
+          poetry run pip freeze | grep -v kserve > requirements.txt
+          poetry build
+
+          # Install runtime deps and wheel with the root directory set to ${{targets.contextdir}}
+          python3 -m pip install --root ${{targets.contextdir}} -I -r requirements.txt --no-compile
+          python3 -m pip install --verbose --prefix=/usr --root=${{targets.contextdir}} dist/*.whl
+
+          # Upgrade requests to fix GHSA-9hjg-9r4m-mvj7
+          python3 -m pip install --upgrade "requests>=2.32.4" --prefix=/usr --root=${{targets.contextdir}}
+      - name: install storage-initializer entrypoint
+        working-directory: ./python/storage-initializer
+        runs: |
+          mkdir -p ${{targets.contextdir}}/storage-initializer/scripts/
+
+          cp ./scripts/initializer-entrypoint ${{targets.contextdir}}/storage-initializer/scripts/
+          chmod 755 ${{targets.contextdir}}/storage-initializer/scripts/initializer-entrypoint
+
+          cd ${{targets.contextdir}}/storage-initializer/scripts/
+          # update shbang to point to the python used rather than '/usr/bin/env python'
+          sed -i.dist "1s,#!/usr/bin/env python[^ ]*,#!$(which python${{vars.py-version}})," initializer-entrypoint
+          # exit fail if it did not change anything
+          diff -u initializer-entrypoint.dist initializer-entrypoint && exit 1
+          rm initializer-entrypoint.dist
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - busybox
+      pipeline:
+        - name: "test entrypoint usage"
+          runs: |
+            /storage-initializer/scripts/initializer-entrypoint --help
+        - uses: test/tw/ldd-check
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  github:
+    identifier: kserve/kserve
+    strip-prefix: v

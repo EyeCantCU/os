@@ -1,0 +1,158 @@
+name: Check Golang fips executables
+
+needs:
+  packages:
+    - apk-tools
+    - busybox
+    - bash
+    - go-fips
+    - posix-libc-utils
+
+inputs:
+  package-match:
+    description: |
+      regex matching packages to check.
+    required: true
+    default: 'DEFAULT'
+
+pipeline:
+  - name: "check golang files for fips-ness"
+    runs: |
+      cat <<"END_CHECK_FIPS" >/tmp/check-fips
+      #!/bin/bash
+      set -o errexit -o nounset -o errtrace -o pipefail
+      r=0
+
+      checkfile() {
+          local path="$1" r=0 outf="${TEMP_D}/syms.out"
+          if ! go tool nm "$path" > "$outf"; then
+              echo "$path is golang but HAS NO SYMBOLS"
+              return 1
+          fi
+          if grep -q ' . crypto' "$outf"; then
+              # Go binary using cryptography
+              if grep -q -e '_Cfunc__goboringcrypto_' -e 'v2._Cfunc_go_openssl' "$outf"; then
+                  # Go binary using cgo openssl cryptography
+                  echo "$path is golang and is using cgo openssl cryptography"
+              else
+                  # Go binary using golang cryptography
+                  echo "$path is golang but is NOT using cgo openssl cryptography"
+                  r=1
+              fi
+              if [ -z "$(ldd "$path" 2>/dev/null)" ]; then
+                  echo "$path is statically linked and will fail to execute upon glibc upgrades"
+                  r=1
+              fi
+          else
+              echo "$path is golang and does not use crypto (that is fips compliant)"
+          fi
+          return $r
+      }
+
+      debug() {
+          [ "$DEBUG" = "true" ] || return 0
+          echo "$@"
+      }
+
+      packages=false
+      if [ "$1" = "--package" ]; then
+          packages=true
+          shift
+      fi
+
+      TEMP_D=$(mktemp -d)
+      trap "rm -Rf '${TEMP_D}'" EXIT
+
+      errors=0
+      files=0
+      DEBUG=false
+      command -v go >/dev/null 2>&1 ||
+          { echo "ERROR: You need 'go' executable"; exit 1; }
+
+      if [ "$packages" = "true" ]; then
+          flist="${TEMP_D}/files"
+          cd /
+          for pkg in "$@"; do
+              apk info --quiet -L "$pkg" > "$flist" || {
+                  echo "failed to list contents of $pkg"
+                  exit 1
+              }
+              debug ":: $pkg"
+              while read f; do
+                  # apk info -L adds a blank line at the end.
+                  [ -z "$f" ] && continue
+                  [ -d "$f" ] && continue
+                  outf="${TEMP_D}/version.out"
+                  errf="${TEMP_D}/version.err"
+                  if ! LANG=C go version "$f" > "$outf" 2> "$errf"; then
+                      rc=$?
+                      echo "ERROR: go version '$f' exited $rc"
+                      cat "$outf"
+                      cat "$errf"
+                      exit 2
+                  fi
+                  # outputs nothing on lots of files (text files)
+                  [ -f "$outf" ] || { echo "ERROR: output file disappeared"; exit 2; }
+                  if [ ! -s "$outf" ]; then
+                      debug "$f: skipping non-binary file"
+                      continue
+                  fi
+                  if grep -qi "not a Go executable" "$errf"; then
+                      debug "$f: not a go executable"
+                      continue
+                  fi
+                  checkfile "$f" || errors=$((errors+1))
+                  files=$((files+1))
+              done < "$flist"
+          done
+      else
+          for path in "$@"; do
+              if [ -d "$path" ]; then
+                  for f in $(go version "$path" | cut -d: -f1); do
+                      checkfile "$f" || errors=$((errors+1))
+                      files=$((files+1))
+                  done
+              elif [ -f "$path" ]; then
+                  checkfile "$path" || errors=$((errors+1))
+                  files=$((files+1))
+              else
+                  echo "ERROR: $path is not a file or a dir!"
+                  exit 2
+              fi
+          done
+      fi
+
+      result=FAIL
+      rc=1
+      [ $errors -eq 0 ] && { result="PASS"; rc=0; }
+
+      echo "$result: $files checked. $errors non-fips golang binaries found."
+      exit $rc
+      END_CHECK_FIPS
+      chmod 755 /tmp/check-fips
+
+      pkgmatch='${{inputs.package-match}}'
+      pkgname='${{package.name}}'
+      if [ "${pkgmatch}" = "DEFAULT" ]; then
+        # default behavior is just "pkgname" intending for 'pkg-fips' to
+        # match it and its subpkgs, but those would be named pkg-<thing>-fips
+        pkgmatch="^${pkgname%-fips}"
+      fi
+
+      pfile=/tmp/packages.list
+      if ! apk info -L >"$pfile" 2>"$pfile.err" ; then
+        echo "ERROR: apk info -L failed"
+        cat "$pfile" "$pfile.err"
+        exit 1
+      fi
+      packages=$(grep "$pkgmatch" "$pfile") || :
+      set -- ${packages}
+      if [ $# -eq 0 ]; then
+        echo "packages:"
+        sed 's,^,>  ,' "$pfile"
+        echo "ERROR: package-match '$pkgmatch'" \
+            "did not match any installed packages (see list above)"
+        exit 1
+      fi
+      echo "checking $# packages: $*"
+      /tmp/check-fips --package "$@"

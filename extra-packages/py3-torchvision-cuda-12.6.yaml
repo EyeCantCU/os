@@ -1,0 +1,197 @@
+package:
+  name: py3-torchvision-cuda-12.6
+  version: "0.22.1"
+  epoch: 3
+  description: Datasets, Transforms and Models specific to Computer Vision
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  resources:
+    cpu: 16
+    memory: 16Gi
+  options:
+    no-depends: true
+
+vars:
+  cudnn-version: 9
+  gcc-version: 12
+  llvm-version: 15
+  pypi-package: torchvision
+  import: torchvision
+  py-version: 3.13 # generic usage at build-time
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.(\d+)$'
+    replace: 'cu$1$2'
+    to: cuda-pyvariant
+
+data:
+  - name: py-versions
+    items:
+      3.10:
+      3.11:
+      3.12:
+      3.13:
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang-${{vars.llvm-version}}
+      - clang-${{vars.llvm-version}}-default
+      - clang-${{vars.llvm-version}}-dev
+      - cmake-3
+      - coreutils
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - gcc-${{vars.gcc-version}}-default
+      - git
+      - libffi-dev
+      - libgomp
+      - libjpeg-dev
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - libpng-utils
+      - llvm${{vars.llvm-version}}
+      - llvm${{vars.llvm-version}}-dev
+      - llvm-lld-${{vars.llvm-version}}
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvidia-driver
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - openmp-17-dev
+      - patchelf
+      - posix-libc-utils
+      - py3-supported-build-base-dev
+      - py3-supported-numpy
+      - py3-supported-torch-cuda-${{vars.cuda-version}}-dev
+      - samurai
+  environment:
+    BUILD_VERSION: ${{package.version}}+${{vars.cuda-pyvariant}}
+    CFLAGS: -Wno-error=nonnull -Wno-nonnull
+    CXXFLAGS: -Wno-error=nonnull -Wno-nonnull
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    CUDA_NVCC_EXECUTABLE: /usr/local/cuda-${{vars.cuda-version}}/bin/nvcc
+    CUDA_VERSION: ${{vars.cuda-version}}
+    CMAKE_CUDA_ARCHITECTURES: all
+    FORCE_CUDA: 1
+    USE_CUDA: 1
+    USE_CUDNN: 1
+    TORCH_CUDA_ARCH_LIST: "5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
+    TORCH_NVCC_FLAGS: -Xfatbin -compress-all
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pytorch/vision.git
+      tag: v${{package.version}}
+      expected-commit: 59a3e1f9f78cfe44cb989877cc6f4ea77c8a75ca
+
+  - name: prepare sdist in advance to avoid creating a new one for each build variant
+    runs: |
+      python${{vars.py-version}} -m build --sdist -n -x
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+subpackages:
+  - name: libtorchvision-cuda-${{vars.cuda-version}}
+    description: C++ torchvision library
+    dependencies:
+      runtime:
+        - libtorch-cuda-${{vars.cuda-version}}
+    pipeline:
+      - name: Build libtorchvision.so
+        runs: |
+          export PATH="$PATH:$CUDA_HOME/bin"
+
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${{vars.cuda-version}} \
+            -DUSE_SYSTEM_NVTX=1 \
+            -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}"
+          make -j$(nproc)
+          make install DESTDIR="${{targets.contextdir}}"
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: libtorchvision-cuda-${{vars.cuda-version}}-dev
+    description: C++ torchvision development files
+    dependencies:
+      runtime:
+        - libtorchvision-cuda-${{vars.cuda-version}}
+    pipeline:
+      - uses: split/dev
+        with:
+          package: libtorchvision-cuda-${{vars.cuda-version}}
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+    description: python${{range.key}} version of ${{vars.pypi-package}} for CUDA ${{vars.cuda-version}}
+    dependencies:
+      runtime:
+        - cuda-toolkit-${{vars.cuda-version}}
+        - nvidia-cudnn-${{vars.cudnn-version}}-cuda-${{vars.cuda-major-version}}
+        - nvidia-nccl-cuda-${{vars.cuda-version}}
+        - openmp-17
+        - py${{range.key}}-numpy
+        - py${{range.key}}-pillow
+        - py${{range.key}}-pyyaml
+        - py${{range.key}}-torch-cuda-${{vars.cuda-version}}
+        - py${{range.key}}-typing-extensions
+    options:
+      no-depends: true
+    pipeline:
+      - name: Python Build
+        runs: |
+          python${{range.key}} -m pip install --verbose \
+            --no-index --no-build-isolation --no-deps \
+            --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/torchvision-${{package.version}}+${{vars.cuda-pyvariant}}.tar.gz
+          sitepkgd=$(python${{range.key}} -c 'import site; print(site.getsitepackages()[0])')
+          python${{range.key}} -m compileall --invalidation-mode=unchecked-hash -r100 ${{targets.contextdir}}/$sitepkgd
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+        - runs: |
+            python${{range.key}} ./quickstart.py > output.out 2>&1
+            grep -E "ERROR|None" output.out && exit 1
+
+  - name: py3-supported-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+    description: meta package providing ${{vars.pypi-package}} for supported python versions.
+    dependencies:
+      runtime:
+        - py3.10-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+        - py3.11-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+        - py3.12-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+        - py3.13-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+    test:
+      pipeline:
+        - uses: test/emptypackage
+
+update:
+  enabled: true
+  github:
+    identifier: pytorch/vision
+    strip-prefix: v
+    tag-filter: v

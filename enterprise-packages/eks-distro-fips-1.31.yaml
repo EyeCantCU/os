@@ -1,0 +1,313 @@
+package:
+  name: eks-distro-fips-1.31
+  version: "1.31.24"
+  epoch: 0
+  description: EKS Distro FIPS 1.31 components
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - eks-distro-fips=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - libcap-utils
+
+# Transform the full version that EKS talks about. They use a form:
+# 1-30-eks-12, where 1-30 is the k8s version, 12 is the eks-distro release.
+var-transforms:
+  - from: ${{package.version}}
+    match: '\.'
+    replace: '-'
+    to: package-version
+  - from: ${{vars.package-version}}
+    match: '(\d+-\d+-)(\d+)'
+    replace: '$2'
+    to: eks-version
+  - from: ${{vars.package-version}}
+    match: '(\d+-\d+)(-\d+)'
+    replace: '$1-eks$2'
+    to: eks-distro-version
+  - from: ${{vars.package-version}}
+    match: '(\d+-\d+)-\d+'
+    replace: '$1'
+    to: kubernetes-version
+  - from: ${{package.version}}
+    match: '(\d+\.\d+)(\.\d+)'
+    replace: '$1'
+    to: kubernetes-major-minor
+
+# There are also things like kubectl, kubeadm, kubelet at least.
+# But there are no eks-distro containers for them, nor releases,
+# so we don't build them yet.
+data:
+  - name: kubernetes-components
+    items:
+      kube-scheduler:
+      kube-proxy:
+      kube-controller-manager:
+      kube-apiserver:
+
+vars:
+  # Projects
+  coredns: "coredns/coredns"
+  external-attacher: "kubernetes-csi/external-attacher"
+  external-provisioner: "kubernetes-csi/external-provisioner"
+  external-resizer: "kubernetes-csi/external-resizer"
+  external-snapshotter: "kubernetes-csi/external-snapshotter"
+  kubernetes: "kubernetes/kubernetes"
+  livenessprobe: "kubernetes-csi/livenessprobe"
+  node-driver-registrar: "kubernetes-csi/node-driver-registrar"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aws/eks-distro
+      tag: v${{vars.eks-distro-version}}
+      expected-commit: 27b873a2c58606f490a838778d56d66f65f27ba0
+
+  # Checkout EKS distro projects
+  - runs: |
+      export RELEASE_BRANCH="${{vars.kubernetes-version}}"
+      projectdir="$(pwd)/projects"
+      for project in "${{vars.kubernetes}}" "${{vars.coredns}}" "${{vars.external-attacher}}" "${{vars.external-provisioner}}" "${{vars.external-resizer}}" "${{vars.external-snapshotter}}" "${{vars.livenessprobe}}" "${{vars.node-driver-registrar}}"; do
+        # Go to project
+        cd "${projectdir}/${project}"
+        # Checkout and patch project
+        make checkout-repo
+        # Return to projects dir
+        cd "${projectdir}"
+      done
+
+  # Keep all the go/bump steps together for easier package update
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.37.0
+        golang.org/x/net@v0.39.0
+        golang.org/x/oauth2@v0.28.0
+      modroot: ./projects/kubernetes/kubernetes/kubernetes
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.37.0
+        golang.org/x/net@v0.39.0
+        golang.org/x/oauth2@v0.28.0
+      modroot: ./projects/coredns/coredns/coredns
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.28.0
+      modroot: ./projects/kubernetes-csi/external-attacher/external-attacher
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.28.0
+      modroot: ./projects/kubernetes-csi/external-provisioner/external-provisioner
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.28.0
+      modroot: ./projects/kubernetes-csi/external-resizer/external-resizer
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.28.0
+      modroot: ./projects/kubernetes-csi/external-snapshotter/external-snapshotter
+
+subpackages:
+  - range: kubernetes-components
+    name: eks-distro-${{range.key}}-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-${{range.key}}-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/${{range.key}}
+          output: ${{range.key}}
+          modroot: ./projects/${{vars.kubernetes}}/kubernetes
+          go-package: go-fips
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -s /usr/bin/${{range.key}} ${{targets.contextdir}}/usr/local/bin/${{range.key}}
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-${{range.key}}-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-coredns-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-coredns-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: .
+          output: coredns
+          modroot: ./projects/${{vars.coredns}}/coredns
+          go-package: go-fips
+      - runs: |
+          setcap cap_net_bind_service=+ep ${{targets.subpkgdir}}/usr/bin/coredns
+          ln -s /usr/bin/coredns ${{targets.contextdir}}/coredns
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-coredns-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-kubernetes-csi-external-attacher-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-csi-external-attacher-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/csi-attacher
+          output: csi-attacher
+          modroot: ./projects/${{vars.external-attacher}}/external-attacher
+          ldflags: "-X main.version=$(cat /home/build/projects/${{vars.external-attacher}}/${{vars.kubernetes-version}}/GIT_TAG)"
+          go-package: go-fips
+      - runs: ln -s /usr/bin/csi-attacher ${{targets.contextdir}}/csi-attacher
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-kubernetes-csi-external-attacher-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-kubernetes-csi-external-provisioner-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-csi-external-provisioner-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/csi-provisioner
+          output: csi-provisioner
+          modroot: ./projects/${{vars.external-provisioner}}/external-provisioner
+          ldflags: "-X main.version=$(cat /home/build/projects/${{vars.external-provisioner}}/${{vars.kubernetes-version}}/GIT_TAG)"
+          go-package: go-fips
+      - runs: ln -s /usr/bin/csi-provisioner ${{targets.contextdir}}/csi-provisioner
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-kubernetes-csi-external-provisioner-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-kubernetes-csi-external-resizer-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-csi-external-resizer-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/csi-resizer
+          output: csi-resizer
+          modroot: ./projects/${{vars.external-resizer}}/external-resizer
+          ldflags: "-X main.version=$(cat /home/build/projects/${{vars.external-resizer}}/${{vars.kubernetes-version}}/GIT_TAG)"
+          go-package: go-fips
+      - runs: ln -s /usr/bin/csi-resizer ${{targets.contextdir}}/csi-resizer
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-kubernetes-csi-external-resizer-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-kubernetes-csi-external-snapshotter-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-csi-external-snapshotter-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/csi-snapshotter
+          output: csi-snapshotter
+          modroot: ./projects/${{vars.external-snapshotter}}/external-snapshotter
+          ldflags: "-X main.version=$(cat /home/build/projects/${{vars.external-snapshotter}}/${{vars.kubernetes-version}}/GIT_TAG)"
+          go-package: go-fips
+      - runs: ln -s /usr/bin/csi-snapshotter ${{targets.contextdir}}/csi-snapshotter
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-kubernetes-csi-external-snapshotter-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-kubernetes-csi-external-snapshot-controller-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-csi-external-snapshot-controller-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/snapshot-controller
+          output: snapshot-controller
+          modroot: ./projects/${{vars.external-snapshotter}}/external-snapshotter
+          ldflags: "-X main.version=$(cat /home/build/projects/${{vars.external-snapshotter}}/${{vars.kubernetes-version}}/GIT_TAG)"
+          go-package: go-fips
+      - runs: ln -s /usr/bin/snapshot-controller ${{targets.contextdir}}/snapshot-controller
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-kubernetes-csi-external-snapshot-controller-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-kubernetes-csi-livenessprobe-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-csi-livenessprobe-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/livenessprobe
+          output: livenessprobe
+          modroot: ./projects/${{vars.livenessprobe}}/livenessprobe
+          go-package: go-fips
+      - runs: ln -s /usr/bin/livenessprobe ${{targets.contextdir}}/livenessprobe
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-kubernetes-csi-livenessprobe-fips-${{vars.kubernetes-major-minor}}"
+
+  - name: eks-distro-kubernetes-csi-node-driver-registrar-fips-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-csi-node-driver-registrar-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/csi-node-driver-registrar
+          output: csi-node-driver-registrar
+          modroot: ./projects/${{vars.node-driver-registrar}}/node-driver-registrar
+          ldflags: "-X main.version=$(cat /home/build/projects/${{vars.node-driver-registrar}}/${{vars.kubernetes-version}}/GIT_TAG)"
+          go-package: go-fips
+      - runs: ln -s /usr/bin/csi-node-driver-registrar ${{targets.contextdir}}/csi-node-driver-registrar
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "^eks-distro-kubernetes-csi-node-driver-registrar-fips-${{vars.kubernetes-major-minor}}"
+
+update:
+  enabled: true
+  version-transform:
+    - match: 'eks-'
+      replace: ''
+    - match: '-'
+      replace: '.'
+  github:
+    identifier: aws/eks-distro
+    strip-prefix: v
+    tag-filter: v1-31
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage

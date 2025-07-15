@@ -1,0 +1,141 @@
+package:
+  name: py3.10-vllm-cuda-11.8
+  version: "0.9.2"
+  epoch: 0
+  description: A high-throughput and memory-efficient inference and serving engine for LLMs
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 16
+    memory: 128Gi
+  target-architecture:
+    - x86_64
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      - nvidia-cuda-nvrtc-${{vars.cuda-version}}
+      - py${{vars.py-version}}-packaging
+      - py${{vars.py-version}}-setuptools
+      - py${{vars.py-version}}-typing-extensions
+
+vars:
+  cudnn-major-version: 9
+  gcc-major-version: 11
+  import: vllm
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+  - from: ${{package.name}}
+    match: '^py(\d+\.\d+)-.*'
+    replace: '$1'
+    to: py-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gcc-${{vars.gcc-major-version}}
+      - gperftools-dev
+      - ninja-build
+      - numactl-dev
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+      - nvidia-cuda-nvcc-${{vars.cuda-version}}
+      - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
+      - nvidia-cuda-nvml-dev-${{vars.cuda-version}}
+      - nvidia-cuda-nvrtc-${{vars.cuda-version}}
+      - nvidia-cuda-nvrtc-${{vars.cuda-version}}-dev
+      - nvidia-cuda-nvtx-${{vars.cuda-version}}
+      - nvidia-cuda-nvtx-${{vars.cuda-version}}-dev
+      - nvidia-cudnn-${{vars.cudnn-major-version}}-cuda-${{vars.cuda-major-version}}
+      - nvidia-libcublas-${{vars.cuda-version}}
+      - nvidia-libcublas-${{vars.cuda-version}}-dev
+      - nvidia-libcufft-${{vars.cuda-version}}
+      - nvidia-libcufft-${{vars.cuda-version}}-dev
+      - nvidia-libcurand-${{vars.cuda-version}}
+      - nvidia-libcurand-${{vars.cuda-version}}-dev
+      - nvidia-libcusolver-${{vars.cuda-version}}
+      - nvidia-libcusolver-${{vars.cuda-version}}-dev
+      - nvidia-libcusparse-${{vars.cuda-version}}
+      - nvidia-libcusparse-${{vars.cuda-version}}-dev
+      - py${{vars.py-version}}-build-base-dev
+      - samurai
+      - tcmalloc-minimal
+  environment:
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    LIBRARY_PATH: /usr/local/cuda-${{vars.cuda-version}}/lib64/stubs
+    MAX_JOBS: 16
+    NVCC_APPEND_FLAGS: -ccbin gcc-${{vars.gcc-major-version}}
+    TORCH_CUDA_ARCH_LIST: 7.0 7.5 8.0 8.6 8.9 9.0+PTX
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/vllm-project/vllm.git
+      tag: v${{package.version}}
+      expected-commit: a5dd03c1ebc5e4f56f3c9d3dc0436e9c582c978f
+
+  - runs: |
+      export PATH=$CUDA_HOME/bin:$PATH
+
+      python${{vars.py-version}} -m venv .venv --system-site-packages
+      source .venv/bin/activate
+      pip${{vars.py-version}} install -r ./requirements/cuda.txt
+      # GHSA-27mf-ghqm-j3j8 fix
+      pip${{vars.py-version}} install build wheel packaging aiohttp==3.10.11 pillow>=11.3.0
+      pip${{vars.py-version}} install -r ./requirements/build.txt
+
+      python${{vars.py-version}} setup.py bdist_wheel
+      python${{vars.py-version}} setup.py build_ext --inplace
+      pip${{vars.py-version}} install dist/vllm-*.whl
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/vllm
+      mv .venv ${{targets.destdir}}/usr/share/vllm/
+
+      rm -rf ${{targets.destdir}}/usr/share/vllm/.venv/bin/__pycache*
+      sed -i "s|/home/build|/usr/share/vllm|g" ${{targets.destdir}}/usr/share/vllm/.venv/bin/*
+      sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/usr/share/vllm/.venv/pyvenv.cfg
+
+      # The psutil tests trigger mal failures
+      rm -rf ${{targets.contextdir}}/usr/lib/python${{vars.py-version}}/site-packages/psutil/tests ${{targets.contextdir}}/usr/share/vllm/.venv/lib/python3.10/site-packages/psutil/tests
+
+  - uses: strip
+
+subpackages:
+  - name: py${{vars.py-version}}-wheels-vllm-cuda-${{vars.cuda-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share/wheels
+          cp dist/*.whl ${{targets.contextdir}}/usr/share/wheels
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - post
+    - test
+    - submission
+  github:
+    identifier: vllm-project/vllm
+    strip-prefix: v
+    # Upstream only indicate tags are pre-releases via GH release metadata
+    use-tag: false
+
+test:
+  pipeline:
+    - name: Verify vllm installation
+      uses: python/import
+      with:
+        python: /usr/share/vllm/.venv/bin/python${{vars.py-version}}
+        import: ${{vars.import}}

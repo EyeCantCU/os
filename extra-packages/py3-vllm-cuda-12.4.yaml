@@ -1,0 +1,158 @@
+package:
+  name: py3-vllm-cuda-12.4
+  version: "0.9.2"
+  epoch: 0
+  description: A high-throughput and memory-efficient inference and serving engine for LLMs
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 16
+    memory: 256Gi
+  target-architecture:
+    - x86_64
+  options:
+    no-depends: true
+
+vars:
+  cudnn-major-version: 9
+  gcc-major-version: 12
+  torchvision-version: 0.21
+  import: vllm
+  pypi-package: vllm
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+
+data:
+  - name: py-versions
+    items:
+      3.12: "312"
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - coreutils
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - gcc-${{vars.gcc-major-version}}
+      - gperftools-dev
+      - kmod
+      - libgomp
+      - libtbb
+      - ninja-build
+      - numactl-dev
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-nvcc-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvidia-cudnn-${{vars.cudnn-major-version}}-cuda-${{vars.cuda-major-version}}-dev
+      - nvidia-driver
+      - nvidia-libnvidia-ml-${{vars.cuda-version}}
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - py3-supported-aiohttp
+      - py3-supported-build-base-dev
+      - py3-supported-torch-cuda-${{vars.cuda-version}}
+      - py3-supported-torch-cuda-${{vars.cuda-version}}-dev
+      # - py${{vars.py-version}}-torchaudio-cuda-${{vars.cuda-version}} # enable this later
+      # - py${{vars.py-version}}-torchvision-${{vars.torchvision-version}}-cuda-${{vars.cuda-version}}
+      - samurai
+      - tcmalloc-minimal
+      - uv
+  environment:
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    LIBRARY_PATH: /usr/local/cuda-${{vars.cuda-version}}/lib64/stubs
+    MAX_JOBS: 16
+    NVCC_APPEND_FLAGS: -ccbin gcc-${{vars.gcc-major-version}}
+    TORCH_CUDA_ARCH_LIST: 7.0 7.5 8.0 8.6 8.9 9.0+PTX
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/vllm-project/vllm.git
+      tag: v${{package.version}}
+      expected-commit: a5dd03c1ebc5e4f56f3c9d3dc0436e9c582c978f
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+    description: python${{range.key}} version of ${{vars.pypi-package}}
+    options:
+      no-depends: true
+    dependencies:
+      runtime:
+        - cuda-toolkit-${{vars.cuda-version}}
+        - nvidia-libcuda-${{vars.cuda-version}}
+        - libgomp
+        - libtbb
+        - py${{range.key}}-aiohappyeyeballs
+        - py${{range.key}}-aiosignal
+        - py${{range.key}}-annotated-types
+        - py${{range.key}}-attrs
+        - py${{range.key}}-distro
+        - py${{range.key}}-httpx
+        - py${{range.key}}-multidict
+        - py${{range.key}}-packaging
+        - py${{range.key}}-pydantic-core
+        - py${{range.key}}-regex
+        - py${{range.key}}-torch-cuda-${{vars.cuda-version}}
+        - py${{range.key}}-typing-inspection
+        - py${{range.key}}-yarl
+        - py${{range.key}}-starlette
+        - py${{range.key}}-transformers
+        - python-${{range.key}}-base
+    pipeline:
+      - runs: |
+          export PATH="$CUDA_HOME/bin:$PATH"
+          python${{range.key}} use_existing_torch.py
+          pip${{range.key}} install -r requirements/cuda.txt
+          pip${{range.key}} install -r requirements/build.txt
+
+          python${{range.key}} -m build --wheel -n -x
+          pip${{range.key}} install --verbose \
+            --no-index --no-build-isolation --no-deps \
+            --force-reinstall --no-compile --prefix=/usr "--root=${{targets.contextdir}}" dist/vllm-*${{range.value}}*.whl
+          sitepkgd=$(python${{range.key}} -c 'import site; print(site.getsitepackages()[0])')
+          pip${{range.key}} install --verbose \
+            --requirement=requirements/cuda.txt --force-reinstall --no-deps \
+            --prefix=/usr --root="${{targets.contextdir}}"
+          # these deps come from pytorch being a runtime dep for this package; uninstall this.
+          uv pip uninstall six typing-extensions filelock numpy requests pyyaml setuptools --system --target "${{targets.contextdir}}$sitepkgd"
+          # this comes from attrs which is a runtime dependency
+          uv pip uninstall importlib-metadata --system --target "${{targets.contextdir}}$sitepkgd"
+          # this comes from attrs which is a huggingface_hub dependency
+          uv pip uninstall huggingface-hub tokenizers tqdm transformers --system --target "${{targets.contextdir}}$sitepkgd"
+          uv pip uninstall anyio certifi charset_normalizer fsspec idna packaging regex sniffio urllib3 --system --target "${{targets.contextdir}}$sitepkgd"
+          python${{range.key}} -m compileall --invalidation-mode=unchecked-hash -r100 "${{targets.contextdir}}/$sitepkgd"
+
+          # The psutil tests trigger mal failures
+          rm -rf ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/psutil/tests
+          rm -rf ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/setuptols/tests
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: Verify vllm installation
+          uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - post
+    - test
+    - submission
+  github:
+    identifier: vllm-project/vllm
+    strip-prefix: v
+    use-tag: true

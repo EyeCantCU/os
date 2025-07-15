@@ -1,0 +1,146 @@
+package:
+  name: ztunnel-fips-1.26
+  version: "1.26.2"
+  epoch: 0
+  description: The `ztunnel` component of istio ambient mesh.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - ztunnel-fips=${{package.full-version}}
+    runtime:
+      - ca-certificates-bundle
+      - ip6tables
+      - iptables
+      - libmnl
+      - libnetfilter_conntrack
+      - libnfnetlink
+      - openssl-config-fipshardened
+
+vars:
+  boring-version: 853ca1ea1168dff08011e5d42d94609cc0ca2e27
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cargo-auditable
+      - clang
+      - cmake
+      - openssl-dev
+      - protoc
+      - rust
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/istio/ztunnel
+      tag: ${{package.version}}
+      expected-commit: c5c31102fd1ddefe95bf3c40dbbe36652dcd7889
+
+  # Since hickory 0.25 now always pulls in the "ring" dependency, we need to edit the Cargo.toml
+  # files of several hickory crates to prevent this. Essentially, hickory client/resolver/server all
+  # import hickory-proto, which optionally requires ring by default. The patches prevent this.
+  - name: "Make sure upstream hasn't updated hickory-dns upstream without us realizing it, which could invalidate our patches"
+    runs: |
+      if [ "$(grep 'hickory-' Cargo.toml | grep -c '0.25')" -ne 4 ]; then
+        echo "Error: Hickory may have been updated. Please validate the patches for correctness and fix this check."
+        exit 1
+      fi
+
+  - uses: patch
+    with:
+      patches: hickory-patch-1.patch
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/hickory-dns/hickory-dns
+      tag: v0.25.1
+      expected-commit: 9cf275f750968c1612d63d585398734ae4a1b50b
+      destination: hickory-dns
+
+  - working-directory: hickory-dns
+    uses: patch
+    with:
+      patches: ../hickory-patch-2.patch
+
+  # mitigate GHSA-2gh3-rmm4-6rq5
+  # created upstream PR to address pprof issue https://github.com/tikv/pprof-rs/pull/264
+  # this needs to be removed once pprof fixes or merges this PR, and ztunnel updates the version
+  - runs: |
+      sed -i 's|pprof = { version = "0.14", features = \["protobuf", "protobuf-codec", "criterion"\] }|pprof = { git = "https://github.com/kbsteere/pprof-rs.git", branch = "bump-protobuf-version-3.x", version = "0.14.0", features = ["protobuf", "protobuf-codec", "criterion"] }|' Cargo.toml
+
+  - runs: |
+      export ZTUNNEL_BUILD_buildStatus=clean
+      export ZTUNNEL_BUILD_buildGitRevision=$(git rev-parse HEAD)
+      export ZTUNNEL_BUILD_buildTag=$(git describe --tags --abbrev=0)
+      export ZTUNNEL_BUILD_buildVersion=$(git rev-parse HEAD)
+      cargo auditable build --release --no-default-features --features tls-openssl --bin ztunnel
+      mkdir -p ${{targets.destdir}}/usr/bin
+      cp out/rust/release/ztunnel ${{targets.destdir}}/usr/bin/ztunnel
+
+  - uses: rust/build-tree-check
+    with:
+      allowed-crates: "libopenssl_sys"
+      blocked-crates: "libaws_lc_rs libaws_lc_sys libboring_sys libring"
+      allowed-symbols: "rustls_openssl::hash::SHA256"
+      blocked-symbols: "ring::digest::SHA384 ring::aead::aes_gcm::AES_256_GCM boringssl_fips_self_test boring_rustls_provider::tls13::AES_256_GCM_SHA384"
+      binary: "out/rust/release/ztunnel"
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ztunnel
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/local/bin
+          ln -sf /usr/bin/ztunnel "${{targets.contextdir}}"/usr/local/bin/ztunnel
+    dependencies:
+      provides:
+        - ztunnel-fips-compat=${{package.full-version}}
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '-rc'
+    - '-beta'
+  github:
+    identifier: istio/ztunnel
+    tag-filter-prefix: 1.26.
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+        - rust-audit-info
+  pipeline:
+    - uses: test/cmvp-fips-certification-check
+      with:
+        certificate-number: 4407
+        software-version: ${{vars.boring-version}}
+    - name: Version information tests
+      runs: |
+        VERSION_OUTPUT=$(ztunnel version)
+        echo "$VERSION_OUTPUT" | grep "Version"
+        echo "$VERSION_OUTPUT" | grep "BuildStatus"
+        echo "$VERSION_OUTPUT" | grep "GitTag"
+        echo "$VERSION_OUTPUT" | grep ${{package.version}}
+    - name: Command structure tests
+      runs: |
+        set -e
+        ztunnel help | grep "Commands:"
+        ztunnel help proxy | grep "Start the ztunnel proxy"
+        ztunnel help version | grep "Print the version"
+    - name: Check audit-info
+      runs: |
+        crate=$(rust-audit-info /usr/bin/ztunnel | jq -r '.packages | .[] | select(.name=="ring") | .name')
+        if [ "ring" = "$crate" ]; then
+          echo ring is a false positive metadata
+        fi
+        crate=$(rust-audit-info /usr/bin/ztunnel | jq -r '.packages | .[] | select(.name=="openssl-sys") | .name')
+        [ "openssl-sys" = "$crate" ]

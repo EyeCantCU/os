@@ -1,0 +1,567 @@
+diff --git a/core/src/main/java/hudson/cli/GetNodeCommand.java b/core/src/main/java/hudson/cli/GetNodeCommand.java
+index 62dd218260..6b62729d2f 100644
+--- a/core/src/main/java/hudson/cli/GetNodeCommand.java
++++ b/core/src/main/java/hudson/cli/GetNodeCommand.java
+@@ -27,8 +27,11 @@ package hudson.cli;
+ import hudson.Extension;
+ import hudson.model.Computer;
+ import hudson.model.Node;
++import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
++import java.nio.charset.StandardCharsets;
+ import jenkins.model.Jenkins;
++import jenkins.security.ExtendedReadRedaction;
+ import org.kohsuke.args4j.Argument;
+ 
+ /**
+@@ -52,7 +55,16 @@ public class GetNodeCommand extends CLICommand {
+ 
+         node.checkPermission(Computer.EXTENDED_READ);
+ 
+-        Jenkins.XSTREAM2.toXMLUTF8(node, stdout);
++        if (node.hasPermission(Computer.CONFIGURE)) {
++            Jenkins.XSTREAM2.toXMLUTF8(node, stdout);
++        } else {
++            var baos = new ByteArrayOutputStream();
++            Jenkins.XSTREAM2.toXMLUTF8(node, baos);
++            String xml = baos.toString(StandardCharsets.UTF_8);
++
++            xml = ExtendedReadRedaction.applyAll(xml);
++            org.apache.commons.io.IOUtils.write(xml, stdout, StandardCharsets.UTF_8);
++        }
+ 
+         return 0;
+     }
+diff --git a/core/src/main/java/hudson/cli/GetViewCommand.java b/core/src/main/java/hudson/cli/GetViewCommand.java
+index e94bb7947a..020b55f719 100644
+--- a/core/src/main/java/hudson/cli/GetViewCommand.java
++++ b/core/src/main/java/hudson/cli/GetViewCommand.java
+@@ -26,6 +26,9 @@ package hudson.cli;
+ 
+ import hudson.Extension;
+ import hudson.model.View;
++import java.io.ByteArrayOutputStream;
++import java.nio.charset.StandardCharsets;
++import jenkins.security.ExtendedReadRedaction;
+ import org.kohsuke.args4j.Argument;
+ 
+ /**
+@@ -48,7 +51,17 @@ public class GetViewCommand extends CLICommand {
+     protected int run() throws Exception {
+ 
+         view.checkPermission(View.READ);
+-        view.writeXml(stdout);
++
++        if (view.hasPermission(View.CONFIGURE)) {
++            view.writeXml(stdout);
++        } else {
++            var baos = new ByteArrayOutputStream();
++            view.writeXml(baos);
++            String xml = baos.toString(StandardCharsets.UTF_8);
++
++            xml = ExtendedReadRedaction.applyAll(xml);
++            org.apache.commons.io.IOUtils.write(xml, stdout, StandardCharsets.UTF_8);
++        }
+ 
+         return 0;
+     }
+diff --git a/core/src/main/java/hudson/model/Computer.java b/core/src/main/java/hudson/model/Computer.java
+index 081f73dd16..8f5b3828c9 100644
+--- a/core/src/main/java/hudson/model/Computer.java
++++ b/core/src/main/java/hudson/model/Computer.java
+@@ -74,6 +74,7 @@ import hudson.util.RemotingDiagnostics;
+ import hudson.util.RemotingDiagnostics.HeapDump;
+ import hudson.util.RunList;
+ import jakarta.servlet.ServletException;
++import java.io.ByteArrayOutputStream;
+ import java.io.File;
+ import java.io.IOException;
+ import java.io.InputStream;
+@@ -83,6 +84,7 @@ import java.net.Inet4Address;
+ import java.net.InetAddress;
+ import java.net.NetworkInterface;
+ import java.nio.charset.Charset;
++import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
+ import java.nio.file.InvalidPathException;
+ import java.nio.file.StandardCopyOption;
+@@ -107,6 +109,7 @@ import java.util.logging.Logger;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+ import jenkins.model.Jenkins;
++import jenkins.security.ExtendedReadRedaction;
+ import jenkins.security.ImpersonatingExecutorService;
+ import jenkins.security.MasterToSlaveCallable;
+ import jenkins.security.stapler.StaplerDispatchable;
+@@ -1560,7 +1563,16 @@ public /*transient*/ abstract class Computer extends Actionable implements Acces
+             if (node == null) {
+                 throw HttpResponses.notFound();
+             }
+-            Jenkins.XSTREAM2.toXMLUTF8(node, rsp.getOutputStream());
++            if (hasPermission(CONFIGURE)) {
++                Jenkins.XSTREAM2.toXMLUTF8(node, rsp.getOutputStream());
++            } else {
++                var baos = new ByteArrayOutputStream();
++                Jenkins.XSTREAM2.toXMLUTF8(node, baos);
++                String xml = baos.toString(StandardCharsets.UTF_8);
++
++                xml = ExtendedReadRedaction.applyAll(xml);
++                org.apache.commons.io.IOUtils.write(xml, rsp.getOutputStream(), StandardCharsets.UTF_8);
++            }
+             return;
+         }
+         if (req.getMethod().equals("POST")) {
+diff --git a/core/src/main/java/hudson/model/ComputerSet.java b/core/src/main/java/hudson/model/ComputerSet.java
+index f25d25a19a..030507e363 100644
+--- a/core/src/main/java/hudson/model/ComputerSet.java
++++ b/core/src/main/java/hudson/model/ComputerSet.java
+@@ -56,6 +56,7 @@ import java.util.logging.Logger;
+ import jenkins.model.Jenkins;
+ import jenkins.model.ModelObjectWithChildren;
+ import jenkins.model.ModelObjectWithContextMenu.ContextMenu;
++import jenkins.security.ExtendedReadRedaction;
+ import jenkins.util.Timer;
+ import jenkins.widgets.HasWidgets;
+ import net.sf.json.JSONObject;
+@@ -67,6 +68,7 @@ import org.kohsuke.stapler.export.Exported;
+ import org.kohsuke.stapler.export.ExportedBean;
+ import org.kohsuke.stapler.interceptor.RequirePOST;
+ import org.kohsuke.stapler.verb.POST;
++import org.springframework.security.access.AccessDeniedException;
+ 
+ /**
+  * Serves as the top of {@link Computer}s in the URL hierarchy.
+@@ -264,6 +266,19 @@ public final class ComputerSet extends AbstractModelObject implements Describabl
+ 
+             // copy through XStream
+             String xml = Jenkins.XSTREAM.toXML(src);
++            if (!src.hasPermission(Computer.CONFIGURE)) {
++                final String redactedConfigDotXml = ExtendedReadRedaction.applyAll(xml);
++                if (!xml.equals(redactedConfigDotXml)) {
++                    // AccessDeniedException2 does not permit a custom message, and anyway redirecting the user to the login screen is obviously pointless.
++                    throw new AccessDeniedException(
++                            Messages.ComputerSet_may_not_copy_as_it_contains_secrets_and_(
++                                    src.getNodeName(),
++                                    Jenkins.getAuthentication2().getName(),
++                                    Computer.PERMISSIONS.title,
++                                    Computer.EXTENDED_READ.name,
++                                    Computer.CONFIGURE.name));
++                }
++            }
+             Node result = (Node) Jenkins.XSTREAM.fromXML(xml);
+             result.setNodeName(name);
+             result.holdOffLaunchUntilSave = true;
+diff --git a/core/src/main/java/hudson/model/View.java b/core/src/main/java/hudson/model/View.java
+index b17077cde4..5fa4381943 100644
+--- a/core/src/main/java/hudson/model/View.java
++++ b/core/src/main/java/hudson/model/View.java
+@@ -62,6 +62,7 @@ import jakarta.servlet.ServletException;
+ import jakarta.servlet.http.HttpServletResponse;
+ import java.io.BufferedInputStream;
+ import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
+@@ -94,6 +95,7 @@ import jenkins.model.ModelObjectWithContextMenu;
+ import jenkins.model.item_category.Categories;
+ import jenkins.model.item_category.Category;
+ import jenkins.model.item_category.ItemCategory;
++import jenkins.security.ExtendedReadRedaction;
+ import jenkins.security.stapler.StaplerNotDispatchable;
+ import jenkins.util.xml.XMLUtils;
+ import jenkins.widgets.HasWidgets;
+@@ -978,7 +980,16 @@ public abstract class View extends AbstractModelObject implements AccessControll
+                 @Override
+                 public void generateResponse(StaplerRequest2 req, StaplerResponse2 rsp, Object node) throws IOException, ServletException {
+                     rsp.setContentType("application/xml");
+-                    View.this.writeXml(rsp.getOutputStream());
++                    if (hasPermission(CONFIGURE)) {
++                        View.this.writeXml(rsp.getOutputStream());
++                    } else {
++                        var baos = new ByteArrayOutputStream();
++                        View.this.writeXml(baos);
++                        String xml = baos.toString(StandardCharsets.UTF_8);
++
++                        xml = ExtendedReadRedaction.applyAll(xml);
++                        org.apache.commons.io.IOUtils.write(xml, rsp.getOutputStream(), StandardCharsets.UTF_8);
++                    }
+                 }
+             };
+         }
+diff --git a/core/src/main/resources/hudson/model/Messages.properties b/core/src/main/resources/hudson/model/Messages.properties
+index f0d52f795e..f8a0279fe1 100644
+--- a/core/src/main/resources/hudson/model/Messages.properties
++++ b/core/src/main/resources/hudson/model/Messages.properties
+@@ -112,6 +112,7 @@ ComputerSet.NoSuchSlave=No such agent: {0}
+ ComputerSet.SlaveAlreadyExists=Agent called ‘{0}’ already exists
+ ComputerSet.SpecifySlaveToCopy=Specify which agent to copy
+ ComputerSet.DisplayName=Nodes
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=May not copy {0} as it contains secrets and {1} has {2}/{3} but not /{4}
+ 
+ Descriptor.From=(from <a href="{1}" rel="noopener noreferrer" target="_blank">{0}</a>)
+ 
+diff --git a/core/src/main/resources/hudson/model/Messages_bg.properties b/core/src/main/resources/hudson/model/Messages_bg.properties
+index 8117419f0a..1b0dc4cfc8 100644
+--- a/core/src/main/resources/hudson/model/Messages_bg.properties
++++ b/core/src/main/resources/hudson/model/Messages_bg.properties
+@@ -155,6 +155,11 @@ CLI.wait-node-offline.shortDescription=\
+ ComputerSet.DisplayName=\
+  Компютри
+ 
++# May not copy {0} as it contains secrets and {1} has {2}/{3} but not /{4}
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=\
++ Не може да копирате „{0}“, защото на него има пароли, а „{1}“ има {2}/{3}, но\
++ не и /{4}
++
+ Descriptor.From=\
+  (от <a href="{1}">{0}</a>)
+ 
+diff --git a/core/src/main/resources/hudson/model/Messages_de.properties b/core/src/main/resources/hudson/model/Messages_de.properties
+index e03f38f640..b96362749a 100644
+--- a/core/src/main/resources/hudson/model/Messages_de.properties
++++ b/core/src/main/resources/hudson/model/Messages_de.properties
+@@ -107,6 +107,7 @@ ComputerSet.DisplayName=Knoten
+ ComputerSet.NoSuchSlave=Agent existiert nicht: „{0}“
+ ComputerSet.SlaveAlreadyExists=Ein Agent mit dem Namen „{0}“ existiert bereits.
+ ComputerSet.SpecifySlaveToCopy=Geben Sie an, welcher Agent kopiert werden soll
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=Kann „{0}“ nicht kopieren, da es Geheimnisse enthält und „{1}“ nur {2}/{3} aber nicht /{4} hat.
+ 
+ Descriptor.From=(aus <a href="{1}">{0}</a>)
+ 
+diff --git a/core/src/main/resources/hudson/model/Messages_fr.properties b/core/src/main/resources/hudson/model/Messages_fr.properties
+index e6794e6fc4..331bb54204 100644
+--- a/core/src/main/resources/hudson/model/Messages_fr.properties
++++ b/core/src/main/resources/hudson/model/Messages_fr.properties
+@@ -107,6 +107,7 @@ ComputerSet.NoSuchSlave=Aucun agent: {0}
+ ComputerSet.SlaveAlreadyExists=L''agent ‘{0}’ existe déjà
+ ComputerSet.SpecifySlaveToCopy=Quel agent à copier
+ ComputerSet.DisplayName=Nœuds
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=Copie impossible de {0} car il contient des secrets et {1} possède {2}/{3} mais pas /{4}
+ 
+ Descriptor.From=(de <a href="{1}" rel="noopener noreferrer" target="_blank">{0}</a>)
+ 
+diff --git a/core/src/main/resources/hudson/model/Messages_it.properties b/core/src/main/resources/hudson/model/Messages_it.properties
+index b61b7fe92c..3c20f349bf 100644
+--- a/core/src/main/resources/hudson/model/Messages_it.properties
++++ b/core/src/main/resources/hudson/model/Messages_it.properties
+@@ -156,6 +156,8 @@ ComputerSet.DisplayName=Nodi
+ ComputerSet.NoSuchSlave=L''agente {0} non esiste
+ ComputerSet.SlaveAlreadyExists=Un agente di nome "{0}" esiste già
+ ComputerSet.SpecifySlaveToCopy=Specificare l''agente da copiare
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=Impossibile copiare \
++  {0} perché contiene segreti e {1} ha {2}/{3} ma non /{4}
+ Descriptor.From=(da <a href="{1}">{0}</a>)
+ Executor.NotAvailable=N/D
+ FileParameterDefinition.DisplayName=Parametro file
+diff --git a/core/src/main/resources/hudson/model/Messages_pt_BR.properties b/core/src/main/resources/hudson/model/Messages_pt_BR.properties
+index f07c6fc49d..b0146701e0 100644
+--- a/core/src/main/resources/hudson/model/Messages_pt_BR.properties
++++ b/core/src/main/resources/hudson/model/Messages_pt_BR.properties
+@@ -105,6 +105,8 @@ UpdateCenter.Status.Success=Sucesso
+ UpdateCenter.init=Iniciando o centro de atualização
+ ParameterAction.DisplayName=Parâmetros
+ ComputerSet.DisplayName=Nós
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=Pode não conseguir copiar {0} já que contem segredos e {1} \
++  tem {2}/{3} mas não /{4}
+ Run.DeletePermission.Description=\
+   Esta permissão concede aos usuários o direito de manualmente apagarem construções do histórico de construções.
+ Run.Summary.BrokenForALongTime=Quebrado há muito tempo
+diff --git a/core/src/main/resources/hudson/model/Messages_sr.properties b/core/src/main/resources/hudson/model/Messages_sr.properties
+index 3802bd4820..ae2c330ba3 100644
+--- a/core/src/main/resources/hudson/model/Messages_sr.properties
++++ b/core/src/main/resources/hudson/model/Messages_sr.properties
+@@ -85,6 +85,7 @@ Computer.BadChannel=Машина агента није повезана или 
+ ComputerSet.SlaveAlreadyExists=Већ постоји агент са именом {0}
+ ComputerSet.SpecifySlaveToCopy=Одредите агент за копирање
+ ComputerSet.DisplayName=Рачунари
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=Неможе се копирати {0} пошто садржи тајне и {1} има {2}/{3} а не /{4}
+ Descriptor.From=(од <a href="{1}">{0}</a>)
+ Executor.NotAvailable=Н/Д
+ FreeStyleProject.DisplayName=Независни задатак
+diff --git a/core/src/main/resources/hudson/model/Messages_sv_SE.properties b/core/src/main/resources/hudson/model/Messages_sv_SE.properties
+index a395ab3011..c0ab7449ee 100644
+--- a/core/src/main/resources/hudson/model/Messages_sv_SE.properties
++++ b/core/src/main/resources/hudson/model/Messages_sv_SE.properties
+@@ -112,6 +112,7 @@ ComputerSet.NoSuchSlave=Det finns ingen sådan agent: {0}
+ ComputerSet.SlaveAlreadyExists=En agent med namnet "{0}" finns redan
+ ComputerSet.SpecifySlaveToCopy=Ange vilken agent som ska kopieras
+ ComputerSet.DisplayName=Noder
++ComputerSet.may_not_copy_as_it_contains_secrets_and_=Kan inte kopiera {0} eftersom den innehåller hemligheter och {1} har {2}/{3} men inte /{4}
+ 
+ Descriptor.From=(från <a href="{1}" rel="noopener noreferrer" target="_blank">{0}</a>)
+ 
+diff --git a/test/src/test/java/lib/form/PasswordTest.java b/test/src/test/java/lib/form/PasswordTest.java
+index 526ef1586a..2342a38ee5 100644
+--- a/test/src/test/java/lib/form/PasswordTest.java
++++ b/test/src/test/java/lib/form/PasswordTest.java
+@@ -24,6 +24,7 @@
+ 
+ package lib.form;
+ 
++import static java.nio.file.Files.readString;
+ import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.hamcrest.Matchers.containsString;
+ import static org.hamcrest.Matchers.is;
+@@ -36,10 +37,13 @@ import static org.junit.Assert.assertTrue;
+ 
+ import edu.umd.cs.findbugs.annotations.CheckForNull;
+ import edu.umd.cs.findbugs.annotations.NonNull;
++import hudson.Extension;
+ import hudson.FilePath;
+ import hudson.Launcher;
+ import hudson.cli.CopyJobCommand;
+ import hudson.cli.GetJobCommand;
++import hudson.cli.GetNodeCommand;
++import hudson.cli.GetViewCommand;
+ import hudson.model.AbstractProject;
+ import hudson.model.Action;
+ import hudson.model.Computer;
+@@ -48,28 +52,43 @@ import hudson.model.Item;
+ import hudson.model.Job;
+ import hudson.model.JobProperty;
+ import hudson.model.JobPropertyDescriptor;
++import hudson.model.ListView;
++import hudson.model.Node;
+ import hudson.model.RootAction;
+ import hudson.model.Run;
+ import hudson.model.TaskListener;
+ import hudson.model.User;
++import hudson.model.View;
++import hudson.model.ViewProperty;
++import hudson.security.ACL;
++import hudson.slaves.DumbSlave;
++import hudson.slaves.NodeProperty;
++import hudson.slaves.NodePropertyDescriptor;
+ import hudson.tasks.BuildStepDescriptor;
+ import hudson.tasks.Builder;
+ import hudson.util.FormValidation;
+ import hudson.util.Secret;
+ import java.io.ByteArrayOutputStream;
++import java.io.File;
+ import java.io.IOException;
+ import java.io.PrintStream;
++import java.net.URL;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.List;
+ import java.util.Locale;
++import java.util.Map;
+ import java.util.regex.Pattern;
+ import jenkins.model.GlobalConfiguration;
+ import jenkins.model.Jenkins;
+ import jenkins.model.TransientActionFactory;
++import jenkins.security.ExtendedReadRedaction;
+ import jenkins.security.ExtendedReadSecretRedaction;
+ import jenkins.tasks.SimpleBuildStep;
++import org.htmlunit.HttpMethod;
+ import org.htmlunit.Page;
++import org.htmlunit.WebRequest;
++import org.htmlunit.WebResponse;
+ import org.htmlunit.html.DomElement;
+ import org.htmlunit.html.HtmlHiddenInput;
+ import org.htmlunit.html.HtmlInput;
+@@ -124,6 +143,203 @@ public class PasswordTest {
+         }
+     }
+ 
++    @For({ExtendedReadRedaction.class, ExtendedReadSecretRedaction.class})
++    @Issue("SECURITY-3495")
++    @Test
++    public void testNodeSecrets() throws Exception {
++        Computer.EXTENDED_READ.setEnabled(true);
++        j.jenkins.setSecurityRealm(j.createDummySecurityRealm());
++        j.jenkins.setAuthorizationStrategy(new MockAuthorizationStrategy().grant(Jenkins.ADMINISTER).everywhere().to("alice").grant(Jenkins.READ, Computer.EXTENDED_READ).everywhere().to("bob"));
++
++        final DumbSlave onlineSlave = j.createOnlineSlave();
++        final String secretText = "t0ps3cr3td4t4_node";
++        final Secret encryptedSecret = Secret.fromString(secretText);
++        final String encryptedSecretText = encryptedSecret.getEncryptedValue();
++
++        onlineSlave.getNodeProperties().add(new NodePropertyWithSecret(encryptedSecret));
++        onlineSlave.save();
++
++        assertThat(readString(new File(onlineSlave.getRootDir(), "config.xml").toPath()), containsString(encryptedSecretText));
++
++
++        { // admin can see encrypted value
++            GetNodeCommand command = new GetNodeCommand();
++            try (JenkinsRule.WebClient wc = j.createWebClient().login("alice")) {
++                final Page page = wc.goTo(onlineSlave.getComputer().getUrl() + "config.xml", "application/xml");
++                final String content = page.getWebResponse().getContentAsString();
++
++                assertThat(content, not(containsString(secretText)));
++                assertThat(content, containsString(encryptedSecretText));
++                assertThat(content, containsString("<secret>" + encryptedSecretText + "</secret>"));
++
++                var baos = new ByteArrayOutputStream();
++                try (var unused = ACL.as(User.get("alice", true, Map.of()))) {
++                    command.setTransportAuth2(Jenkins.getAuthentication2());
++                    command.main(List.of(onlineSlave.getNodeName()), Locale.US, System.in, new PrintStream(baos), System.err);
++                }
++                assertEquals(content, baos.toString(page.getWebResponse().getContentCharset()));
++            }
++        }
++
++        { // extended reader gets only redacted value
++            GetNodeCommand command = new GetNodeCommand();
++            try (JenkinsRule.WebClient wc = j.createWebClient().login("bob")) {
++                final Page page = wc.goTo(onlineSlave.getComputer().getUrl() + "config.xml", "application/xml");
++                final String content = page.getWebResponse().getContentAsString();
++
++                assertThat(content, not(containsString(secretText)));
++                assertThat(content, not(containsString(encryptedSecretText)));
++                assertThat(content, containsString("<secret>********</secret>"));
++
++                var baos = new ByteArrayOutputStream();
++                try (var unused = ACL.as(User.get("bob", true, Map.of()))) {
++                    command.setTransportAuth2(Jenkins.getAuthentication2());
++                    command.main(List.of(onlineSlave.getNodeName()), Locale.US, System.in, new PrintStream(baos), System.err);
++                }
++                assertEquals(content, baos.toString(page.getWebResponse().getContentCharset()));
++            }
++        }
++    }
++
++    @For({ExtendedReadRedaction.class, ExtendedReadSecretRedaction.class})
++    @Issue("SECURITY-3513")
++    @Test
++    public void testCopyNodeSecrets() throws Exception {
++        Computer.EXTENDED_READ.setEnabled(true);
++        j.jenkins.setSecurityRealm(j.createDummySecurityRealm());
++        MockAuthorizationStrategy mockAuthorizationStrategy = new MockAuthorizationStrategy();
++        mockAuthorizationStrategy.grant(Jenkins.READ, Computer.CREATE, Computer.CONFIGURE).everywhere().to("alice");
++        mockAuthorizationStrategy.grant(Jenkins.READ, Computer.CREATE, Computer.EXTENDED_READ).everywhere().to("bob");
++        j.jenkins.setAuthorizationStrategy(mockAuthorizationStrategy);
++
++        final DumbSlave onlineSlave = j.createOnlineSlave();
++        final String secretText = "t0ps3cr3td4t4_node";
++        final Secret encryptedSecret = Secret.fromString(secretText);
++        final String encryptedSecretText = encryptedSecret.getEncryptedValue();
++
++        onlineSlave.getNodeProperties().add(new NodePropertyWithSecret(encryptedSecret));
++        onlineSlave.save();
++
++        assertThat(readString(new File(onlineSlave.getRootDir(), "config.xml").toPath()), containsString(encryptedSecretText));
++        assertEquals(2, j.getInstance().getComputers().length);
++
++        String agentCopyURL = j.getURL() + "/computer/createItem?mode=copy&from=" + onlineSlave.getNodeName() + "&name=";
++
++        { // with configure, you can copy a node containing secrets
++            try (JenkinsRule.WebClient wc = j.createWebClient().login("alice")) {
++                WebResponse rsp = wc.getPage(wc.addCrumb(new WebRequest(new URL(agentCopyURL + "aliceAgent"),
++                        HttpMethod.POST))).getWebResponse();
++                assertEquals(200, rsp.getStatusCode());
++                assertEquals(3, j.getInstance().getComputers().length);
++
++                final Page page = wc.goTo("computer/aliceAgent/config.xml", "application/xml");
++                final String content = page.getWebResponse().getContentAsString();
++
++                assertThat(content, not(containsString(secretText)));
++                assertThat(content, containsString(encryptedSecretText));
++                assertThat(content, containsString("<secret>" + encryptedSecretText + "</secret>"));
++            }
++        }
++
++        { // without configure, you cannot copy a node containing secrets
++            try (JenkinsRule.WebClient wc = j.createWebClient().withThrowExceptionOnFailingStatusCode(false).login("bob")) {
++                WebResponse rsp = wc.getPage(wc.addCrumb(new WebRequest(new URL(agentCopyURL + "bobAgent"),
++                        HttpMethod.POST))).getWebResponse();
++
++                assertEquals(403, rsp.getStatusCode());
++                assertThat(rsp.getContentAsString(), containsString("May not copy " + onlineSlave.getNodeName() + " as it contains secrets"));
++                assertEquals(3, j.getInstance().getComputers().length);
++            }
++        }
++    }
++
++    public static class NodePropertyWithSecret extends NodeProperty<Node> {
++        private final Secret secret;
++
++        @DataBoundConstructor
++        public NodePropertyWithSecret(Secret secret) {
++            this.secret = secret;
++        }
++
++        public Secret getSecret() {
++            return secret;
++        }
++
++        @Extension
++        public static class DescriptorImpl extends NodePropertyDescriptor {
++
++        }
++    }
++
++    @For({ExtendedReadRedaction.class, ExtendedReadSecretRedaction.class})
++    @Issue("SECURITY-3496")
++    @Test
++    public void testViewSecrets() throws Exception {
++        j.jenkins.setSecurityRealm(j.createDummySecurityRealm());
++        j.jenkins.setAuthorizationStrategy(new MockAuthorizationStrategy().grant(Jenkins.ADMINISTER).everywhere().to("alice").grant(Jenkins.READ, View.READ).everywhere().to("bob"));
++
++        final String secretText = "t0ps3cr3td4t4_view";
++        final Secret encryptedSecret = Secret.fromString(secretText);
++        final String encryptedSecretText = encryptedSecret.getEncryptedValue();
++
++        final ListView v = new ListView("security-3496");
++        v.getProperties().add(new ViewPropertyWithSecret(encryptedSecret));
++        j.jenkins.addView(v);
++
++        assertThat(readString(new File(j.jenkins.getRootDir(), "config.xml").toPath()), containsString(encryptedSecretText));
++
++
++        { // admin can see encrypted value
++            var command = new GetViewCommand();
++            try (JenkinsRule.WebClient wc = j.createWebClient().login("alice")) {
++                final Page page = wc.goTo(v.getUrl() + "config.xml", "application/xml");
++                final String content = page.getWebResponse().getContentAsString();
++
++                assertThat(content, not(containsString(secretText)));
++                assertThat(content, containsString(encryptedSecretText));
++                assertThat(content, containsString("<secret>" + encryptedSecretText + "</secret>"));
++
++                var baos = new ByteArrayOutputStream();
++                try (var unused = ACL.as(User.get("alice", true, Map.of()))) {
++                    command.setTransportAuth2(Jenkins.getAuthentication2());
++                    command.main(List.of(v.getViewName()), Locale.US, System.in, new PrintStream(baos), System.err);
++                }
++                assertEquals(content, baos.toString(page.getWebResponse().getContentCharset()));
++            }
++        }
++
++        { // extended reader gets only redacted value
++            var command = new GetViewCommand();
++            try (JenkinsRule.WebClient wc = j.createWebClient().login("bob")) {
++                final Page page = wc.goTo(v.getUrl() + "config.xml", "application/xml");
++                final String content = page.getWebResponse().getContentAsString();
++
++                assertThat(content, not(containsString(secretText)));
++                assertThat(content, not(containsString(encryptedSecretText)));
++                assertThat(content, containsString("<secret>********</secret>"));
++
++                var baos = new ByteArrayOutputStream();
++                try (var unused = ACL.as(User.get("bob", true, Map.of()))) {
++                    command.setTransportAuth2(Jenkins.getAuthentication2());
++                    command.main(List.of(v.getViewName()), Locale.US, System.in, new PrintStream(baos), System.err);
++                }
++                assertEquals(content, baos.toString(page.getWebResponse().getContentCharset()));
++            }
++        }
++    }
++
++    public static class ViewPropertyWithSecret extends ViewProperty {
++        private final Secret secret;
++
++        public ViewPropertyWithSecret(Secret secret) {
++            this.secret = secret;
++        }
++
++        public Secret getSecret() {
++            return secret;
++        }
++    }
++
+     @Issue({"SECURITY-266", "SECURITY-304"})
+     @Test
+     @For(ExtendedReadSecretRedaction.class)

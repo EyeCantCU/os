@@ -1,0 +1,89 @@
+package:
+  name: neo4j-browser-4.4
+  version: "4.4.44"
+  epoch: 0
+  description: Neo4j Browser is the general purpose user interface for working with Neo4j.
+  dependencies:
+    provides:
+      - neo4j-browser=${{package.full-version}}
+  copyright:
+    - license: GPL-3.0-or-later
+
+environment:
+  environment:
+    NODE_OPTIONS: "--openssl-legacy-provider"
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - maven
+      - nodejs-16
+      - openjdk-17-default-jdk
+      - openssl-provider-legacy
+      - posix-libc-utils # getconf
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/neo4j/neo4j-browser
+      tag: neo4j-${{package.version}}
+      expected-commit: c55f50909fce92e63995ca9b33028b513de15d93
+
+  - uses: auth/maven
+
+  - runs: |
+      yarn install --frozen-lockfile
+      yarn build
+      node ./scripts/prepare-mvn-package.js
+      mvn package -DskipTests=true
+      mkdir -p ${{targets.contextdir}}/var/lib/neo4j/lib/
+      find target/ -maxdepth 1 -type f -name 'neo4j-browser-*.jar' ! -name '*-tests.jar' -exec mv {} ${{targets.contextdir}}/var/lib/neo4j/lib/ \;
+
+  - uses: strip
+
+# this is a dependency to main neo4j package so please update it first to unblock neo4j main package.
+update:
+  enabled: true
+  git:
+    strip-prefix: neo4j-
+    tag-filter-prefix: neo4j-4.4.
+
+test:
+  environment:
+    contents:
+      packages:
+        - neo4j-4.4
+        - curl
+    environment:
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+  pipeline:
+    - name: check jar
+      runs: |
+        stat /var/lib/neo4j/lib/neo4j-browser*.jar
+    - uses: test/daemon-check-output
+      with:
+        start: /usr/bin/neo4j console
+        timeout: 30
+        expected_output: |
+          Starting Neo4j
+          Starting
+          Bolt enabled on localhost
+        post: |
+          #!/bin/sh -e
+          # retry loop to check Neo4j Browser availability
+          for i in $(seq 1 12); do
+            echo "Checking Neo4j HTTP interface (attempt $i/12)..."
+            if curl -s -f --connect-timeout 5 -o /dev/null http://localhost:7474/; then
+              curl -fsSL localhost:7474/browser | grep "<title>Neo4j Browser</title>" && \
+              echo "✓ Neo4j Browser is up and running!" && exit 0
+            fi
+
+            if [ "$i" -lt "12" ]; then
+              echo "× Neo4j Browser not ready yet. Waiting 2s..."
+              sleep 2
+            else
+              echo "× Neo4j Browser did not become available within 24s"
+              exit 1
+            fi
+          done

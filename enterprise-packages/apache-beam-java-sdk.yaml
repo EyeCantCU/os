@@ -1,0 +1,156 @@
+package:
+  # There are detailed notes on some of the issues encountered with this
+  # package here: https://github.com/chainguard-dev/image-requests/issues/3539
+  name: apache-beam-java-sdk
+  version: "2.66.0"
+  epoch: 0
+  description:
+  copyright:
+    - license: Apache-2.0
+
+data:
+  - name: openjdk-versions
+    items:
+      #8: "openjdk-8"
+      11: "openjdk-11"
+      17: "openjdk-17"
+      21: "openjdk-21"
+
+environment:
+  contents:
+    packages:
+      - bash # some helper scripts use bash
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - go # needed to build the boot binary. Unless explicitly specified, installer will download an older version, so use ours here.
+      # go-licenses does not seem to work, so we need to install it manually
+      # below. Once we figure out what's going on, we should update this.
+      # https://github.com/chainguard-dev/enterprise-packages/issues/6507
+      # - go-licenses
+      - gzip
+      # Note that upstream uses version 8, but using our 8 fails, so use this
+      # https://github.com/chainguard-dev/enterprise-packages/issues/6508
+      - openjdk-11-default-jdk
+      - py3.11-pip
+      - python-3.11 # we just need python to create the java licenses.
+      - rsync
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-11-openjdk
+    LANG: en_US.UTF-8
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/beam
+      tag: v${{package.version}}
+      expected-commit: 32d2c020bc0535289b1dd3bb3878d12885efc75c
+
+  - runs: |
+      # Set the version: https://github.com/apache/beam/issues/21302#issuecomment-1912679793
+      ./release/src/main/scripts/set_version.sh ${{package.version}} --release
+
+  - name: Install go-licenses that works
+    runs: |
+      # For generating go licenses. With our apk package go-licenses does
+      # not work so just working around with this for it.
+      # https://github.com/chainguard-dev/enterprise-packages/issues/6507
+      mkdir /tmp/go
+      export GOPATH=/tmp/go
+      go install github.com/google/go-licenses@latest
+
+subpackages:
+  - range: openjdk-versions
+    name: apache-beam-java-${{range.key}}-sdk
+    dependencies:
+      runtime:
+        - ${{range.value}}-default-jvm
+    pipeline:
+      - runs: |
+          # Create the output directories we need.
+          mkdir -p ${{targets.subpkgdir}}/opt/apache/beam/jars
+          mkdir -p ${{targets.subpkgdir}}/opt/apache/beam/options
+          mkdir -p ${{targets.subpkgdir}}/opt/apache/beam/third_party_licenses
+      # Go build has nothing different about it for a particular jdk version
+      - uses: go/build
+        with:
+          packages: ./java/container
+          modroot: ./sdks
+          prefix: /opt
+          install-dir: apache/beam
+          output: boot
+      - runs: |
+          # This next line is to workaround for java.net.UnknownHostException facing in elastic build
+          sed -i -e '/127.0.0.1/ s/\(localhost\)/'$(hostname)' \1/' /etc/hosts
+
+          # Arguments from: https://github.com/apache/beam/blob/master/.github/workflows/build_release_candidate.yml#L288
+          # This builds the `beam-sdks-java-harness-{version}.jar` file
+          ./gradlew -PisRelease -Pdocker-pull-licenses -Pprune-images --no-daemon  jar
+
+          # And this builds the docker container required base files
+          ./gradlew -PisRelease -Pdocker-pull-licenses -Pprune-images --no-daemon :sdks:java:container:java${{range.key}}:build
+
+          cp ./sdks/java/harness/build/libs/beam-sdks-java-harness-${{package.version}}.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/beam-sdks-java-harness.jar
+      - runs: |
+          # Generate / copy the licenses.
+
+          # Copy LICENSE and NOTICE first
+          cp ./LICENSE ${{targets.subpkgdir}}/opt/apache/beam/LICENSE
+          cp ./NOTICE ${{targets.subpkgdir}}/opt/apache/beam/NOTICE
+
+          # Generate java licenses. By default it uses python 3.8
+          # which we do not have, specify our installed version of 3.11 instead.
+          ./gradlew -PpythonVersion=3.11 :sdks:java:container:java${{range.key}}:copyJavaThirdPartyLicenses
+          cp -R ./sdks/java/container/java${{range.key}}/build/target/third_party_licenses/* ${{targets.subpkgdir}}/opt/apache/beam/third_party_licenses/
+
+          cp LICENSE sdks/java/container/
+          cd sdks/java/container
+          /tmp/go/bin/go-licenses save . --save_path=${{targets.subpkgdir}}/opt/apache/beam/third_party_licenses/golang
+          go-licenses csv . | tee ${{targets.subpkgdir}}/opt/apache/beam/third_party_licenses/golang/list.csv
+          cd ../../../
+      - runs: |
+          # Generate and copy the java options files.
+          ./gradlew :sdks:java:container:java${{range.key}}:copyJdkOptions
+          cp ./sdks/java/container/java${{range.key}}/build/target/options/* ${{targets.subpkgdir}}/opt/apache/beam/options
+      - runs: |
+          # Package the dependent jars
+          ./gradlew sdks:java:container:java${{range.key}}:copyDockerfileDependencies
+
+          # There are other jars there that are NOT part of the upstream sdk
+          # docker image, so be selective on what we copy from there
+          cp ./sdks/java/container/java${{range.key}}/build/target/jamm.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+          cp ./sdks/java/container/java${{range.key}}/build/target/jcl-over-slf4j.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+          cp ./sdks/java/container/java${{range.key}}/build/target/slf4j-api.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+          cp ./sdks/java/container/java${{range.key}}/build/target/slf4j-jdk14.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+          cp ./sdks/java/container/java${{range.key}}/build/target/log4j-to-slf4j.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+          cp ./sdks/java/container/java${{range.key}}/build/target/log4j-over-slf4j.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+          cp ./sdks/java/container/java${{range.key}}/build/target/slf4j-jdk14.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+
+          # Upstream does not include this agent in their container for 21. It
+          # gets build (as `beam-sdks-java-container-agent-2.57.0.jar`) but is
+          # not in the container. No idea why, but leave it out for 21.
+          if [[ "${{range.key}}" != "21" ]]; then
+            cp ./sdks/java/container/java${{range.key}}/build/target/open-module-agent.jar ${{targets.subpkgdir}}/opt/apache/beam/jars/
+          fi
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - ca-certificates-bundle
+      pipeline:
+        - runs: /opt/apache/beam/boot --help
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - sdks/
+    - '-RC'
+  git:
+    tag-filter-prefix: v
+    strip-prefix: v
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage

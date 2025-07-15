@@ -1,0 +1,86 @@
+package:
+  name: stakater-reloader-fips
+  version: "1.4.5"
+  epoch: 0
+  description: A Kubernetes controller to watch changes in ConfigMap and Secrets and do rolling upgrades on Pods
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/stakater/Reloader
+      tag: v${{package.version}}
+      expected-commit: 0bdf4814452e5b2c95ad81b1c4ad0f1bfa7e462d
+
+  - uses: go/build
+    with:
+      packages: .
+      go-package: go-fips
+      output: manager
+
+update:
+  enabled: true
+  github:
+    identifier: stakater/Reloader
+    strip-prefix: v
+  ignore-regex-patterns:
+    - chart-.* # Not the relevant tags
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+    - name: help output from manager binary
+      runs: /usr/bin/manager --help
+    - name: "run manager binary"
+      uses: test/daemon-check-output
+      with:
+        start: /usr/bin/manager
+        timeout: 30
+        expected_output: |
+          Starting Reloader
+          created controller for: secrets
+          Starting Controller to watch resource type: secrets
+          created controller for: configMaps
+          Starting Controller to watch resource type: configMaps
+        post: |
+          # create a configmap and a secret
+          kubectl create configmap test-config --from-literal=key=value
+          sleep 2
+          cat <<EOF > deployment.yaml
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: test-deployment
+              annotations:
+                reloader.stakater.com/auto: "true"
+            spec:
+              replicas: 1
+              selector:
+                matchLabels:
+                  app: test-deployment
+              template:
+                metadata:
+                  labels:
+                    app: test-deployment
+                spec:
+                  containers:
+                    - name: nginx
+                      image: nginx:latest
+                      envFrom:
+                        - configMapRef:
+                            name: test-config
+          EOF
+          kubectl apply -f deployment.yaml
+          sleep 2
+          kubectl patch configmap test-config --type=merge -p "{\"data\":{\"key\":\"new-value\"}}"
+          # wait for the controller to pick up the changes
+          sleep 2
+          # check for the deployment containers have STAKATER_TEST_CONFIG_CONFIGMAP env variable exists
+          if [ -n "$(kubectl get deployment test-deployment -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"STAKATER_TEST_CONFIG_CONFIGMAP\")].value}")" ]; then
+             echo "STAKATER_TEST_CONFIG_CONFIGMAP found in deployment"
+          else
+              echo "STAKATER_TEST_CONFIG_CONFIGMAP env variable not found in deployment"
+              exit 1
+          fi

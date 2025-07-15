@@ -1,0 +1,102 @@
+package:
+  name: flux-notification-controller
+  version: "1.6.0"
+  epoch: 3
+  description: The GitOps Toolkit event forwarded and notification dispatcher
+  copyright:
+    - license: Apache-2.0
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 3a6de1fcef16947f8abe6fc589bc02977663931e
+      repository: https://github.com/fluxcd/notification-controller
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      packages: .
+      output: notification-controller
+      ldflags: -X main.Version=${{package.version}}
+
+subpackages:
+  - name: ${{package.name}}-bitnami-compat
+    description: "Compatibility package for usage with the Bitnami helm chart."
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/fluxcd-notification-controller/bin/
+          ln -sf /usr/bin/notification-controller ${{targets.contextdir}}/opt/bitnami/fluxcd-notification-controller/bin/notification-controller
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        # the test is extensive in the main package and this is the same binary invoked via a symlink.
+        - runs: |
+            /opt/bitnami/fluxcd-notification-controller/bin/notification-controller --help 2>&1 | grep -i "Usage of /opt/bitnami/fluxcd-notification-controller/bin/notification-controller"
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    pipeline:
+      - runs: |
+          mkdir -p /opt/iamguarded/fluxcd-notification-controller/bin/
+          ln -sf /usr/bin/notification-controller /opt/iamguarded/fluxcd-notification-controller/bin/notification-controller
+      - uses: iamguarded/build-compat
+        with:
+          package: flux-notification-controller
+          version: ${{vars.major-version}}
+      - uses: iamguarded/finalize-compat
+        with:
+          package: flux-notification-controller
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - runs: |
+            stat /opt/iamguarded/fluxcd-notification-controller/bin/notification-controller
+        - uses: iamguarded/test-compat
+          with:
+            package: flux-notification-controller
+            version: ${{vars.major-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: fluxcd/notification-controller
+    strip-prefix: v
+    tag-filter: v
+
+# only passes with docker runner: `MELANGE_EXTRA_OPTS="--runner docker" make test/flux-notification-controller`
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - uses: test/kwok/cluster
+    - name: "start ${{package.name}} and test"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl apply -f https://github.com/fluxcd/flux2/releases/latest/download/install.yaml
+          kubectl wait --for=condition=Ready nodes --all
+        start: notification-controller --health-addr :9441 --metrics-addr :8081 > /dev/null 2>&1
+        timeout: 30
+        expected_output: |
+          starting event server
+          starting webhook receiver server
+          starting manager
+          notification.toolkit.fluxcd.io
+          Starting Controller
+          Starting workers
+        post: |
+          #!/bin/sh -e
+          set -o pipefail
+          curl -s localhost:8081/metrics  | grep rest_client_requests_total
+          curl -v localhost:9441/healthz 2>&1 | grep -i "200 OK"

@@ -1,0 +1,253 @@
+package:
+  name: pgadmin4
+  version: "9.5"
+  epoch: 0
+  description: "Administration and development platform for PostgreSQL."
+  copyright:
+    - license: PostgreSQL
+  dependencies:
+    runtime:
+      - ca-certificates
+      - coreutils
+      - findutils
+      - gawk
+      - glibc-locale-en
+      - grep
+      - krb5-libs
+      - libcap
+      - libedit
+      - libjpeg-turbo
+      - libldap
+      - liblz4-1
+      - libpq
+      - libzstd1
+      - merged-usrsbin
+      - posix-libc-utils
+      - postfix
+      - py${{vars.py-version}}-jinja2
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-setuptools
+      - python-${{vars.py-version}}
+      - python-${{vars.py-version}}-privileged-netbindservice
+      - sed
+      - shadow
+      - tzdata
+      - wolfi-baselayout
+
+vars:
+  py-version: 3.12
+  pg-version: 17
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '\.'
+    replace: "_"
+    to: mangled-package-version
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - glibc-locale-en
+      - krb5-dev
+      - libcap-utils
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - libpq
+      - libtool
+      - nasm
+      - nodejs
+      - npm
+      - openssl-dev
+      - pkgconf-dev
+      - postgresql-${{vars.pg-version}}-dev
+      - py${{vars.py-version}}-jinja2
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-setuptools
+      - python-${{vars.py-version}}-dev
+      - rust
+      - yarn
+      - yasm
+      - zlib-dev
+  environment:
+    LANG: en_US.UTF-8
+    LC_ALL: en_US.UTF-8
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: a5714903acb250481a987f3e352680b7a66403b5
+      repository: https://github.com/pgadmin-org/pgadmin4
+      tag: REL-${{vars.mangled-package-version}}
+
+  - uses: patch
+    with:
+      patches: postdrop-permissions.patch
+
+  - name: Build assets
+    working-directory: ./web
+    runs: |
+      # Remove tests and file descriptors
+      rm -rf regression \
+        `find . -type d -name tests` \
+        `find . -type f -name .DS_Store`
+
+      # Build assets
+      if [ ${{build.arch}} = "aarch64" ]; then
+        export CPPFLAGS="$CPPFLAGS -DPNG_ARM_NEON_OPT=0"
+      fi
+      npm install -g corepack
+      corepack enable
+      yarn set version berry
+      yarn set version 3
+      yarn install
+      yarn run bundle
+
+      # Cleanup
+      rm -rf node_modules yarn.lock package.json \
+        .[^.]* babel.cfg webpack.* jest.config.js \
+        babel.* ./pgadmin/static/js/generated/.cache
+
+  - name: Create virtual environment
+    runs: |
+      # Setup virtual environment
+      python${{vars.py-version}} -m venv venv --system-site-packages
+      source venv/bin/activate
+
+      # CVE-2025-47273
+      sed -i 's/^setuptools==75\..*/setuptools==78.1.1/' requirements.txt
+
+      # Install pgAdmin dependencies
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      pip install --no-cache-dir gunicorn
+
+      # Remediate GHSA-9hjg-9r4m-mvj7
+      pip install --upgrade "requests>=2.32.4"
+
+      # Remediate GHSA-48p4-8xcf-vxj5 and GHSA-pq67-6m6q-mj2v
+      pip install --upgrade "urllib3>=2.5.0"
+
+      # Copy over virtual env
+      mkdir -p ${{targets.contextdir}}/venv
+      cp -r venv/* ${{targets.contextdir}}/venv
+
+      # Build documentation
+      pip install sphinx sphinxcontrib-youtube
+      sphinx-build docs/en_US docs/en_US/_build/html
+
+      # Uninstall pip
+      sed -i '1s|.*/home/build.*|#!${{targets.contextdir}}/venv/bin/python|' $(find ${{targets.contextdir}}/venv/bin -maxdepth 1 -type f)
+      source ${{targets.contextdir}}/venv/bin/activate
+      pip uninstall --yes pip
+
+      # Correct virtual env path
+      sed -i '1s|.*/home/build.*|#!/venv/bin/python|' $(find ${{targets.contextdir}}/venv/bin -maxdepth 1 -type f)
+
+      # Create directories used by pgAdmin
+      mkdir -p ${{targets.contextdir}}/pgadmin4/docs
+      mkdir -p ${{targets.contextdir}}/run/pgadmin
+      mkdir -p ${{targets.contextdir}}/var/lib/pgadmin
+      mkdir -p ${{targets.contextdir}}/var/log/pgadmin
+
+      # Install pgAdmin
+      cp -r web/* ${{targets.contextdir}}/pgadmin4/
+      cp -r docs/* ${{targets.contextdir}}/pgadmin4/docs/
+      cp ./pkg/docker/run_pgadmin.py ${{targets.contextdir}}/pgadmin4/
+      cp ./pkg/docker/gunicorn_config.py ${{targets.contextdir}}/pgadmin4/
+      touch ${{targets.contextdir}}/pgadmin4/config_distro.py
+
+      # Remove pycache
+      find ${{targets.contextdir}} -type d -name '__pycache__' -exec rm -rf {} +
+      find ${{targets.contextdir}} -type f -name '*.pyc' -exec rm -rf {} +
+
+      # Add pgadmin to sudoers
+      mkdir -p ${{targets.contextdir}}/etc/sudoers.d
+      cp ./sudoers ${{targets.contextdir}}/etc/sudoers.d/postfix
+
+      # Correct permissions for postdrop/postqueue
+      mkdir -p ${{targets.contextdir}}/usr/bin
+      cp ./postdrop-permissions.sh ${{targets.contextdir}}/usr/bin/postdrop-permissions
+
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    description: pgAdmin 4 OCI entrypoint
+    dependencies:
+      runtime:
+        - bash
+        - merged-usrsbin
+        - sudo
+        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          cp ./pkg/docker/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
+    test:
+      pipeline:
+        - runs: |
+            stat /entrypoint.sh
+            if [[ ! -x /entrypoint.sh ]]; then
+              echo "Entrypoint script isn't executable!" && exit 1
+            fi
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - sudo
+    accounts:
+      users:
+        - username: pgadmin
+          uid: 5050
+          gid: 0
+        - username: postfix
+          uid: 100
+          gid: 101
+      # sudo must retain permissions
+      run-as: 0
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: "Set permissions"
+      runs: |
+        chown -R pgadmin:root \
+          /pgadmin4 \
+          /var/lib/pgadmin \
+          /var/log/pgadmin
+    - name: "Start pgAdmin4 server"
+      uses: test/daemon-check-output
+      working-directory: /pgadmin4
+      with:
+        start: |
+          sudo -u pgadmin env \
+            PATH="/venv/bin:$PATH" \
+            PYTHONPATH="/pgadmin4" \
+            PGADMIN_SETUP_EMAIL="admin@pgadmin.com" \
+            PGADMIN_SETUP_PASSWORD="r4nd0mP455w0rd" \
+            python${{vars.py-version}} pgAdmin4.py
+        expected_output: |
+          Starting pgAdmin 4. Please navigate to http://127.0.0.1:5050 in your browser.
+        error_strings: |
+          "ERROR"
+          "FAIL"
+          "FATAL"
+          "Traceback.*most.recent.call"
+        timeout: 60
+        post: |
+          curl -X POST http://127.0.0.1:5050/login \
+              -d "email=$PGADMIN_SETUP_EMAIL&password=$PGADMIN_SETUP_PASSWORD" \
+              -H "Content-Type: application/x-www-form-urlencoded" || { echo "Failed to log in to pgAdmin4"; exit 1; }
+
+update:
+  version-separator: _
+  enabled: true
+  github:
+    identifier: pgadmin-org/pgadmin4
+    strip-prefix: REL-
+    tag-filter: REL-
+    use-tag: true

@@ -1,0 +1,147 @@
+package:
+  name: gotenberg
+  version: "8.21.1"
+  epoch: 0
+  description: A developer-friendly API for converting numerous document formats into PDF files, and more!
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - busybox
+      - chromium
+      - culmus
+      - exiftool
+      - font-abyssinica
+      - font-amiri
+      - font-ipa
+      - font-ipafont-gothic
+      - font-ipafont-mincho
+      - font-liberation
+      - font-linux-libertine
+      - font-lklug
+      - font-lohit-beng-assamese
+      - font-lohit-beng-bengali
+      - font-lohit-beng-extra
+      - font-lohit-guru
+      - font-lohit-knda
+      - font-noto-cjk
+      - font-noto-emoji
+      - font-padauk
+      - font-samyak-devanagari
+      - font-samyak-gujarati
+      - font-samyak-malayalam
+      - font-samyak-oriya
+      - font-samyak-tamil
+      - font-tlwg
+      - font-unfonts-core
+      - font-wqy-zenhei
+      - gnupg
+      - libreoffice
+      - msttcorefonts-installer
+      - pdfcpu
+      - pdftk
+      - qpdf
+      - tini
+      - ttf-arphic-ukai
+      - ttf-arphic-uming
+      - unoconverter
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - exiftool
+      - go
+  environment:
+    CGO_ENABLED: 0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gotenberg/gotenberg
+      tag: v${{package.version}}
+      expected-commit: ffeb4703fd85666fa5cbd970eb97ce1721d95dfe
+
+  # https://github.com/gotenberg/gotenberg/blob/main/build/Dockerfile#L27C5-L27C129
+  - uses: go/build
+    with:
+      modroot: .
+      packages: ./cmd/gotenberg/main.go
+      output: gotenberg.bin
+      ldflags: "-X 'github.com/gotenberg/gotenberg/v8/cmd.Version=${{package.version}}'"
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/etc/fonts/conf.d
+      cp build/fonts.conf ${{targets.destdir}}/etc/fonts/conf.d/100-gotenberg.conf
+
+  - runs: |
+      d=${{targets.destdir}}/usr/bin
+      mkdir -p "$d"
+      cat >"$d/gotenberg" <<"EOF"
+      #!/bin/sh
+      exec env \
+        CHROMIUM_BIN_PATH="${CHROMIUM_BIN_PATH:-/usr/bin/chromium}" \
+        EXIFTOOL_BIN_PATH="${EXIFTOOL_BIN_PATH:-/usr/bin/exiftool}" \
+        LIBREOFFICE_BIN_PATH="${LIBREOFFICE_BIN_PATH:-/usr/lib/libreoffice/program/soffice.bin}" \
+        PDFCPU_BIN_PATH="${PDFCPU_BIN_PATH:-/usr/bin/pdfcpu}" \
+        PDFTK_BIN_PATH="${PDFTK_BIN_PATH:-/usr/bin/pdftk}" \
+        QPDF_BIN_PATH="${QPDF_BIN_PATH:-/usr/bin/qpdf}" \
+        UNOCONVERTER_BIN_PATH="${UNOCONVERTER_BIN_PATH:-/usr/bin/unoconv}" \
+          gotenberg.bin "$@"
+      EOF
+      chmod 755 "$d/gotenberg"
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: gotenberg/gotenberg
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+  pipeline:
+    - uses: test/daemon-check-output
+      with:
+        start: gotenberg
+        expected_output: |
+          Version: ${{package.version}}
+          libreoffice-api.* ready to start
+          api:.* started on.*3000
+          chromium:.* ready to start
+        post: |
+          set +x
+          url=http://localhost:3000/health
+          echo "checking status at $url"
+          out=$(curl --silent "$url") || {
+            echo "FAIL[$?]: curl --silent $url"
+            curl -i "$url"
+            exit 1;
+          }
+
+          found=$(echo "$out" | jq) || {
+            echo "FAIL[$?]: parsing health with jq failed."
+            echo "health: $out"
+            exit 1
+          }
+
+          echo "health has:"
+          echo "$out" | jq
+
+          for p in .status .details.chromium.status .details.libreoffice.status ; do
+            found=$(echo "$out" | jq --raw-output "$p")
+            [ "$found" = "up" ] || {
+              echo "FAIL: $p expected 'up' found '$found'"
+              exit 1
+            }
+          done
+
+          echo "PASS: status looks good."
+          echo "$out"

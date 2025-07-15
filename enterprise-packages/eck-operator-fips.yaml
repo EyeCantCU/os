@@ -1,0 +1,85 @@
+package:
+  name: eck-operator-fips
+  version: "3.0.0"
+  epoch: 2
+  description: Elastic Cloud on Kubernetes
+  copyright:
+    - license: Elastic-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/cloud-on-k8s/
+      tag: v${{package.version}}
+      expected-commit: 89a41511a4bc8fdb4770cf1da60c37b8b8232b6d
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/conf
+      install -Dm644 ./config/eck.yaml ${{targets.contextdir}}/conf/eck.yaml
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+      modroot: .
+
+  # Run Go generate
+  - runs: go generate ./...
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: github.com/elastic/cloud-on-k8s/v2/cmd
+      output: elastic-operator
+      ldflags: |
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.version=${{package.version}}
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildHash=$(git rev-parse HEAD)
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildDate=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+        -X github.com/elastic/cloud-on-k8s/v2/pkg/about.buildSnapshot=true
+
+test:
+  environment:
+    contents:
+      packages:
+        - eck-operator-compat
+        - wait-for-it
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        [ -f /usr/bin/elastic-operator ] && exit 0 || exit 1
+        /elastic-operator --version
+        elastic-operator --version
+    - uses: test/kwok/cluster
+    - runs: |
+        kubectl create -f https://download.elastic.co/downloads/eck/3.0.0/crds.yaml
+        kubectl create namespace test
+    - uses: test/daemon-check-output
+      with:
+        start: elastic-operator manager --operator-namespace test
+        timeout: 30
+        expected_output: |
+          Starting the manager
+          Starting Controller
+          Starting workers
+        error_strings: |
+          unlicensed
+        post: |
+          kubectl get pods -n test
+          kubectl logs -n test -l control-plane=elastic-operator
+
+          wait-for-it localhost:8080 --timeout=30
+
+          # Check all endpoints
+          curl -s http://localhost:8080/metrics | grep -q "elastic_operator_"
+          curl -s http://localhost:8080/health | grep -q "status.*ok"
+          curl -s http://localhost:8080/ready | grep -q "ready"
+
+          # Check operator status
+          kubectl get elasticsearch -A
+          kubectl get kibana -A
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/cloud-on-k8s
+    strip-prefix: v

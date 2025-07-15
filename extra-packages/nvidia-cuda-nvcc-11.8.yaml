@@ -1,0 +1,108 @@
+package:
+  name: nvidia-cuda-nvcc-11.8
+  version: 11.8.89
+  epoch: 7
+  description: CUDA NVCC
+  copyright:
+    - license: PROPRIETARY
+
+environment:
+  contents:
+    packages:
+      - busybox
+
+pipeline:
+  - assertions:
+      required-steps: 1
+    pipeline:
+      - if: ${{build.arch}} == 'aarch64'
+        uses: fetch
+        with:
+          # SBSA = ARM Server Base System Architecture (now called SystemReady)
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-sbsa/cuda_nvcc-linux-sbsa-11.8.89-archive.tar.xz"
+          expected-sha256: "17d30d924a1d6ff5748a0b6a4e7c25fd39644250cef9184fba520362f70ff798"
+          timeout: 30
+      - if: ${{build.arch}} == 'x86_64'
+        uses: fetch
+        with:
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-11.8.89-archive.tar.xz"
+          expected-sha256: "7ee8450dbcc16e9fe5d2a7b567d6dec220c5894a94ac6640459e06231e3b39a5"
+          timeout: 30
+
+  # Without this patch nvcc will not work with glibc 2.41 an newer, as their
+  # recently added C23 math functions conflict with CUDA header definitions.
+  - uses: patch
+    with:
+      patches: math_functions_glibc_2.41.patch
+
+  # Setup version symlinks
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/local/
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/local/cuda-11.8/
+      mv include ${{targets.destdir}}/usr/local/cuda-11.8/
+      mv lib ${{targets.destdir}}/usr/local/cuda-11.8/lib64
+      mv LICENSE ${{targets.destdir}}/usr/local/cuda-11.8/${{package.name}}.LICENSE
+      mv bin ${{targets.destdir}}/usr/local/cuda-11.8/
+      mv nvvm ${{targets.destdir}}/usr/local/cuda-11.8/
+
+  - runs: |
+      # Symlink the binaries onto the normal path
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      for i in ${{targets.destdir}}/usr/local/cuda-11.8/nvcc/bin/*; do
+        [ -f "$i" ] && [ -x "$i" ] && ln -sf /usr/local/cuda-11.8/nvcc/bin/$(basename "$i") ${{targets.destdir}}/usr/bin/
+      done
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development headers
+    pipeline:
+      - uses: split/dev
+      - if: ${{build.arch}} == 'aarch64'
+        runs: |
+          # Override bits/math-vector.h for aarch64 as latest glibc ships symbols that nvcc
+          # does not export ; more details:
+          # https://bugs.launchpad.net/ubuntu/+source/glibc/+bug/2033747
+          # https://github.com/OE4T/meta-tegra/commit/981245c8bf3164f16bd7f52fca6ea9c9fa8c349a
+          mkdir -p "${{targets.contextdir}}/usr/local/cuda-11.8/include/bits"
+          install -m644 math-vector.h "${{targets.contextdir}}/usr/local/cuda-11.8/include/bits/math-vector.h"
+    dependencies:
+      runtime:
+        - nvidia-cuda-nvcc-11.8
+
+update:
+  # No release-monitoring support for the multi-arch "enterprise" driver, only
+  # for x86-only consumer release train.
+  enabled: false
+
+test:
+  environment:
+    contents:
+      packages:
+        - gcc-11-default
+        - build-base
+        - nvidia-cuda-cudart-11.8-dev
+        - ${{package.name}}-dev
+  pipeline:
+    - name: Test .c files can be compiled
+      runs: |
+        cat <<EOF >/tmp/test-c.c
+        #include <math.h>
+        int main() {
+          return 0;
+        }
+        EOF
+        /usr/local/cuda-11.8/bin/nvcc -o /tmp/test-c /tmp/test-c.c
+        /tmp/test-c
+    - name: Test .cu files can be compiled
+      runs: |
+        cat <<EOF >/tmp/test-cu.cu
+        #include <math.h>
+        int main() {
+          return 0;
+        }
+        EOF
+        /usr/local/cuda-11.8/bin/nvcc -o /tmp/test-cu /tmp/test-cu.cu
+        /tmp/test-cu
+    - uses: test/tw/ldd-check

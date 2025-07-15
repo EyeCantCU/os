@@ -1,0 +1,90 @@
+package:
+  name: step-issuer-fips
+  version: "0.9.8"
+  epoch: 5
+  description: A certificate issuer for cert-manager using step certificates CA
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/smallstep/step-issuer
+      tag: v${{package.version}}
+      expected-commit: 2781d68f0ca331ccfe9580c2134129868ee6bf34
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.38.0
+        github.com/go-chi/chi/v5@v5.2.2
+
+  - uses: go/build
+    with:
+      packages: ./
+      output: step-issuer
+      ldflags: -w -X "main.Version=${{package.version}}"
+      go-package: go-fips
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - step-issuer-fips
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          ln -sf /usr/bin/step-issuer ${{targets.contextdir}}/manager
+    description: Helm chart compatability
+    test:
+      pipeline:
+        - runs: |
+            /manager -h
+
+update:
+  enabled: true
+  github:
+    identifier: smallstep/step-issuer
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - ca-certificates-bundle
+  pipeline:
+    - name: Run Help Command
+      runs: |
+        /usr/bin/step-issuer -h
+    - uses: test/go-fips-check
+    - name: "Setup KWOK cluster"
+      uses: test/kwok/cluster
+    - name: "Install CRDs"
+      runs: |
+        kubectl apply -f https://raw.githubusercontent.com/smallstep/step-issuer/refs/heads/master/config/crd/bases/certmanager.step.sm_stepclusterissuers.yaml
+        kubectl apply -f https://raw.githubusercontent.com/smallstep/step-issuer/refs/heads/master/config/crd/bases/certmanager.step.sm_stepissuers.yaml
+    - name: "Functional Test"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl config view --minify --raw > /tmp/kubeconfig.yaml
+        start: |
+          step-issuer --logtostderr=true --zap-log-level=debug --disable-approval-check --metrics-addr=":8080" --kubeconfig=/tmp/kubeconfig.yaml
+        timeout: 180
+        expected_output: |
+          starting manager
+          Starting metrics server
+          Starting Controller
+          Starting workers
+          Starting EventSource
+        post: |
+          if curl -sf http://localhost:8080/metrics | grep -q "controller_runtime_active_workers"; then
+            echo "Metrics endpoint is up and exporting metrics"
+          else
+            echo " Metrics endpoint check failed"
+            exit 1
+          fi
