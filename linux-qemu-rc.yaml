@@ -1,0 +1,111 @@
+package:
+  name: linux-qemu-rc
+  version: "6.16_rc4"
+  epoch: 0
+  description: "Linux Release Candidate kernel"
+  copyright:
+    - license: GPL-2.0
+  resources:
+    cpu: 16
+    memory: 24Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-modules=${{package.full-version}}
+      # Ensure we get Chainguard branding in our VMs.
+      - chainguard-baselayout
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)_rc(\d+)
+    replace: "$1"
+    to: kernel-version
+  - from: ${{package.version}}
+    match: \d+\.\d+\_rc(\d+)
+    replace: "$1"
+    to: kernel-rc
+  - from: ${{package.name}}
+    match: "(.*)"
+    replace: "${{package.full-version}}"
+    to: version-flavor
+  - from: ${{package.version}}
+    match: ^(.+)_rc(.+)
+    replace: "$1-rc$2"
+    to: git-tag-version
+
+environment:
+  environment:
+    KBUILD_BUILD_USER: noreply
+    KBUILD_BUILD_HOST: chainguard.dev
+    KBUILD_BUILD_VERSION: Chainguard
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/torvalds/linux.git
+      expected-commit: d0b3b7b22dfa1f4b515fd3a295b3fd958f9e81af
+      tag: v${{vars.git-tag-version}}
+
+  - uses: kernel/patch
+
+  - uses: kernel/config
+    with:
+      make-targets: hardening.config
+      version-flavor: ${{vars.version-flavor}}
+
+  - uses: kernel/build
+    with:
+      version-flavor: ${{vars.version-flavor}}
+
+subpackages:
+  - name: "${{package.name}}-boot-installed"
+    description: "Linux RC kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - chainguard-baselayout
+        - systemd-boot-installed
+        - ${{package.name}}-modules=${{package.full-version}}
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+
+  - name: "${{package.name}}-modules"
+    description: "Linux kernel modules"
+    pipeline:
+      - uses: kernel/modules
+        with:
+          version-flavor: ${{vars.kernel-version}}.0-rc${{vars.kernel-rc}}-r${{package.epoch}}
+
+test:
+  pipeline:
+    - uses: kernel/test/kconfig/systemd
+    - name: Test Basic Boot
+      uses: kernel/test/console_grep
+      with:
+        string: "Unable to mount root fs"
+    - name: Test for XFS
+      uses: kernel/test/console_grep
+      with:
+        string: "xfs"
+    - name: Test for NVME
+      uses: kernel/test/console_grep
+      with:
+        string: "nvme nvme0: pci function"
+    - name: Test for ip6tables
+      uses: kernel/test/console_grep
+      with:
+        string: "Segment Routing with IPv6"
+
+update:
+  enabled: true
+  enable-prerelease-tags: true
+  version-transform:
+    - match: -rc(\d+)$
+      replace: _rc$1
+  github:
+    identifier: torvalds/linux
+    use-tag: true
+    strip-prefix: v
