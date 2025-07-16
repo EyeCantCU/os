@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -14,53 +14,84 @@ import (
 
 	"chainguard.dev/melange/pkg/build"
 	"chainguard.dev/melange/pkg/config"
+	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
 
+var dirToRepo map[string]string = map[string]string{
+	// TODO: These aren't all apk.cgr.dev because there is a
+	// meaningful diff for build dependencies of some packages.
+	"os":                  "https://packages.wolfi.dev/os",
+	"extra-packages":      "https://packages.cgr.dev/extras",
+	"enterprise-packages": "https://apk.cgr.dev/chainguard-private",
+}
+
 func main() {
-	if len(os.Args) != 2 || os.Args[1] != "lint" {
-		log.Fatalf("usage: %s lint", os.Args[0])
+	root := &cobra.Command{
+		Use:          "stereo",
+		Short:        "Manage the stereo repo",
+		SilenceUsage: true,
 	}
-	if err := lint(context.Background()); err != nil {
-		fmt.Println(err)
+
+	root.AddCommand(bucketsCmd())
+	root.AddCommand(lintCmd())
+
+	if err := root.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)
 	}
 }
 
+func lintCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "lint",
+		Short: "Find duplicate package names",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return lint(cmd.Context())
+		},
+	}
+}
+
 func lint(ctx context.Context) error {
+	pkgss, err := dirToPackages(ctx)
+	if err != nil {
+		return err
+	}
+
 	var errs []error
 
-	wolfi, err := NewPackages(ctx, os.DirFS("os"), "./os", "./os/pipelines/")
-	if err != nil {
-		errs = append(errs, fmt.Errorf("wolfi: %w", err))
-	}
-
-	extras, err := NewPackages(ctx, os.DirFS("extra-packages"), "./extra-packages", "./extra-packages/pipelines/")
-	if err != nil {
-		errs = append(errs, fmt.Errorf("extras: %w", err))
-	}
-
-	enterprise, err := NewPackages(ctx, os.DirFS("enterprise-packages"), "./enterprise-packages", "./enterprise-packages/pipelines/")
-	if err != nil {
-		errs = append(errs, fmt.Errorf("enterprise: %w", err))
-	}
-
-	seen := map[string]*config.Configuration{}
-
-	for _, repo := range []map[string]*config.Configuration{wolfi, extras, enterprise} {
-		for pkg, cfg := range repo {
+	// name -> yaml path
+	seen := map[string]string{}
+	for repo, pkgs := range pkgss {
+		for pkg, cfg := range pkgs {
+			want := path.Join(repo, cfg.Package.Name)
 			if got, ok := seen[pkg]; ok {
-				errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml and %s.yaml", pkg, got.Package.Name, cfg.Package.Name))
+				errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml and %s.yaml", pkg, got, want))
 			}
-			seen[pkg] = cfg
+			seen[pkg] = want
 		}
 	}
 
-	// log.Printf("wolfi has %d packages", len(wolfi))
-	// log.Printf("extras has %d packages", len(extras))
-	// log.Printf("enterprise has %d packages", len(enterprise))
-
 	return errors.Join(errs...)
+}
+
+func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configuration, error) {
+	pkgss := map[string]map[string]*config.Configuration{}
+
+	var g errgroup.Group
+	for dir := range dirToRepo {
+		g.Go(func() error {
+			local := fmt.Sprintf("./%s", dir)
+			pipelines := fmt.Sprintf("./%s/pipelines/", dir)
+			pkgs, err := NewPackages(ctx, os.DirFS(dir), local, pipelines)
+			if err != nil {
+				return fmt.Errorf("walking %s: %w", dir, err)
+			}
+			pkgss[dir] = pkgs
+			return nil
+		})
+	}
+
+	return pkgss, g.Wait()
 }
 
 func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (map[string]*config.Configuration, error) {
@@ -122,7 +153,7 @@ func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (
 			if err := build.Compile(ctx); err != nil {
 				return fmt.Errorf("compiling build: %w", err)
 			}
-			c.Environment.Contents.Packages = build.Configuration.Environment.Contents.Packages
+			c.Environment = build.Configuration.Environment
 
 			mu.Lock()
 			defer mu.Unlock()
