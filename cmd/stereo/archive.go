@@ -62,14 +62,14 @@ type ArchiveCandidate struct {
 }
 
 type ArchiveContext struct {
-	DependencyMap   map[string][]Dependency     // package -> list of dependencies on it
-	AllPackages     map[string][]string         // package name -> list of available versions
-	PackageToOrigin map[string]string           // package name -> melange origin
+	DependencyMap   map[string][]Dependency          // package -> list of dependencies on it
+	AllPackages     map[string][]string              // package name -> list of available versions
+	PackageToOrigin map[string]string                // package name -> melange origin
 	ActivePackages  map[string]*config.Configuration // packages still being built from melange
-	Cache           *apk.Cache                  // APK cache for build dependency resolution
-	BuildRepos      map[string][]string         // dir -> list of repo URLs for build dependencies
+	Cache           *apk.Cache                       // APK cache for build dependency resolution
+	BuildRepos      map[string][]string              // dir -> list of repo URLs for build dependencies
 	ConfigToDir     map[*config.Configuration]string // config -> directory mapping
-	Architecture    string                      // target architecture
+	Architecture    string                           // target architecture
 }
 
 func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt, arch string) error {
@@ -282,11 +282,11 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 
 				// If both packages come from the same melange origin and it's an exact version match,
 				// this is an internal dependency within the same build - don't block archiving
-				if candidateOrigin != "" && candidateOrigin == dependentOrigin && 
-				   dep.Constraint != "" && strings.HasPrefix(dep.Constraint, "=") {
+				if candidateOrigin != "" && candidateOrigin == dependentOrigin &&
+					dep.Constraint != "" && strings.HasPrefix(dep.Constraint, "=") {
 					requiredVersion := dep.Constraint[1:]
 					if candidate.Version == requiredVersion {
-						log.Printf("Package %s=%s internal dependency from same origin %s (%s=%s) - not blocking", 
+						log.Printf("Package %s=%s internal dependency from same origin %s (%s=%s) - not blocking",
 							candidate.Name, candidate.Version, candidateOrigin, dep.DependentPackage, dep.DependentPackageVersion)
 						continue
 					}
@@ -300,10 +300,10 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 					if candidateSet[candidate.Name+"="+version] {
 						continue
 					}
-					
+
 					// Check if this non-candidate version satisfies the dependency
 					if versionSatisfiesDependency(version, dep) {
-						log.Printf("Package %s=%s dependency (%s) can be satisfied by non-candidate version %s=%s", 
+						log.Printf("Package %s=%s dependency (%s) can be satisfied by non-candidate version %s=%s",
 							candidate.Name, candidate.Version, dep.Constraint, candidate.Name, version)
 						canBeSatisfiedByNonCandidate = true
 						break
@@ -318,7 +318,7 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 						if !candidateSet[candidate.Name+"="+version] {
 							continue
 						}
-						
+
 						// Check if this candidate version satisfies the dependency
 						if versionSatisfiesDependency(version, dep) {
 							satisfyingCandidates = append(satisfyingCandidates, version)
@@ -329,7 +329,7 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 						// Multiple candidates can satisfy this dependency
 						// Find the most recent version to keep
 						mostRecentVersion := findMostRecentVersion(satisfyingCandidates)
-						
+
 						if candidate.Version != mostRecentVersion {
 							log.Printf("Package %s=%s can be archived - dependency (%s) can be satisfied by more recent candidate %s=%s",
 								candidate.Name, candidate.Version, dep.Constraint, candidate.Name, mostRecentVersion)
@@ -410,22 +410,22 @@ func versionSatisfiesDependency(version string, dep Dependency) bool {
 func versionIsCompatible(candidateVersion, requiredVersion string) bool {
 	// For tilde constraints (~), use the APK module's constraint parsing
 	// Create a tilde constraint and check if the candidate version satisfies it
-	
+
 	constraint := apk.ResolvePackageNameVersionPin("dummy~" + requiredVersion)
-	
+
 	candidateVer, err := apk.ParseVersion(candidateVersion)
 	if err != nil {
 		// If we can't parse the candidate version, assume it's not compatible
 		return false
 	}
-	
+
 	// Check if the candidate version satisfies the tilde constraint
 	satisfies, err := constraint.SatisfiedBy(candidateVer)
 	if err != nil {
 		// If there's an error, assume it's not compatible
 		return false
 	}
-	
+
 	return satisfies
 }
 
@@ -517,7 +517,7 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 			// Capture variables for closure
 			currentPkgName := pkgName
 			currentCfg := cfg
-			
+
 			log.Printf("Checking build dependencies for melange configuration: %s", currentPkgName)
 
 			// Get the directory for this configuration to determine build repos
@@ -590,4 +590,3 @@ func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *
 
 	return locked.Contents.Packages, nil
 }
-
