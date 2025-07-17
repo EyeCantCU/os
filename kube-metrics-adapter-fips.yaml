@@ -1,0 +1,76 @@
+package:
+  name: kube-metrics-adapter-fips
+  version: "0.2.4"
+  epoch: 0
+  description: General purpose metrics adapter for Kubernetes HPA metrics
+  copyright:
+    - license: MIT
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/zalando-incubator/kube-metrics-adapter
+      expected-commit: eef3840510840ad5926f8457770b9c3970e91ca7
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/net@v0.38.0
+      replaces: |-
+        github.com/golang-jwt/jwt=github.com/golang-jwt/jwt/v4@v4.5.2
+      modroot: .
+
+  - uses: go/build
+    with:
+      modroot: .
+      output: kube-metrics-adapter
+      packages: main.go
+      ldflags: -X main.version=${{package.version}} -X main.commit=$(git rev-parse HEAD) -X main.date=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+      go-package: go-fips
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - kube-metrics-adapter-*
+  github:
+    identifier: zalando-incubator/kube-metrics-adapter
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - openssl
+  pipeline:
+    - runs: |
+        kube-metrics-adapter -h
+        kube-metrics-adapter --help
+    - uses: test/kwok/cluster
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create dummy certificates in /tmp
+          echo "Creating dummy certificates..."
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/tls.key -out /tmp/tls.crt -days 1 -subj "/CN=localhost"
+          kubectl config view --minify --raw > /tmp/kubeconfig.yaml
+        start: |
+          kube-metrics-adapter --secure-port=8443 --tls-cert-file=/tmp/tls.crt --tls-private-key-file=/tmp/tls.key --enable-external-metrics-api=false --authentication-skip-lookup=true --authorization-always-allow-paths=/healthz --metrics-address=localhost:7979 --authorization-webhook-cache-authorized-ttl=30s --authorization-webhook-cache-unauthorized-ttl=30s --authorization-kubeconfig=/tmp/kubeconfig.yaml --authentication-kubeconfig=/tmp/kubeconfig.yaml --lister-kubeconfig=/tmp/kubeconfig.yaml
+        timeout: 60
+        expected_output: |
+          Starting controller
+          Starting DynamicServingCertificateController
+        post: |
+          STATUS=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:8443/healthz)
+          # Check if the status code is 200, if so exit 0, otherwise exit 1
+          if [ "$STATUS" -eq 200 ]; then
+              echo "Health check passed with status code 200"
+          else
+              echo "Health check failed with status code $STATUS"
+              exit 1
+          fi
+          curl -sf http://localhost:7979/metrics | grep '^kube_metrics_adapter_collections_success' || exit 1
+    - uses: test/go-fips-check
