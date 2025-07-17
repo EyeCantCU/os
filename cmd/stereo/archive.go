@@ -10,6 +10,7 @@ import (
 
 	"chainguard.dev/apko/pkg/apk/apk"
 	"chainguard.dev/apko/pkg/apk/auth"
+	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
 )
 
@@ -50,6 +51,13 @@ type ArchiveCandidate struct {
 	Reason     string
 }
 
+type ArchiveContext struct {
+	DependencyMap   map[string][]Dependency     // package -> list of dependencies on it
+	AllPackages     map[string][]string         // package name -> list of available versions
+	PackageToOrigin map[string]string           // package name -> melange origin
+	ActivePackages  map[string]*config.Configuration // packages still being built from melange
+}
+
 func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt string) error {
 	log.Printf("Searching for APK archive candidates older than %v...", duration)
 
@@ -61,13 +69,28 @@ func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt
 
 	log.Printf("Found %d packages older than %v", len(candidates), duration)
 
-	// Step 2: Filter out packages with reverse dependencies
-	filtered, err := filterByReverseDependencies(ctx, candidates)
+	// Step 2: Build archive context (fetch indexes, build dependency maps, etc.)
+	archiveCtx, err := buildArchiveContext(ctx, candidates)
+	if err != nil {
+		return fmt.Errorf("building archive context: %w", err)
+	}
+
+	// Step 3: Filter out packages with reverse dependencies
+	filtered, err := filterByReverseDependencies(candidates, archiveCtx)
 	if err != nil {
 		return fmt.Errorf("filtering by reverse dependencies: %w", err)
 	}
 
 	log.Printf("After filtering reverse dependencies: %d packages remain", len(filtered))
+	candidates = filtered
+
+	// Step 4: Filter out most recent versions that are still built from melange
+	filtered, err = filterByMostRecentVersion(candidates, archiveCtx)
+	if err != nil {
+		return fmt.Errorf("filtering by most recent version: %w", err)
+	}
+
+	log.Printf("After filtering most recent versions: %d packages remain", len(filtered))
 	candidates = filtered
 
 	if dryRun {
@@ -146,17 +169,15 @@ func fetchAPKIndex(ctx context.Context, baseURL, arch string) (*apk.APKIndex, er
 	return apk.IndexFromArchive(resp.Body)
 }
 
-func filterByReverseDependencies(ctx context.Context, candidates []ArchiveCandidate) ([]ArchiveCandidate, error) {
-	log.Println("Checking for reverse dependencies...")
+func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate) (*ArchiveContext, error) {
+	log.Println("Building archive context...")
 
-	// Build a map of all packages and their dependencies with version constraints
-	dependencyMap := make(map[string][]Dependency) // package -> list of dependencies on it
-
-	// Build a map of package name -> melange origin for determining if dependencies come from same source
-	packageToOrigin := make(map[string]string)
-
-	// Build a map of all available packages (both candidates and non-candidates)
-	allPackages := make(map[string][]string) // package name -> list of available versions
+	archiveCtx := &ArchiveContext{
+		DependencyMap:   make(map[string][]Dependency),
+		AllPackages:     make(map[string][]string),
+		PackageToOrigin: make(map[string]string),
+		ActivePackages:  make(map[string]*config.Configuration),
+	}
 
 	// Create a set of candidate packages for quick lookup
 	candidateSet := make(map[string]bool)
@@ -164,16 +185,17 @@ func filterByReverseDependencies(ctx context.Context, candidates []ArchiveCandid
 		candidateSet[candidate.Name+"="+candidate.Version] = true
 	}
 
-	// Get melange configurations to understand package origins
+	// Get melange configurations to understand package origins and active packages
 	pkgss, err := dirToPackages(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("getting package origins: %w", err)
 	}
 
-	// Map each package name to its melange origin
+	// Map each package name to its melange origin and track active packages
 	for _, pkgs := range pkgss {
 		for pkgName, cfg := range pkgs {
-			packageToOrigin[pkgName] = cfg.Package.Name // The main package name is the origin
+			archiveCtx.PackageToOrigin[pkgName] = cfg.Package.Name // The main package name is the origin
+			archiveCtx.ActivePackages[pkgName] = cfg
 		}
 	}
 
@@ -188,7 +210,7 @@ func filterByReverseDependencies(ctx context.Context, candidates []ArchiveCandid
 		// For each package, track all available versions and dependencies
 		for _, pkg := range index.Packages {
 			// Track all available versions
-			allPackages[pkg.Name] = append(allPackages[pkg.Name], pkg.Version)
+			archiveCtx.AllPackages[pkg.Name] = append(archiveCtx.AllPackages[pkg.Name], pkg.Version)
 
 			// Build dependency map
 			for _, dep := range pkg.Dependencies {
@@ -196,23 +218,35 @@ func filterByReverseDependencies(ctx context.Context, candidates []ArchiveCandid
 				if parsedDep.Name != "" {
 					parsedDep.DependentPackage = pkg.Name
 					parsedDep.DependentPackageVersion = pkg.Version
-					dependencyMap[parsedDep.Name] = append(dependencyMap[parsedDep.Name], parsedDep)
+					archiveCtx.DependencyMap[parsedDep.Name] = append(archiveCtx.DependencyMap[parsedDep.Name], parsedDep)
 				}
 			}
 		}
 	}
 
+	return archiveCtx, nil
+}
+
+func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, error) {
+	log.Println("Checking for reverse dependencies...")
+
+	// Create a set of candidate packages for quick lookup
+	candidateSet := make(map[string]bool)
+	for _, candidate := range candidates {
+		candidateSet[candidate.Name+"="+candidate.Version] = true
+	}
+
 	// Filter candidates by checking if their dependencies can be satisfied by non-candidate packages
 	var filtered []ArchiveCandidate
 	for _, candidate := range candidates {
-		reverseDeps := dependencyMap[candidate.Name]
+		reverseDeps := archiveCtx.DependencyMap[candidate.Name]
 		hasBlockingReverseDependency := false
 
 		for _, dep := range reverseDeps {
 			if versionSatisfiesDependency(candidate.Version, dep) {
 				// Check if this dependency is from the same melange origin and exact version match
-				candidateOrigin := packageToOrigin[candidate.Name]
-				dependentOrigin := packageToOrigin[dep.DependentPackage]
+				candidateOrigin := archiveCtx.PackageToOrigin[candidate.Name]
+				dependentOrigin := archiveCtx.PackageToOrigin[dep.DependentPackage]
 
 				// If both packages come from the same melange origin and it's an exact version match,
 				// this is an internal dependency within the same build - don't block archiving
@@ -228,7 +262,7 @@ func filterByReverseDependencies(ctx context.Context, candidates []ArchiveCandid
 
 				// Check if this dependency can be satisfied by a non-candidate package
 				canBeSatisfiedByNonCandidate := false
-				availableVersions := allPackages[candidate.Name]
+				availableVersions := archiveCtx.AllPackages[candidate.Name]
 				for _, version := range availableVersions {
 					// Skip if this version is a candidate for archiving
 					if candidateSet[candidate.Name+"="+version] {
@@ -390,5 +424,42 @@ func findMostRecentVersion(versions []string) string {
 	}
 
 	return mostRecent
+}
+
+func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, error) {
+	log.Println("Checking for most recent versions still built from melange...")
+
+	var filtered []ArchiveCandidate
+	for _, candidate := range candidates {
+		// Check if this package is still being built from melange
+		_, isStillBuilt := archiveCtx.ActivePackages[candidate.Name]
+		if !isStillBuilt {
+			// Package is no longer built from melange, safe to archive any version
+			filtered = append(filtered, candidate)
+			continue
+		}
+
+		// Package is still being built, check if this is the most recent version
+		allVersions := archiveCtx.AllPackages[candidate.Name]
+		if len(allVersions) <= 1 {
+			// Only one version available, don't archive it
+			log.Printf("Package %s=%s cannot be archived - only version of package still built from melange",
+				candidate.Name, candidate.Version)
+			continue
+		}
+
+		mostRecentVersion := findMostRecentVersion(allVersions)
+		if candidate.Version == mostRecentVersion {
+			log.Printf("Package %s=%s cannot be archived - most recent version of package still built from melange",
+				candidate.Name, candidate.Version)
+			continue
+		}
+
+		log.Printf("Package %s=%s can be archived - not the most recent version (most recent: %s)",
+			candidate.Name, candidate.Version, mostRecentVersion)
+		filtered = append(filtered, candidate)
+	}
+
+	return filtered, nil
 }
 
