@@ -117,7 +117,7 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 	log.Println("Archive candidates:")
 
 	for _, candidate := range candidates {
-		fmt.Printf("%s=%s\n", candidate.Name, candidate.Version)
+		fmt.Printf("%s=%s %s\n", candidate.Name, candidate.Version, candidate.Repository)
 	}
 
 	return nil
