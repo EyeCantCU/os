@@ -2,16 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/apk"
 	"chainguard.dev/apko/pkg/apk/auth"
+	apko_build "chainguard.dev/apko/pkg/build"
+	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 func archiveCmd() *cobra.Command {
@@ -56,6 +64,9 @@ type ArchiveContext struct {
 	AllPackages     map[string][]string         // package name -> list of available versions
 	PackageToOrigin map[string]string           // package name -> melange origin
 	ActivePackages  map[string]*config.Configuration // packages still being built from melange
+	Cache           *apk.Cache                  // APK cache for build dependency resolution
+	BuildRepos      map[string][]string         // dir -> list of repo URLs for build dependencies
+	ConfigToDir     map[*config.Configuration]string // config -> directory mapping
 }
 
 func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt string) error {
@@ -91,6 +102,15 @@ func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt
 	}
 
 	log.Printf("After filtering most recent versions: %d packages remain", len(filtered))
+	candidates = filtered
+
+	// Step 5: Filter out packages that are reverse build dependencies
+	filtered, err = filterByReverseBuildDependencies(ctx, candidates, archiveCtx)
+	if err != nil {
+		return fmt.Errorf("filtering by reverse build dependencies: %w", err)
+	}
+
+	log.Printf("After filtering reverse build dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
 	if dryRun {
@@ -177,6 +197,13 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate) (*A
 		AllPackages:     make(map[string][]string),
 		PackageToOrigin: make(map[string]string),
 		ActivePackages:  make(map[string]*config.Configuration),
+		Cache:           apk.NewCache(true),
+		BuildRepos: map[string][]string{
+			"os":                  []string{dirToRepo["os"]},
+			"extra-packages":      []string{dirToRepo["os"], dirToRepo["extra-packages"]},
+			"enterprise-packages": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
+		},
+		ConfigToDir: make(map[*config.Configuration]string),
 	}
 
 	// Create a set of candidate packages for quick lookup
@@ -192,10 +219,11 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate) (*A
 	}
 
 	// Map each package name to its melange origin and track active packages
-	for _, pkgs := range pkgss {
+	for dir, pkgs := range pkgss {
 		for pkgName, cfg := range pkgs {
 			archiveCtx.PackageToOrigin[pkgName] = cfg.Package.Name // The main package name is the origin
 			archiveCtx.ActivePackages[pkgName] = cfg
+			archiveCtx.ConfigToDir[cfg] = dir
 		}
 	}
 
@@ -461,5 +489,102 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 	}
 
 	return filtered, nil
+}
+
+func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, error) {
+	log.Println("Checking for reverse build dependencies...")
+
+	// Create a set of candidate packages for quick lookup
+	candidateSet := make(map[string]bool)
+	for _, candidate := range candidates {
+		candidateSet[candidate.Name+"="+candidate.Version] = true
+	}
+
+	// Build a map of all build dependencies from active melange configurations
+	buildDependencies := make(map[string]bool) // package=version -> true if it's a build dependency
+	var mu sync.Mutex
+
+	// Process melange configurations in parallel
+	var g errgroup.Group
+	g.SetLimit(runtime.GOMAXPROCS(0))
+
+	for pkgName, cfg := range archiveCtx.ActivePackages {
+		g.Go(func() error {
+			// Capture variables for closure
+			currentPkgName := pkgName
+			currentCfg := cfg
+			
+			log.Printf("Checking build dependencies for melange configuration: %s", currentPkgName)
+
+			// Get the directory for this configuration to determine build repos
+			dir := archiveCtx.ConfigToDir[currentCfg]
+			buildRepos := archiveCtx.BuildRepos[dir]
+
+			// Use the same locking mechanism as the buckets command
+			buildDeps, err := lockBuildDependencies(ctx, currentCfg, archiveCtx.Cache, buildRepos)
+			if err != nil {
+				log.Printf("Error locking build dependencies for %s: %v", currentPkgName, err)
+				return nil // Don't fail the entire operation for one config
+			}
+
+			// Add all build dependencies to our set (with mutex protection)
+			mu.Lock()
+			for _, dep := range buildDeps {
+				buildDependencies[dep] = true
+			}
+			mu.Unlock()
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, fmt.Errorf("error processing build dependencies: %w", err)
+	}
+
+	// Filter out candidates that are build dependencies
+	var filtered []ArchiveCandidate
+	for _, candidate := range candidates {
+		packageVersion := candidate.Name + "=" + candidate.Version
+		if buildDependencies[packageVersion] {
+			log.Printf("Package %s=%s cannot be archived - is a build dependency for active melange configuration",
+				candidate.Name, candidate.Version)
+			continue
+		}
+
+		filtered = append(filtered, candidate)
+	}
+
+	return filtered, nil
+}
+
+func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string) ([]string, error) {
+	// Work around LockImageConfiguration assuming multi-arch.
+	c.Environment.Archs = []apko_types.Architecture{"x86_64"}
+
+	opts := []apko_build.Option{apko_build.WithImageConfiguration(c.Environment),
+		apko_build.WithExtraBuildRepos(apkRepos),
+		// TODO: multi-arch
+		apko_build.WithArch("x86_64"),
+		// TODO: Allow offline.
+		apko_build.WithCache("", false, cache),
+		// TODO: Fix that.
+		apko_build.WithIgnoreSignatures(true),
+	}
+
+	configs, _, err := apko_build.LockImageConfiguration(ctx, c.Environment, opts...)
+	if err != nil {
+		if err := json.NewEncoder(os.Stderr).Encode(c.Environment); err != nil {
+			return nil, fmt.Errorf("encoding %s: %w", c.Name)
+		}
+		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
+	}
+
+	locked, ok := configs["index"]
+	if !ok {
+		return nil, errors.New("missing locked config")
+	}
+
+	return locked.Contents.Packages, nil
 }
 
