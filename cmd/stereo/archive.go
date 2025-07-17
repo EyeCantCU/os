@@ -25,7 +25,6 @@ import (
 func archiveCmd() *cobra.Command {
 	var (
 		duration  time.Duration
-		dryRun    bool
 		outputFmt string
 		arch      string
 	)
@@ -41,12 +40,11 @@ based on the following criteria:
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or other seeds`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return archive(cmd.Context(), duration, dryRun, outputFmt, arch)
+			return archive(cmd.Context(), duration, outputFmt, arch)
 		},
 	}
 
 	cmd.Flags().DurationVar(&duration, "duration", 365*24*time.Hour, "Age threshold for archive candidates (default: 1 year)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be archived without actually doing it")
 	cmd.Flags().StringVar(&outputFmt, "output", "text", "Output format: text, json, yaml")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
 
@@ -72,7 +70,7 @@ type ArchiveContext struct {
 	Architecture    string                           // target architecture
 }
 
-func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt, arch string) error {
+func archive(ctx context.Context, duration time.Duration, outputFmt, arch string) error {
 	log.Printf("Searching for APK archive candidates older than %v for architecture %s...", duration, arch)
 
 	// Step 1: Identify older APKs
@@ -116,11 +114,7 @@ func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt
 	log.Printf("After filtering reverse build dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
-	if dryRun {
-		log.Println("DRY RUN: Would archive the following packages:")
-	} else {
-		log.Println("Archive candidates:")
-	}
+	log.Println("Archive candidates:")
 
 	for _, candidate := range candidates {
 		fmt.Printf("%s=%s\n", candidate.Name, candidate.Version)
