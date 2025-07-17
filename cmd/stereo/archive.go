@@ -27,6 +27,7 @@ func archiveCmd() *cobra.Command {
 		duration  time.Duration
 		dryRun    bool
 		outputFmt string
+		arch      string
 	)
 
 	cmd := &cobra.Command{
@@ -40,13 +41,14 @@ based on the following criteria:
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or other seeds`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return archive(cmd.Context(), duration, dryRun, outputFmt)
+			return archive(cmd.Context(), duration, dryRun, outputFmt, arch)
 		},
 	}
 
 	cmd.Flags().DurationVar(&duration, "duration", 365*24*time.Hour, "Age threshold for archive candidates (default: 1 year)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be archived without actually doing it")
 	cmd.Flags().StringVar(&outputFmt, "output", "text", "Output format: text, json, yaml")
+	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
 
 	return cmd
 }
@@ -67,13 +69,14 @@ type ArchiveContext struct {
 	Cache           *apk.Cache                  // APK cache for build dependency resolution
 	BuildRepos      map[string][]string         // dir -> list of repo URLs for build dependencies
 	ConfigToDir     map[*config.Configuration]string // config -> directory mapping
+	Architecture    string                      // target architecture
 }
 
-func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt string) error {
-	log.Printf("Searching for APK archive candidates older than %v...", duration)
+func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt, arch string) error {
+	log.Printf("Searching for APK archive candidates older than %v for architecture %s...", duration, arch)
 
 	// Step 1: Identify older APKs
-	candidates, err := findOlderAPKs(ctx, duration)
+	candidates, err := findOlderAPKs(ctx, duration, arch)
 	if err != nil {
 		return fmt.Errorf("finding older APKs: %w", err)
 	}
@@ -81,7 +84,7 @@ func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt
 	log.Printf("Found %d packages older than %v", len(candidates), duration)
 
 	// Step 2: Build archive context (fetch indexes, build dependency maps, etc.)
-	archiveCtx, err := buildArchiveContext(ctx, candidates)
+	archiveCtx, err := buildArchiveContext(ctx, candidates, arch)
 	if err != nil {
 		return fmt.Errorf("building archive context: %w", err)
 	}
@@ -126,7 +129,7 @@ func archive(ctx context.Context, duration time.Duration, dryRun bool, outputFmt
 	return nil
 }
 
-func findOlderAPKs(ctx context.Context, duration time.Duration) ([]ArchiveCandidate, error) {
+func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]ArchiveCandidate, error) {
 	var candidates []ArchiveCandidate
 	cutoffTime := time.Now().Add(-duration)
 
@@ -134,8 +137,8 @@ func findOlderAPKs(ctx context.Context, duration time.Duration) ([]ArchiveCandid
 	for dir, repoURL := range dirToRepo {
 		log.Printf("Checking repository: %s (%s)", dir, repoURL)
 
-		// Fetch the APK index for x86_64 architecture
-		index, err := fetchAPKIndex(ctx, repoURL, "x86_64")
+		// Fetch the APK index for specified architecture
+		index, err := fetchAPKIndex(ctx, repoURL, arch)
 		if err != nil {
 			log.Printf("Error fetching index for %s: %v", repoURL, err)
 			continue
@@ -189,8 +192,8 @@ func fetchAPKIndex(ctx context.Context, baseURL, arch string) (*apk.APKIndex, er
 	return apk.IndexFromArchive(resp.Body)
 }
 
-func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate) (*ArchiveContext, error) {
-	log.Println("Building archive context...")
+func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arch string) (*ArchiveContext, error) {
+	log.Printf("Building archive context for architecture %s...", arch)
 
 	archiveCtx := &ArchiveContext{
 		DependencyMap:   make(map[string][]Dependency),
@@ -203,7 +206,8 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate) (*A
 			"extra-packages":      []string{dirToRepo["os"], dirToRepo["extra-packages"]},
 			"enterprise-packages": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
 		},
-		ConfigToDir: make(map[*config.Configuration]string),
+		ConfigToDir:  make(map[*config.Configuration]string),
+		Architecture: arch,
 	}
 
 	// Create a set of candidate packages for quick lookup
@@ -229,7 +233,7 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate) (*A
 
 	// Fetch all package indexes to build dependency graph and available packages list
 	for _, repoURL := range dirToRepo {
-		index, err := fetchAPKIndex(ctx, repoURL, "x86_64")
+		index, err := fetchAPKIndex(ctx, repoURL, archiveCtx.Architecture)
 		if err != nil {
 			log.Printf("Error fetching index for %s: %v", repoURL, err)
 			continue
@@ -521,7 +525,7 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 			buildRepos := archiveCtx.BuildRepos[dir]
 
 			// Use the same locking mechanism as the buckets command
-			buildDeps, err := lockBuildDependencies(ctx, currentCfg, archiveCtx.Cache, buildRepos)
+			buildDeps, err := lockBuildDependencies(ctx, currentCfg, archiveCtx.Cache, buildRepos, archiveCtx.Architecture)
 			if err != nil {
 				log.Printf("Error locking build dependencies for %s: %v", currentPkgName, err)
 				return nil // Don't fail the entire operation for one config
@@ -558,14 +562,13 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 	return filtered, nil
 }
 
-func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string) ([]string, error) {
+func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
 	// Work around LockImageConfiguration assuming multi-arch.
-	c.Environment.Archs = []apko_types.Architecture{"x86_64"}
+	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
 
 	opts := []apko_build.Option{apko_build.WithImageConfiguration(c.Environment),
 		apko_build.WithExtraBuildRepos(apkRepos),
-		// TODO: multi-arch
-		apko_build.WithArch("x86_64"),
+		apko_build.WithArch(apko_types.Architecture(arch)),
 		// TODO: Allow offline.
 		apko_build.WithCache("", false, cache),
 		// TODO: Fix that.
