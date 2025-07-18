@@ -1,8 +1,35 @@
 #nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+vars:
+  cuda-version: 12.6
+  py-version: 3.12
+  # Here's how do determine the tensorrt-version
+  # 1. Look at the requirements.txt file in TensorRT_LLM https://github.com/NVIDIA/TensorRT-LLM/blob/be9cd719f7d3149a5267c854284d83f717da0771/requirements.txt
+  # 2. This will be installing a pip file for TensorRT that is the version you want
+  # to use for the given version of TensorRT_LLM
+  # 3. The APK for TensorRT should be built at the same version as that pip
+  # The TRT version should be in the tar.gz of the TensorRT distribution you
+  # download.
+  tensorrt-version: 10.7.0.23
+  # This is unfortunately needed to support CUDA archs for CUDA 12.6, when we move our other AI ecosystem to CUDA 12.8, this can be switched to latest branch
+  # Default CUDA_ARCHITECTURES are defined in these repositories that are pulled in via cmake
+  # Newer branches may introduce architectures that an older
+  # CUDA nvcc doesn't yet recognize so we have to pin to these commits and tags
+  triton_common_repo_tag: r24.12
+  triton_core_repo_tag: r24.12
+  triton_backend_repo_tag: r24.12
+  triton_common_repo_commit: a6b410343234f9acaa5d615c19f5b38690b45dff
+  triton_core_repo_commit: ce46b95dcaa860a524f91324c146877c018dcf13
+  triton_backend_repo_commit: 70d71e0d68f7198cffa4e8688d5e2782c07f67a1
+  # 7f21b6702779b862e33a34880050f17f514bc20a is the commit for r25.04
+  # Becareful about changing the commit because you need to keep it in sync with the tags for the other repositories it pulls in.
+  # N.B. r25.04 is a branch; there doesn't appear to be specific tags. So I think potentially they could push a change to the
+  # branch and it would end up changing the commit we build but hopefully that's caught by expected commit
+  triton_python_backend_repo_commit: 7f21b6702779b862e33a34880050f17f514bc20a
+
 package:
   name: tritonserver-backend-python
-  version: 24.08
-  epoch: 0
+  version: 25.04
+  epoch: 2
   description: NVIDIA Triton Inference Server Python Backend
   copyright:
     - license: BSD-3-Clause
@@ -17,16 +44,12 @@ package:
       - libstdc++-12
       - nvidia-cuda-cudart-${{vars.cuda-version}}
       - nvidia-cuda-cupti-${{vars.cuda-version}}
+      - py${{vars.py-version}}-numpy
+      - python-${{vars.py-version}}-base
       - rapidjson
-      - python-3.10-base
       - zlib
   options:
     no-depends: true
-
-vars:
-  cuda-version: 12.5
-  tensorrt-version: 10.3.0.26
-  triton-repo-tag: r24.08
 
 var-transforms:
   - from: ${{vars.cuda-version}}
@@ -40,38 +63,62 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
-      - cmake
+      - cmake-3
       - cuda-toolkit-${{vars.cuda-version}}
       - file
       - gcc-12
       - gcc-12-default
+      - git-lfs
       - libarchive-dev
       - nvidia-cuda-cudart-${{vars.cuda-version}}
       - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
       - nvidia-cuda-cupti-${{vars.cuda-version}}
       - nvidia-cuda-cupti-${{vars.cuda-version}}-dev
       - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
-      - py3.10-setuptools
-      - py3.10-wheel
-      - python-3.10
-      - python-3.10-dev
+      - py${{vars.py-version}}-build-base-dev
       - rapidjson-dev
       - zlib-dev
   environment:
-    LD_LIBRARY_PATH: "/usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/local/cuda-${{vars.cuda-version}}/lib64/stubs"
+    INSTALLDIR: "/tmp/tritonbuild/python/install" # INSTALLDIR is the directory where the built artifacts are placed after running cmake install
 
 pipeline:
   - uses: git-checkout
     with:
-      # c848884d24e71b20a1636e7e63435ca8daba097b is the commit for r24.04
-      # Becareful about changing the commit because you need to keep it in sync with the tags for the other repositories it pulls in.
-      # N.B. r24.04 is a branch; there doesn't appear to be specific tags. So I think potentially they could push a change to the
-      # branch and it would end up changing the commit we build but hopefully that's caught by expected commit
-      expected-commit: bbb523d3189265b7c4e1c42a0fbe1a48869c1623
+      expected-commit: ${{vars.triton_python_backend_repo_commit}}
       repository: https://github.com/triton-inference-server/python_backend.git
       branch: r${{package.version}}
       destination: backend
       recurse-submodules: true
+
+  - runs: mkdir -p triton-inference-server
+
+  - uses: git-checkout
+    with:
+      expected-commit: ${{vars.triton_common_repo_commit}}
+      repository: https://github.com/triton-inference-server/common.git
+      branch: ${{vars.triton_common_repo_tag}}
+      destination: common.git
+      recurse-submodules: true
+    working-directory: triton-inference-server
+
+  - uses: git-checkout
+    with:
+      expected-commit: ${{vars.triton_core_repo_commit}}
+      repository: https://github.com/triton-inference-server/core.git
+      branch: ${{vars.triton_core_repo_tag}}
+      destination: core.git
+    working-directory: triton-inference-server
+
+  # Default CUDA_ARCHITECTURES are defined in this repository.
+  # Newer branches may introduce architectures that an older
+  # CUDA nvcc doesn't yet recognize.
+  - uses: git-checkout
+    with:
+      expected-commit: ${{vars.triton_backend_repo_commit}}
+      repository: https://github.com/triton-inference-server/backend.git
+      branch: ${{vars.triton_backend_repo_tag}}
+      destination: backend.git
+    working-directory: triton-inference-server
 
   - runs: |
       # This is a bit of hack to fix the warnings
@@ -83,6 +130,7 @@ pipeline:
   #
   - runs: |
       export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin"
+      export BUILD_DIR="/home/build"
       # CUDA detection needs path set to find nvcc so we  call cmake directly
 
       mkdir output
@@ -94,10 +142,10 @@ pipeline:
         "-DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}" \
         "-DCMAKE_BUILD_TYPE=Release" \
         "-DCMAKE_INSTALL_PREFIX:PATH=/tmp/tritonbuild/python/install" \
-        "-DTRITON_REPO_ORGANIZATION:STRING=https://github.com/triton-inference-server" \
-        "-DTRITON_COMMON_REPO_TAG:STRING=${{vars.triton-repo-tag}}" \
-        "-DTRITON_CORE_REPO_TAG:STRING=${{vars.triton-repo-tag}}" \
-        "-DTRITON_BACKEND_REPO_TAG:STRING=${{vars.triton-repo-tag}}" \
+        "-DTRITON_REPO_ORGANIZATION:STRING=file:///${BUILD_DIR}/triton-inference-server" \
+        "-DTRITON_COMMON_REPO_TAG:STRING=${{vars.triton_common_repo_tag}}" \
+        "-DTRITON_CORE_REPO_TAG:STRING=${{vars.triton_core_repo_tag}}" \
+        "-DTRITON_BACKEND_REPO_TAG:STRING=${{vars.triton_backend_repo_tag}}" \
         "-DTRITON_ENABLE_GPU:BOOL=ON" \
         "-DTRITON_ENABLE_MALI_GPU:BOOL=OFF" \
         "-DTRITON_ENABLE_STATS:BOOL=ON" \
@@ -110,10 +158,7 @@ pipeline:
       # N.B. I'm not sure how we would convert this to use the cmake/build pipeline
       # https://github.com/chainguard-dev/melange/blob/main/pkg/build/pipelines/cmake/build.yaml
       # Because it doesn't look like that lets us specify additional options.
-      cmake --build /home/build/output --config Release -j20  -t install
-
-      # INSTALLDIR is the directory where the built artifacts are placed after running cmake install
-      export INSTALLDIR=/tmp/tritonbuild/python/install
+      cmake --build /home/build/output --config Release -j$(nproc) -t install
 
       # Dest dir is the directory in final output where we should put the artifacts
       # See https://github.com/triton-inference-server/server/issues/7410#issuecomment-2218856792
@@ -125,6 +170,17 @@ pipeline:
       rm -fr ${DESTDIR}/backends/python
       cp -r ${INSTALLDIR}/backends/python ${DESTDIR}/backends
 
+test:
+  pipeline:
+    - name: python dependency smoke test
+      runs: |
+        # Make sure the imports in this script don't fail
+        python${{vars.py-version}} /opt/tritonserver/backends/python/triton_python_backend_utils.py
+
+#Tritonserver backends doesn't use tags or releases, we can't use latest 25.05 branch as of now
+#The reason for that is that will need CUDA 12.8 bump of all the other packages and to unblock for now we are using 25.04 with more latest Python 3.12
+#Creating new package as the older one is based on python 3.10 which was requested by user
+#Not making it mainline till we have a more later branch ready to be shipped
 update:
   enabled: false
   exclude-reason: "upstream not using tags or releases"

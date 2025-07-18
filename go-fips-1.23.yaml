@@ -1,8 +1,8 @@
 # NB! this source patches are also used by go-openssl-1.23
 package:
   name: go-fips-1.23
-  version: 1.23.3
-  epoch: 0
+  version: "1.23.11"
+  epoch: 1
   description: "the Go programming language"
   copyright:
     - license: BSD-3-Clause
@@ -14,7 +14,6 @@ package:
     runtime:
       - '!go-1.23'
       - bash
-      - binutils-gold # Needed for cgo linking due to upstream issue #15696 which forces use of the gold linker.
       - build-base
 
 vars:
@@ -31,8 +30,8 @@ environment:
       - ca-certificates-bundle
       # We always use the equivalent non-FIPS branch of Go to build this.
       - go~1.23
-      - openssl-dev
       - openssl-config-fipshardened # New patches enable go in fips mode
+      - openssl-dev
 
 pipeline:
   - uses: git-checkout
@@ -40,7 +39,7 @@ pipeline:
       repository: https://github.com/golang/go
       tag: go${{package.version}}
       destination: go
-      expected-commit: c390a1c22e8951263e6c01346a4281d604b25062
+      expected-commit: 0a75dd7c2dcf7057ef200290d8f5c4c1514dba80
 
   # patches directly from openssl-fips/patches, skipping:
   # - 017-fix-linkage.patch breaks coverage for now TODO backport FNV-1 patch
@@ -118,7 +117,13 @@ pipeline:
           patches: /home/build/extra/0002-boring-always-enable-access-to-boring.Enabled-functi.patch
       - uses: patch
         with:
-          patches: /home/build/extra/cmd-go-always-emit-ldflags-version-information.patch
+          patches: |
+            ../extra/cmd-go-always-emit-ldflags-version-information.patch
+            ../extra/change-default-telemetry-from-local-to-off.patch
+
+  - uses: patch
+    with:
+      patches: use-gnu-ld-arm64.patch
 
   - runs: |
       cd go/src
@@ -307,3 +312,57 @@ test:
             cat decrypt.out
             fail "test-parallel-decrypt.go exited $rc"
         }
+    - name: Test telemetry settings - should be off by default.
+      runs: |
+        fail() { echo "FAIL:" "$@" 1>&2; exit 1; }
+
+        tmpd=$(mktemp -d)
+        trap "rm -R '$tmpd'" EXIT
+        export HOME="$tmpd/home"
+        mkdir "$HOME"
+
+        out=$(go telemetry) || fail "'go telemetry' exited $?"
+        [ "$out" = "off" ] ||
+          fail "go telemetry output '$out'. expected 'off'"
+
+        cfgdir="$HOME/.config/go/telemetry"
+        if [ -d "$cfgdir" ]; then
+          fail "$cfgdir was created by running 'go telemetry'"
+        fi
+
+        go telemetry on ||
+          fail "'go telemetry on' exited $?"
+        out=$(go telemetry) || fail "'go telemetry' after 'on' exited $?"
+        [ "$out" = "on" ] ||
+          fail "go telemetry after 'on' output '$out'. expected 'on'"
+
+        [ -f "$cfgdir/mode" ] ||
+          fail "ERROR: 'go telemetry on' did not write ~/${cfgdir#$HOME/}"
+
+        go telemetry local ||
+          fail "'go telemetry local' exited $?"
+        out=$(go telemetry) || fail "'go telemetry' after 'local' exited $?"
+        [ "$out" = "local" ] ||
+          fail "go telemetry after 'local' output '$out'. expected 'local'"
+
+        go telemetry off ||
+          fail "explicit 'go telemetry off' exited $?"
+        out=$(go telemetry) || fail "'go telemetry' after explicit off exited $?"
+        [ "$out" = "off" ] ||
+          fail "go telemetry after explicit off output '$out'. expected 'off'"
+    - name: Test using external linker
+    - runs: |
+        # We need to trick Golang into thinking that we're building a binary
+        # that will be used for linking later.  This way, it will force the use
+        # of an external linker.  The way to do this is to use the "-buildmode=plugin"
+        # option
+        cat > external_linker.go << _EOF_
+        package main
+        func main() {
+            return
+        }
+        _EOF_
+        go build -buildmode=plugin external_linker.go
+    - name: Test building a regular project
+    - runs: |
+        go install github.com/junegunn/fzf@v0.64.0

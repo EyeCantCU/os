@@ -1,6 +1,6 @@
 package:
   name: mongod-7.0
-  version: 7.0.14
+  version: "7.0.22"
   epoch: 0
   description: "The MongoDB Database"
   copyright:
@@ -11,45 +11,55 @@ package:
   dependencies:
     provides:
       - mongod=${{package.full-version}}
+    runtime:
+      - merged-usrsbin
+      - wolfi-baselayout
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
 
 environment:
   contents:
     packages:
+      - bash
       - binutils-gold
       - build-base
       - busybox
       - ca-certificates-bundle
       - curl-dev
+      - gcc-14-default
+      - gosu
       - ld-linux
-      - openssl-dev
+      - mongo-tools
+      - mongosh
       - openssl
+      - openssl-dev
       - py3.11-pip
       - python-3.11
       - python-3.11-dev
-      - wolfi-base
-      - xz-dev
-      - zlib-dev
-      - bash
-      - gosu
-      - mongo-tools
-      - mongosh
       - render-template
       - wait-for-port
+      - wolfi-base
+      - xz-dev
       - yq
+      - zlib-dev
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/mongodb/mongo
       tag: r${{package.version}}
-      expected-commit: 1b488fa20bdc54915b89f3a6ef981742adbe8cb2
+      expected-commit: dacdbc3df2fbe579b03336a2f01fc9aedf406a41
 
   - uses: patch
     with:
       patches: disablewerror.patch optional.patch
 
   - runs: |
-      python3 -m pip install scons
+      python3 -m pip install scons\<4.9.0
       python3 -m pip install -r etc/pip/compile-requirements.txt
       # fix build object cache hash calcuation in a fips-enabled environment
       sed 's/hashlib.md5()/hashlib.sha256()/g' -i site_scons/mongo/generators.py
@@ -76,6 +86,9 @@ subpackages:
     dependencies:
       provides:
         - mongos=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
@@ -91,6 +104,9 @@ subpackages:
     dependencies:
       provides:
         - mongo=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
@@ -106,18 +122,21 @@ subpackages:
     dependencies:
       runtime:
         # Required by startup scripts
-        - busybox
         - bash
         - coreutils
         - posix-libc-utils
-        - gosu
+        - merged-usrsbin
         - mongo-7.0
-        - mongo-tools
         - mongod-7.0
         - mongosh
+        - posix-libc-utils
         - render-template
-        - wait-for-port
-        - yq
+        # These are needed, but must be specified in the image config to enable FIPS alternatives.
+        #- gosu
+        #- mongo-tools
+        #- wait-for-port
+        #- yq
+        - wolfi-baselayout
     pipeline:
       - uses: bitnami/compat
         with:
@@ -168,8 +187,9 @@ subpackages:
                   echo "Created symbolic link for $binary_name"
               fi
           done
-          ln -sf /usr/bin/mongo "${{targets.subpkgdir}}"/opt/bitnami/mongodb/bin/mongo
-          ln -sf /usr/bin/mongod "${{targets.subpkgdir}}"/opt/bitnami/mongodb/bin/mongod
+          for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+            ln -sf /usr/bin/$binary "${{targets.subpkgdir}}"/opt/bitnami/mongodb/bin/$binary
+          done
       - runs: |
           # touch/mkdir these empty files and directories to quiet various startup messages per upstream
           touch "${{targets.subpkgdir}}"/.dbshell
@@ -182,6 +202,103 @@ subpackages:
         - runs: |
             run-script --version
             run-script --help
+        - runs: |
+            for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+              test "$(readlink /opt/bitnami/mongodb/bin/$binary)" = "/usr/bin/$binary"
+            done
+
+  - name: "mongod-7.0-iamguarded-compat"
+    description: "mongod iamguarded compat"
+    dependencies:
+      runtime:
+        # Required by startup scripts
+        - bash
+        - coreutils
+        - posix-libc-utils
+        - merged-usrsbin
+        - mongo-7.0
+        - mongod-7.0
+        - mongosh
+        - posix-libc-utils
+        - render-template
+        # These are needed, but must be specified in the image config to enable FIPS alternatives.
+        #- gosu
+        #- mongo-tools
+        #- wait-for-port
+        #- yq
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: mongodb
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded
+          mkdir -p /opt/iamguarded/licenses
+          mkdir -p /opt/iamguarded/scripts
+          mkdir -p /opt/iamguarded/etc
+          mkdir -p /opt/iamguarded/common/bin
+          mkdir -p /opt/iamguarded/mongodb/bin
+          mkdir -p /opt/iamguarded/mongodb/logs
+          mkdir -p /opt/iamguarded/mongodb/tmp
+          mkdir -p /opt/iamguarded/mongodb/conf
+          mkdir -p /opt/iamguarded/mongodb/data/db
+
+          ln -sf /usr/bin/gosu /opt/iamguarded/common/bin/gosu
+          ln -sf /usr/bin/render-template /opt/iamguarded/common/bin/render-template
+          ln -sf /usr/bin/wait-for-port /opt/iamguarded/common/bin/wait-for-port
+          ln -sf /usr/bin/yq /opt/iamguarded/common/bin/yq
+
+          # This script does some magic with env vars, templates, etc. etc.
+          # it is easier to run it than figure out everything that it touches.
+          /opt/iamguarded/scripts/mongodb/postunpack.sh
+      - runs: |
+          # Set the target directory for the symbolic links
+          target_dir="/opt/iamguarded/mongodb/bin/"
+
+          # Loop through the binaries in /usr/bin/
+          for binary_path in /usr/bin/mongo*; do
+              # Check if the path is a file and not a directory
+              if [ -f "$binary_path" ]; then
+                  # Extract the binary name from the path
+                  binary_name=$(basename "$binary_path")
+
+                  # Create the symbolic link
+                  ln -sf "$binary_path" "$target_dir$binary_name"
+
+                  echo "Created symbolic link for $binary_name"
+              fi
+          done
+          for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+            ln -sf /usr/bin/$binary /opt/iamguarded/mongodb/bin/$binary
+          done
+      - runs: |
+          # touch/mkdir these empty files and directories to quiet various startup messages per upstream
+          touch "${{targets.subpkgdir}}"/.dbshell
+          touch "${{targets.subpkgdir}}"/.mongorc.js
+          touch "${{targets.subpkgdir}}"/.mongoshrc.js
+          mkdir "${{targets.subpkgdir}}"/.mongodb
+          mkdir "${{targets.subpkgdir}}"/docker-entrypoint-initdb.d
+      - uses: iamguarded/finalize-compat
+        with:
+          package: mongodb
+          version: ${{vars.major-minor-version}}
+      # TODO(maxgio92): restore this hardlink, once Melange is released with:
+      # * https://github.com/chainguard-dev/melange/pull/205
+      - runs: rm -f ./build/install/LICENSE-Community.txt
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: mongodb
+            version: ${{vars.major-minor-version}}
+        - runs: |
+            run-script --version
+            run-script --help
+        - runs: |
+            for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
+              test "$(readlink /opt/iamguarded/mongodb/bin/$binary)" = "/usr/bin/$binary"
+            done
 
 update:
   enabled: true

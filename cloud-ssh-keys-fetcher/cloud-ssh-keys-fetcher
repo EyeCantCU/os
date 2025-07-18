@@ -1,0 +1,125 @@
+#!/bin/sh
+# shellcheck disable=SC2162,SC2166,SC2295,SC3043
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} user [fingerprint]
+
+write ssh keys to stdout for user.
+fingerprint is the fingerprint of the key or certificate.
+EOF
+}
+
+stderr() { echo "$@" 1>&2; }
+fail() { stderr "FATAL:" "$@"; exit 1; }
+
+ec2md_setup() {
+    [ -n "$EC2MD_TOK" ] && [ -n "$EC2MD_URL" ] && return 0
+    local tok="" ttl=120
+    local tokurls="http://169.254.169.254:80"
+    tokurls="$tokurls http://[fd00:ec2::254]:80"
+    for tokurl in $tokurls; do
+        tok=$(curl --fail --max-time 5 --silent \
+                -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: $ttl" \
+                "${tokurl}/latest/api/token") || continue
+        [ -n "$tok" ] && url="$tokurl" && break
+    done
+    if [ -z "$url" ]; then
+        stderr "could not get a token on ec2 from $tokurls"
+        return 1
+    fi
+    EC2MD_TOK="$tok"
+    EC2MD_URL="$url"
+}
+
+ec2md_fetch() {
+    ec2md_setup || return 1
+    local path="$1" rc=0
+    local url="$EC2MD_URL/$path" tok="$EC2MD_TOK"
+    curl --silent --fail \
+        -H "X-aws-ec2-metadata-token: $tok" "$url" && return 0
+    rc=$?
+    stderr "ec2md_fetch failed [$rc] on '$url'"
+    return 1
+}
+
+ec2dump_keys() {
+    local out="" num="" tok="" ver="2024-04-11"
+    # index shows newline separated items '0=name\n1=name\n'
+    # get the index and then loop over items.
+    out=$(ec2md_fetch "$ver/meta-data/public-keys") || {
+        stderr "failed to list ec2 public-keys"
+        return 1
+    }
+    for tok in ${out}; do
+        num=${tok%%=*}
+        ec2md_fetch "$ver/meta-data/public-keys/$num/openssh-key" || {
+            stderr "failed to retrieve public key '$num' for $tok"
+            return 1
+        }
+    done
+    return 0
+}
+
+gce_dump_keys() {
+    local url="http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys"
+    local out="" line=""
+    out=$(curl --silent --fail -H "Metadata-Flavor: Google" "$url") ||
+        { stderr "failed retrieving keys on google"; return 1; }
+    # ssh-keys is formatted as
+    # "user1:ssh-rsa mypublickey user1@host.com\nuser2:ssh-rsa mypublickey user2@host.com"
+    # use printf to convert '\n' to carriage return, and
+    # then strip the 'user:' off..
+    # shellcheck disable=SC2059
+    printf "$out\n" |
+        while read line; do printf "%s\n" "${line#*:}"; done
+}
+
+azure_dump_keys() {
+    local url="http://169.254.169.254/metadata/instance/compute/publicKeys?api-version=2021-02-01"
+    local out="" pubkey="" quote='"'
+    out=$(curl --silent --fail -H "Metadata: true" "$url") ||
+        { stderr "failed retrieving keys on azure"; return 1; }
+    if command -v jq >/dev/null 2>&1 ; then
+        printf "%s\n" "$out" | jq -r '.[].keyData'
+        return
+    fi
+    # assuming it looks like this
+    # [{"keyData":"ssh-ed25519 A...BAkh user@sys\n","path","/home/user"...}]
+    pubkey=${out#*keyData${quote}:${quote}}
+    pubkey=${pubkey%%${quote}*}
+    printf "%s" "$pubkey"
+}
+
+if [ "$1" = "-h" -o "$1" = "--help" ]; then
+    Usage
+    exit 0
+elif [ $# -lt 1 -o $# -gt 2 ]; then
+    stderr "$0 received $# args ($*), expected 1 or 2"
+    exit 1
+fi
+
+# shellcheck disable=SC2034
+user="$1"
+fp="$2"
+
+cloud="$(systemd-detect-virt)"
+stderr "Fetching keys on $cloud"
+case $cloud in
+    google) gce_dump_keys ||
+        fail "failed retrieving keys on google";;
+    microsoft) azure_dump_keys ||
+        fail "failed retrieving keys on azure";;
+    amazon)
+        # Should check the passed in $2 arg for the key fingerprint.
+        # If it is found in ec2dump_keys we can choose not to execute
+        # eic binary at all. Because eic connect binary will return
+        # error when no keys are found, which then makes sshd not
+        # trust the already printed ec2dump_keys. sshd really needs to
+        # gain support for multiple authorized_keys commands.
+        ec2dump_keys
+        if [ -x /opt/aws/bin/eic_run_authorized_keys ]; then
+            /opt/aws/bin/eic_run_authorized_keys "$@" || :
+        fi
+        ;;
+    *) fail "unsupported cloud \"$cloud\"";;
+esac

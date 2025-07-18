@@ -1,0 +1,358 @@
+# NOTE: A license is required to use this package!
+# To run Elasticsearch in FIPS mode, you will need to provide a license key. To obtain
+# a license for Elasticsearch, see their subscriptions page [here](https://www.elastic.co/subscriptions).
+# This package is equipped with the essential components for Elasticsearch to operate in
+# FIPS mode. However, it's important for users to ensure they use it in line with
+# FIPS compliance standards.
+# This includes tasks such as keystore generation, configuration, and launching
+# Elasticsearch with the correct configuration parameters.
+package:
+  name: elasticsearch-fips-9
+  version: "9.0.3"
+  epoch: 1
+  description:
+  copyright:
+    - license: SSPL-1.0 AND Elastic-2.0
+  resources:
+    cpu: 6
+    memory: 30Gi
+  dependencies:
+    runtime:
+      - bash # some helper scripts use bash
+      - coreutils # eck operator init container runs date with iso format
+      - curl # eck operator init container does a health check
+      - elasticsearch-fips-9-config
+      - grep
+      - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+      - merged-usrsbin
+      - openjdk-21-default-jdk
+      - bcfips-policy-140-3-j21
+      - openssl-config-fipshardened
+      - tini
+      - wolfi-baselayout
+    provides:
+      - elasticsearch-fips=${{package.full-version}}
+      - ${{package.name}}-policy-140-3=${{package.full-version}}
+
+environment:
+  environment:
+    LANG: "en_US.UTF-8"
+    JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8"
+  contents:
+    packages:
+      - bouncycastle-fips~2.0
+      - build-base
+      - busybox
+      - libudev
+      - openjdk-21-default-jdk
+      - wolfi-base
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/elasticsearch
+      tag: v${{package.version}}
+      expected-commit: cc7302afc8499e83262ba2ceaa96451681f0609d
+
+  - uses: auth/gradle
+
+  - runs: |
+      # If you need to bump any dependency, maybe because for some CVE,
+      # then we also need re-generate the verification metadata and add it as a patch.
+      # ./gradlew --write-verification-metadata sha256 precommit
+      ./gradlew localDistro -Dbuild.snapshot=false -Dlicense.key="x-pack/license-tools/src/test/resources/public.key"
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/logs
+
+      # https://github.com/elastic/elasticsearch/blob/d87b93f3174e82a86f4fad0ea8b85ac7b454f96d/plugins/examples/settings.gradle#L59-L76
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        BUILD_DIR="linux-aarch64-tar"
+      else
+        BUILD_DIR="linux-tar"
+      fi
+
+      find distribution/archives
+      install -dm777 ${{targets.destdir}}/usr/share/elasticsearch/
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/bin ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/lib ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/config ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/modules ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
+
+      # Use custom entrypoint with KeyStore password fix for FIPS
+      mv ./docker-entrypoint.sh ${{targets.destdir}}/usr/share/elasticsearch/bin
+      mkdir -p ${{targets.destdir}}/usr/local/bin
+      ln -sf /usr/share/elasticsearch/bin/docker-entrypoint ${{targets.destdir}}/usr/local/bin/
+
+      # Set permissions to read/write the config dir
+      chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
+        name=$(basename $i)
+        ln -sf /usr/share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+      done
+
+      # We get this from elasticsearch-fips-9-config
+      mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
+      sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
+
+      # To remove problematic/unnecessary jar files
+      rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bc-fips-*.jar
+      rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bcpg-fips-*.jar
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/lib
+
+      # elasticsearch requires bcfips jars.
+      # Symlink these from runtime dependency: 'openjdk-21-bcfips'.
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/elasticsearch/lib/
+
+      # Add java.policy
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/config
+      mv java.policy ${{targets.destdir}}/usr/share/elasticsearch/config/java.policy
+
+subpackages:
+  - name: elasticsearch-fips-9-config
+    description: Creates a usable elasticsearch.yml config
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/share/elasticsearch/config
+          install -m644 elasticsearch.yml ${{targets.subpkgdir}}/usr/share/elasticsearch/config/elasticsearch.yml
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-bitnami
+    description: ElasticSearch FIPS for Bitnami
+    dependencies:
+      provides:
+        - elasticsearch-bitnami-fips=${{package.full-version}}
+      runtime:
+        - bash # some helper scripts use bash
+        - busybox
+        - coreutils # eck operator init container runs date with iso format
+        - curl # eck operator init container does a health check
+        - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+        - merged-usrsbin
+        - openjdk-21-default-jvm
+        - openssl-config-fipshardened
+        - posix-libc-utils # required for helm install
+        - wolfi-baselayout
+        - yq
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: elasticsearch
+          version-path: ${{vars.major-version}}/debian-12
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # I know this is awful, but Bitnami doesn't like symlinks
+          cp -r ${{targets.destdir}}/usr/share/elasticsearch/* ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          mkdir -p ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default
+          cp -r ${{targets.contextdir}}/opt/bitnami/elasticsearch/config/* \
+            ${{targets.contextdir}}/opt/bitnami/elasticsearch/config.default/
+
+          # Use subpackage path while unpacking
+          find . -iname "*.sh" -exec sed 's#/opt/bitnami#${{targets.contextdir}}/opt/bitnami#g' -i {} \;
+            ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/postunpack.sh || true
+          # Restore path
+          find ${{targets.contextdir}}/opt/bitnami -type f -exec sed 's#${{targets.contextdir}}##g' -i {} \;
+
+          # Set java home
+          sed -i 's|export JAVA_HOME=/opt/bitnami/java|export JAVA_HOME=/usr/lib/jvm/java-21-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+          sed -i 's|export ES_JAVA_HOME=/opt/bitnami/java|export ES_JAVA_HOME=/usr/lib/jvm/java-21-openjdk|' ${{targets.contextdir}}/opt/bitnami/scripts/elasticsearch/run.sh
+
+          # Set wide permissions
+          chmod -R 775 ${{targets.contextdir}}/opt/bitnami/elasticsearch
+
+          # Remove non-bitnami entrypoint script
+          rm ${{targets.contextdir}}/opt/bitnami/elasticsearch/bin/docker-entrypoint.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.destdir}}/usr/bin
+          for i in ${{targets.destdir}}/opt/bitnami/elasticsearch/bin/*; do
+            name=$(basename $i)
+            ln -sf /opt/bitnami/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+          done
+
+          mkdir -p ${{targets.contextdir}}/opt/bitnami
+          ln -sf /usr/lib/jvm/java-21-openjdk ${{targets.contextdir}}/opt/bitnami/java
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/data
+          mkdir -p ${{targets.contextdir}}/bitnami/elasticsearch/plugins
+    # TODO: convert tests to make use of "daemon-check-output"
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - busybox
+            - coreutils
+            - openjdk-21-default-jvm
+            - yq
+            - shadow
+            - sudo
+            - wolfi-base
+            - openssl-config-fipshardened
+        environment:
+          ES_JAVA_HOME: "/usr/lib/jvm/java-21-openjdk"
+          ES_USER: elasticsearch
+      pipeline:
+        - name: "Verify Elasticsearch Binary for Bitnami"
+          runs: |
+            set -x
+            useradd $ES_USER
+            chown -R "${ES_USER}:${ES_USER}" /opt/bitnami/elasticsearch
+            sudo -E -u $ES_USER /opt/bitnami/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+        - uses: java-fips/algorithms
+          with:
+            java-version: 21
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: elasticsearch
+          gid: 1000
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 1000
+      run-as: 0
+    contents:
+      packages:
+        - curl
+        - sudo
+        - wait-for-it
+    environment:
+      ES_JAVA_HOME: "/usr/lib/jvm/java-21-openjdk"
+      ES_PIPE: "/tmp/elasticsearch"
+      ES_USER: elasticsearch
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
+  pipeline:
+    - name: "Check for LICENSE.txt"
+      runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
+    - runs: |
+        # Using generic tests as entire tests require creation of keystore and it requires separate env
+        /usr/share/elasticsearch/bin/elasticsearch -h
+    - name: "Setup Elasticsearch configuration"
+      runs: |
+        set -x
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
+        -alias "localhost" \
+        -genkeypair \
+        -keyalg DSA \
+        -dname CN="localhost" \
+        -storetype bcfks \
+        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD \
+        -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
+        -providerpath /usr/share/java/bouncycastle-fips/bc-fips.jar
+
+        cat >>/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
+        cluster.name: "docker-cluster"
+        network.host: 0.0.0.0
+        node.store.allow_mmap: false
+        node.name: es
+        cluster.initial_master_nodes:
+          - es
+        EOF
+
+        sudo -E -u $ES_USER elasticsearch-keystore create -p <<EOF
+        ${KEYSTORE_PASSWORD}
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        sudo -E -u $ES_USER elasticsearch-keystore add xpack.security.transport.ssl.keystore.secure_password  <<EOF
+        ${KEYSTORE_PASSWORD}
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        # Create FIFO pipe for passing Elastic KeyStore password
+        mkfifo "${ES_PIPE}"
+
+        (
+          tail -f "${ES_PIPE}" | \
+            sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid
+        ) &
+        sleep 1
+
+        # Write password to pipe
+        cat > "${ES_PIPE}" << EOF
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        wait-for-it -t 60 localhost:9200
+
+        # At this point, Elastic is coming up but we don't have an entitlement
+        # to use FIPS, so it won't come up fully: it won't serve SSL, and it
+        # won't allow any authentication.  We check that it is at least up.
+        curl -s http://localhost:9200/_cluster/health | grep "missing authentication credentials"
+
+        kill $(cat /tmp/elasticsearch.pid)
+
+        # Check for unexpected WARN messages: ignoring, respectively,
+        # entitlement-related warnings, warnings emitted when auth fails,
+        # clustering failure (due to not coming up), and stat retrieval failure
+        # (ibid)
+        unexpected_warns="$(grep WARN /usr/share/elasticsearch/logs/docker-cluster.log \
+          | grep -Ev "(Not entitled|Skipped default trust store)" \
+          | grep -v "exception caught on transport layer" \
+          | grep -v "master not discovered" \
+          | grep -v "failed to retrieve stats for node" \
+          | wc -l)"
+        [ ${unexpected_warns} = "0" ]
+
+        # Check for unexpected ERROR messages: these are all caused by the
+        # cluster never properly coming up
+        unexpected_errors="$(grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log \
+          | grep -Ev "error adding (lifecycle|ingest)" \
+          | grep -v "unsupported ciphers" \
+          | grep -v "unable to install token metadata" \
+          | grep -v "failed to create geoip downloader task" \
+          | wc -l)"
+        [ ${unexpected_errors} = "0" ]
+
+        exit 0  # TODO: execute the rest of the test if we can get an entitlement figured out
+
+        # Reset the password
+        ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b << EOF | grep 'New value' | awk '{print $3}'
+        ${KEYSTORE_PASSWORD}
+        EOF
+        )
+        curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+        curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+            {
+              "name": "John Doe",
+              "age": 30,
+              "about": "I love to go rock climbing"
+            }' || exit 1
+        curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+    - uses: java-fips/algorithms
+      with:
+        java-version: 21
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/elasticsearch
+    strip-prefix: v
+    tag-filter: v9.

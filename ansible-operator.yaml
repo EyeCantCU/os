@@ -1,0 +1,145 @@
+package:
+  name: ansible-operator
+  version: "1.39.0"
+  epoch: 3
+  description: Ansible operator to run in kubernetes environments.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - py${{vars.py-version}}-pip
+
+vars:
+  home: /usr/share/ansible-operator
+  # As of v1.37.0, the upstream lockfile specifies 3.12
+  py-version: 3.12
+
+environment:
+  contents:
+    packages:
+      - py${{vars.py-version}}-build-base
+      - py${{vars.py-version}}-pipenv-bin
+  environment:
+    PIP_NO_CACHE_DIR: "1"
+    PIPENV_CLEAR: "1"
+    PIPENV_VENV_IN_PROJECT: "1"
+    VIRTUALENV_SYSTEM_SITE_PACKAGES: "1"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/operator-framework/ansible-operator-plugins
+      tag: v${{package.version}}
+      expected-commit: 919b7ea0b1c7404743e0cda6ab8e6790653fe2b5
+
+  - uses: go/build
+    with:
+      packages: ./cmd/ansible-operator/main.go
+      output: ansible-operator
+      ldflags: |
+        -X github.com/operator-framework/ansible-operator-plugins/internal/version.Version=${{package.version}}
+        -X github.com/operator-framework/ansible-operator-plugins/internal/version.GitVersion=$(git describe --dirty --tags --always)
+        -X github.com/operator-framework/ansible-operator-plugins/internal/version.GitCommit=$(git rev-parse HEAD)
+
+  - name: Install virtual environment
+    runs: |
+      cp images/ansible-operator/Pipfile* .
+
+      # Dependency bumps / create virtual environment
+      pipenv install --deploy --extra-pip-args="-I"
+      pipenv upgrade cryptography~=44.0.1 jinja2~=3.1.6 setuptools~=78.1.1 requests~=2.32.4 urllib3~=2.5.0
+
+      # Set variables
+      install_home=${{targets.contextdir}}${{vars.home}}
+
+      # Configure the installed paths in the virtual environment
+      sed -i "s|/home/build/.venv|${{vars.home}}|g" .venv/pyvenv.cfg
+      sed -i "s|/home/build/.venv|${{vars.home}}|g" .venv/bin/*
+
+      # Cleanup
+      find .venv -name "*.pyc" -delete
+      find .venv -name "__pycache__" -exec rm -rf {} +
+
+      # Install the virtual environment
+      mkdir -p $install_home
+      cp -r .venv/* $install_home/
+
+  - name: Install Ansible files
+    runs: |
+      mkdir -p ${{targets.destdir}}/etc/ansible
+      echo "localhost ansible_connection=local" > ${{targets.destdir}}/etc/ansible/hosts
+      echo '[defaults]' > ${{targets.destdir}}/etc/ansible/ansible.cfg
+      echo 'roles_path = /opt/ansible/roles' >> ${{targets.destdir}}/etc/ansible/ansible.cfg
+      echo 'library = /usr/share/ansible/openshift' >> ${{targets.destdir}}/etc/ansible/ansible.cfg
+
+subpackages:
+  - name: ansible-operator-compat
+    description: ansible-operator compat to put binary at expected place by stream
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -sf /usr/bin/ansible-operator ${{targets.subpkgdir}}/usr/local/bin/ansible-operator
+
+update:
+  enabled: true
+  github:
+    identifier: operator-framework/ansible-operator-plugins
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - wait-for-it
+  pipeline:
+    - name: Check version
+      runs: |
+        ansible-operator version | grep -q ${{package.version}}
+    - uses: test/tw/ldd-check
+    - uses: test/kwok/cluster
+    - name: Smoke test run
+      runs: |
+        export \
+          PATH="${{vars.home}}/bin:${PATH}" \
+          PYTHONPATH="${{vars.home}}/lib/python${{vars.py-version}}/site-packages"
+        ansible-operator run --watches-file=/dev/null &
+
+        wait-for-it localhost:6789
+        curl -sf localhost:6789/healthz
+    - name: Test ansible-* binaries functionality
+      runs: |
+        source /usr/share/ansible-operator/bin/activate
+
+        ANSIBLE_VERSION=$(pip inspect | jq -r '.installed[] | select(.metadata.name == "ansible-core") | .metadata.version')
+        TEMP_DIR=$(mktemp -d)
+        cd $TEMP_DIR
+
+        # Test all ansible binaries silently
+        ansible-operator version | grep ${{package.version}}
+        ansible --version | grep $ANSIBLE_VERSION
+        ansible-galaxy --version | grep $ANSIBLE_VERSION
+        ansible-playbook --version | grep $ANSIBLE_VERSION
+        ansible-doc --version | grep $ANSIBLE_VERSION
+        ansible-config --version | grep $ANSIBLE_VERSION
+        ansible-inventory --version | grep $ANSIBLE_VERSION
+        ansible-vault --version | grep $ANSIBLE_VERSION
+
+        # Test playbook execution
+        cat > test-playbook.yml << 'EOF'
+        ---
+        - name: Test playbook
+          hosts: localhost
+          connection: local
+          gather_facts: no
+          tasks:
+            - name: Echo hello
+              debug:
+                msg: "Hello from test playbook"
+        EOF
+
+        ansible-playbook test-playbook.yml -v | grep "Hello from test playbook"
+
+        rm -rf $TEMP_DIR

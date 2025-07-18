@@ -1,8 +1,8 @@
 # Generated from https://pypi.org/project/cassandra-medusa/
 package:
   name: request-1276
-  version: 0.22.3
-  epoch: 0
+  version: "0.24.1"
+  epoch: 3
   description: Apache Cassandra backup and restore tool with customizations
   copyright:
     - license: Apache-2.0
@@ -11,32 +11,29 @@ package:
     no-depends: true
   dependencies:
     runtime:
-      - poetry
-      - python-3.11-base
+      - merged-bin
+      - python-${{vars.py-version}}-base
+      - wolfi-baselayout
+
+vars:
+  py-version: 3.11
 
 environment:
   contents:
     packages:
-      - build-base
-      - busybox
-      - ca-certificates-bundle
-      - py3.11-installer
-      - py3.11-pip
-      - python-3.11
-      - python-3.11-dev
-      - wolfi-base
+      - py${{vars.py-version}}-build-base-dev
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/thelastpickle/cassandra-medusa
       tag: v${{package.version}}
-      expected-commit: 6202aca6e4c2859d2ad601571571a774df7bebc8
+      expected-commit: 665b5ffc88c449223c123a84132ea9e922a2ac56
 
   # Except from, "cves.patch", these are NOT a patches for CVE remediation. This is a once-off custom package and patches. Do not remove this as part of triaging CVE / build failures
   - uses: patch
     with:
-      patches: azure_storage.patch docker-entrypoint.patch google_storage.patch cves.patch
+      patches: azure_storage.patch docker-entrypoint.patch google_storage.patch
 
   - name: Spot check patches worked
     runs: |
@@ -66,55 +63,60 @@ pipeline:
 
   - name: Python Build
     runs: |
-      pip install wheel
-      pip install poetry
-      # GHSA-h4gh-qq45-vh27: cryptography
-      poetry add "pyOpenSSL==24.2.1"
-      poetry add "cryptography==43.0.1"
+      # fix CVE-2025-47273
+      sed -i 's/setuptools = "76\.1\.0"/setuptools = "78.1.1"/' pyproject.toml
+      # fix GHSA-8qvm-5x2c-j2w7
+      sed -i 's/protobuf = "5\.29\.3"/protobuf = "5.29.5"/' pyproject.toml
+      # fix GHSA-9548-qrrj-x5pj
+      sed -i 's/aiohttp = "3\.12\.11"/aiohttp = "3.12.14"/' pyproject.toml
 
-      poetry add "aiohttp==3.9.4"
+      pip${{vars.py-version}} install wheel
+      # As of 0.23.0, this package is incompatible with poetry 2.0.
+      # See: https://github.com/thelastpickle/cassandra-medusa/commit/fd044f92d9a5ea245c61d1df9c58462de51496e4
+      pip${{vars.py-version}} install 'poetry>=1.0.0,<2.0.0'
+      # GHSA-h4gh-qq45-vh27: cryptography
+      poetry add "pyOpenSSL@^24.2.1"
+      poetry add "cryptography@^44.0.1"
+
       poetry add "certifi==2024.7.4"
       poetry add "dnspython==2.6.1"
       poetry add "idna==3.7"
       # GHSA-m5vv-6r4h-3vj9: azure-identity
       poetry add "azure-identity==1.16.1"
-      # GHSA-34jh-p97f-mpxf: urllib3
-      poetry add "urllib3==1.26.19"
+      # GHSA-9hjg-9r4m-mvj7: requests
+      poetry add "requests@^2.32.4"
       poetry run pip freeze | grep -v cassandra-medusa > requirements.txt
       POETRY_VIRTUALENVS_IN_PROJECT=true poetry install
       poetry build
 
-  - runs: |
       # Setup the virtualenv
-      python -m venv .venv --system-site-packages
-      # Bump pip to patch a CVE
-      .venv/bin/pip install --upgrade pip==24.0 setuptools==70.0.0
+      python${{vars.py-version}} -m venv .venv
 
-  - runs: |
-      .venv/bin/pip install -I -r requirements.txt --no-compile
-      .venv/bin/pip install -I --no-compile dist/*.whl
+      .venv/bin/pip${{vars.py-version}} install -I -r requirements.txt --no-compile
+      .venv/bin/pip${{vars.py-version}} install -I --no-compile dist/*.whl
 
-  - runs: |
       # python-snappy is required to run medusa using $MEDUSA_MODE=GRPC.
-      .venv/bin/pip install -I python-snappy --no-compile
+      .venv/bin/pip${{vars.py-version}} install -I python-snappy --no-compile
 
-  - runs: |
+      # Install poetry
+      .venv/bin/pip${{vars.py-version}} install 'poetry>=1.0.0,<2.0.0'
+      mkdir -p ${{targets.destdir}}/usr/bin
+      ln -s /home/cassandra/.venv/bin/poetry ${{targets.destdir}}/usr/bin/poetry
+
       mkdir -p ${{targets.destdir}}/home/cassandra
       mv .venv ${{targets.destdir}}/home/cassandra/
 
       # edit the venv paths
-      sed -i "s|/home/build|${{targets.destdir}}/home/cassandra|g" ${{targets.destdir}}/home/cassandra/.venv/bin/*
+      sed -i "s|/home/build|/home/cassandra|g" ${{targets.destdir}}/home/cassandra/.venv/bin/*
 
       # allow site-packages
       sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" ${{targets.destdir}}/home/cassandra/.venv/pyvenv.cfg
 
-  - runs: |
       mkdir -p ${{targets.destdir}}/usr/bin
       ln -s /usr/share/medusa/.venv/bin/medusa ${{targets.destdir}}/usr/bin/medusa
       cp k8s/medusa.sh ${{targets.destdir}}/usr/bin/medusa
       chmod +x ${{targets.destdir}}/usr/bin/medusa
 
-  - runs: |
       cp pyproject.toml ${{targets.destdir}}/home/cassandra
       cp k8s/docker-entrypoint.sh ${{targets.destdir}}/home/cassandra
       chmod +x ${{targets.destdir}}/home/cassandra/docker-entrypoint.sh
@@ -124,18 +126,16 @@ subpackages:
     description: "Compatibility package to place binaries and docker entrypoints in the location expected by upstream helm charts"
     dependencies:
       runtime:
-        - grpc-health-probe-fips
-        # The entrypoint script fails to start without bash and sleep (which comes from busybox)
         - bash
         - busybox
+        - grpc-health-probe-fips
+        # The entrypoint script fails to start without bash and sleep (which comes from busybox)
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}/home/cassandra/"
           ln -sf /usr/bin/medusa ${{targets.subpkgdir}}/home/cassandra/medusa
-
-          # Symlink the binary from usr/bin to /bin
-          mkdir -p "${{targets.subpkgdir}}"/bin
-          ln -sf /usr/bin/grpc-health-probe ${{targets.subpkgdir}}/bin/grpc_health_probe
 
 update:
   enabled: true
@@ -147,9 +147,11 @@ test:
   environment:
     contents:
       packages:
-        - python-3.11-dev
+        - python-${{vars.py-version}}-dev
   pipeline:
-    - runs: medusa --version
+    - runs: |
+        medusa --version
+        poetry --version
     - runs: |
         set +e
         fail() { echo "$@" 1>&2; exit 1; }

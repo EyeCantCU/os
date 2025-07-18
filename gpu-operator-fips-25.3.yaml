@@ -1,0 +1,97 @@
+package:
+  name: gpu-operator-fips-25.3
+  version: "25.3.1"
+  epoch: 1
+  description: NVIDIA GPU Operator creates/configures/manages GPUs atop Kubernetes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - gpu-operator-fips=${{package.full-version}}
+    runtime:
+      - busybox
+      - kubectl-fips
+      - nvidia-cuda-nvml-dev-${{vars.cuda-version}}
+
+vars:
+  # Based on the base image used in upstream dockerfile: https://github.com/NVIDIA/gpu-operator/blob/main/docker/Dockerfile#L17
+  cuda-version: 12.8
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NVIDIA/gpu-operator
+      tag: v${{package.version}}
+      expected-commit: a1da4772ae73020aea2b829449b2b07e48c75fb8
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      modroot: .
+      packages: ./cmd/gpu-operator
+      output: gpu-operator
+      ldflags: -X github.com/NVIDIA/gpu-operator/internal/info.gitCommit=$(git rev-list -1 HEAD) -X github.com/NVIDIA/gpu-operator/internal/info.version=v${{package.version}}
+      vendor: true
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/opt/gpu-operator
+      mkdir -p ${{targets.destdir}}/opt/gpu-operator/manifests
+      mkdir -p ${{targets.destdir}}/licenses
+
+      cp -r ./assets/* ${{targets.destdir}}/opt/gpu-operator
+      cp -r ./manifests/* ${{targets.destdir}}/opt/gpu-operator/manifests
+      cp hack/must-gather.sh ${{targets.destdir}}/usr/bin/gather
+
+      cp deployments/gpu-operator/crds/nvidia.com_clusterpolicies.yaml ${{targets.destdir}}/opt/gpu-operator/nvidia.com_clusterpolicies.yaml
+      cp deployments/gpu-operator/charts/node-feature-discovery/crds/nfd-api-crds.yaml ${{targets.destdir}}/opt/gpu-operator/nfd-api-crds.yaml
+      cp deployments/gpu-operator/crds/nvidia.com_nvidiadrivers.yaml ${{targets.destdir}}/opt/gpu-operator/nvidia.com_nvidiadrivers.yaml
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Match CUDA version"
+      runs: |
+        line=$(curl -sL https://raw.githubusercontent.com/NVIDIA/gpu-operator/refs/tags/v${{package.version}}/docker/Dockerfile | grep '^FROM .*cuda:')
+        cuda_mm_version=$(echo "$line" | head -n1 | sed -E 's/.*cuda:([0-9]+\.[0-9]+).*/\1/')
+
+        if [ "$cuda_mm_version" != "${{vars.cuda-version}}" ]; then
+          echo "CUDA version mismatch!"
+          exit 1
+        fi
+    - runs: |
+        gpu-operator --help
+        go version -m /usr/bin/gpu-operator | grep -i ${{package.version}}
+    - uses: test/kwok/cluster
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /opt/gpu-operator/manifests/state-driver
+          echo "{}" > /opt/gpu-operator/manifests/state-driver/dummy.yaml
+        start: /usr/bin/gpu-operator
+        timeout: 30
+        expected_output: |
+          starting manager
+          Starting metrics server
+          starting server
+          Serving metrics server
+        post: |
+          wait-for-it -t 10 --strict localhost:8081 -- echo "Server is up"
+          curl -ksfL http://localhost:8081/healthz
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/gpu-operator
+    strip-prefix: v
+    use-tag: true
+    tag-filter-prefix: v25.3.

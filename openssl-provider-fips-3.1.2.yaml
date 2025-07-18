@@ -1,0 +1,109 @@
+# This package must ALWAYS be pinned to the latest FIPS certified version of
+# openssl. At the time of writing this commment, this is v3.1.2. More info:
+# - https://openssl-library.org/post/2025-03-11-fips-140-3/
+# When bumping this, ensure you also update `openssl-config-fipshardened.yaml`.
+package:
+  name: openssl-provider-fips-3.1.2
+  version: 3.1.2
+  epoch: 2
+  description: "the OpenSSL cryptography suite (FIPS provider module)"
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - openssl
+      - perl
+  environment:
+    # To support automatic discovery of source code in debug symbols
+    # packaged in openssl-dbg, build with debug symbols &
+    # file-prefix-map. Also see "Create dbg sourcecode" and
+    # split/debug.
+    CFLAGS: "-g -ffile-prefix-map=/home/build=/usr/src/${{package.name}}"
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://www.openssl.org/source/openssl-${{package.version}}.tar.gz
+      expected-sha256: a0ce69b8b97ea6a35b96875235aa453b966ba3cba8af2de23657d8b6767d6539
+
+  - name: Create dbg sourcecode
+    runs: |
+      SRCDIR=$(mktemp -d)
+      cp -r . $SRCDIR/
+      mkdir -p ${{targets.destdir}}-dbg/usr/src/
+      mv $SRCDIR ${{targets.destdir}}-dbg/usr/src/${{package.name}}
+      # Note that mktemp -d created it as 700, whilst the contents
+      # inside is 644 for files and 755 for dirs, without this gdb
+      # doesn't work for non-root user, fix this up.
+      chmod 755 ${{targets.destdir}}-dbg/usr/src/${{package.name}}
+
+  - name: Configure and build
+    runs: |
+      export CC=${{host.triplet.gnu}}-gcc
+      export CXX=${{host.triplet.gnu}}-g++
+      export CPP=${{host.triplet.gnu}}-cpp
+
+      perl ./Configure \
+         linux-${{build.arch}} \
+         --prefix=/usr \
+         --libdir=lib \
+         --openssldir=/etc/ssl \
+         enable-fips \
+         enable-ktls \
+         shared \
+         no-zlib \
+         no-async \
+         no-comp \
+         no-idea \
+         no-mdc2 \
+         no-rc5 \
+         no-ec2m \
+         no-sm2 \
+         no-sm4 \
+         no-ssl3 \
+         no-seed \
+         no-weak-ssl-ciphers \
+         -Wa,--noexecstack
+      make -j$(nproc)
+      make tests HARNESS_JOBS=10 || true
+
+  - runs: |
+      make install_fips DESTDIR="${{targets.destdir}}"
+
+subpackages:
+  - name: "${{package.name}}-dbg"
+    description: "${{package.name}} debug symbols"
+    pipeline:
+      - uses: split/debug
+      # Regenerate fipsmodule.cnf last, after strip or split/debug
+      - runs: |
+          rm -f ${{targets.destdir}}/etc/ssl/fipsmodule.cnf
+          ./util/wrap.pl ./apps/openssl fipsinstall \
+          -no_drbg_truncated_digests \
+          -module ${{targets.destdir}}/usr/lib/ossl-modules/fips.so \
+          -out ${{targets.destdir}}/etc/ssl/fipsmodule.cnf
+
+test:
+  pipeline:
+    # XXX: We can't really validate the FIPS certification via CMVP using the
+    #  version number for validation as the 4985 entry is missing the
+    #  "Software Versions" metadata set.
+    #  https://support.openssl.org/hc/en-us/requests/1493
+    - uses: test/cmvp-fips-certification-check
+      with:
+        certificate-number: 4985
+    - uses: test/tw/ldd-check
+      with:
+        packages: ${{package.name}}
+
+update:
+  enabled: false
+  exclude-reason: |
+    Can only upgrade once there is a new certified version, but update
+    bot is not doing cmvp-fips-certification-check to only open update
+    PR when new version is also listed in the cmvp cert.

@@ -1,7 +1,7 @@
 package:
   name: boringssl-fips-static
   version: 0.1
-  epoch: 1
+  epoch: 4
   description: FIPS validated BoringSSL static libraries
   copyright:
     - license: Apache-2.0
@@ -9,27 +9,27 @@ package:
 environment:
   contents:
     packages:
-      - busybox
       - binutils
       - build-base
-      - libtool
-      - python3-dev
+      - busybox
       - coreutils
-      - patch
-      - libstdc++-12-dev
       - curl
+      - gcc-12-default
+      - git
+      - libstdc++-12-dev
+      - libtool
       # Even though this is the latest version, our solver does not pick it up.
       - ncurses~6.4_p20230722
+      - patch
       - perl
-      - gcc-12-default
+      - python3-dev<3.13
 
 pipeline:
   # This comes from envoyproxy/envoy/blob/main/bazel/external/boringssl_fips.genrule_cmd
   # with a few mods to make old Clang works w/ newer cstdlib.
   #
-  # This script basically download versions of Cmake, Clang, ninja, Golang, and boringssl
-  # from exact versions and the same exact commands as called out by section 12.1 of
-  # the NIST doc https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp4407.pdf
+  # This script is based on the BoringSSL update stream documentation as described in:
+  # https://boringssl.googlesource.com/boringssl/+/refs/heads/main/crypto/fipsmodule/FIPS.md#update-stream
   #
   # A package with this much of version pinning is not very suitable for our
   # infrastructures & tools, because we prefer getting newer/better versions for more
@@ -96,20 +96,20 @@ pipeline:
         exit 1
       fi
 
-      # Go
-      VERSION=1.16.5
+      # Go: requires minimum 1.22.
+      VERSION=1.24.2
       if [ "$ARCH" == "x86_64" ]; then
         PLATFORM="linux-amd64"
-        SHA256=b12c23023b68de22f74c0524f10b753e7b08b1504cb7e417eccebdd3fae49061
+        SHA256=68097bd680839cbc9d464a0edce4f7c333975e27a90246890e9f1078c7e702ad
       else
         PLATFORM="linux-arm64"
-        SHA256=d5446b46ef6f36fdffa852f73dfbbe78c1ddf010b99fa4964944b9ae8b4d6799
+        SHA256=756274ea4b68fa5535eb9fe2559889287d725a8da63c6aae4d5f23778c229f4b
       fi
 
       echo "Downloading Go"
       curl -sLO --progress-bar --retry 5 https://dl.google.com/go/go"$VERSION"."$PLATFORM".tar.gz
       echo "$SHA256" go"$VERSION"."$PLATFORM".tar.gz | sha256sum --check
-      tar xf go"$VERSION"."$PLATFORM".tar.gz
+      tar xf go"$VERSION"."$PLATFORM".tar.gz --no-same-owner
 
       export GOPATH="$PWD/gopath"
       export GOROOT="$PWD/go"
@@ -127,7 +127,7 @@ pipeline:
       curl -sLO --progress-bar --retry 5 \
         https://github.com/ninja-build/ninja/archive/refs/tags/v"$VERSION".tar.gz
       echo "$SHA256" v"$VERSION".tar.gz | sha256sum --check
-      tar -xvf v"$VERSION".tar.gz
+      tar -xvf v"$VERSION".tar.gz --no-same-owner
       cd ninja-"$VERSION"
       python3 ./configure.py --bootstrap
 
@@ -153,7 +153,7 @@ pipeline:
       curl -sLO --progress-bar --retry 5 \
         https://github.com/Kitware/CMake/releases/download/v"$VERSION"/cmake-"$VERSION"-"$PLATFORM".tar.gz
       echo "$SHA256" cmake-"$VERSION"-"$PLATFORM".tar.gz | sha256sum --check
-      tar xf cmake-"$VERSION"-"$PLATFORM".tar.gz
+      tar xf cmake-"$VERSION"-"$PLATFORM".tar.gz --no-same-owner
 
       export PATH="$PWD/cmake-$VERSION-$PLATFORM/bin:$PATH"
 
@@ -162,24 +162,19 @@ pipeline:
         exit 1
       fi
 
-      # Download boring_ssl, at commit 853ca1ea1168dff08011e5d42d94609cc0ca2e27 as
-      # instructed in section 12 of the FIPS validation document.
-      export COMMIT=853ca1ea1168dff08011e5d42d94609cc0ca2e27
-      echo "Downloading BoringSSL @ $COMMIT"
-      curl -sLO --progress-bar --retry 5 \
-        https://commondatastorage.googleapis.com/chromium-boringssl-fips/boringssl-$COMMIT.tar.xz
-      tar xf boringssl-$COMMIT.tar.xz
+      git clone https://boringssl.googlesource.com/boringssl
+
+      cd boringssl
+      git checkout 0.20240913.0
 
       # Build BoringSSL.
-      cd boringssl
-      mkdir build && cd build && cmake -GNinja -DCMAKE_TOOLCHAIN_FILE=${HOME}/toolchain -DFIPS=1 -DCMAKE_BUILD_TYPE=Release ..
+      mkdir build && cd build && cmake -GNinja -DCMAKE_TOOLCHAIN_FILE=${HOME}/toolchain -DFIPS=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
       ninja
 
-      # Run the crypto_test according to the FIPS doc.
-      ./crypto/crypto_test
+      ninja run_tests
 
       # Verify correctness of the FIPS build.
-      if [ `tool/bssl isfips` != "1" ]; then
+      if [ `./tool/bssl isfips` != "1" ]; then
         echo "ERROR: BoringSSL tool didn't report FIPS build."
         exit 1
       else
@@ -187,8 +182,8 @@ pipeline:
       fi
 
       mkdir -p ${{targets.destdir}}/usr/lib
-      cp ./crypto/libcrypto.a \
-         ./ssl/libssl.a \
+      cp ./libcrypto.a \
+         ./libssl.a \
          ${{targets.destdir}}/usr/lib
 
 subpackages:
@@ -201,8 +196,8 @@ subpackages:
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/usr/lib/${{package.name}}
           cd boringssl/build
-          cp ./crypto/libcrypto.a \
-             ./ssl/libssl.a \
+          cp ./libcrypto.a \
+             ./libssl.a \
              ${{targets.subpkgdir}}/usr/lib/${{package.name}}
 
 update:

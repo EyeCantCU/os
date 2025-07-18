@@ -4,13 +4,35 @@ ifeq (${ARCH}, arm64)
 else ifeq (${ARCH}, amd64)
 	ARCH = x86_64
 endif
+ifeq (${TMPDIR}, )
+        CACHEDIR = /tmp/melange-cache
+else
+        CACHEDIR = ${TMPDIR}/melange-cache
+endif
 TARGETDIR = packages/${ARCH}
 
 MELANGE ?= $(shell which melange)
 WOLFICTL ?= $(shell which wolfictl)
 KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
-GCS_FETCH_BUCKET_NAME ?= gs://chainguard-enterprise-registry-destination/os/
+QEMU_KERNEL_REPO := https://apk.cgr.dev/chainguard-private/
+
+ifeq (${MELANGE_RUNNER},)
+MELANGE_RUNNER = qemu
+$(warning ****************************** WARNING ******************************)
+$(warning *** MELANGE_RUNNER is unset. The default runner is now qemu, which)
+$(warning *** requires chainctl authentication to access the Chainguard kernel.)
+$(warning *** See `melange build --help` for a list of other runner options.)
+$(warning ****************************** WARNING ******************************)
+endif
+
+MELANGE_OPTS += --runner=${MELANGE_RUNNER}
+
+QEMU_KERNEL_IMAGE ?= kernel/$(ARCH)/vmlinuz
+ifeq (${MELANGE_RUNNER},qemu)
+	QEMU_KERNEL_DEP = ${QEMU_KERNEL_IMAGE}
+	export QEMU_KERNEL_IMAGE
+endif
 
 MELANGE_OPTS += --repository-append ${REPO}
 MELANGE_OPTS += --keyring-append ${KEY}.pub
@@ -18,10 +40,10 @@ MELANGE_OPTS += --keyring-append chainguard-enterprise.rsa.pub
 MELANGE_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
 MELANGE_OPTS += --repository-append https://apk.cgr.dev/chainguard-private
-MELANGE_OPTS += --keyring-append https://apk.cgr.dev/chainguard-private/chainguard-7fb528a64a862d44bbea6069093f1fec29fa864ba7e9754828eeceed3f487239.rsa.pub
 MELANGE_OPTS += --repository-append https://packages.cgr.dev/extras
 MELANGE_OPTS += --keyring-append https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
 MELANGE_OPTS += --arch ${ARCH}
+MELANGE_OPTS += --cache-dir ${CACHEDIR}
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
 MELANGE_BUILD_OPTS += ${MELANGE_OPTS}
@@ -45,122 +67,117 @@ MELANGE_DEBUG_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += ${MELANGE_OPTS}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_TEST_OPTS += --test-package-append wolfi-base
+MELANGE_TEST_OPTS += --debug
 MELANGE_TEST_OPTS += ${MELANGE_EXTRA_OPTS}
-
-# The list of packages to be built. The order matters.
-# wolfictl determines the list and order
-# set only to be called when needed, so make can be instant to run
-# when it is not
-PKGLISTCMD ?= $(WOLFICTL) text --dir . --type name
-
-all: ${KEY} .build-packages
-
-# this ensures two things:
-# 1. We only generate the graph for the list of commands that requires it
-# 2. If generating the graph fails, we error out; without this, a failure in $(shell) might go unnoticed.
-ifneq ($(findstring $(MAKECMDGOALS),all list list-yaml),)
-  PKGNAMES := $(shell $(PKGLISTCMD) || echo "failed")
-  ifeq ($(PKGNAMES),failed)
-    $(error $(PKGLISTCMD) failed)
-  endif
-  PKGLIST := $(addprefix package/,$(PKGNAMES))
-else
-  PKGLIST :=
-endif
-.build-packages: $(PKGLIST)
 
 ${KEY}:
 	${MELANGE} keygen ${KEY}
 
+.PHONY: cache
+cache:
+	mkdir -p ${CACHEDIR}
+
+.PHONY: clean
 clean:
 	rm -rf packages/${ARCH}
+	rm -rf kernel/
 
-.PHONY: list list-yaml
+.PHONY: clean-cache
+clean-cache:
+	rm -rf ${CACHEDIR}
 
-list:
-	$(info $(PKGNAMES))
-	@printf ''
-
-list-yaml:
-	$(info $(addsuffix .yaml,$(PKGNAMES)))
-	@printf ''
-
+.PHONY: apk-token
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
 
-fetch-kernel:
-	$(eval KERNEL_PKG := $(shell curl -L --silent --output - --user user:$$(chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/APKINDEX.tar.gz | \
-		zcat | \
-		grep -a -A1 "^P:linux" | \
-		grep "^V:" | \
-		sort -V | \
-		tail -n1 | sed -e "s/^V://"))
-	@curl -s -LSo /tmp/linux.apk --user user:$(shell chainctl auth token --audience apk.cgr.dev) https://apk.cgr.dev/chainguard-private/$(ARCH)/linux-$(KERNEL_PKG).apk
-	@mkdir -p /tmp/kernel
-	@tar -xf /tmp/linux.apk -C /tmp/kernel/ 2>/dev/null
-	export QEMU_KERNEL_IMAGE=/tmp/kernel/boot/vmlinuz
-	export MELANGE_OPTS="--runner=qemu"
+${CACHEDIR}/.libraries_token.txt: cache
+	tmpf=$(shell mktemp); \
+	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
+	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
 
-package/%: apk-token
+.PHONY: lib-token
+lib-token: ${CACHEDIR}/.libraries_token.txt
+
+.PHONY: fetch-kernel
+fetch-kernel:
+	rm -rf kernel/$(ARCH)
+	$(MAKE) kernel/$(ARCH)/vmlinuz
+
+kernel/%/APKINDEX.tar.gz:
+	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$(ARCH)/APKINDEX.tar.gz)
+
+kernel/%/APKINDEX: kernel/%/APKINDEX.tar.gz
+	tar -x -C kernel --to-stdout -f $< APKINDEX > $@.tmp.$$$$ && mv $@.tmp.$$$$ $@
+	touch $@
+
+kernel/%/chosen: kernel/%/APKINDEX
+	# Extract lines with 'P:linux-qemu-generic' and the following line that contains the version
+	# This approach is compatible with both GNU and BSD sed
+	awk '/^P:linux-qemu-generic$$/ {print; getline; print}' $< > kernel/$*/available
+	grep '^V:' kernel/$*/available | sed 's/V://' | \
+	  sort -V | tail -n1 > $@.tmp
+	# Sanity check that this looks like an apk version
+	grep -E '^([0-9]+\.)+[0-9]+-r[0-9]+$$' $@.tmp
+	mv $@.tmp $@
+
+kernel/%/linux.apk: kernel/%/chosen
+	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$*/linux-qemu-generic-$(shell cat kernel/$*/chosen).apk)
+
+kernel/%/vmlinuz: kernel/%/linux.apk
+	tmpd=kernel/.$$$$ && mkdir -p $$tmpd $(dir $@) && \
+		tar -x -C $$tmpd -f $< boot/ 2> /dev/null && \
+		[ -f $$tmpd/boot/vmlinuz ] && mv $$tmpd/boot/* $(dir $@) && \
+		rc=$$?; rm -Rf $$tmpd; exit $$rc
+
+yamls := $(wildcard *.yaml)
+pkgs := $(subst .yaml,,$(yamls))
+pkg_targets = $(foreach name,$(pkgs),package/$(name))
+$(pkg_targets): package/%:
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
 	$(MAKE) yamlfile=$(yamlfile) pkgname=$* packages/$(ARCH)/$(pkgver).apk
 
-packages/$(ARCH)/%.apk: $(KEY)
-	@mkdir -p ./$(pkgname)/
+packages/$(ARCH)/%.apk: cache $(KEY) $(QEMU_KERNEL_DEP)
+	mkdir -p ./$(pkgname)/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_BUILD_OPTS) --source-dir ./$(pkgname)/
 
-debug/%: apk-token
+dbg_targets = $(foreach name,$(pkgs),debug/$(name))
+$(dbg_targets): debug/%: cache $(KEY) $(QEMU_KERNEL_DEP)
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	$(info pkgver $(pkgver))
-	@mkdir -p ./"$*"/
+	mkdir -p ./"$*"/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_DEBUG_OPTS) $(MELANGE_BUILD_OPTS)  --source-dir ./$(*)/
 
-test/%:
-	@mkdir -p ./$(*)/
+test_targets = $(foreach name,$(pkgs),test/$(name))
+$(test_targets): test/%: cache apk-token $(KEY)
+	mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) --source-dir ./$(*)/
 
-test-debug/%:
-	@mkdir -p ./$(*)/
+testdbg_targets = $(foreach name,$(pkgs),test-debug/$(name))
+$(testdbg_targets): test-debug/%: cache apk-token $(KEY)
+	mkdir -p ./$(*)/
 	$(eval yamlfile := $*.yaml)
-	@if [ -z "$(yamlfile)" ]; then \
-		echo "Error: could not find yaml file for $*"; exit 1; \
-	else \
-		echo "yamlfile is $(yamlfile)"; \
-	fi
 	$(eval pkgver := $(shell $(MELANGE) package-version $(yamlfile)))
 	@printf "Testing package $* with version $(pkgver) from file $(yamlfile)\n"
 	@HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" $(MELANGE) test $(yamlfile) $(MELANGE_TEST_OPTS) $(MELANGE_DEBUG_TEST_OPTS) --source-dir ./$(*)/
 
-dev-container:
-	docker run --privileged --rm -it \
+.PHONY: dev-container
+dev-container: apk-token
+	docker run --pull=always --privileged --rm -it \
 			-v "${PWD}:${PWD}" \
 			-v "${HOME}/.cache/wolfictl/dev-container-enterprise/root:/root" \
 			-v "${HOME}/.config/chainctl:/root/.config/chainctl" \
+			-v "${HOME}/.config/gcloud:/root/.config/gcloud" \
+			-v "${CACHEDIR}:/tmp/melange-cache" \
 			-w "${PWD}" \
-			ghcr.io/wolfi-dev/sdk:latest@sha256:e0aaf9303112afa815377584d22dce90f26c974a4fa754ea666d01968c9bf2fb
+			ghcr.io/wolfi-dev/sdk:latest
 
 # The next two targets are mostly copies from the local-wolfi and
 # dev-container-wolfi targets from wolfi-dev/os:
@@ -173,21 +190,22 @@ TMP_REPOSITORIES_FILE := $(TMP_REPOSITORIES_DIR)/repositories
 # changes to the packages. It mounts the local packages folder as a read-only,
 # and sets up the necessary keys for you to run `apk add` commands, and then
 # test the packages however you see fit.
-local-wolfi: ${KEY}
-	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
-	@echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
-	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
-	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
-	@mkdir -p ${PWD}/packages
-	docker run --rm -it \
+.PHONY: local-wolfi
+local-wolfi: ${KEY} apk-token
+	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
+	echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
+	echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
+	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+	mkdir -p ${PWD}/packages
+	docker run --pull=always --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
 		cgr.dev/chainguard-private/chainguard-base:latest
-	@rm "$(TMP_REPOSITORIES_FILE)"
-	@rmdir "$(TMP_REPOSITORIES_DIR)"
+	rm "$(TMP_REPOSITORIES_FILE)"
+	rmdir "$(TMP_REPOSITORIES_DIR)"
 
 # This target spins up a docker container that is helpful for building images
 # using local packages.
@@ -223,53 +241,34 @@ OUT_LOCAL_DIR ?= /work/out
 OUT_DIR ?= $(shell mktemp -d)
 OS_LOCAL_DIR ?= /work/os
 OS_DIR ?= ${PWD}
+
+.PHONY: dev-container-wolfi
 dev-container-wolfi:
-	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
-	@echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
-	docker run --rm -it \
+	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
+	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+	docker run --pull=always --rm -it \
 		--mount type=bind,source="${OUT_DIR}",destination="$(OUT_LOCAL_DIR)" \
 		--mount type=bind,source="${OS_DIR}",destination="$(OS_LOCAL_DIR)",readonly \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
 		--mount type=bind,source="${PWD}/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
 		--mount type=bind,source="$(TMP_REPOSITORIES_FILE)",destination="/etc/apk/repositories",readonly \
 		-w "$(PACKAGES_CONTAINER_FOLDER)" \
-		ghcr.io/wolfi-dev/sdk:latest@sha256:e0aaf9303112afa815377584d22dce90f26c974a4fa754ea666d01968c9bf2fb
-	@rm "$(TMP_REPOSITORIES_FILE)"
-	@rmdir "$(TMP_REPOSITORIES_DIR)"
+		ghcr.io/wolfi-dev/sdk:latest
+	rm "$(TMP_REPOSITORIES_FILE)"
+	rmdir "$(TMP_REPOSITORIES_DIR)"
 
-.PHONY: fetch-baselayout
-fetch-baselayout:
-	echo "Fetching baselayout from GCS..." && \
-		mkdir -p ./packages/x86_64/ && \
-		mkdir -p ./packages/aarch64/ && \
-		gsutil cp $(GCS_FETCH_BUCKET_NAME)chainguard-enterprise.rsa.pub ./packages/ && \
-        gsutil cp $(GCS_FETCH_BUCKET_NAME)x86_64/APKINDEX.tar.gz ./packages/x86_64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)x86_64/chainguard-baselayout-* ./packages/x86_64/ && \
-        gsutil cp $(GCS_FETCH_BUCKET_NAME)aarch64/APKINDEX.tar.gz ./packages/aarch64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)aarch64/chainguard-baselayout-* ./packages/aarch64/
+.PHONY: gcp-auth
+gcp-auth:
+	if ! [ -d ${HOME}/.config/gcloud ]; then \
+		echo "Initializing GCP auth..."; \
+		gcloud auth login; \
+	fi
+	mkdir -p ${CACHEDIR}/.config/gcloud
+	cp -rf ~/.config/gcloud/* ${CACHEDIR}/.config/gcloud/
 
-SINGLE_PACKAGE ?= unknown
-
-.PHONY: fetch-single-package
-fetch-single-package: fetch-baselayout
-	echo "Fetching single package from GCS..." && \
-		mkdir -p ./packages/x86_64/ && \
-		mkdir -p ./packages/aarch64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)x86_64/$(SINGLE_PACKAGE)-* ./packages/x86_64/ && \
-        gsutil -m cp -n $(GCS_FETCH_BUCKET_NAME)aarch64/$(SINGLE_PACKAGE)-* ./packages/aarch64/
-
-# List of package names to fetch, separated by spaces
-PACKAGES ?= unknown
-
-.PHONY: fetch-multiple-packages
-fetch-multiple-packages: $(addprefix fetch-package-,$(PACKAGES))
-
-fetch-package-%:
-	@echo "Fetching package $* from GCS..."
-	@$(MAKE) fetch-single-package SINGLE_PACKAGE=$*
-
-.PHONY: fetch-all-packages
-fetch-all-packages:
-	echo "Fetching all packages from GCS..." && \
-		mkdir -p ./packages/ && \
-		gsutil -m cp -r -n 'gs://chainguard-enterprise-registry-destination/os/*' packages/
+authget = tok=$$(chainctl auth token --audience=$(1)) || \
+  { echo "failed token from $(1) for target $@"; exit 1; }; \
+  mkdir -p $$(dirname $(2)) && \
+  echo "auth-download[$(1)] to $(2) from $(3)" && \
+  curl --fail -LS --silent -o $(2).tmp --user "user:$$tok" $(3) && \
+	mv "$(2).tmp" "$(2)"

@@ -1,7 +1,7 @@
 package:
   name: metrics-server-fips
-  version: 0.7.2
-  epoch: 2
+  version: "0.8.0"
+  epoch: 1
   description: Scalable and efficient source of container resource metrics for Kubernetes built-in autoscaling pipelines.
   copyright:
     - license: Apache-2.0
@@ -16,7 +16,7 @@ pipeline:
     with:
       repository: https://github.com/kubernetes-sigs/metrics-server
       tag: v${{package.version}}
-      expected-commit: 096960107da4a1b2e2ec83b2ac3424248cfc0ad5
+      expected-commit: d66279c6426c6581d9656fe3d42bc52db7c29597
 
   - uses: go/remove-cgo-enabled-0
 
@@ -28,6 +28,29 @@ pipeline:
 
   - uses: strip
 
+# Note, we don't need to fetch any upstream files, as there aren't any custom
+# entrypoints or scripts required for compatibility with the metrics-server
+# Bitnami helm chart.
+subpackages:
+  - name: ${{package.name}}-bitnami-compat
+    description: "Compatibility package for usage with the Bitnami helm chart."
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/opt/bitnami/metrics-server/bin/
+          mkdir -p ${{targets.subpkgdir}}/opt/bitnami/metrics-server/certificates/
+          chmod g+rwX ${{targets.subpkgdir}}/opt/bitnami
+          ln -sf /usr/bin/metrics-server ${{targets.subpkgdir}}/opt/bitnami/metrics-server/bin/metrics-server
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - bash
+      pipeline:
+        - runs: |
+            /opt/bitnami/metrics-server/bin/metrics-server --version
+            /opt/bitnami/metrics-server/bin/metrics-server --help
+
 update:
   enabled: true
   github:
@@ -37,8 +60,50 @@ update:
     strip-prefix: v
 
 test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - curl
+        - jq
+        - procps
+        - shadow
   pipeline:
+    - uses: test/go-fips-check
     - runs: |
         metrics-server --version
         metrics-server --help
-    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+    - name: "Start metrics-server daemon"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Set required environment variables
+          export KUBERNETES_SERVICE_HOST="127.0.0.1"
+          export KUBERNETES_SERVICE_PORT="8080"
+
+          # Create required certificates directory
+          mkdir -p /tmp/certs
+        start: |
+          metrics-server \
+            --kubelet-insecure-tls \
+            --kubelet-preferred-address-types=InternalIP \
+            --cert-dir=/tmp/certs \
+            --secure-port=10250 \
+            --authentication-skip-lookup \
+            --authentication-kubeconfig ~/.kube/config \
+            --authorization-kubeconfig ~/.kube/config \
+            --kubeconfig ~/.kube/config
+        timeout: 30
+        expected_output: |
+          Generated self-signed cert
+          Starting controller
+        # virtual node exceptions
+        error_strings: |
+          Failed to scrape node.*no address matched types \[InternalIP\].*node="node-000000"
+        post: |
+          # Verify health endpoint
+          curl -sk https://localhost:10250/healthz || exit 1
+
+          # Check prometheus metrics endpoint
+          curl -sk https://localhost:10250/metrics

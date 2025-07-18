@@ -1,13 +1,17 @@
 package:
   name: calico-fips-3.28
-  version: 3.28.2
-  epoch: 0
+  version: "3.28.5"
+  epoch: 2
   description: "Cloud native networking and network security"
   copyright:
     - license: Apache-2.0
   dependencies:
     provides:
       - calico-fips=${{package.full-version}}
+    runtime:
+      - merged-bin
+      - merged-usrsbin
+      - wolfi-baselayout
   resources:
     cpu: 4
     memory: 12Gi
@@ -31,25 +35,29 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
-      # - llvm16-tools
       - clang-16
-      - clang-16-dev
       # TODO: Can remove this when cni-plugins are built from source
       - curl
       # for felix
       - elfutils-dev
       # for BIRD
       - flex
-      - go-fips
+      - go-fips-md5
       - iproute2
       - libbpf
       - libbpf-dev
       - libpcap-dev
       - linux-headers
-      - llvm16
-      - oldglibc
+      - llvm-16
+      # On boot the CNI is installed/copied onto the host
+      # node and run when pod network sandboxes are created. Since it runs on
+      # the host, we explicitly link it with oldglibc for a wide compatibility
+      - oldglibc~2.28
       - zlib-dev
       - zstd-dev
+  environment:
+    # local spec file that opts-out of oldglibc integration
+    GCC_SPEC_FILE: /home/build/openssf.spec
 
 # The calico build process is heavily tailored towards using Makefiles to
 # orchestrate docker commands. This makes for a less than ideal
@@ -65,7 +73,15 @@ pipeline:
     with:
       repository: https://github.com/projectcalico/calico
       tag: v${{package.version}}
-      expected-commit: 9a96ee39f3833c3eabde151add8a84d546bcf24d
+      expected-commit: 1bf7ccd12971a007f5776e8edd992ced6317c187
+  - name: Some binaries cannot be built with oldglibc, and some must be built with it
+    runs: |
+      gccdir="$(GCC_SPEC_FILE=/dev/null gcc --print-search-dirs | grep ^install: | cut -d' ' -f2)"
+      sed -r '/oldglibc/d' < "$gccdir/openssf.spec" > /home/build/openssf.spec
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
   - working-directory: felix
     pipeline:
       # Equivalent to target: "build-bpf"
@@ -140,26 +156,29 @@ subpackages:
         - calico-node-fips=${{package.full-version}}
         - calico-fips-node-${{vars.short-package-version}}
       runtime:
-        - runit
         - bash # required for logging functionality to work since `start_runit` logging script uses #!/bin/bash
-        - iptables
+        - conntrack-tools
+        - glibc
         - ip6tables
+        - iproute2
         - ipset
-        - libpcap
-        - libelf
-        - zlib
+        - iptables
         - libbpf
         # listed in Dockerfile, but not sure if they're build dependencies (for iptables) or runtime
+        - libelf
         - libmnl
-        - libnfnetlink
         - libnetfilter_conntrack
-        - iproute2
-        - procps
-        - conntrack-tools
         - libnetfilter_cthelper
         - libnetfilter_cttimeout
         - libnetfilter_queue
-        - glibc
+        - libnfnetlink
+        - libpcap
+        - merged-bin
+        - merged-usrsbin
+        - procps
+        - runit
+        - wolfi-baselayout
+        - zlib
     pipeline:
       - assertions:
           required-steps: 2
@@ -178,20 +197,15 @@ subpackages:
               LDFLAGS="-w"
               LDFLAGS="$LDFLAGS -X node/pkg/lifecycle/startup.VERSION=${{package.version}}"
               LDFLAGS="$LDFLAGS -X node/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-              LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+              LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
               LDFLAGS="$LDFLAGS -X node/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
-
-              # Mitigate CVE-2023-48795
-              go mod edit -replace=golang.org/x/crypto=golang.org/x/crypto@v0.17.0
-
-              go mod tidy
 
               CGO_ENABLED=1 \
                 CGO_LDFLAGS="$CGO_LDFLAGS" \
                 CGO_CFLAGS="$CGO_CFLAGS" \
                 go build -v -tags cgo,fipsstrict -v -buildvcs=false \
                 -ldflags "$LDFLAGS" \
-                -o "${{targets.subpkgdir}}"/bin/calico-node \
+                -o "${{targets.subpkgdir}}"/usr/bin/calico-node \
                 ./node/cmd/calico-node
           # Equivalent to target: "$(TOOLS_MOUNTNS_BINARY)"
           - runs: |
@@ -206,7 +220,7 @@ subpackages:
                 CGO_LDFLAGS="$CGO_LDFLAGS" \
                 CGO_CFLAGS="$CGO_CFLAGS" \
                 go build -v -tags cgo -v -buildvcs=false \
-                -o "${{targets.subpkgdir}}"/bin/mountns \
+                -o "${{targets.subpkgdir}}"/usr/bin/mountns \
                 ./node/cmd/mountns
       # Equivalent to target: "$(FELIX_GPL_SOURCE)"
       - working-directory: node
@@ -220,21 +234,18 @@ subpackages:
           touch $_target
       # Filesystem prep
       - runs: |
-          # BIRD needs to run with root permissions, so put them in /bin/ to remember
-          mkdir -p "${{targets.subpkgdir}}"/bin "${{targets.subpkgdir}}"/usr/bin
-          find bird/dist -type f -name 'bird*' -exec cp {} "${{targets.subpkgdir}}"/bin \;
-          # calico-node also uses the hardcoded path /usr/bin/bird, so link it
-          for exe in $(find bird/dist -type f -name 'bird*') ; do ln -s /bin/$(basename $exe) "${{targets.subpkgdir}}"/usr/bin/$(basename $exe) ; done
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          find bird/dist -type f -name 'bird*' -exec cp {} "${{targets.subpkgdir}}"/usr/bin \;
 
           mkdir -p "${{targets.subpkgdir}}"/etc \
                    "${{targets.subpkgdir}}"/included-source \
                    "${{targets.subpkgdir}}"/licenses \
-                   "${{targets.subpkgdir}}"/usr/sbin
+                   "${{targets.subpkgdir}}"/usr/bin
 
           cp -avR ./node/filesystem/etc "${{targets.subpkgdir}}"/
           cp -avR ./node/filesystem/included-source "${{targets.subpkgdir}}"/
           cp -avR ./node/filesystem/usr "${{targets.subpkgdir}}"/
-          cp -avR ./node/filesystem/sbin/* "${{targets.subpkgdir}}"/usr/sbin/
+          cp -avR ./node/filesystem/sbin/* "${{targets.subpkgdir}}"/usr/bin/
           cp ./node/LICENSE "${{targets.subpkgdir}}"/licenses/
 
           # TODO: Proper fix for this
@@ -252,11 +263,14 @@ subpackages:
         - calico-felix-fips=${{package.full-version}}
         - calico-fips-felix-${{vars.short-package-version}}
       runtime:
-        - iproute2
-        - libelf
-        - zlib
-        - libbpf
         - glibc
+        - iproute2
+        - libbpf
+        - libelf
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
+        - zlib
     pipeline:
       - working-directory: felix
       - runs: |
@@ -270,7 +284,7 @@ subpackages:
 
           LDFLAGS="-w"
           LDFLAGS="$LDFLAGS -X node/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-          LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+          LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
           LDFLAGS="$LDFLAGS -X node/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
           LDFLAGS="$LDFLAGS -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
 
@@ -328,27 +342,30 @@ subpackages:
         - uses: test/go-fips-check
           with:
             package-match: "^calico-cni-fips-${{vars.short-package-version}}"
+        - uses: test/oldglibc
+          with:
+            files: /usr/bin/calico /usr/bin/calico-cni-install
     dependencies:
       provides:
         - calico-cni-fips=${{package.full-version}}
         - calico-fips-cni-${{vars.short-package-version}}
       runtime:
-        - flannel-cni-plugin
-        - cni-plugins-fips-loopback
+        - cni-plugins-fips-bandwidth
         - cni-plugins-fips-host-local
+        - cni-plugins-fips-loopback
         - cni-plugins-fips-portmap
         - cni-plugins-fips-tuning
-        - cni-plugins-fips-bandwidth
+        - flannel-cni-plugin
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       # NOTE: cni is a multicall binary: https://github.com/projectcalico/calico/blob/master/cni-plugin/cmd/calico/calico.go
       # install is not a part of that multicall binary anymore (as of calico 3.27.1)
       - runs: |
-          # On boot (of calico-node) the CNI is installed/copied onto the host
-          # node and run when pod network sandboxes are created. Since it runs on
-          # the host, we explicitly link it with oldglibc for a wide compatibility
+          # Use default spec file with oldglibc integration
+          export GCC_SPEC_FILE=openssf.spec
 
-          export CGO_CFLAGS="-I/usr/lib/oldglibc/include"
-          export CGO_LDFLAGS="-L/usr/lib/oldglibc/lib"
           LDFLAGS="-w -X main.VERSION=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
 
           CGO_ENABLED=1 \
@@ -382,12 +399,15 @@ subpackages:
         - calico-cni-fips-compat-${{vars.short-package-version}}
       runtime:
         - calico-cni-fips-${{vars.short-package-version}}
-        - flannel-cni-plugin-compat
-        - cni-plugins-fips-loopback-compat
+        - cni-plugins-fips-bandwidth-compat
         - cni-plugins-fips-host-local-compat
+        - cni-plugins-fips-loopback-compat
         - cni-plugins-fips-portmap-compat
         - cni-plugins-fips-tuning-compat
-        - cni-plugins-fips-bandwidth-compat
+        - flannel-cni-plugin-compat
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/opt/cni/bin
@@ -407,14 +427,21 @@ subpackages:
         - calico-fips-apiserver-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./apiserver/cmd/apiserver
           output: calico-apiserver
-          ldflags: "-X github.com/projectcalico/calico/cmd/apiserver/server.VERSION=${{package.version}}) -X github.com/projectcalico/calico/cmd/apiserver/server.BUILD_DATE=$(date -u +'%FT%T%z') -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_DESCRIPTION=$(git describe --tags) -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_REVISION=$(git rev-parse --short HEAD)"
+          ldflags: |
+            -X github.com/projectcalico/calico/cmd/apiserver/server.VERSION=${{package.version}})
+            -X github.com/projectcalico/calico/cmd/apiserver/server.BUILD_DATE=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')
+            -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_DESCRIPTION=$(git describe --tags)
+            -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_REVISION=$(git rev-parse --short HEAD)
           tags: fipsstrict
 
   - name: "calico-key-cert-provisioner-fips-${{vars.short-package-version}}"
@@ -427,10 +454,14 @@ subpackages:
       provides:
         - calico-key-cert-provisioner-fips=${{package.full-version}}
         - calico-fips-key-cert-provisioner-${{vars.short-package-version}}
+      runtime:
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./key-cert-provisioner/cmd/
           output: calico-key-cert-provisioner
@@ -447,18 +478,24 @@ subpackages:
         - calico-fips-app-policy-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./app-policy/cmd/dikastes
           output: calico-dikastes
-          ldflags: "-X github.com/projectcalico/calico/app-policy/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>') -X github.com/projectcalico/calico/app-policy/buildinfo.BuildDate=$(date -u +'%FT%T%z') -X github.com/projectcalico/calico/app-policy/GitRevision=$(git rev-parse HEAD || echo '<unknown>') -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
+          ldflags: |
+            -X github.com/projectcalico/calico/app-policy/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')
+            -X github.com/projectcalico/calico/app-policy/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')
+            -X github.com/projectcalico/calico/app-policy/GitRevision=$(git rev-parse HEAD || echo '<unknown>') -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')
           tags: fipsstrict
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./app-policy/cmd/healthz
           output: calico-healthz
@@ -476,10 +513,13 @@ subpackages:
         - calico-fips-kube-controllers-${{vars.short-package-version}}
       runtime:
         - glibc-dev
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./kube-controllers/cmd/kube-controllers
           output: calico-kube-controllers
@@ -487,7 +527,7 @@ subpackages:
           tags: fipsstrict
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./kube-controllers/cmd/check-status
           output: check-status # keep naming convention as "check-status" is usually harded to /usr/bin/check-status
@@ -506,23 +546,26 @@ subpackages:
         - calico-fips-pod2daemon-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./pod2daemon/flexvol
           output: calico-pod2daemon-flexvol
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./pod2daemon/csidriver
           output: calico-pod2daemon-csidriver
           tags: fipsstrict,osusergo,netgo
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./pod2daemon/nodeagent
           output: calico-pod2daemon-nodeagent
@@ -539,10 +582,14 @@ subpackages:
     dependencies:
       provides:
         - calicoctl-fips=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
-          go-package: go-fips
+          go-package: go-fips-md5
           modroot: .
           packages: ./calicoctl/calicoctl
           output: calicoctl
@@ -562,12 +609,15 @@ subpackages:
         - calico-fips-typhad-${{vars.short-package-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       # TODO: I'm not sure yet if this actually needs CGO, or is just enabled upstream because of go-fips
       - runs: |
           LDFLAGS="-w"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
           LDFLAGS="$LDFLAGS -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
 
@@ -595,18 +645,21 @@ subpackages:
         - calico-typha-client-fips=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       # TODO: I'm not sure yet if this actually needs CGO, or is just enabled upstream because of go-fips
       - runs: |
           LDFLAGS="-w"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
           LDFLAGS="$LDFLAGS -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
 
           CGO_ENABLED=1 \
             go build -v -tags fipsstrict,osusergo,netgo,cgo -v -buildvcs=false \
-            -o "${{targets.subpkgdir}}"/bin/typha-client \
+            -o "${{targets.subpkgdir}}"/usr/bin/typha-client \
             ./typha/cmd/typha-client
 
 update:
@@ -615,3 +668,8 @@ update:
     identifier: projectcalico/calico
     strip-prefix: v
     tag-filter: v3.28.
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage

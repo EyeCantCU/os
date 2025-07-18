@@ -1,0 +1,299 @@
+# AWX upstream relies on libpq-13/postgresql-13
+# This is why even the latest package resides in enterprise
+package:
+  name: awx
+  version: 24.6.1
+  epoch: 11
+  description: AWX provides a web-based user interface, REST API, and task engine built on top of Ansible
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - busybox
+      - coreutils
+      - dumb-init
+      - findutils
+      - git
+      - git-daemon
+      - glibc-locales
+      - krb5-dev
+      - libpq-13
+      - libxml2
+      - libxml2-dev
+      - nginx
+      - openssl-dev
+      - postgresql-13
+      - postgresql-13-client
+      - postgresql-13-dev
+      - py3.11-jinja2
+      - py3.11-packaging
+      - py3.11-pip
+      - python-3.11
+      - py3.11-setuptools
+      - rsync
+      - rsyslog
+      - tzdata
+      - unzip
+      - vim
+      - xmlsec-legacy
+      - xmlsec-legacy-openssl
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - gettext-dev
+      - glibc-locale-en
+      - iputils
+      - libffi-dev
+      - libpq-13
+      - libtool
+      - libxml2
+      - libxml2-dev
+      - libxslt
+      - libxslt-dev
+      - nodejs
+      - npm
+      - nss
+      - nvm
+      - openldap-dev
+      - openssl-dev
+      - patch
+      - pkgconf-dev
+      - postgresql-13
+      - postgresql-13-dev
+      - py3.11-build
+      - py3.11-jinja2
+      - py3.11-pip
+      - python-3.11-dev
+      - swig
+      - unzip
+      - wolfi-base
+      - xmlsec-legacy
+      - xmlsec-legacy-dev
+      - xmlsec-legacy-openssl
+      - zlib-dev
+  environment:
+    LANG: en_US.UTF-8
+    LANGUAGE: en_US:en
+    LC_ALL: en_US.UTF-8
+    AWX_LOGGING_MODE: stdout
+    VENV_BASE: /var/lib/awx/venv
+    NPM_CONFIG_LEGACY_PEER_DEPS: true
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ansible/awx.git
+      tag: ${{package.version}}
+      expected-commit: 94e5795dfc37b95c576d61f3e3b4e936c021548c
+
+  # This patch fixes two issues, the primary issue is documented here https://github.com/ansible/awx/issues/15484#issuecomment-2331674345
+  # the other issue is related to xmlsec which is fixed with this https://github.com/xmlsec/python-xmlsec/issues/257#issuecomment-2063433563
+  # The default-settings.patch fixes missing env variable for the base virtual environment for AWX
+  # The js-security-updates.patch fixes JavaScript vulnerabilities: SNYK-JS-AXIOS-9403194, SNYK-JS-FOLLOWREDIRECTS-6444610, SNYK-JS-PATHTOREGEXP-7925106
+  - uses: patch
+    with:
+      patches: fix-pip.patch default-settings.patch js-security-updates.patch
+
+  # Regenerate package-lock.json to match updated package.json dependencies and fix compatibility issues
+  - runs: |
+      cd awx/ui
+      rm -f package-lock.json
+      # Fix ajv compatibility by downgrading ajv-keywords to compatible version
+      npm install ajv@6.12.6 ajv-keywords@3.5.2 --save-dev --legacy-peer-deps
+      npm install --package-lock-only --legacy-peer-deps
+
+  - runs: |
+      pip3.11 install -vv build
+      # # Install Python dependencies
+      pip3.11 install --upgrade pip setuptools wheel build cryptography==44.0.1 django==4.2.22 requests==2.32.4 python-jose==3.4.0
+
+      mkdir -p $VENV_BASE
+      python3.11 -m venv $VENV_BASE/awx --system-site-packages
+
+      CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec -r requirements/requirements.txt
+      CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec -r requirements/requirements_tower_uninstall.txt
+      CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec -r requirements/requirements_git.txt
+      # This is important otherwise application breaks with missing libpq error
+      $VENV_BASE/awx/bin/pip install "psycopg[binary,pool]==3.1.18"
+
+      # Install favicons dependency in ui_next after it's cloned but before build
+      make awx/ui_next/src || true
+      if [ -d "awx/ui_next/src" ]; then
+        (cd awx/ui_next/src && npm install favicons --save --legacy-peer-deps || true)
+      fi
+
+      make sdist
+      $VENV_BASE/awx/bin/pip install dist/awx.tar.gz
+      rm -rf $VENV_BASE/awx/bin/__pycache*
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/var/lib/awx/public
+      mkdir -p ${{targets.destdir}}/usr/local/bin
+      mkdir -p ${{targets.destdir}}/etc/tower
+
+      cp -r ./awx/ui/build ${{targets.destdir}}/var/lib/awx/public
+      # Ensure permissions without ownership change
+      chmod -R 0755 ${{targets.destdir}}/var/lib/awx/public/build
+      cp tools/ansible/roles/dockerfile/files/wait-for-migrations ${{targets.destdir}}/usr/local/bin/wait-for-migrations
+      cp tools/ansible/roles/dockerfile/files/stop-supervisor ${{targets.destdir}}/usr/local/bin/stop-supervisor
+      cp tools/ansible/roles/dockerfile/files/uwsgi.ini ${{targets.destdir}}/etc/tower/uwsgi.ini
+
+  - runs: |
+      # Create directories and copy specific files
+      for dir in \
+          /var/lib/awx \
+          /var/lib/awx \
+          /var/lib/awx/rsyslog \
+          /var/lib/awx/rsyslog/conf.d \
+          /var/lib/awx/.local/share/containers/storage \
+          /var/run/awx-rsyslog \
+          /var/log/nginx \
+          /var/lib/pgsql \
+          /var/run/supervisor \
+          /var/run/awx-receptor \
+          /var/lib/nginx ; \
+      do
+          mkdir -p ${{targets.destdir}}$dir && chmod 0775 ${{targets.destdir}}$dir;
+      done
+      # Copy specific required files if they exist
+      if [ -f tools/ansible/roles/dockerfile/files/rsyslog.conf ]; then
+          cp tools/ansible/roles/dockerfile/files/rsyslog.conf ${{targets.destdir}}/var/lib/awx/rsyslog/rsyslog.conf
+      fi
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mkdir -p ${{targets.destdir}}/etc/supervisord
+      mkdir -p ${{targets.destdir}}/var/lib/nginx/tmp/client_body
+
+      # Add runtime scripts
+      cp tools/ansible/roles/dockerfile/files/launch_awx_web.sh ${{targets.destdir}}/usr/bin/
+      cp tools/ansible/roles/dockerfile/files/launch_awx_task.sh ${{targets.destdir}}/usr/bin/
+      cp tools/ansible/roles/dockerfile/files/launch_awx_rsyslog.sh ${{targets.destdir}}/usr/bin/
+      cp tools/scripts/rsyslog-4xx-recovery ${{targets.destdir}}/usr/bin/
+      cp tools/scripts/awx-python ${{targets.destdir}}/usr/bin/
+
+  - runs: |
+      python3 <<EOF
+      from jinja2 import Environment, FileSystemLoader, Undefined
+      import os
+
+      # Define a custom bool filter
+      def bool_filter(value):
+          return bool(value)
+
+      # Define a custom Undefined handler for Jinja2 to prevent errors on undefined variables
+      class SilentUndefined(Undefined):
+          def __str__(self):
+              return ""
+          def __getattr__(self, item):
+              return ""
+
+      template_dir = "tools/ansible/roles/dockerfile/templates"
+      output_dir = "${{targets.destdir}}/etc"
+
+      os.makedirs(output_dir, exist_ok=True)
+
+      env = Environment(loader=FileSystemLoader(template_dir), undefined=SilentUndefined)
+
+      # Add the custom bool filter to the Jinja2 environment
+      env.filters['bool'] = bool_filter
+
+      templates = ["supervisor_web.conf.j2", "supervisor_task.conf.j2", "supervisor_rsyslog.conf.j2"]
+      for template_name in templates:
+          template = env.get_template(template_name)
+          # Replace 'supervisor_' prefix with 'supervisord_' and remove '.j2'
+          output_file_name = template_name.replace('supervisor_', 'supervisord_').replace('.j2', '')
+          output_path = os.path.join(output_dir, output_file_name)
+          with open(output_path, 'w') as f:
+              f.write(template.render(kube_dev=False))  # Provide a default value for kube_dev
+      EOF
+
+  - runs: |
+      export DJANGO_SETTINGS_MODULE=awx.settings.defaults
+      export SKIP_SECRET_KEY_CHECK=yes
+      export SKIP_PG_VERSION_CHECK=yes
+      export AWX_SETTINGS_FILE=/etc/tower/settings.py
+      mkdir -p /etc/tower
+      mkdir -p /var/log/tower
+
+      # We need to separately install supervisor to make it work with py3.11
+      pip3.11 install supervisor --prefix=/usr --root="${{targets.destdir}}"
+      touch /etc/tower/settings.py
+      $VENV_BASE/awx/bin/awx-manage collectstatic --noinput --clear
+      sed -i "s|/home/build/$VENV_BASE/awx|/var/lib/awx/venv/awx|g" $VENV_BASE/awx/pyvenv.cfg
+      sed -i "s|/home/build/$VENV_BASE/awx|/var/lib/awx/venv/awx|g" $VENV_BASE/awx/bin/*
+
+  - runs: |
+      # Activate AWX venv first
+      source /var/lib/awx/venv/awx/bin/activate
+
+      # Update the vulnerable packages
+      pip install --upgrade cryptography==44.0.1
+      pip install --upgrade django==4.2.22
+      pip install --upgrade python-jose==3.4.0
+      pip install --upgrade requests==2.32.4
+      pip install --upgrade ecdsa
+      pip install --upgrade pip
+      pip install --upgrade protobuf==4.25.8
+      pip install --upgrade urllib3==2.5.0
+
+      mkdir -p ${{targets.contextdir}}/var/lib/awx
+      # Remove unnecessary cache files
+      find . -name '__pycache__' -exec rm -rf {} +
+      ln -sf /var/lib/awx/venv/awx/bin/awx-manage ${{targets.destdir}}/usr/bin/awx-manage
+      mv /var/lib/awx/venv ${{targets.destdir}}/var/lib/awx
+      mv /var/lib/awx/public/static ${{targets.destdir}}/var/lib/awx/public
+      rm -rf ${{targets.destdir}}/var/lib/awx/public/build
+      mkdir -p  ${{targets.destdir}}/var/log
+      mv /var/log/tower  ${{targets.destdir}}/var/log
+      mv /etc/tower/settings.py ${{targets.destdir}}/etc/tower
+
+      # If you want to clean up the entire venv (nuclear option)
+      python -m venv --clear /var/lib/awx/venv/awx
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - libpq-13
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: "Run AWX Migration and Superuser Creation"
+      runs: |
+        # Navigate to the AWX virtual environment
+        cd /var/lib/awx/venv/awx
+
+        # Set necessary environment variables
+        export DJANGO_SETTINGS_MODULE=awx.settings.defaults
+        export SKIP_SECRET_KEY_CHECK=yes
+        export SKIP_PG_VERSION_CHECK=yes
+
+        # Run database migrations
+        bin/awx-manage migrate --noinput
+
+        # Create a superuser with predefined username and password
+        echo "from django.contrib.auth.models import User; User.objects.create_superuser('root', 'root@example.com', 'rootpassword')" | bin/awx-manage shell
+
+        # Start the AWX development server
+        bin/awx-manage runserver 0.0.0.0:8013 > /dev/null 2>&1 &
+
+        # Give the server time to start
+        sleep 10
+
+        # Verify the server is running using curl
+        curl --fail http://127.0.0.1:8013/api/v2/ || (echo "AWX server is not running" && exit 1)
+
+        echo "Test completed successfully."
+
+update:
+  enabled: true
+  github:
+    identifier: ansible/awx
+    use-tag: true

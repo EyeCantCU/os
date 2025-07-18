@@ -1,0 +1,146 @@
+package:
+  name: prometheus-redis-exporter
+  version: "1.74.0"
+  epoch: 1
+  description: Prometheus Exporter for Redis Metrics.
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - merged-usrsbin
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - go
+      - wolfi-baselayout
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/oliver006/redis_exporter
+      tag: v${{package.version}}
+      expected-commit: 009602959fd20c5a78de639490745c8bbc7b2e06
+
+  - uses: go/build
+    with:
+      packages: .
+      output: redis_exporter
+      ldflags: -extldflags -static -X main.BuildVersion=v${{package.version}} -X main.BuildCommitSha=$(git rev-parse HEAD) -X main.BuildDate=$(date +%F-%T)
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream helm charts"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/"
+          ln -sf /usr/bin/redis_exporter ${{targets.contextdir}}/redis_exporter
+    test:
+      pipeline:
+        - runs: test "$(readlink /redis_exporter)" = "/usr/bin/redis_exporter"
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-bitnami-compat
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: redis-exporter
+          version-path: 1/debian-12
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/opt/bitnami/redis-exporter/bin
+          ln -s /usr/bin/redis_exporter ${{targets.subpkgdir}}/opt/bitnami/redis-exporter/bin/redis_exporter
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: prometheus-redis-exporter
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/redis-exporter/bin
+          ln -s /usr/bin/redis_exporter /opt/iamguarded/redis-exporter/bin/redis_exporter
+      - uses: iamguarded/finalize-compat
+        with:
+          package: prometheus-redis-exporter
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: prometheus-redis-exporter
+            version: ${{vars.major-version}}
+        - runs: |
+            run-script --version
+            run-script --help
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+
+update:
+  enabled: true
+  github:
+    identifier: oliver006/redis_exporter
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - redis
+  pipeline:
+    - name: Basic command checks
+      runs: |
+        redis_exporter --version
+        redis_exporter --help
+    - name: Test metrics endpoint
+      runs: |
+        # Start Redis
+        redis-server &
+        REDIS_PID=$!
+        sleep 2
+
+        # Start redis-exporter
+        redis_exporter --web.listen-address=":9121" --log-format=txt &
+        EXPORTER_PID=$!
+        sleep 2
+
+        # Check metrics endpoint (which is provided by redis-exporter).
+        if ! curl -s http://localhost:9121/metrics | grep -q "redis_up"; then
+          echo "Metrics endpoint not responding"
+          kill $REDIS_PID $EXPORTER_PID
+          exit 1
+        fi
+
+        METRICS=$(curl -s http://localhost:9121/metrics)
+
+        # Check core metrics exist
+        echo $METRICS
+        for metric in "redis_up 1" "redis_uptime_in_seconds"; do
+          if ! echo "$METRICS" | grep -q "$metric"; then
+            echo "Missing metric: $metric"
+            kill $REDIS_PID $EXPORTER_PID
+            exit 1
+          fi
+        done

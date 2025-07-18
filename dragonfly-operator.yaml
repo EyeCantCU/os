@@ -1,0 +1,78 @@
+package:
+  name: dragonfly-operator
+  version: "1.1.11"
+  epoch: 2
+  description: "Kubernetes operator used to deploy and manage Dragonfly instances"
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: "https://github.com/dragonflydb/dragonfly-operator.git"
+      tag: "v${{package.version}}"
+      expected-commit: "2adcd38d15aa4f0878b427dba4586777ba23398e"
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/redis/go-redis/v9@v9.5.5
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.38.0
+
+  - uses: go/build
+    with:
+      packages: "./cmd"
+      output: "manager"
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/
+          ln -sf /usr/bin/manager ${{targets.contextdir}}/manager
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      pipeline:
+        - runs: test "$(readlink /manager)" = "/usr/bin/manager"
+
+update:
+  enabled: true
+  github:
+    identifier: "dragonflydb/dragonfly-operator"
+    strip-prefix: "v"
+
+test:
+  environment:
+    contents:
+      packages:
+        - wait-for-it
+        - ${{package.name}}-compat
+  pipeline:
+    - name: "Verify dragonfly-operator binary"
+      runs: |
+        # upstream uses const for version in cmd/main.go, so we can't grep for version
+        /manager -help
+        /manager -version
+    - uses: test/kwok/cluster
+    - name: "Install CRD"
+      runs: |
+        kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/v${{package.version}}/manifests/dragonfly-operator.yaml
+    - name: "Start operator and test"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          echo "Starting dragonfly operator..."
+        start: /manager
+        timeout: 30
+        expected_output: |
+          Starting EventSource
+        post: |
+          #!/bin/sh -e
+          echo "Applying dragonfly sample configuration..."
+          kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/v${{package.version}}/config/samples/v1alpha1_dragonfly.yaml
+          sleep 10 # takes a few seconds for dragonfly pods to exist to wait for them to be ready
+          kubectl wait --for=condition=Ready pod/dragonfly-sample-0 --timeout=300s
+          echo "Dragonfly operator test completed successfully!"

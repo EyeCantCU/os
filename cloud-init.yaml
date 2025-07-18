@@ -1,0 +1,125 @@
+package:
+  name: cloud-init
+  version: "25.1.3"
+  epoch: 2
+  description: Cloud instance initialization
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - blkid
+      - dhclient
+      - e2fsprogs
+      - glibc-locale-en
+      - logger
+      - lsblk
+      - netcat-openbsd
+      - openssh-pam-config # Optional - Enables login for locked accounts
+      - py${{vars.python-version}}-configobj
+      - py${{vars.python-version}}-jinja2
+      - py${{vars.python-version}}-jsonpatch
+      - py${{vars.python-version}}-jsonschema
+      - py${{vars.python-version}}-netifaces
+      - py${{vars.python-version}}-oauthlib
+      - py${{vars.python-version}}-pyserial
+      - py${{vars.python-version}}-pyyaml
+      - py${{vars.python-version}}-requests
+      - python-${{vars.python-version}}
+      - sgdisk
+      - shadow
+      - ssh-import-id
+      - sudo-rs
+      - systemd
+
+vars:
+  python-version: "3.13"
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - py${{vars.python-version}}-build
+      - py${{vars.python-version}}-configobj
+      - py${{vars.python-version}}-installer
+      - py${{vars.python-version}}-jinja2
+      - py${{vars.python-version}}-jsonpatch
+      - py${{vars.python-version}}-jsonschema
+      - py${{vars.python-version}}-netifaces
+      - py${{vars.python-version}}-oauthlib
+      - py${{vars.python-version}}-pip
+      - py${{vars.python-version}}-pyserial
+      - py${{vars.python-version}}-pyyaml
+      - py${{vars.python-version}}-requests
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/canonical/cloud-init.git
+      expected-commit: 79ac5c8311efb8b89bca129cc8a0098ca5ef679d
+      tag: ${{package.version}}
+
+  - uses: patch
+    with:
+      patches: chainguard-cloud-init.patch
+
+  - name: Install Python Files
+    runs: |
+      python${{vars.python-version}} -m build --wheel --no-isolation -C--prefix=/usr
+      python${{vars.python-version}} -m installer --destdir="${{targets.destdir}}" dist/*.whl
+
+      rm -rf ${{targets.destdir}}/usr/lib/python${{vars.python-version}}/site-packages/usr
+      rm -rf ${{targets.destdir}}/usr/lib/python${{vars.python-version}}/site-packages/etc
+      rm -rf ${{targets.destdir}}/usr/lib/python${{vars.python-version}}/site-packages/lib
+
+  - name: Install System Files
+    runs: |
+      install -vDm 644 config/cloud.cfg.d/* -t ${{targets.destdir}}/etc/cloud/cloud.cfg.d/
+
+      python${{vars.python-version}} ./tools/render-template --variant chainguard ./config/cloud.cfg.tmpl "${{targets.destdir}}/etc/cloud/cloud.cfg"
+      install -vDm 644 templates/*.tmpl -t "${{targets.destdir}}/etc/cloud/templates/"
+
+      # Tools
+      for tool in ds-identify hook-hotplug uncloud-init write-ssh-key-fingerprints; do
+        install -vDm 755 tools/$tool -t ${{targets.destdir}}/usr/lib/cloud-init/
+      done
+
+      # Udev
+      install -vDm 644 udev/*.rules -t "${{targets.destdir}}/usr/lib/udev/rules.d/"
+
+      # Systemd Services
+      mkdir -p "${{targets.destdir}}/usr/lib/systemd/system"
+
+      install -vDm 644 systemd/*.service ${{targets.destdir}}/usr/lib/systemd/system
+      install -vDm 644 systemd/*.target ${{targets.destdir}}/usr/lib/systemd/system
+      install -vDm 644 systemd/*.socket ${{targets.destdir}}/usr/lib/systemd/system
+
+      # Generator
+      python${{vars.python-version}} ./tools/render-template --variant chainguard ./systemd/cloud-init-generator.tmpl ${{targets.destdir}}/usr/lib/systemd/system-generators/cloud-init-generator
+      chmod 755 ${{targets.destdir}}/usr/lib/systemd/system-generators/cloud-init-generator
+
+      install -vDm 644 ./systemd/disable-sshd-keygen-if-cloud-init-active.conf -t ${{targets.destdir}}/usr/lib/systemd/system/sshd-keygen@.service.d/
+
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/system
+      for service in init-local init-main init-network; do
+        python${{vars.python-version}} ./tools/render-template --variant chainguard "./systemd/cloud-${service}.service.tmpl" ${{targets.destdir}}/usr/lib/systemd/system/cloud-${service}.service
+      done
+
+
+      # systemd-networkd-wait-online is timing out in ~2sec which is shorter than the default should be
+      # It seems to also think it needs more interfaces configured that it really does
+      # We'll consider ourselves online as long as any given interface is.
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/system/systemd-networkd-online-wait.service.d/
+      echo "[Service]\nExecStart=/usr/lib/systemd/systemd-networkd-wait-online --any\n" >>  "${{targets.destdir}}/usr/lib/systemd/system/systemd-networkd-online-wait.service.d/10-any.conf"
+
+update:
+  enabled: true
+  github:
+    identifier: canonical/cloud-init
+
+test:
+  pipeline:
+    - runs: |
+        cloud-init --version
+        cloud-init --help

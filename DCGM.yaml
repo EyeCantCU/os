@@ -1,82 +1,89 @@
 package:
   name: DCGM
-  version: 3.3.8
-  epoch: 3
+  version: "4.2.3"
+  epoch: 1
   description: "NVIDIA Data Center GPU Manager"
   copyright:
     - license: Apache-2.0
-  target-architecture:
-    - x86_64
   dependencies:
     runtime:
+      - fmt~10
+      - ld-linux # so:ld-linux-x86-64.so.2 and so:ld-linux-aarch64.so.1=1
       # Actually DCGM upstream tries to build both cuda11 and cuda12
       # builds at the same time, force a single build for now.
       # Possibly need DCGM-cuda11 build, which does full build, but
       # then only keeps the compiled 11 code paths.
-      - nvidia-cuda-cudart-12.6
-      - so:ld-linux-x86-64.so.2
+      - merged-usrsbin
+      - nvidia-cuda-cudart-12.8
+      - nvidia-dcgm-libdcgmmoduleprofiling
       - so:libc.so.6
       - so:libdl.so.2
-      - fmt-9.1
       - so:libgcc_s.so.1
       - so:libm.so.6
       - so:libpthread.so.0
       - so:librt.so.1
       - so:libstdc++.so.6
       - so:libyaml-cpp.so.0.8
-      - nvidia-dcgm-libdcgmmoduleprofiling
+      - wolfi-baselayout
   options:
     no-depends: true
 
 environment:
   contents:
     packages:
-      - wolfi-baselayout
-      - busybox
-      - ca-certificates-bundle
+      - Catch2-2.13-dev
+      - Catch2-2.13-static
       - bash
-      - build-base
-      - cmake
-      - gcc~13
-      - yaml-cpp-dev
       - boost-dev
       - boost-static
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - coreutils
+      - cuda-toolkit-12.8-dev
+      - fmt-dev~10
+      - gcc~14
       - jsoncpp-dev
       - jsoncpp-static
       - libevent-dev
       - libevent-static
-      - fmt-9.1-dev
-      - Catch2-2.13-dev
-      - Catch2-2.13-static
-      - cuda-toolkit-12.6-dev
-      - nvidia-cuda-cccl-12.6
-      - coreutils
-      - tclap
+      - nvidia-cuda-cccl-12.8
       - plog-dev
       - plog-static
+      - tclap
+      - wolfi-baselayout
+      - yaml-cpp-dev
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/NVIDIA/DCGM
-      expected-commit: 903d745504f50153be8293f8566346f9de3b3c93
+      expected-commit: 6e947dcac9b3160d61d98fea4741d51d4bec5c1f
       tag: v${{package.version}}
 
   - uses: patch
     with:
-      patches: ftbfs.patch
+      patches: fix-build-update-boost-api.patch fix-build-boost-process-v1.patch fix-link-ordering.patch
 
   - runs: |
       # code has unused variables in C code
       sed -i 's|-Werror|-Wno-error|' CMakeLists.txt
       # Cannot currently coinstall, hence both are the same build, and
       # "11" one is removed
-      sed -i 's|11.8|12.6|' -i ./cmake/FindCuda.cmake
-      sed -i 's|12.0|12.6|' -i ./cmake/FindCuda.cmake
+      sed -i 's|11.8|12.8|' -i ./cmake/FindCuda.cmake
 
   - uses: cmake/configure
     with:
-      opts: -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -UDCGM_LIB_INSTALL_PREFIX -UDCGM_PACKAGING -UDCGM_PACKAGING_ENGINE -DBUILD_TESTING=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+      opts: |
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -UDCGM_LIB_INSTALL_PREFIX \
+        -UDCGM_PACKAGING \
+        -UDCGM_PACKAGING_ENGINE \
+        -DBUILD_TESTING=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_CXX_STANDARD=20
 
   - uses: cmake/build
 
@@ -87,18 +94,21 @@ pipeline:
       find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_64bit' -delete
       find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_aarch64' -delete
       find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_ppc64le' -delete
+      mv ${{targets.destdir}}/usr/sbin/* ${{targets.destdir}}/usr/bin/
+      rmdir ${{targets.destdir}}/usr/sbin/
 
   - uses: strip
 
   - name: Remove cuda11 build, which was missbuilt with cuda12
+    working-directory: ${{targets.contextdir}}
     runs: |
-      cd ${{targets.destdir}}
       rm usr/bin/dcgmproftester11
-      rm usr/lib/libdcgm_cublas_proxy11.so
-      rm usr/share/dcgm_tests/apps/amd64/dcgmproftester11
-      rm usr/share/dcgm_tests/apps/amd64/libdcgm_cublas_proxy11.so
-      rm -r usr/share/nvidia-validation-suite/plugins/cuda11
+      rm usr/lib/libdcgm_cublas_proxy11.so*
+      rm -r usr/libexec/datacenter-gpu-manager-4/plugins/cuda11
       rm -r usr/share/dcgm_tests/apps/nvvs/plugins/cuda11
+      _arch=${{build.arch}}; case $_arch in x86_64) _arch="amd64" ;; aarch64) _arch="aarch64" ;; esac
+      rm usr/share/dcgm_tests/apps/${_arch}/dcgmproftester11
+      rm usr/share/dcgm_tests/apps/${_arch}/libdcgm_cublas_proxy11.so*
 
 subpackages:
   - name: ${{package.name}}-dev
@@ -106,26 +116,33 @@ subpackages:
       - uses: split/dev
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/local/dcgm/sdk_samples
-          mv ${{targets.destdir}}/usr/local/dcgm/sdk_samples/c_src ${{targets.contextdir}}/usr/local/dcgm/sdk_samples
-          # Move libdcgm.so back to the main package, as dcgm-exporter dlopens it
-          mv ${{targets.contextdir}}/usr/lib/libdcgm.so ${{targets.destdir}}/usr/lib/
-          # Move libdcgm_cublas_proxy12.so to subpackage from mainpackage to optimise main package size
-          mv ${{targets.destdir}}/usr/lib/libdcgm_cublas_proxy12.so ${{targets.contextdir}}/usr/lib/
+          mv ${{targets.destdir}}/usr/src/datacenter-gpu-manager-4/sdk_samples/c_src ${{targets.contextdir}}/usr/local/dcgm/sdk_samples
+          # Move libdcgm_cublas_proxy12.so* to subpackage from mainpackage to optimise main package size
+          mv ${{targets.destdir}}/usr/lib/libdcgm_cublas_proxy12.so* ${{targets.contextdir}}/usr/lib/
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
 
   - name: ${{package.name}}-tests
     pipeline:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/share
           mv ${{targets.destdir}}/usr/share/dcgm_tests ${{targets.contextdir}}/usr/share
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
 
   - name: ${{package.name}}-nvvs
     pipeline:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/share
-          mv ${{targets.destdir}}/usr/share/nvidia-validation-suite ${{targets.contextdir}}/usr/share
-          mkdir -p ${{targets.contextdir}}/usr/
-          # TODO this path looks weird
-          mv ${{targets.destdir}}/usr/etc ${{targets.contextdir}}/usr/
+          mv ${{targets.destdir}}/usr/libexec/datacenter-gpu-manager-4 ${{targets.contextdir}}/usr/share
+    dependencies:
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
 
 update:
   enabled: true
@@ -138,7 +155,23 @@ update:
 test:
   pipeline:
     - runs: |
-        dcgmi --version
+        dcgmi --version | grep ${{package.version}}
         dcgmi --help
-        nv-hostengine --version
+        nv-hostengine --version | grep ${{package.version}}
         nv-hostengine --help
+    - name: Run and test DCGM
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /var/run
+          touch /var/run/nvhostengine.pid
+        start: nv-hostengine
+        timeout: 30
+        expected_output: |
+          Started host engine version
+        post: |
+          #!/bin/sh -e
+          set -o pipefail
+          dcgmi modules --list | grep -i Success
+          dcgmi modules --list | grep -i Loaded
+          dcgmi modules --list | grep -i Core

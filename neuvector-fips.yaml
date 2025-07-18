@@ -1,7 +1,7 @@
 package:
   name: neuvector-fips
-  version: 5.4.0
-  epoch: 3
+  version: "5.4.5"
+  epoch: 1
   description: "NeuVector Full Lifecycle Container Security Platform"
   copyright:
     - license: Apache-2.0
@@ -12,6 +12,7 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
+      - gcc-14-default
       - glibc-dev
       - jansson-dev
       - jemalloc-dev
@@ -27,21 +28,30 @@ environment:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 21a435c3ba76904d3fade5faf97c64a31dc03507
+      expected-commit: 51f9b4492aea9563fe2ddff8322d4668a6a4f822
       repository: https://github.com/neuvector/neuvector.git
       tag: v${{package.version}}
 
-  - uses: patch
-    with:
-      patches: consul-tls-cipher.patch
-
   - uses: go/bump
     with:
-      deps: golang.org/x/sys@v0.19.0 golang.org/x/crypto@v0.22.0 github.com/docker/docker@v26.1.5 github.com/opencontainers/runc@v1.1.14 github.com/golang-jwt/jwt/v4@v4.5.1
-      replaces: github.com/samalba/dockerclient=github.com/Dentrax/dockerclient@v0.1.0 github.com/dgrijalva/jwt-go=github.com/golang-jwt/jwt/v4@v4.5.1 github.com/docker/docker=github.com/docker/docker@v26.1.5+incompatible
+      replaces: |-
+        github.com/samalba/dockerclient=github.com/Dentrax/dockerclient@v0.1.0 github.com/dgrijalva/jwt-go=github.com/golang-jwt/jwt/v4@v4.5.1 github.com/golang-jwt/jwt/v5=github.com/golang-jwt/jwt/v5@v5.2.2
       show-diff: true
 
 subpackages:
+  - name: neuvector-upgrader-fips
+    description: "NeuVector Upgrader"
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./upgrader
+          output: upgrader
+          prefix: usr/local
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+
   - name: neuvector-enforcer-fips
     description: "NeuVector Enforcer"
     dependencies:
@@ -64,17 +74,17 @@ subpackages:
           sed -i 's|interim/master.xxxx|v${{package.version}}|g' agent/version.go
       - uses: go/build
         with:
-          modroot: agent
+          modroot: .
           ldflags: "-X main.version=${{package.version}}"
-          packages: .
+          packages: ./agent
           output: agent
           prefix: usr/local
           go-package: go-fips-md5
       - uses: go/build
         with:
-          modroot: agent/workerlet/pathWalker
+          modroot: .
           ldflags: "-X main.version=${{package.version}}"
-          packages: .
+          packages: ./agent/workerlet/pathWalker
           output: pathWalker
           prefix: usr/local
           go-package: go-fips-md5
@@ -90,10 +100,16 @@ subpackages:
           # Build and install dp
           export CFLAGS="$CFLAGS -DRCU_MEMBARRIER=true -I${PWD}/dp"
           export LDFLAGS="$LDFLAGS -lurcu-memb -no-pie"
+
+          # We are overwriting the EXTRA_LDFLAGS here
+          # without this dp will fail to build due to referencing of -lhs path is different
+          # had to reorder -lstd++ to be after lhs and lm has to be after lhs due to how the build gets or generates the libraries
+          export CG_EXTRA_LDFLAGS="-lpcap -lpcre2-8 -ljansson -ljemalloc -pthread -lurcu -lurcu-cds -lrt -lnetfilter_queue -Wl,-rpath,'$$ORIGIN' -Wl,--disable-new-dtags -L/usr/lib -lhs -lm -lstdc++"
+
           if [[ "${{build.arch}}" == "aarch64" ]]; then
-            make -C dp -f Makefile_arm64 CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
+            make EXTRA_LDFLAGS="$CG_EXTRA_LDFLAGS" -C dp -f Makefile_arm64 LDFLAGS="$LDFLAGS" CFLAGS="$CFLAGS"
           else
-            make -C dp CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
+            make EXTRA_LDFLAGS="$CG_EXTRA_LDFLAGS" -C dp CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
           fi
           mkdir -p ${{targets.contextdir}}/usr/local/bin
           install -Dm755 dp/dp ${{targets.contextdir}}/usr/local/bin/dp
@@ -123,6 +139,7 @@ subpackages:
         - neuvector-cis-benchmarks
         - neuvector-monitor
         - neuvector-nstools
+        - neuvector-upgrader-fips
         - opa-fips
         - openssl-config-fipshardened
         - pcre
@@ -132,9 +149,9 @@ subpackages:
           sed -i 's|interim/master.xxxx|v${{package.version}}|g' controller/version.go
       - uses: go/build
         with:
-          modroot: controller
+          modroot: .
           ldflags: "-X main.Version=${{package.version}} -X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn"
-          packages: .
+          packages: ./controller
           output: controller
           prefix: usr/local
           go-package: go-fips-md5
@@ -153,6 +170,10 @@ subpackages:
           # Binaries expected by agent in /usr/local/bin
           ln -sf /usr/bin/opa ${{targets.contextdir}}/usr/local/bin/opa
           ln -sf /bin/consul ${{targets.contextdir}}/usr/local/bin/consul
+
+          # Copy busybox to /usr/bin/cat to work around neuvector controller hardening
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          cp /bin/busybox ${{targets.contextdir}}/usr/bin/cat
     test:
       pipeline:
         - runs: |
@@ -168,3 +189,8 @@ update:
     identifier: neuvector/neuvector
     tag-filter: v
     strip-prefix: v
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage

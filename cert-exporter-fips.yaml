@@ -1,6 +1,6 @@
 package:
   name: cert-exporter-fips
-  version: 2.13.0
+  version: "2.15.1"
   epoch: 1
   description: A Prometheus exporter that publishes cert expirations on disk and in Kubernetes secrets
   copyright:
@@ -19,11 +19,17 @@ pipeline:
     with:
       repository: https://github.com/joe-elliott/cert-exporter.git
       tag: v${{package.version}}
-      expected-commit: 5565b9ff987e4af7803436bfcf89598a808f6b7c
+      expected-commit: fb0ad660fe83b3e3991ed7493d9cfef3c442b4cb
 
   - uses: go/bump
     with:
-      deps: golang.org/x/crypto@v0.17.0 google.golang.org/protobuf@v1.33.0 github.com/golang/protobuf@v1.5.4 golang.org/x/net@v0.23.0
+      deps: |-
+        github.com/golang/protobuf@v1.5.4
+        github.com/cert-manager/cert-manager@v1.15.4
+        github.com/golang/glog@v1.2.4
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/net@v0.38.0
 
   - uses: go/build
     with:
@@ -43,6 +49,27 @@ update:
     tag-filter: v
 
 test:
+  environment:
+    contents:
+      packages:
+        - openssl
+        - curl
   pipeline:
     - runs: |
         cert-exporter --help
+    - uses: test/go-fips-check
+    - name: "Functional test"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create dummy certificates in /tmp
+          echo "Creating dummy certificates..."
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/tls.key -out /tmp/tls.crt -days 1 -subj "/CN=test-cert"
+        start: |
+          cert-exporter -logtostderr -include-cert-glob="/tmp/tls.crt" -prometheus-listen-address=":8080" -prometheus-path="/metrics"
+        timeout: 60
+        expected_output: |
+          Starting cert-exporter
+          Publishing  node metrics
+        post: |
+          curl -sf http://localhost:8080/metrics | grep -q 'cert_exporter_cert_expires_in_seconds' || exit 1

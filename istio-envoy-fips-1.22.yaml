@@ -1,7 +1,7 @@
 package:
   name: istio-envoy-fips-1.22
-  version: 1.22.6
-  epoch: 0
+  version: "1.22.8"
+  epoch: 2
   description: Envoy with additional Istio plugins (wasm, telemetry, etc)
   copyright:
     - license: Apache-2.0
@@ -18,49 +18,47 @@ environment:
       # We don't use automake/autoconf directly, but the Bazel rule uses them
       - autoconf
       - automake
+      - bash
+      - bazel-6
+      - binutils
+      - boringssl-fips-static=0.1-r2
+      - build-base
       - busybox
       - ca-certificates-bundle
-      - wolfi-baselayout
-      - binutils
-      - build-base
-      - git
-      - bazel-6
-      - openjdk-11
-      - bash
-      - libtool
+      - clang-15
       - cmake
-      - samurai
-      - python3-dev
-      - clang~15
-      - llvm-libcxx-15
-      - llvm-libcxx-15-dev
-      - llvm15
-      - llvm15-dev
-      - llvm-lld-15
-      - llvm15-tools
-      - llvm15-cmake-default
       - coreutils
+      - gcc-14-default
+      - git
+      - libcxx1-15-dev
+      - libtool
+      - lld-15
+      - llvm-15-dev
+      - openjdk-11
       - patch
-      - boringssl-fips-static
+      - python3-dev
+      - samurai
+      - wolfi-baselayout
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/istio/proxy
       tag: ${{package.version}}
-      expected-commit: 59080172cb101a90727fb6fbf829bf514d63cb53
+      expected-commit: b79502579bd44605d3ce9e1747ac3ed330beb947
 
-  - runs: |
+  - name: Add use-precompiled-boringssl-from-build-env patch
+    runs: |
+      # Append new patch use-precompiled-boringssl-from-build-environment.patch to the envoy in WORKSPACE.
+      # it will search for the entry `sha256 = ENVOY_SHA256`` and append the patch entry after it.
+      # This patch is sets the code to use the precompiled boringssl from the build environment.
+      sed -i "/sha256 = ENVOY_SHA256/a\\
+         patches = [\"//:use-precompiled-boringssl-from-build-environment.patch\"], patch_args = [\"-p1\"]," WORKSPACE
+
+  - name: Build envopy
+    runs: |
       export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
       mkdir -p .cache/bazel/_bazel_root
-
-      # Two patches here:
-      # - 1b576a103463ca008c76800d1f67929c2a2ffaeb.diff: patch Envoy to be able to use make 4.4
-      #   This patch is from https://github.com/envoyproxy/envoy/commit/1b576a103463ca008c76800d1f67929c2a2ffaeb.diff
-      #
-      # - boringssl_fips.genrule.cmd.diff: patch Envoy to use our boringssl-fips package.
-      sed -i "/sha256 = ENVOY_SHA256/a\\
-         patches = [\"//:boringssl_fips.genrule_cmd.diff\"], patch_args = [\"-p1\"]," WORKSPACE
 
       # The flag boringssl=fips is to build with FIPS boringssl
       # See https://github.com/envoyproxy/envoy/blob/v1.27.0/bazel/BUILD#L475
@@ -88,3 +86,78 @@ update:
     identifier: istio/proxy
     use-tag: true
     tag-filter: 1.22.
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - curl
+        - netcat-openbsd
+        - procps
+        - jq
+  pipeline:
+    - name: "Verify binary installation"
+      runs: |
+        envoy --version
+        envoy --help
+    - name: "Test Envoy admin interface startup"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: envoy --config-path /tmp/minimal.yaml --admin-address-path /tmp/admin.txt
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          # Get admin address
+          ADMIN_ADDR=$(cat /tmp/admin.txt)
+
+          # Test admin endpoints
+          curl -s "http://${ADMIN_ADDR}/server_info" | jq . || exit 1
+          curl -s "http://${ADMIN_ADDR}/stats" | grep envoy || exit 1
+          curl -s "http://${ADMIN_ADDR}/clusters" | jq . || exit 1
+    - name: "Test hot restart capability"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: envoy --config-path /tmp/minimal.yaml --restart-epoch 0
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          first_pid=$(pgrep -f "restart-epoch 0")
+          envoy --config-path /tmp/minimal.yaml --restart-epoch 1 &
+          sleep 2
+
+          # Verify both processes exist
+          if ! ps -p $first_pid > /dev/null; then
+            echo "Original Envoy process not found"
+            exit 1
+          fi

@@ -1,0 +1,126 @@
+package:
+  name: linux-aws-generic
+  version: "6.15.6"
+  epoch: 2
+  description: "the AWS generic linux kernel"
+  copyright:
+    - license: GPL-2.0
+  resources:
+    cpu: 16
+    memory: 24Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-modules=${{package.full-version}}
+      # Ensure we get Chainguard branding in our VMs.
+      - chainguard-baselayout
+      - merged-lib
+      - wolfi-baselayout
+
+environment:
+  environment:
+    KBUILD_BUILD_USER: noreply
+    KBUILD_BUILD_HOST: chainguard.dev
+    KBUILD_BUILD_VERSION: Chainguard
+
+var-transforms:
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '$1'
+    to: flavor
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '${{package.full-version}}-$1'
+    to: version-flavor
+  - from: ${{package.version}}
+    match: '^(\d+[.]\d+)[.]0$'
+    replace: '$1'
+    to: git-tag-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gregkh/linux
+      tag: v${{vars.git-tag-version}}
+      expected-commit: 1562d948232546cfad45a1beddc70fe0c7b34950
+
+  - uses: kernel/patch
+
+  - uses: kernel/config
+    with:
+      flavor: ${{vars.flavor}}
+      make-targets: hardening.config
+      version-flavor: ${{vars.version-flavor}}
+
+  - uses: kernel/build
+    with:
+      version-flavor: ${{vars.version-flavor}}
+
+subpackages:
+  - name: "${{package.name}}-boot-installed"
+    description: "Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - ${{package.name}}-modules=${{package.full-version}}
+        - chainguard-baselayout
+        - merged-lib
+        - systemd-boot-installed
+        - wolfi-baselayout
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          aarch64_console: ttyS0
+
+  - name: "${{package.name}}-modules"
+    description: "Linux kernel modules"
+    pipeline:
+      - uses: kernel/modules
+        with:
+          version-flavor: ${{vars.version-flavor}}
+    dependencies:
+      runtime:
+        - merged-lib
+        - wolfi-baselayout
+
+test:
+  pipeline:
+    - uses: kernel/test/kconfig/systemd
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: ${{vars.flavor}}
+        # Depends on CONFIG_X86_64
+        aarch64_exclude: AMD_IOMMU
+    - name: Test Basic Boot
+      uses: kernel/test/console_grep
+      with:
+        string: "Unable to mount root fs"
+    - name: Test for XFS
+      uses: kernel/test/console_grep
+      with:
+        string: "xfs"
+    - name: Test for NVME
+      uses: kernel/test/console_grep
+      with:
+        string: "nvme nvme0: pci function"
+    - name: Test for ip6tables
+      uses: kernel/test/console_grep
+      with:
+        string: "Segment Routing with IPv6"
+
+update:
+  enabled: true
+  github:
+    identifier: gregkh/linux
+    use-tag: true
+    strip-prefix: v
+    tag-filter: v
+  ignore-regex-patterns:
+    # skip mainline (x.y) release tags, wait for stable (x.y.z) release tags
+    - ^\d+[.]\d+$
+  version-transform:
+    # mainline release tag x.y to kernel version x.y.0
+    - match: ^(\d+[.]\d+)$
+      replace: $1.0

@@ -1,0 +1,121 @@
+package:
+  name: linux-raspberry-pi
+  version: "20250702"
+  epoch: 0
+  description: "the linux kernel for raspberry pi 5"
+  copyright:
+    - license: GPL-2.0
+  resources:
+    cpu: 8
+    memory: 24Gi
+  dependencies:
+    runtime:
+      # Ensure we get Chainguard branding in our VMs.
+      - chainguard-baselayout
+      - merged-lib
+      - wolfi-baselayout
+  target-architecture:
+    - aarch64 # This kernel is specific to the raspberry pi hardware
+
+environment:
+  contents:
+    packages:
+      - bison
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - diffutils
+      - elfutils
+      - elfutils-dev
+      - findutils
+      - flex
+      - gawk
+      - gmp
+      - gmp-dev
+      - mpc
+      - mpc-dev
+      - mpfr
+      - mpfr-dev
+      - openssl-dev
+      - perl
+      - python3
+      - wolfi-base
+      - zstd
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/raspberrypi/linux
+      tag: stable_${{package.version}}
+      expected-commit: 8f77e03530f65209a377d25023e912b288e039cd
+
+  - runs: |
+      set -x
+      # Make a kernel
+      # TODO: Much work to be done, tailoring a kernel config (or, more likely, a set of kernel configs)
+      KERNEL=kernel_2712
+      make bcm2712_defconfig
+
+      # Enable fuse and overlayfs stuff for dockerd to work
+      cat .config-fuse >> .config
+
+      # Enable iptables stuff for dockerd to work
+      cat .config-iptables >> .config
+
+      # Enable XFS
+      cat .config-xfs >> .config
+
+      # Remove early warnings for missing /etc/target
+      sed -i 's|CONFIG_TARGET_CORE=y|# CONFIG_TARGET_CORE is not set|g' .config
+
+      # Enable modules by default
+      sed -i 's|=m|=y|g' .config
+
+      #echo CONFIG_VERSION_SIGNATURE=\"Chainguard Wolfi Linux $(uname -m)-${{package.full-version}}\" >> .config
+      # Build the Linux Kernel
+      make -j $(nproc) Image.gz modules dtbs
+      mkdir -p ${{targets.destdir}}/boot/firmware/overlays
+      cp -a arch/arm64/boot/dts/broadcom/*.dtb ${{targets.destdir}}/boot/firmware/
+      cp -a arch/arm64/boot/dts/overlays/*.dtb* ${{targets.destdir}}/boot/firmware/overlays/
+      cp -a arch/arm64/boot/dts/overlays/README ${{targets.destdir}}/boot/firmware/overlays/
+      cp -a .config ${{targets.destdir}}/boot/config-$(uname -m)-${{package.full-version}}
+      chmod 644 ${{targets.destdir}}/boot/config-$(uname -m)-${{package.full-version}}
+      cp -a $(find . -type f \( -name bzImage -or -name Image.gz \) -print -quit) ${{targets.destdir}}/boot/vmlinuz
+      chmod 644 ${{targets.destdir}}/boot/vmlinuz
+      # NOTE: Do NOT symlink this, as it will get installed onto a vfat filesystem
+      ( cd ${{targets.destdir}}/boot && cp -af vmlinuz vmlinuz-$(uname -m)-${{package.full-version}} )
+
+subpackages:
+  - name: "linux-raspberry-pi-boot-configuration"
+    description: "Linux raspberry pi kernel (installed for EFI)"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/boot
+          # Setup linux command line arguments for raspberry pi
+          cat > ${{targets.subpkgdir}}/boot/cmdline.txt <<EOF
+          multipath=off dwc_otg.lpm_enable=0 root=PARTLABEL=Chainguard rootfstype=xfs rootwait fixrtc quiet splash rw
+          EOF
+          cp -af config.txt ${{targets.subpkgdir}}/boot/
+          # In addition to noting the root partition above, configure /etc/fstab as well.
+          mkdir -p ${{targets.subpkgdir}}/etc
+          echo "/dev/gpt-auto-root / auto defaults,x-systemd.growfs 0 1" > "${{targets.subpkgdir}}/etc/fstab"
+    dependencies:
+      runtime:
+        - merged-lib
+        - wolfi-baselayout
+
+test:
+  pipeline:
+    - name: vmlinuz existence
+      runs: |
+        # Just a dumb test for now...see if we have a file at /boot/vmlinuz
+        [ -e /boot/vmlinuz ]
+
+update:
+  enabled: true
+  github:
+    identifier: raspberrypi/linux
+    use-tag: true
+    strip-prefix: stable_
+    tag-filter: stable_

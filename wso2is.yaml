@@ -1,0 +1,311 @@
+package:
+  name: wso2is
+  # IMPORTANT - Manual updates required between versions. Please refer to the
+  # vars section below.
+  version: 7.1.0
+  epoch: 5
+  description: "WSO2 Identity Server - Open source identity and access management solution"
+  copyright:
+    # https://github.com/chainguard-dev/image-requests/issues/5594#issuecomment-2992353956
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - busybox
+      - ca-certificates-bundle
+      - netcat-openbsd
+      - openjdk-${{vars.runtime-java-version}}-default-jvm
+      - tzdata
+
+vars:
+  # --- Manual update required, docker-entrypoint vars ---
+  # This application depends on docker-entrypoint scripts, which are contained
+  # in a different repository. The tagging format is also slightly different.
+  # Whilst releases are not frequent, for each new-version update, please check
+  # what the 'closest' corresponding release tag is here, then update below:
+  # - https://github.com/wso2/docker-is
+  docker-entrypoint-git-repo-tag: v7.1.0.1
+  docker-entrypoint-git-repo-sha: 5c550233f4dd0517576d223b3d50ee4c639699c0
+  java-version: 11
+  runtime-java-version: 21
+  # They download a specific version of dnsjava JAR file into the image:
+  # https://github.com/wso2/docker-is/blob/v7.1.0.1/dockerfiles/ubuntu/is/Dockerfile#L121
+  # so we need to keep this in sync with that version too.
+  dns-java-version: 3.6.1
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - wget
+      - zip
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    # Required for compatibility with older JAR files in Maven dependencies that don't follow strict ZIP specifications
+    JAVA_TOOL_OPTIONS: "-Djdk.util.zip.disableZip64ExtraFieldValidation=true -Djdk.nio.zipfs.allowDotZipEntry=true"
+    MAVEN_OPTS: |
+      -Xmx2g
+      -Dmaven.artifact.threads=10
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/wso2/product-is
+      tag: v${{package.version}}
+      expected-commit: d1738c763163b0df2722be27eac65e5a7470b02a
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/wso2/docker-is
+      tag: ${{vars.docker-entrypoint-git-repo-tag}}
+      expected-commit: ${{vars.docker-entrypoint-git-repo-sha}}
+      destination: docker-is
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+
+  - runs: |
+      # Build all modules from the root
+      mvn clean install -Dmaven.test.skip=true
+
+  - runs: |
+      # Create installation directory structure
+      mkdir -p ${{targets.destdir}}/usr/share/java/wso2is
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mkdir -p ${{targets.destdir}}/var/lib/wso2is
+      mkdir -p ${{targets.destdir}}/var/log/wso2is
+
+      # Install from distribution ZIP
+      unzip -q modules/distribution/target/wso2is-${{package.version}}.zip -d modules/distribution/target/
+      cp -r modules/distribution/target/wso2is-${{package.version}}/* ${{targets.destdir}}/usr/share/java/wso2is/
+      chmod +x ${{targets.destdir}}/usr/share/java/wso2is/bin/*.sh 2>/dev/null
+
+      # Create symlinks for data and logs
+      ln -sf /var/lib/wso2is ${{targets.destdir}}/usr/share/java/wso2is/repository/database
+      ln -sf /var/log/wso2is ${{targets.destdir}}/usr/share/java/wso2is/repository/logs
+
+      # Copy docker-entrypoint.sh from the docker-is repository
+      cp docker-is/dockerfiles/alpine/is/docker-entrypoint.sh ${{targets.destdir}}/usr/share/java/wso2is/
+      chmod +x ${{targets.destdir}}/usr/share/java/wso2is/docker-entrypoint.sh
+
+      # Make all scripts executable
+      chmod +x ${{targets.destdir}}/usr/share/java/wso2is/bin/*.sh
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package for WSO2 Identity Server Docker deployments"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/home/wso2carbon/repository/components/lib
+
+          wget https://repo1.maven.org/maven2/dnsjava/dnsjava/${{vars.dns-java-version}}/dnsjava-${{vars.dns-java-version}}.jar \
+             -O "${{targets.contextdir}}/home/wso2carbon/repository/components/lib/dnsjava-${{vars.dns-java-version}}.jar"
+
+          # Create symlink for WSO2 IS directory where Docker expects it
+          ln -sf /usr/share/java/wso2is ${{targets.contextdir}}/home/wso2carbon/wso2is-${{package.version}}
+
+          # Create symlinks for Docker scripts
+          mkdir -p ${{targets.contextdir}}/
+          ln -sf /usr/share/java/wso2is/bin/wso2server.sh ${{targets.contextdir}}/wso2server.sh
+          ln -sf /usr/share/java/wso2is/docker-entrypoint.sh ${{targets.contextdir}}/home/wso2carbon/docker-entrypoint.sh
+          ln -sf /usr/share/java/wso2is/docker-entrypoint.sh ${{targets.contextdir}}/docker-entrypoint.sh
+
+          # Create Java preferences directories
+          mkdir -p ${{targets.contextdir}}/home/wso2carbon/.java/.systemPrefs
+          mkdir -p ${{targets.contextdir}}/home/wso2carbon/.java/.userPrefs
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - name: Test root-level symlinks
+          runs: |
+            stat /home/wso2carbon/wso2is-${{package.version}}/README.txt
+            stat /wso2server.sh
+            stat /home/wso2carbon/docker-entrypoint.sh
+            stat /docker-entrypoint.sh
+            stat /home/wso2carbon/.java/.systemPrefs
+            stat /home/wso2carbon/.java/.userPrefs
+
+  - name: ${{package.name}}-doc
+    description: "Documentation for WSO2 Identity Server"
+    pipeline:
+      - uses: split/manpages
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - curl
+        - jq
+        - openjdk-${{vars.runtime-java-version}}-default-jvm
+        - procps
+        - wait-for-it
+    environment:
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+      CARBON_HOME: "/usr/share/java/wso2is"
+  pipeline:
+    - name: Check installation
+      runs: |
+        # Verify installation directories
+        stat /usr/share/java/wso2is
+        stat /usr/share/java/wso2is/bin/wso2server.sh
+    - name: Test Startup
+      runs: |
+        # Launch wso2 using entrypoint script
+        export WORKING_DIRECTORY="/home/wso2carbon"
+        export WSO2_SERVER_HOME="/usr/share/java/wso2is"
+
+        # Start using docker-entrypoint.sh
+        # Also validates the symlink created by our -compat package.
+        nohup /home/wso2carbon/docker-entrypoint.sh > /tmp/wso2is.log 2>&1 &
+        SERVER_PID=$!
+        sleep 5
+        if ! ps -p $SERVER_PID > /dev/null 2>&1; then
+          echo "Failed to launch application via docker-entrypoint.sh"; exit 1
+        fi
+
+        echo "Waiting for server to start..."
+        wait-for-it localhost:9443 --timeout=60
+        echo "Waiting 10 seconds for services to stabilize..."
+        sleep 10
+    - name: Test creating a new user via SCIM API
+      runs: |
+        set -euo pipefail
+
+        echo "Checking server health before SCIM API test..."
+        curl -k -s -f "https://localhost:9443/carbon/admin/login.jsp" > /dev/null || {
+          echo "Server health check failed, dumping last 50 lines of log:"
+          tail -50 /tmp/wso2is.log 2>/dev/null || echo "Log file not accessible"
+          exit 1
+        }
+
+        # Create a test user via SCIM
+        USER_ID=$(curl -k -s -f -u "admin:admin" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+            "userName": "testuser123",
+            "password": "Test@123",
+            "name": {
+              "givenName": "Test",
+              "familyName": "User"
+            },
+            "emails": [{
+              "primary": true,
+              "value": "testuser@example.com"
+            }]
+          }' \
+          "https://localhost:9443/scim2/Users" | jq -r '.id')
+
+        # Test we can retrieve users! Use our previous User ID, then validate
+        # the user details match what we created.
+        USER_RESPONSE=$(curl -k -s -f -u "admin:admin" \
+          "https://localhost:9443/scim2/Users/$USER_ID")
+
+        # Verify the user data matches what we created
+        echo "$USER_RESPONSE" | jq -e '.userName == "testuser123"'
+        echo "$USER_RESPONSE" | jq -e '.emails | contains(["testuser@example.com"])'
+    - name: Test OAuth2 endpoints
+      runs: |
+        set -euo pipefail
+
+        # Fetch OIDC discovery document and verify required fields
+        DISCOVERY=$(curl -k -s -f "https://localhost:9443/oauth2/oidcdiscovery/.well-known/openid-configuration")
+
+        # Verify all required OIDC endpoints exist
+        echo "$DISCOVERY" | jq -e '.issuer and .authorization_endpoint and .token_endpoint and .jwks_uri and .userinfo_endpoint'
+    - name: Test management console
+      runs: |
+        set -euo pipefail
+
+        # Verify management console login page
+        BODY=$(curl -k -L -s -f "https://localhost:9443/carbon")
+        echo "$BODY" | grep -q "<title>WSO2 Management Console</title>"
+        echo "$BODY" | grep -q "txtUserName"
+        echo "$BODY" | grep -q "/carbon/admin/login_action.jsp"
+    - name: Test SAML SSO metadata
+      runs: |
+        set -euo pipefail
+
+        # Verify SAML metadata contains EntityDescriptor
+        curl -k -s -f "https://localhost:9443/identity/metadata/saml2" | grep -q "EntityDescriptor"
+    - name: Test OAuth2 and OpenID Connect flow
+      runs: |
+        set -euo pipefail
+
+        # Step 1: Register a new OAuth2 client via Dynamic Client Registration
+        echo "Registering OAuth2 client..."
+        read -r CLIENT_ID CLIENT_SECRET < <(curl -k -s -f -u "admin:admin" -X POST \
+          -H "Content-Type: application/json" \
+          -d '{
+            "client_name": "test_client",
+            "grant_types": ["password"],
+            "redirect_uris": ["http://localhost"]
+          }' \
+          "https://localhost:9443/api/identity/oauth2/dcr/v1.1/register" | \
+          jq -r '"\(.client_id) \(.client_secret)"')
+
+        echo "Registered client ID: $CLIENT_ID"
+
+        # Step 2: Get access token and ID token using the registered client
+        TOKEN_RESPONSE=$(curl -k -s -f -X POST \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -u "$CLIENT_ID:$CLIENT_SECRET" \
+          -d "grant_type=password&username=admin&password=admin&scope=openid internal_login" \
+          "https://localhost:9443/oauth2/token")
+
+        ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
+        ID_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.id_token')
+        TOKEN_TYPE=$(echo "$TOKEN_RESPONSE" | jq -r '.token_type // "Bearer"')
+
+        echo "Successfully obtained tokens (type: $TOKEN_TYPE)"
+
+        # Test OAuth userinfo endpoint
+        echo "Testing OAuth userinfo endpoint..."
+        USERINFO=$(curl -k -s -f -H "Authorization: Bearer $ACCESS_TOKEN" \
+          "https://localhost:9443/oauth2/userinfo")
+
+        # Verify userinfo contains sub claim
+        echo "$USERINFO" | jq -e '.sub'
+
+        # Test JWKS endpoint (for token verification)
+        echo "Testing JWKS endpoint..."
+        JWKS=$(curl -k -s -f "https://localhost:9443/oauth2/jwks")
+
+        # Verify JWKS contains keys
+        echo "$JWKS" | jq -e '.keys | length > 0'
+    - name: Test SCIM Groups endpoint
+      runs: |
+        set -euo pipefail
+
+        # Create a test group
+        GROUP_ID=$(curl -k -s -f -u "admin:admin" -X POST \
+          -H "Content-Type: application/json" \
+          -d '{
+            "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+            "displayName": "testgroup123",
+            "members": []
+          }' \
+          "https://localhost:9443/scim2/Groups" | jq -r '.id')
+
+        echo "Created group with ID: $GROUP_ID"
+
+        # Verify group exists
+        curl -k -s -f -u "admin:admin" \
+          "https://localhost:9443/scim2/Groups?filter=displayName+eq+testgroup123" | \
+          jq -e '.Resources | map(select(.displayName == "testgroup123")) | length == 1'
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - 'm' # If contains 'm' it is Pre-release version, skip updates.
+  manual: true # Manual step required - details in 'vars' section.
+  github:
+    identifier: wso2/product-is
+    strip-prefix: v
+    tag-filter: v

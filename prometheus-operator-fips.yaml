@@ -1,18 +1,20 @@
 package:
   name: prometheus-operator-fips
-  version: 0.78.1
-  epoch: 0
+  version: "0.84.0"
+  epoch: 1
   description: Prometheus Operator creates/configures/manages Prometheus clusters atop Kubernetes
   copyright:
     - license: Apache-2.0
+  dependencies:
+    runtime:
+      - merged-bin
+      - wolfi-baselayout
 
-# Environment needed for unit tests below
-environment:
-  contents:
-    packages:
-      - ca-certificates-bundle
-      - openssl
-      - openssl-config-fipshardened
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
 
 vars:
   PKG: "github.com/prometheus/common"
@@ -22,14 +24,18 @@ pipeline:
     with:
       repository: https://github.com/prometheus-operator/prometheus-operator.git
       tag: v${{package.version}}
-      expected-commit: 40104e6b861f6794243d65a11ef5ba3bc356e121
+      expected-commit: 8337f851ab7550fb7f914461e810a722e4312e17
 
   - uses: go/build
     with:
       go-package: go-fips
       packages: ./cmd/operator
       output: operator
-      ldflags: -X ${{vars.PKG}}/version.Revision=$(git rev-parse --short HEAD) -X ${{vars.PKG}}/version.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${{vars.PKG}}/version.Branch=$(git branch --show-current) -X ${{vars.PKG}}/version.Version=v${{package.version}}
+      ldflags: |
+        -X ${{vars.PKG}}/version.Revision=$(git rev-parse --short HEAD)
+        -X ${{vars.PKG}}/version.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%Y-%m-%dT%H:%M:%SZ')
+        -X ${{vars.PKG}}/version.Branch=$(git branch --show-current)
+        -X ${{vars.PKG}}/version.Version=v${{package.version}}
 
   - runs: |
       # test uses the -race flag which is incompatible with -buildmode=pie
@@ -39,24 +45,29 @@ pipeline:
 subpackages:
   - name: prometheus-config-reloader-fips
     description: Prometheus Operator creates/configures/manages Prometheus clusters atop Kubernetes
+    dependencies:
+      # REMOVE_POST_USRMERGE - https://github.com/orgs/wolfi-dev/discussions/40270
+      provides:
+        - prometheus-config-reloader-oci-entrypoint-compat-fips=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
           go-package: go-fips
           packages: ./cmd/prometheus-config-reloader
           output: prometheus-config-reloader
-          ldflags: -X ${{vars.PKG}}/version.Revision=$(git rev-parse --short HEAD) -X ${{vars.PKG}}/version.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${{vars.PKG}}/version.Branch=$(git branch --show-current) -X ${{vars.PKG}}/version.Version=v${{package.version}}
+          ldflags: |
+            -X ${{vars.PKG}}/version.Revision=$(git rev-parse --short HEAD)
+            -X ${{vars.PKG}}/version.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%Y-%m-%dT%H:%M:%SZ')
+            -X ${{vars.PKG}}/version.Branch=$(git branch --show-current)
+            -X ${{vars.PKG}}/version.Version=v${{package.version}}
     test:
       pipeline:
         - runs: |
             prometheus-config-reloader --version
             prometheus-config-reloader --help
-
-  - name: prometheus-config-reloader-oci-entrypoint-compat-fips
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.contextdir}}/bin"
-          ln -s /usr/bin/prometheus-config-reloader "${{targets.contextdir}}/bin/prometheus-config-reloader"
 
   - name: prometheus-admission-webhook-fips
     description: Prometheus Operator creates/configures/manages Prometheus clusters atop Kubernetes
@@ -66,12 +77,48 @@ subpackages:
           go-package: go-fips
           packages: ./cmd/admission-webhook
           output: admission-webhook
-          ldflags: -X ${{vars.PKG}}/version.Revision=$(git rev-parse --short HEAD) -X ${{vars.PKG}}/version.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ') -X ${{vars.PKG}}/version.Branch=$(git branch --show-current) -X ${{vars.PKG}}/version.Version=v${{package.version}}
+          ldflags: |
+            -X ${{vars.PKG}}/version.Revision=$(git rev-parse --short HEAD)
+            -X ${{vars.PKG}}/version.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%Y-%m-%dT%H:%M:%SZ')
+            -X ${{vars.PKG}}/version.Branch=$(git branch --show-current)
+            -X ${{vars.PKG}}/version.Version=v${{package.version}}
     test:
       pipeline:
         - runs: |
             admission-webhook --version
             admission-webhook --help
+    dependencies:
+      runtime:
+        - merged-bin
+        - wolfi-baselayout
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    pipeline:
+      - runs: |
+          mkdir -p /opt/iamguarded/prometheus-operator/bin/
+          ln -sf /usr/bin/operator /opt/iamguarded/prometheus-operator/bin/operator
+      - uses: iamguarded/build-compat
+        with:
+          package: prometheus-operator
+          version: ${{vars.major-version}}
+      - uses: iamguarded/finalize-compat
+        with:
+          package: prometheus-operator
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - runs: |
+            stat /opt/iamguarded/prometheus-operator/bin/operator
+            /opt/iamguarded/prometheus-operator/bin/operator --version
+        - uses: iamguarded/test-compat
+          with:
+            package: prometheus-operator
+            version: ${{vars.major-version}}
 
 test:
   environment:

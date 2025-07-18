@@ -1,0 +1,180 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: cassandra-fips-5.0
+  version: 5.0.3
+  epoch: 7
+  description: Open Source NoSQL Database
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - coreutils
+      - openjdk-${{vars.java-version}}-default-jvm
+      - python-${{vars.py-version}} # needed for cqlsh
+      - jemalloc
+    provides:
+      - cassandra-fips=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+vars:
+  py-version: 3.11
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - ant
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gh
+      - git
+      - openjdk-${{vars.java-version}}-default-jdk
+      - py${{vars.py-version}}-build
+      - py${{vars.py-version}}-cython-bin
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-setuptools
+      - python-${{vars.py-version}}-dev
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - uses: auth/github
+    with:
+      repo: chainguard-dev/ecosystems-cassandra
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/chainguard-dev/ecosystems-cassandra
+      expected-commit: 278a8f0744829834c874ceef98c55572bb6b9756
+      branch: fips-${{vars.major-minor-version}}
+
+  - uses: patch
+    with:
+      # Remediate GHSA-h46c-h94j-95f3
+      patches: bumpdeps.patch
+
+  - runs: |
+      ant artifacts -Dversion=${{package.version}}
+
+      # Install cassandra from the tarball in build/dist into the destdir in /usr/share/java/cassandra
+      mkdir -p "${{targets.destdir}}"/usr/share/java/cassandra
+      tar --strip-components 1 -C "${{targets.destdir}}"/usr/share/java/cassandra -xzf build/apache-cassandra-${{package.version}}-bin.tar.gz
+
+      # Symlink everything in the cassandra bin directory into /usr/bin
+      mkdir -p "${{targets.destdir}}"/usr/bin/
+
+      for f in /home/build/build/dist/bin/*; do
+        filename=$(basename "$f")
+        ln -sf  /usr/share/java/cassandra/bin/"$filename" "${{targets.destdir}}"/usr/bin/"$filename"
+      done
+
+      mkdir -p ${{targets.destdir}}/var/lib/cassandra
+      mkdir -p ${{targets.destdir}}/var/log/cassandra
+
+      ln -sT /var/lib/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/data
+      ln -sT /var/log/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/logs
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - cassandra-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc
+          ln -s /opt/cassandra/conf ${{targets.subpkgdir}}/etc/cassandra
+          mkdir -p ${{targets.subpkgdir}}/opt
+          ln -s /usr/share/java/cassandra ${{targets.subpkgdir}}/opt/cassandra
+
+  - name: cqlsh-fips-${{vars.major-minor-version}}
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-cassandra-driver
+        - py${{vars.py-version}}-wcwidth
+      provides:
+        - cqlsh-fips=${{package.full-version}}
+    pipeline:
+      - name: "Install python module"
+        working-directory: pylib
+        uses: py/pip-build-install
+        with:
+          python: python${{vars.py-version}}
+      - name: "Install cqlsh executable"
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          cp ./bin/cqlsh.py ${{targets.contextdir}}/usr/bin/cqlsh
+          python=python${{vars.py-version}}
+          sed -i "1s,.*,#!/usr/bin/$python,g" ${{targets.contextdir}}/usr/bin/cqlsh
+          head -n 1 ${{targets.contextdir}}/usr/bin/cqlsh
+    test:
+      pipeline:
+        - runs: |
+            cqlsh --version
+
+update:
+  enabled: false
+  manual: true
+  schedule:
+    period: daily
+    reason: Currently we maintain single branch. And 'cg' tool doesn't support to access private repos as of now. See, https://github.com/chainguard-dev/internal-dev/issues/9318.
+  git: {}
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - openjdk-${{vars.java-version}}-default-jdk
+    environment:
+      LANG: en_US.UTF-8
+      CASSANDRA_HOME: /opt/cassandra
+      CASSANDRA_CONF: /opt/cassandra/conf
+      CASSANDRA_LOGS_DIR: /opt/cassandra/logs
+      PATH: /usr/sbin:/sbin:/usr/bin:/bin:/opt/cassandra/bin/
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS"
+  pipeline:
+    - runs: apk fix openjdk-${{vars.java-version}} # FIXME: Band-aid for "Module jdk.compiler not found" issue when running "java-fips/algorithms" pipeline.
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - runs: |
+        cqlsh --help
+        cqlsh.py --version
+        cqlsh.py --help
+        stop-server -h
+    - name: "Test Cassandra server startup"
+      uses: test/daemon-check-output
+      with:
+        start: |
+          cassandra -R -f
+        timeout: 120
+        expected_output: |
+          Startup complete
+        post: |
+          # Basic connectivity test
+          nodetool status | grep -q "UN"
+
+          # Run CQL operations
+          cqlsh -e "CREATE KEYSPACE IF NOT EXISTS test_ks
+            WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};"
+
+          cqlsh -e "CREATE TABLE IF NOT EXISTS test_ks.test_table
+            (id uuid PRIMARY KEY, value text);"
+
+          cqlsh -e "INSERT INTO test_ks.test_table (id, value)
+            VALUES (uuid(), 'test_value');"
+
+          # Verify data
+          cqlsh -e "SELECT value FROM test_ks.test_table;" | grep -q "test_value"
+
+          # Check node tools
+          nodetool info | grep -q "Native Transport active"

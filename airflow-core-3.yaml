@@ -1,0 +1,163 @@
+# Based on discussion with ecosystem team (Pris), we have
+# decided to create airflow-core package in enterprise as
+# it is installed with `--user` unlike system site packages.
+# This is done to match with upstream apache/airflow:slim-latest
+# and address customer needs.
+package:
+  name: airflow-core-3
+  version: "3.0.3"
+  epoch: 1
+  description: Minimal Airflow core - Platform to programmatically author, schedule, and monitor workflows
+  dependencies:
+    runtime:
+      - bash
+      - busybox
+      - curl
+      - cyrus-sasl
+      - findutils
+      - glibc-locale-en
+      - glibc-locales
+      - gnupg-utils
+      - gzip
+      - mariadb
+      - openssl
+      - postgresql-client
+      - py${{vars.py-version}}-packaging # Airflow uses this at runtime for config loading
+      - python-${{vars.py-version}}
+    provides:
+      - airflow-core=${{package.full-version}}
+  copyright:
+    - license: Apache-2.0
+
+# As of now (2025/04/28), airflow is primarily available for python 3.12 and will break for python 3.13
+# For ref: https://airflow.apache.org/blog/airflow-2.9.0
+vars:
+  py-version: 3.12
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - patch
+      - py${{vars.py-version}}-build-bin
+      - py${{vars.py-version}}-pip
+      - python-${{vars.py-version}}
+      - python-${{vars.py-version}}-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/airflow
+      tag: ${{package.version}}
+      expected-commit: 71b03470da2d104a07a68da2d496fa9ed253f335
+
+  - runs: |
+      # Install airflow core, the upstream sets this as directory (and therefore differs from our main airflow package)
+      export PYTHONUSERBASE=${{targets.destdir}}/home/airflow/.local
+      pip install --no-cache-dir --user apache-airflow[core]==${{package.version}} --no-warn-script-location
+
+      # Patch to effectively handle instances of md5 used for non-security purposes in airflow
+      # by adding usedforsecurity=False in hashlib wrapper.
+      # We can't use patch pipeline as we use pip install method
+      # which makes us patch after installation in site-packages
+      patch -p1 -d "${{targets.destdir}}/home/airflow/.local/lib/python3.12/site-packages" < handle-md5.patch
+
+      find . -name '__pycache__' -exec rm -rf {} +
+
+# We can't re-use airflow-compat subpackage from airflow package in wolfi/os because it invoke full airflow and hence bloats size
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+      provides:
+        - airflow-core-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          # Symlink libstdc++ from usr/lib to /usr/lib/$(uname -m)-linux-gnu/
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/$(uname -m)-linux-gnu
+          ln -sf /usr/lib/libstdc++.so.6 ${{targets.subpkgdir}}/usr/lib/$(uname -m)-linux-gnu/
+    test:
+      pipeline:
+        - runs: stat /usr/lib/$(uname -m)-linux-gnu/libstdc++.so.6
+  - name: ${{package.name}}-oci-entrypoint
+    description: Entrypoint for using airflow-core in OCI containers
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - netcat-openbsd
+      provides:
+        - airflow-core-oci-entrypoint=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opt/airflow/dags
+          mkdir -p ${{targets.contextdir}}/opt/airflow/logs
+          mkdir -p ${{targets.contextdir}}/scripts/docker
+
+          # The first time you run Airflow, it will create a file called `airflow.cfg` in
+          # `$AIRFLOW_HOME` directory
+          # However, for production case it is advised to generate the configuration
+          export PYTHONPATH=${{targets.destdir}}/home/airflow/.local/lib/python${{vars.py-version}}/site-packages
+
+          ${{targets.destdir}}/home/airflow/.local/bin/airflow config list --defaults > ${{targets.contextdir}}/opt/airflow/"airflow.cfg"
+
+          cp airflow-core/src/airflow/config_templates/default_webserver_config.py ${{targets.contextdir}}/
+
+          install -Dm755 scripts/docker/entrypoint_prod.sh ${{targets.contextdir}}/entrypoint
+          install -Dm755 scripts/docker/clean-logs.sh ${{targets.contextdir}}/clean-logs
+          install -Dm755 scripts/docker/airflow-scheduler-autorestart.sh ${{targets.contextdir}}/airflow-scheduler-autorestart
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - 'rc\d+$'
+    - 'helm-chart*'
+  github:
+    identifier: apache/airflow
+    tag-filter-prefix: 3.
+
+test:
+  environment:
+    contents:
+      packages:
+        - python-${{vars.py-version}}
+        - airflow-core-3-compat
+        - bash
+  pipeline:
+    - runs: |
+        # Set environment variables
+        export PATH=/home/airflow/.local/bin:$PATH
+        export PYTHONUSERBASE=/home/airflow/.local
+        export AIRFLOW_HOME=/opt/airflow
+
+        # Prevents warnings about example dags not being in the right place under /opt/airflow
+        # This is expected as we intentionally put them under /home/airflow, and we use our own test dag
+        export AIRFLOW__CORE__LOAD_EXAMPLES=False
+
+        # Initialize Airflow database
+        airflow db migrate
+
+        # Create and test a simple DAG
+        echo "Creating and testing a simple DAG..."
+        mkdir -p /opt/airflow/dags
+        cat <<EOF > /opt/airflow/dags/test_dag.py
+        from airflow import DAG
+        from airflow.operators.bash import BashOperator
+        from datetime import datetime
+
+        with DAG("test_dag", start_date=datetime(2024, 1, 1), schedule=None) as dag:
+            task = BashOperator(
+                task_id="test_task",
+                bash_command="echo Hello World!"
+            )
+        EOF
+
+        # Reload the db
+        airflow dags reserialize
+
+        # List DAGs
+        airflow dags list | grep test_dag || (echo "DAG not found!" && exit 1)
+
+        # Test Task Execution in DAG
+        airflow tasks test test_dag test_task 2024-01-01 || (echo "Task execution failed!" && exit 1)
+    - uses: test/tw/ldd-check

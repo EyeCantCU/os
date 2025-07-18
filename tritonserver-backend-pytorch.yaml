@@ -1,0 +1,165 @@
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+vars:
+  cuda-version: 12.6
+  nvcc-gcc-version: 12
+  py-version: 3.12
+  cmake-configure-opts: |
+    -DTRITON_PYTORCH_ENABLE_TORCHVISION=on \
+    -DTRITON_PYTORCH_ENABLE_TORCHTRT=on \
+    -DTRITON_PYTORCH_INCLUDE_PATHS="/usr/include/torch;/usr/include/torch/csrc/api/include" \
+    -DTRITON_PYTORCH_LIB_PATHS="/usr/lib" \
+    -DTRITON_TORCHTRT_INCLUDE_PATH="/usr/include/torch_tensorrt" \
+    -DTRITON_TORCHTRT_LIB_PATHS="/usr/lib" \
+    -DTRITON_PYTORCH_SKIP_TORCH_INSTALL=ON \
+    -DCMAKE_INSTALL_PREFIX=/opt/tritonserver
+
+package:
+  name: tritonserver-backend-pytorch
+  version: 25.04
+  epoch: 0
+  description: NVIDIA Triton Inference Server Python Backend
+  copyright:
+    - license: BSD-3-Clause
+  target-architecture:
+    - x86_64
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      - libjpeg-turbo
+      - libpng
+      - libtorch-tensorrt-cuda-${{vars.cuda-version}}
+      - tritonserver
+    replaces:
+      - tritonserver # both were getting in binaries of tritonserver at the same place so we had to use it
+
+var-transforms:
+  - from: ${{vars.cuda-version}}
+    match: (\d+)\.\d+
+    replace: $1
+    to: cuda-major-version
+
+environment:
+  contents:
+    packages:
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - gcc-${{vars.nvcc-gcc-version}}
+      - libjpeg-turbo-dev
+      - libpng-dev
+      - libtorch-cuda-${{vars.cuda-version}}-dev
+      - libtorch-tensorrt-cuda-${{vars.cuda-version}}-dev
+      - libtorchvision-cuda-${{vars.cuda-version}}-dev
+      - opencv-dev
+      - py${{vars.py-version}}-build-base-dev
+      - py${{vars.py-version}}-pip
+      - python-${{vars.py-version}}
+      - rapidjson-dev
+  environment:
+    CUDA_ARCHITECTURES: all
+    NVCC_APPEND_FLAGS: -ccbin gcc-${{vars.nvcc-gcc-version}}
+    LIBRARY_PATH: /usr/lib/python${{vars.py-version}}/site-packages/torch/lib
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/triton-inference-server/pytorch_backend
+      branch: r${{package.version}}
+      expected-commit: e3244bcedae5a24a4a64987cc52741b42666ed96
+
+  # Comments for cmake.patch
+  # - Simplify torchvision .so logic (always use libtorchvision.so instead of libtorchvision.so.1)
+  # - Skip patchelf in non-Docker builds (What we do)
+  # - Helps OpenCV libs (with our libopencv)
+  # - Helps install torchtrtc binary if Torch-TRT is enabled (with our torchtrtc instead of pulling it from web)
+  # For fuser-depracate.patch, we are removing a dead code path that is not used anymore
+  - uses: patch
+    with:
+      patches: fuser-depracate.patch cmake.patch
+
+  # This configure will pull the file we want to patch
+  - uses: cmake/configure
+    with:
+      output-dir: output
+      #Can't use cuda-version in var so adding it in opts separately
+      opts: |
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc \
+        ${{vars.cmake-configure-opts}}
+
+  - uses: patch
+    working-directory: output/_deps/repo-backend-src
+    with:
+      patches: ../../../cuda-architectures-override.patch
+
+  # Now that it is patched, we need to configure again
+  - uses: cmake/configure
+    with:
+      output-dir: output
+      #Can't use cuda-version in var so adding it in opts separately
+      opts: |
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc \
+        ${{vars.cmake-configure-opts}}
+
+  - uses: cmake/build
+    with:
+      output-dir: output
+
+  - uses: cmake/install
+    with:
+      output-dir: output
+
+update:
+  enabled: false
+  exclude-reason: "upstream not using tags or releases"
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/opt/tritonserver/lib"
+    - name: Triton PyTorch backend minimal startup smoke test (intentinal failure to check backend init)
+      runs: |
+        # Setup dummy model directory
+        mkdir -p /tmp/models/resnet50/1
+        echo '{}' > /tmp/models/resnet50/1/model.pt
+        cat > /tmp/models/resnet50/config.pbtxt <<EOF
+        name: "resnet50"
+        platform: "pytorch_libtorch"
+        max_batch_size: 0
+        input [
+          {
+            name: "input"
+            data_type: TYPE_FP32
+            dims: [3, 224, 224]
+          }
+        ]
+        output [
+          {
+            name: "output"
+            data_type: TYPE_FP32
+            dims: [1000]
+          }
+        ]
+        EOF
+
+        # Start Triton in background and capture logs
+        /opt/tritonserver/bin/tritonserver --model-repository=/tmp/models > /tmp/triton.log 2>&1 &
+        pid=$!
+
+        # Give it a moment to start
+        sleep 5
+
+        # Kill it to avoid test hang
+        kill $pid || true
+
+        echo "=== Triton logs ==="
+        cat /tmp/triton.log
+
+        # Grep for known successful backend init logs
+        if grep -q "TRITONBACKEND_Initialize: pytorch" /tmp/triton.log && \
+           grep -q "cuDNN is enabled for model instance 'resnet50'" /tmp/triton.log; then
+          echo "Backend initialized"
+          exit 0
+        fi
+
+        echo "Backend did not initialize as expected"
+        exit 1

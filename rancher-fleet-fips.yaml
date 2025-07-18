@@ -1,0 +1,164 @@
+package:
+  name: rancher-fleet-fips
+  version: "0.12.4"
+  epoch: 5
+  description: Deploy workloads from Git to large fleets of Kubernetes clusters
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 05a581d2c0b42428d889a5ec0fa1752f8590fa31
+      repository: https://github.com/rancher/fleet
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
+      modroot: pkg/apis
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.29.0
+        k8s.io/kubernetes@v1.33.2
+        helm.sh/helm/v3@v3.18.4
+
+subpackages:
+  - name: rancher-fleet-agent-fips
+    dependencies:
+      runtime:
+        - busybox
+        - gzip
+        - posix-libc-utils
+    pipeline:
+      - uses: go/build
+        with:
+          ldflags: |
+            -X github.com/rancher/fleet/pkg/version.GitCommit=$(git rev-parse HEAD)
+            -X github.com/rancher/fleet/pkg/version.Version=${{package.version}}
+          output: fleetagent
+          packages: ./cmd/fleetagent/main.go
+          go-package: go-fips
+    test:
+      environment:
+        environment:
+          # required to run any of these tests and the application
+          # otherwise panic failures will occur.
+          # values referenced here: https://github.com/rancher/fleet/blob/ad5324910e30cf7d2b7ef3ab8893c68c9c9e6baa/charts/fleet/values.yaml#L101
+          CATTLE_ELECTION_LEASE_DURATION: 30s
+          CATTLE_ELECTION_RENEW_DEADLINE: 25s
+          CATTLE_ELECTION_RETRY_PERIOD: 10s
+      pipeline:
+        - uses: test/go-fips-check
+        - name: Verify version output
+          runs: |
+            fleetagent --version | grep ${{package.version}}
+        - uses: test/kwok/cluster
+        - name: "Test fleet-agent register functionality"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tmp/fleet-test
+              kwokctl get kubeconfig > /tmp/fleet-test/kubeconfig
+              kubectl create ns fleet-system
+              kubectl create secret generic fleet-agent-bootstrap
+            start: fleetagent register --kubeconfig /tmp/fleet-test/kubeconfig --namespace fleet-system
+            timeout: 30
+            expected_output: |
+              starting registration on upstream cluster
+            error_strings: |
+              ERROR
+              FATAL
+              panic
+            post: |
+              rm -rf /tmp/fleet-test
+
+  - name: rancher-fleet-cli-fips
+    pipeline:
+      - uses: go/build
+        with:
+          ldflags: |
+            -X github.com/rancher/fleet/pkg/version.GitCommit=$(git rev-parse HEAD)
+            -X github.com/rancher/fleet/pkg/version.Version=${{package.version}}
+          output: fleet
+          packages: ./cmd/fleetcli/main.go
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - name: Verify version output
+          runs: |
+            fleet --version | grep ${{package.version}}
+            fleet completion bash | grep -qE "__fleet_debug.*starting completion logic.*"
+        - name: "Setup KWOK cluster"
+          uses: test/kwok/cluster
+        - name: "Install CRDs"
+          runs: |
+            kubectl apply -f https://raw.githubusercontent.com/rancher/fleet/refs/tags/v${{package.version}}/charts/fleet-crd/templates/crds.yaml
+            kubectl wait --for=condition=Established crd --all --timeout=60s
+        - name: "Cleanup cluster registrations"
+          runs: |
+            fleet cleanup clusterregistration | grep "Cleaning up outdated cluster registrations"
+
+  - name: rancher-fleet-controller-fips
+    dependencies:
+      runtime:
+        - openssh-client
+        - git
+    pipeline:
+      - uses: go/build
+        with:
+          ldflags: |
+            -X github.com/rancher/fleet/pkg/version.GitCommit=$(git rev-parse HEAD)
+            -X github.com/rancher/fleet/pkg/version.Version=${{package.version}}
+          output: fleetcontroller
+          packages: ./cmd/fleetcontroller
+          go-package: go-fips
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+      pipeline:
+        - uses: test/go-fips-check
+        - name: Verify version output
+          runs: |
+            fleetcontroller --version
+            fleetcontroller --help
+        - name: "Setup KWOK cluster"
+          uses: test/kwok/cluster
+        - name: "Install CRDs"
+          runs: |
+            kubectl apply -f https://raw.githubusercontent.com/rancher/fleet/refs/tags/v${{package.version}}/charts/fleet-crd/templates/crds.yaml
+            kubectl wait --for=condition=Established crd --all --timeout=60s
+            kubectl create ns cattle-fleet-system
+        - name: "Start fleet controller daemon"
+          uses: test/daemon-check-output
+          with:
+            start: |
+              fleetcontroller \
+                --namespace cattle-fleet-system  \
+                --kubeconfig ~/.kube/config
+            timeout: 30
+            expected_output: |
+              listening for changes on local cluster
+              starting job scheduler
+              starting manager
+              successfully acquired lease
+            post: |
+              # Check metrics endpoint
+              curl -fsSL http://localhost:8080/metrics | grep "leader_election_master_status"
+
+update:
+  enabled: true
+  github:
+    identifier: rancher/fleet
+    strip-prefix: v
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage

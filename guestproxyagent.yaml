@@ -1,0 +1,91 @@
+# Adpated from:
+# https://github.com/Azure/GuestProxyAgent/blob/dev/rpmbuild/SPECS/azure-proxy-agent.spec
+# https://github.com/Azure/GuestProxyAgent/blob/dev/build-linux.sh
+package:
+  name: guestproxyagent
+  version: "1.0.32"
+  epoch: 1
+  description: Microsoft Azure Guest Proxy Agent.
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - merged-usrsbin
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - cargo-auditable
+      - clang
+      - libbpf-dev
+      - rust-1.80 # See https://github.com/Azure/GuestProxyAgent/blob/95b0be931eed78733fc0514da1c47b895d337a8c/build-linux.sh#L50C22-L51C1
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Azure/GuestProxyAgent.git
+      tag: ${{package.version}}
+      expected-commit: 169ef4c98e91b93346e7c01ce81b0dd35ac86859
+
+  - uses: rust/cargobump
+
+  - runs: |
+      mkdir target_dir
+
+      ARCH=${{build.arch}}
+      ARCH=${ARCH/x86_64/x86}
+      ARCH=${ARCH/aarch64/arm64}
+
+      # extracted from the build-linux.sh script which is not suitablew for our usecase
+
+      # Build proxy_agent_shared
+      cargo build --release --manifest-path ./proxy_agent_shared/Cargo.toml
+
+      # Build ebpf program
+      clang -g -target bpf -D__TARGET_ARCH_${ARCH} -c ./linux-ebpf/ebpf_cgroup.c -o ebpf_cgroup.o
+
+      # Build Proxy_agent
+      cargo build --release --manifest-path ./proxy_agent/Cargo.toml
+
+      # Build Proxy extensions
+      cargo build --release --manifest-path ./proxy_agent_extension/Cargo.toml
+
+      # Build Proxy Agent Setup
+      cargo build --release --manifest-path ./proxy_agent_setup/Cargo.toml
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      cp target/release/azure-proxy-agent ${{targets.destdir}}/usr/bin/
+      cp target/release/proxy_agent_setup ${{targets.destdir}}/usr/bin/
+
+      mkdir -p ${{targets.destdir}}/usr/lib/azure-proxy-agent/
+      cp ebpf_cgroup.o ${{targets.destdir}}/usr/lib/azure-proxy-agent/
+
+      mkdir -p ${{targets.destdir}}/usr/lib/system/systemd/
+      cp proxy_agent_setup/src/linux/azure-proxy-agent.service ${{targets.destdir}}/usr/lib/system/systemd/
+
+      mkdir -p ${{targets.destdir}}/usr/lib/system/systemd-preset/
+      cat << EOF > ${{targets.destdir}}/usr/lib/system/systemd-preset/azure-proxy-agent.preset
+      azure-proxy-agent enable
+      EOF
+
+      mkdir -p ${{targets.destdir}}/etc/azure/
+      cp proxy_agent/config/GuestProxyAgent.linux.json ${{targets.destdir}}/etc/azure/proxy-agent.json
+
+  - uses: strip
+
+test:
+  pipeline:
+    - runs: |
+        proxy_agent_setup help
+        azure-proxy-agent help
+
+update:
+  enabled: true
+  github:
+    identifier: Azure/GuestProxyAgent
+    use-tag: true

@@ -1,7 +1,7 @@
 package:
   name: prometheus-redis-exporter-fips
-  version: 1.66.0
-  epoch: 0
+  version: "1.74.0"
+  epoch: 1
   description: Prometheus Exporter for Redis Metrics.
   copyright:
     - license: MIT
@@ -20,7 +20,7 @@ pipeline:
     with:
       repository: https://github.com/oliver006/redis_exporter
       tag: v${{package.version}}
-      expected-commit: d9ccc72f2061857f41585768d2318ae5b765cfdf
+      expected-commit: 009602959fd20c5a78de639490745c8bbc7b2e06
 
   - uses: go/build
     with:
@@ -33,11 +33,47 @@ pipeline:
         -X main.BuildDate=$(date +%F-%T)
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - redis
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
+    - name: Basic command checks
+      runs: |
         redis_exporter --version
         redis_exporter --help
+    - name: Test metrics endpoint
+      runs: |
+        # Start Redis
+        redis-server &
+        REDIS_PID=$!
+        sleep 2
+
+        # Start redis-exporter
+        redis_exporter --web.listen-address=":9121" --log-format=txt &
+        EXPORTER_PID=$!
+        sleep 2
+
+        # Check metrics endpoint (which is provided by redis-exporter).
+        if ! curl -s http://localhost:9121/metrics | grep -q "redis_up"; then
+          echo "Metrics endpoint not responding"
+          kill $REDIS_PID $EXPORTER_PID
+          exit 1
+        fi
+
+        METRICS=$(curl -s http://localhost:9121/metrics)
+
+        # Check core metrics exist
+        echo $METRICS
+        for metric in "redis_up 1" "redis_uptime_in_seconds"; do
+          if ! echo "$METRICS" | grep -q "$metric"; then
+            echo "Missing metric: $metric"
+            kill $REDIS_PID $EXPORTER_PID
+            exit 1
+          fi
+        done
 
 update:
   enabled: true

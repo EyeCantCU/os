@@ -1,6 +1,6 @@
 package:
   name: calico-3.28
-  version: 3.28.2
+  version: "3.28.5"
   epoch: 2
   description: "Cloud native networking and network security"
   copyright:
@@ -8,6 +8,10 @@ package:
   dependencies:
     provides:
       - calico=${{package.full-version}}
+    runtime:
+      - merged-bin
+      - merged-usrsbin
+      - wolfi-baselayout
   resources:
     cpu: 4
     memory: 12Gi
@@ -31,9 +35,7 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
-      # - llvm16-tools
       - clang-16
-      - clang-16-dev
       # TODO: Can remove this when cni-plugins are built from source
       - curl
       # for felix
@@ -46,8 +48,7 @@ environment:
       - libbpf-dev
       - libpcap-dev
       - linux-headers
-      - llvm16
-      - openssf-compiler-options
+      - llvm-16
       - zlib-dev
       - zstd-dev
 
@@ -65,7 +66,11 @@ pipeline:
     with:
       repository: https://github.com/projectcalico/calico
       tag: v${{package.version}}
-      expected-commit: 9a96ee39f3833c3eabde151add8a84d546bcf24d
+      expected-commit: 1bf7ccd12971a007f5776e8edd992ced6317c187
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
   - working-directory: felix
     pipeline:
       # Equivalent to target: "build-bpf"
@@ -134,26 +139,29 @@ subpackages:
       provides:
         - calico-node=${{package.full-version}}
       runtime:
-        - runit
         - bash # required for logging functionality to work since `start_runit` logging script uses #!/bin/bash
-        - iptables
+        - conntrack-tools
+        - glibc
         - ip6tables
+        - iproute2
         - ipset
-        - libpcap
-        - libelf
-        - zlib
+        - iptables
         - libbpf
         # listed in Dockerfile, but not sure if they're build dependencies (for iptables) or runtime
+        - libelf
         - libmnl
-        - libnfnetlink
         - libnetfilter_conntrack
-        - iproute2
-        - procps
-        - conntrack-tools
         - libnetfilter_cthelper
         - libnetfilter_cttimeout
         - libnetfilter_queue
-        - glibc
+        - libnfnetlink
+        - libpcap
+        - merged-bin
+        - merged-usrsbin
+        - procps
+        - runit
+        - wolfi-baselayout
+        - zlib
     pipeline:
       - assertions:
           required-steps: 2
@@ -172,20 +180,15 @@ subpackages:
               LDFLAGS="-w"
               LDFLAGS="$LDFLAGS -X node/pkg/lifecycle/startup.VERSION=${{package.version}}"
               LDFLAGS="$LDFLAGS -X node/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-              LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+              LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
               LDFLAGS="$LDFLAGS -X node/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
-
-              # Mitigate CVE-2023-48795
-              go mod edit -replace=golang.org/x/crypto=golang.org/x/crypto@v0.17.0
-
-              go mod tidy
 
               CGO_ENABLED=1 \
                 CGO_LDFLAGS="$CGO_LDFLAGS" \
                 CGO_CFLAGS="$CGO_CFLAGS" \
                 go build -v -tags cgo -v -buildvcs=false \
                 -ldflags "$LDFLAGS" \
-                -o "${{targets.subpkgdir}}"/bin/calico-node \
+                -o "${{targets.subpkgdir}}"/usr/bin/calico-node \
                 ./node/cmd/calico-node
           # Equivalent to target: "$(TOOLS_MOUNTNS_BINARY)"
           - runs: |
@@ -200,7 +203,7 @@ subpackages:
                 CGO_LDFLAGS="$CGO_LDFLAGS" \
                 CGO_CFLAGS="$CGO_CFLAGS" \
                 go build -v -tags cgo -v -buildvcs=false \
-                -o "${{targets.subpkgdir}}"/bin/mountns \
+                -o "${{targets.subpkgdir}}"/usr/bin/mountns \
                 ./node/cmd/mountns
       # Equivalent to target: "$(FELIX_GPL_SOURCE)"
       - working-directory: node
@@ -214,19 +217,18 @@ subpackages:
           touch $_target
       # Filesystem prep
       - runs: |
-          # BIRD needs to run with root permissions, so put them in /bin/ to remember
-          mkdir -p "${{targets.subpkgdir}}"/bin
-          find bird/dist -type f -name 'bird*' -exec cp {} "${{targets.subpkgdir}}"/bin \;
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          find bird/dist -type f -name 'bird*' -exec cp {} "${{targets.subpkgdir}}"/usr/bin \;
 
           mkdir -p "${{targets.subpkgdir}}"/etc \
                    "${{targets.subpkgdir}}"/included-source \
                    "${{targets.subpkgdir}}"/licenses \
-                   "${{targets.subpkgdir}}"/usr/sbin
+                   "${{targets.subpkgdir}}"/usr/bin
 
           cp -avR ./node/filesystem/etc "${{targets.subpkgdir}}"/
           cp -avR ./node/filesystem/included-source "${{targets.subpkgdir}}"/
           cp -avR ./node/filesystem/usr "${{targets.subpkgdir}}"/
-          cp -avR ./node/filesystem/sbin/* "${{targets.subpkgdir}}"/usr/sbin/
+          cp -avR ./node/filesystem/sbin/* "${{targets.subpkgdir}}"/usr/bin/
           cp ./node/LICENSE "${{targets.subpkgdir}}"/licenses/
 
           # TODO: Proper fix for this
@@ -238,11 +240,14 @@ subpackages:
       provides:
         - calico-felix=${{package.full-version}}
       runtime:
-        - iproute2
-        - libelf
-        - zlib
-        - libbpf
         - glibc
+        - iproute2
+        - libbpf
+        - libelf
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
+        - zlib
     pipeline:
       - working-directory: felix
       - runs: |
@@ -256,7 +261,7 @@ subpackages:
 
           LDFLAGS="-w"
           LDFLAGS="$LDFLAGS -X node/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-          LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+          LDFLAGS="$LDFLAGS -X node/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
           LDFLAGS="$LDFLAGS -X node/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
           LDFLAGS="$LDFLAGS -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
 
@@ -313,12 +318,15 @@ subpackages:
       provides:
         - calico-cni=${{package.full-version}}
       runtime:
-        - flannel-cni-plugin
-        - cni-plugins-loopback
+        - cni-plugins-bandwidth
         - cni-plugins-host-local
+        - cni-plugins-loopback
         - cni-plugins-portmap
         - cni-plugins-tuning
-        - cni-plugins-bandwidth
+        - flannel-cni-plugin
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       # NOTE: cni is a multicall binary: https://github.com/projectcalico/calico/blob/master/cni-plugin/cmd/calico/calico.go
       # install is not a part of that multicall binary anymore (as of calico 3.27.1)
@@ -354,12 +362,15 @@ subpackages:
         - calico-cni-compat=${{package.full-version}}
       runtime:
         - calico-cni
-        - flannel-cni-plugin-compat
-        - cni-plugins-loopback-compat
+        - cni-plugins-bandwidth-compat
         - cni-plugins-host-local-compat
+        - cni-plugins-loopback-compat
         - cni-plugins-portmap-compat
         - cni-plugins-tuning-compat
-        - cni-plugins-bandwidth-compat
+        - flannel-cni-plugin-compat
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/opt/cni/bin
@@ -373,19 +384,30 @@ subpackages:
         - calico-apiserver=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
           modroot: .
           packages: ./apiserver/cmd/apiserver
           output: calico-apiserver
-          ldflags: "-X github.com/projectcalico/calico/cmd/apiserver/server.VERSION=${{package.version}}) -X github.com/projectcalico/calico/cmd/apiserver/server.BUILD_DATE=$(date -u +'%FT%T%z') -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_DESCRIPTION=$(git describe --tags) -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_REVISION=$(git rev-parse --short HEAD)"
+          ldflags: |
+            -X github.com/projectcalico/calico/cmd/apiserver/server.VERSION=${{package.version}})
+            -X github.com/projectcalico/calico/cmd/apiserver/server.BUILD_DATE=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')
+            -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_DESCRIPTION=$(git describe --tags)
+            -X github.com/projectcalico/calico/cmd/apiserver/server.GIT_REVISION=$(git rev-parse --short HEAD)
 
   # https://github.com/projectcalico/calico/blob/master/apiserver/Dockerfile#L8
   - name: "calico-apiserver-compat-${{vars.short-package-version}}"
     dependencies:
       provides:
         - calico-apiserver-compat=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/code
@@ -397,6 +419,9 @@ subpackages:
         - calico-key-cert-provisioner=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -410,13 +435,19 @@ subpackages:
         - calico-app-policy=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
           modroot: .
           packages: ./app-policy/cmd/dikastes
           output: calico-dikastes
-          ldflags: "-X github.com/projectcalico/calico/app-policy/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>') -X github.com/projectcalico/calico/app-policy/buildinfo.BuildDate=$(date -u +'%FT%T%z') -X github.com/projectcalico/calico/app-policy/GitRevision=$(git rev-parse HEAD || echo '<unknown>') -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
+          ldflags: |
+            -X github.com/projectcalico/calico/app-policy/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')
+            -X github.com/projectcalico/calico/app-policy/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')
+            -X github.com/projectcalico/calico/app-policy/GitRevision=$(git rev-parse HEAD || echo '<unknown>') -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')
       - uses: go/build
         with:
           modroot: .
@@ -429,6 +460,9 @@ subpackages:
         - calico-kube-controllers=${{package.full-version}}
       runtime:
         - glibc-dev
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -450,6 +484,9 @@ subpackages:
         - calico-pod2daemon=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -474,6 +511,10 @@ subpackages:
     dependencies:
       provides:
         - calico-pod2daemon-flexvol-compat=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
@@ -484,6 +525,10 @@ subpackages:
     dependencies:
       provides:
         - calicoctl=${{package.full-version}}
+      runtime:
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -499,12 +544,15 @@ subpackages:
         - calico-typhad=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       # TODO: I'm not sure yet if this actually needs CGO, or is just enabled upstream because of go-fips
       - runs: |
           LDFLAGS="-w"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
           LDFLAGS="$LDFLAGS -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
 
@@ -527,12 +575,15 @@ subpackages:
         - calico-typha-client=${{package.full-version}}
       runtime:
         - glibc
+        - merged-bin
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       # TODO: I'm not sure yet if this actually needs CGO, or is just enabled upstream because of go-fips
       - runs: |
           LDFLAGS="-w"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitVersion=$(git describe --tags --dirty --always --abbrev=12 || echo '<unknown>')"
-          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -u +'%FT%T%z')"
+          LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%FT%T%z')"
           LDFLAGS="$LDFLAGS -X github.com/projectcalico/calico/typha/pkg/buildinfo.GitRevision=$(git rev-parse HEAD || echo '<unknown>')"
           LDFLAGS="$LDFLAGS -B 0x$(git rev-parse HEAD || uuidgen | sed 's/-//g')"
 
@@ -570,7 +621,7 @@ test:
         /usr/bin/calico-pod2daemon-csidriver --help
         /usr/bin/calico-pod2daemon-flexvol  --help
         /usr/bin/calico-kube-controllers --help
-        /usr/sbin/start_runit 2>&1 | grep -q 'no configuration has been provided'
+        /usr/bin/start_runit 2>&1 | grep -q 'no configuration has been provided'
         /usr/bin/calico-typha --help
         /usr/bin/typha-client --help
     - name: Test compat package paths

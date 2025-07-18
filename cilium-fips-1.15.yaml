@@ -1,7 +1,7 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-fips-1.15
-  version: 1.15.10
+  version: "1.15.19"
   epoch: 0
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
@@ -20,7 +20,7 @@ package:
       - ipset
       - iptables
       - kmod
-      - llvm17
+      - llvm-17
       - cilium-host-utils=${{package.full-version}}
     provides:
       - cilium=${{package.full-version}}
@@ -37,26 +37,28 @@ environment:
       - bazel-6
       - binutils
       # Use the FIPS build of BoringSSL
-      - boringssl-fips-static-compat
+      - boringssl-fips-static-compat=0.1-r2
       - build-base
       - busybox
       - ca-certificates-bundle
       - clang-17
-      - clang-17-dev
       - cmake
       - coreutils # for GNU install
-      # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
-      - gcc-12-default
       - git
-      - go-fips
+      # MD5 needed by the Hubble config watched to calculate hash:
+      # https://github.com/cilium/cilium/blob/1d896cad39c6ec67ca15984c6c4748577622b80a/pkg/hubble/exporter/config_watcher.go#L102
+      - go-fips-md5
       - grep
       - ip6tables
       - iptables # for cilium-iptables
       - libtool
-      - llvm-lld-17
-      - llvm17
-      - llvm17-dev
-      - oldglibc
+      - libcxx1-17-dev
+      - lld-17
+      - lld-17-dev
+      - llvm-17
+      - llvm-17-dev
+      # tools run on host and are linked against oldglibc for compatability
+      - oldglibc~2.28
       - openjdk-11
       - patch
       - python3-dev
@@ -65,34 +67,16 @@ environment:
       # for fips config & fips-provider
       - openssl-config-fipshardened
 
-vars:
-  # https://github.com/cilium/cilium/blob/v1.15.6/images/cilium/Dockerfile
-  CILIUM_PROXY_COMMIT: "0d05e48bfbb8c4737ec40d5781d970a550ed2bbd"
-
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: 2fdab41a13d2a3f8abbbb4d3b4ba8cc1624c3935
+      expected-commit: 6a0e0dfd47b1d6057e766dfb1fbd6d5e6ed661d1
 
   - uses: patch
     with:
-      patches: loopback-location.patch
-
-  - uses: go/bump
-    with:
-      deps: google.golang.org/grpc@v1.64.1
-
-  - runs: |
-      # Check the Dockerfile for a SHA and match against the proxy SHA
-      ENVOY_SHA=$(grep 'FROM.*cilium-envoy' ./images/cilium/Dockerfile \
-        | sed "s/^FROM.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
-
-      if [ "$ENVOY_SHA" != "${{vars.CILIUM_PROXY_COMMIT}}" ]; then
-        echo "Expected vars.CILIUM_PROXY_COMMIT to be $ENVOY_SHA. Please update" 1>&2
-        exit 1
-      fi
+      patches: loopback-location.patch cilium-version.patch
 
   - runs: |
       # Bazel errors out on toolchain stanza
@@ -119,68 +103,9 @@ pipeline:
       DESTDIR=${{targets.destdir}} DISABLE_ENVOY_INSTALLATION=1 make install-container
 
   - runs: |
-      # these tools run on host and are linked against oldglibc for compatability
-      export CGO_CFLAGS=-I/usr/lib/oldglibc/include
-      export CGO_LDFLAGS=-L/usr/lib/oldglibc/lib
       for d in tools/sysctlfix tools/mount plugins/cilium-cni; do
           make -C $d clean all
           DESTDIR=${{targets.destdir}} make -C $d install
-      done
-
-  - uses: git-checkout
-    with:
-      repository: https://github.com/cilium/proxy
-      # Branch from https://github.com/cilium/cilium/blob/v1.15.5/images/cilium/Dockerfile
-      # Note often the branch is updated with dependencies updates, no tags
-      # See CILIUM_PROXY_COMMIT for anchor point
-      branch: v1.29
-      depth: 1000
-      destination: envoy
-
-  - runs: |
-      git -C envoy reset --hard ${{vars.CILIUM_PROXY_COMMIT}}
-
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-toolchains-paths.patch
-
-  # Remove when Envoy > 1.29.9 is used.
-  - working-directory: envoy
-    uses: patch
-    with:
-      patches: ../envoy-googleurl.patch
-
-  # Use the FIPS build of BoringSSL
-  - uses: patch
-    with:
-      patches: boringssl_fips.genrule_cmd.patch
-
-  - runs: |
-      cd /home/build/envoy/proxylib
-      make
-      mkdir -p ${{targets.destdir}}/usr/lib
-      cp -v libcilium.so ${{targets.destdir}}/usr/lib/libcilium.so
-
-      cd /home/build/envoy
-
-      # The Python interpreter complains about being run as root, there's a flag to pass to disable that warning.
-      sed -i 's/envoy_dependencies_extra()/envoy_dependencies_extra(ignore_root_user_error=True)/g' WORKSPACE
-      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-      mkdir -p .cache/bazel/_bazel_root
-
-      ./bazel/setup_clang.sh /usr
-
-      mkdir -p ${{targets.destdir}}/usr/bin
-
-      for target in cilium-envoy-starter cilium-envoy; do
-        bazel build --fission=no --config=clang \
-          --discard_analysis_cache \
-          --nokeep_state_after_build \
-          --notrack_incremental_state \
-          --conlyopt="-Wno-strict-prototypes" \
-          --verbose_failures -c opt //:${target}
-        install -m 755 bazel-bin/${target} ${{targets.destdir}}/usr/bin/${target}
       done
 
   - uses: strip
@@ -198,6 +123,34 @@ subpackages:
           cd /home/build/operator
           make cilium-operator-generic
           DESTDIR=${{targets.subpkgdir}} make install-generic
+      - uses: strip
+
+  - name: ${{package.name}}-operator-aws
+    description: AWS operator for cilium
+    dependencies:
+      runtime:
+        - gops
+      provides:
+        - cilium-operator-aws-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          cd /home/build/operator
+          make cilium-operator-aws
+          DESTDIR=${{targets.subpkgdir}} make install-aws
+      - uses: strip
+
+  - name: ${{package.name}}-operator-azure
+    description: Azure operator for cilium
+    dependencies:
+      runtime:
+        - gops
+      provides:
+        - cilium-operator-azure-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          cd /home/build/operator
+          make cilium-operator-azure
+          DESTDIR=${{targets.subpkgdir}} make install-azure
       - uses: strip
 
   - name: ${{package.name}}-hubble-relay
@@ -230,6 +183,30 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
 
+  - name: ${{package.name}}-clustermesh-apiserver
+    description: Clustermesh apiserver
+    dependencies:
+      runtime:
+        - etcd-fips
+        - gops-fips
+      provides:
+        - cilium-clustermesh-apiserver-fips=${{package.full-version}}
+    pipeline:
+      - working-directory: /home/build/clustermesh-apiserver
+        pipeline:
+          - runs: make clustermesh-apiserver
+          - uses: autoconf/make-install
+          - runs: install -Dm755 etcd-config.yaml ${{targets.contextdir}}/var/lib/cilium/etcd-config.yaml
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - runs: |
+            # check these files exist
+            stat /usr/bin/clustermesh-apiserver
+            stat /var/lib/cilium/etcd-config.yaml
+            clustermesh-apiserver help 2>&1 | grep "Run the ClusterMesh apiserver"
+
 test:
   pipeline:
     - uses: test/go-fips-check
@@ -241,12 +218,12 @@ test:
         cilium-bugtool --help
         cilium-dbg version
         cilium-dbg --help
-        cilium-envoy --version
-        cilium-envoy --help
         cilium-health --help
         cilium-mount --version
         cilium-mount --help
         cilium-sysctlfix --help
+    # Ensure that structured version info is available
+    - runs: cilium version -ojsonpath={.Client.Version} | grep ${{package.version}}
 
 update:
   enabled: true

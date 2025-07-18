@@ -1,0 +1,138 @@
+package:
+  name: vunnel
+  version: "0.34.2"
+  epoch: 1
+  description: "A tool for fetching, transforming, and storing vulnerability data from a variety of sources. It is used to create the Grype vulnerability database."
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - crane
+      - curl
+      - glow
+      - go
+      - py3-supported-fastjsonschema
+      - py3-supported-hatch-vcs
+      - py3-supported-hatchling
+      - py3-supported-pip
+      - py3-supported-poetry
+      - py3-supported-python
+      - py3-supported-setuptools
+      - py3-supported-trove-classifiers
+      - py3-supported-wheel
+      - py3-supported-zstandard
+      - uv
+      - wolfi-base
+
+vars:
+  pypi-package: vunnel
+
+data:
+  # Note that vunnel does not work with 3.10, so we'll skip that version.
+  - name: py-versions
+    items:
+      3.11: '311'
+      3.12: '312'
+      3.13: '313'
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/anchore/vunnel.git
+      tag: v${{package.version}}
+      expected-commit: 22782b751a5d2518c498a28b09a19e2b3733d861
+
+  # Revert upstream breaking their 3.13 version specifier in
+  # https://github.com/anchore/vunnel/commit/66bb76978845bd1373af8065c366c2b93aba648c#diff-50c86b7ed8ac2cf95bd48334961bf0530cdc77b5a56f852c5c61b89d735fd711
+  # https://github.com/chainguard-dev/enterprise-packages/pull/20499#issuecomment-2797469181
+  - runs: |
+      sed -i 's/<=3\.13,>=3\.11/>=3.11,<3\.14/g' pyproject.toml
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}
+    description: ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      provides:
+        - py3-${{vars.pypi-package}}
+      provider-priority: ${{range.value}}
+    pipeline:
+      - name: "Install uv-dynamic-versioning for the build since uv alone is insufficient"
+        runs: |
+          pip${{range.key}} install uv-dynamic-versioning
+          uv sync --all-extras
+      - uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - name: move usr/bin executables for -bin
+        runs: |
+          mkdir -p ./cleanup/${{range.key}}/
+          mv ${{targets.contextdir}}/usr/bin ./cleanup/${{range.key}}/
+      - uses: strip
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.pypi-package}}
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-bin
+    description: Executable binaries for ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      provider-priority: ${{range.value}}
+      provides:
+        - py3-${{vars.pypi-package}}
+        - py3-${{vars.pypi-package}}-bin
+      runtime:
+        - py${{range.key}}-${{vars.pypi-package}}
+        - py${{range.key}}-click
+        - py${{range.key}}-colorlog
+        - py${{range.key}}-cvss
+        - py${{range.key}}-dateutil
+        - py${{range.key}}-defusedxml
+        - py${{range.key}}-iso8601
+        - py${{range.key}}-importlib-metadata
+        - py${{range.key}}-lxml
+        - py${{range.key}}-mashumaro
+        - py${{range.key}}-mergedeep
+        - py${{range.key}}-orjson
+        - py${{range.key}}-packageurl-python
+        - py${{range.key}}-pyyaml
+        - py${{range.key}}-requests
+        - py${{range.key}}-sqlalchemy
+        - py${{range.key}}-xsdata
+        - py${{range.key}}-xxhash
+        - py${{range.key}}-zstandard
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/
+          mv ./cleanup/${{range.key}}/bin ${{targets.contextdir}}/usr/
+    test:
+      pipeline:
+        - runs: |
+            vunnel --help
+            vunnel list | grep wolfi
+            vunnel run wolfi
+            vunnel clear wolfi
+
+  - name: py3-supported-${{vars.pypi-package}}
+    description: meta package providing ${{vars.pypi-package}} for supported python versions.
+    dependencies:
+      runtime:
+        - py3.11-${{vars.pypi-package}}
+        - py3.12-${{vars.pypi-package}}
+        - py3.13-${{vars.pypi-package}}
+
+update:
+  enabled: true
+  manual: false
+  github:
+    identifier: anchore/vunnel
+    use-tag: true
+    strip-prefix: v

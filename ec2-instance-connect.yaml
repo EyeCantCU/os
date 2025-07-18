@@ -1,0 +1,92 @@
+package:
+  name: ec2-instance-connect
+  version: "1.1.17"
+  epoch: 1
+  description: ssh daemon configuration and necessary EC2 instance scripting to enable EC2 Instance Connect
+  url: https://github.com/aws/aws-ec2-instance-connect-config
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+      - coreutils
+      - curl
+      - findutils
+      - openssh-keygen
+      - openssh-server
+      - openssl
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - coreutils
+      - findutils
+      - libfaketime
+      - openssh-keygen
+      - openssl
+      - wolfi-baselayout
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aws/aws-ec2-instance-connect-config
+      tag: ${{package.version}}
+      expected-commit: a6dbf0b77ec2cfcea11d35554a079ac670906111
+      cherry-picks: |
+        master/086f148e3e2c34759ecf203f6b13a4d726572975: Update curl command to not fail silently on HTTP server error
+        master/551c73e8ec1f5ade4c8b1f52cf616e75b47879b4: Remove references to harvest-hostkeys
+
+  - uses: patch
+    with:
+      patches: 0001-unit-test-Improve-test-suite-compatiblity-with-newer.patch
+
+  - runs: |
+      # Requires usr-merge at build time, fake it
+      # Note this is modifying the build host (bubblewrap / docker)
+      # environment that was launched by melange to execute this
+      # pipeline. Once wolfi-baselyout upgrades to merged-usr this can
+      # be removed.
+      if [ ! -x /usr/bin/cp ]; then
+         cp --no-clobber /bin/* /usr/bin/
+      fi
+
+      # Run unit tests (self-signed certs, not system certs)
+      ./bin/unit_test_suite.sh
+
+      # Opt into using certificate bundle instead of cert dirs like
+      # bin/make_tarball.sh and our production images
+      sed -i "s%^ca_path=/etc/ssl/certs$%ca_path=/etc/ssl/certs/ca-bundle.crt%" src/bin/eic_curl_authorized_keys
+
+  - runs: |
+      # these binaries are only executed by sshd, and impossible for
+      # humans to comprehend or debug, thus no need to install them in
+      # search PATH
+      mkdir -p ${{targets.destdir}}/opt/aws/bin/
+      cp src/bin/* ${{targets.destdir}}/opt/aws/bin/
+
+      mkdir -p ${{targets.destdir}}/etc/ssh/sshd_config.d/
+      cp 50-ec2-instance-connect.conf ${{targets.destdir}}/etc/ssh/sshd_config.d/
+
+      mkdir -p ${{targets.destdir}}/usr/lib/sysusers.d/
+      cp ec2-instance-connect.conf ${{targets.destdir}}/usr/lib/sysusers.d/
+
+  - runs: |
+      # Perform build time test against keys signed with public CA
+      # TODO contribute this upstream as a unit_test_suite case
+      cd standalone-test-case/
+      PATH=${{targets.destdir}}/opt/aws/bin:$PATH ./retry.sh
+
+test:
+  pipeline:
+    - runs: |
+        ssh-keygen -A -q -N ""
+        eic_cmd="$(sshd -T | grep "authorizedkeyscommand " | cut -d\  -f2)"
+        # No --help available
+        [ -x "$eic_cmd" ]
+
+update:
+  enabled: true
+  github:
+    identifier: aws/aws-ec2-instance-connect-config

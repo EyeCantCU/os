@@ -1,7 +1,7 @@
 package:
   name: swift
-  version: 6.0.2
-  epoch: 0
+  version: "6.1.2"
+  epoch: 1
   description: Swift is a high-performance system programming language. It has a clean and modern syntax, offers seamless access to existing C and Objective-C code and frameworks, and is memory-safe by default.
   copyright:
     - license: Apache-2.0
@@ -24,7 +24,7 @@ environment:
       - cmake
       - curl
       - curl-dev
-      - gcc
+      - gcc-14-default
       - glibc-dev
       - gnutar # busybox tar doesn't like --owner flag.
       - libedit
@@ -40,9 +40,12 @@ environment:
       - patch
       - perl
       - posix-libc-utils # Tests require this for something
-      - py3-pip # for setuptools
-      - python3
-      - python3-dev
+      # Lock to Python 3.10 because of "error: use of undeclared identifier 'PyEval_ThreadsInitialized'"
+      # This function is deprecated, and removed in 3.11.
+      # See: https://docs.python.org/3/whatsnew/3.9.html#:~:text=PyEval_ThreadsInitialized
+      - py3.10-pip # for setuptools
+      - python-3.10
+      - python-3.10-dev
       - rsync # Needed to package the swiftpm
       - sqlite
       - sqlite-dev
@@ -50,8 +53,6 @@ environment:
       - swift
       - swig
       - util-linux-dev # for uuid/uuid.h
-      - wasi-libc # For tests
-      - wasi-sdk-libclang-rt-builtins # For tests
 
 pipeline:
   - runs: |
@@ -62,15 +63,15 @@ pipeline:
     with:
       repository: https://github.com/swiftlang/swift
       tag: swift-${{package.version}}-RELEASE
-      expected-commit: 75ee22a51df9d89ae21597fad5eb21b5375fd160
+      expected-commit: cc4f13a96e9600bd6f801368ab51f614ab5ddd5e
       destination: swift-project/swift
 
-  - runs: |
+  - working-directory: swift-project/swift
+    runs: |
       # This is the way the project tells you to update the dependent repos.
       # I also tried independently checking out the various repos at various
       # tags but that seemed like a maintenance nightmare. However, if this
       # is something that we would prefer, then we can do that.
-      cd swift-project/swift
       MAX_RETRIES=5
 
       attempt=1
@@ -91,33 +92,33 @@ pipeline:
       echo "update-checkout failed after $MAX_RETRIES attempts"
       exit 1
 
-  - runs: |
-      # Use this patch to fix: https://github.com/swiftlang/swift/issues/74696
-      cd swift-project/swift
-      git apply ../../clang-path-include-fix.patch
-
-  - runs: |
+  - working-directory: swift-project
+    uses: patch
+    with:
       # Apply fedora patches from: https://src.fedoraproject.org/rpms/swift-lang/tree/rawhide
-      cd swift-project
-      patch -p0 < ../enable_lzma.patch
-      patch -p0 < ../need_pic.patch
-      patch -p0 < ../no_pipes.patch
-      patch -p0 < ../have_strcat.patch
+      patches: ../enable_lzma.patch ../need_pic.patch
+      strip-components: 0
 
-      cd swift
-      patch -p1 < ../../lldb-server.patch
+  - name: "Install wolfi build presets"
+    runs: |
+      cp wolfi.ini swift-project/wolfi-build-presets.ini
 
-  - runs: |
-      cd swift-project
-      swift/utils/build-script --preset=wolfi install_destdir=${{targets.contextdir}} installable_package=${{targets.contextdir}}/swift-${{package.version}}-wolfi.tar.gz
-      # We do not use this but release script creates it, just remove it so
-      # it doesn't get packaged.
-      rm ${{targets.contextdir}}/swift-${{package.version}}-wolfi.tar.gz
+  - working-directory: swift-project
+    runs: |
+      swift/utils/build-script \
+        --preset-file="swift/utils/build-presets.ini" \
+        --preset-file="wolfi-build-presets.ini" \
+        --preset=wolfi \
+        install_destdir=${{targets.contextdir}} \
+        installable_package=""
 
   - uses: strip
 
 test:
   pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/usr/lib/swift/linux/:/usr/lib/swift/host/:/usr/lib/swift/host/compiler/"
     - name: Hello world
       runs: |
         echo 'print("Hello, World!")' > /tmp/hello.swift

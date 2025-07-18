@@ -1,0 +1,154 @@
+package:
+  name: azure-functions-host
+  version: "4.1041.200"
+  epoch: 2
+  description: Runtime host used by the Azure Functions service.
+  target-architecture:
+    - x86_64
+  copyright:
+    - license: MIT
+    - license: Apache-2.0
+    - license: BSD-3-Clause
+    - license: BSD-2-Clause
+    - license: MIT
+    - license: PROPRIETARY # Proprietary is http://www.microsoft.com/web/webpi/eula/MVC_4_eula_ENU.htm for System.Net.Http.Formatting nuget package runtime dependency, https://www.microsoft.com/web/webpi/eula/aspnetcomponent_rtw_enu.htm for Microsoft.Azure.WebJobs.Script nuget package runtime dependency, https://www.nuget.org/packages/Microsoft.ApplicationInsights.SnapshotCollector/1.4.6/License for Microsoft.ApplicationInsights.SnapshotCollector nuget package runtime dependency
+  dependencies:
+    runtime:
+      - aspnet-8-runtime
+      - dotnet-8-runtime
+
+environment:
+  environment:
+    GRPC_PROTOC_PLUGIN: "/usr/bin/grpc_csharp_plugin"
+    PROTOBUF_PROTOC: "/usr/bin/protoc"
+    PublishWithAspNetCoreTargetManifest: "false"
+  contents:
+    packages:
+      - azure-functions-nodejs-worker
+      - bash
+      - build-base
+      - busybox
+      - dotnet-8-sdk
+      - git
+      - gnupg
+      - grpc
+      - grpc-dev
+      - linux-headers
+      - mono
+      - protobuf
+      - protobuf-dev
+      - protoc
+      - wget
+      - zlib
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Azure/azure-functions-host
+      tag: v${{package.version}}
+      expected-commit: 2391b98f7e2f8da0e5b35d2002131f9d5894e633
+      destination: /home/build/src
+
+  - name: Download nuget.exe CLI
+    runs: |
+      mkdir -p /home/build/packages
+      wget https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
+
+  - working-directory: /usr/share/worker-node
+    pipeline:
+      - name: Build NodeJs Worker nupkg
+        runs: |
+          mono /home/build/nuget.exe pack -OutputDirectory /home/build/packages/
+
+  - working-directory: /home/build/src
+    pipeline:
+      - name: Build and install Azure Functions Host
+        runs: |
+          # Use the locally built workers
+          dotnet nuget add source /home/build/packages/ --name LocalWorker
+          # Build the package
+          BUILD_NUMBER=$(echo "${{package.version}}" | cut -d'.' -f 3)
+          HOST_COMMIT=$(git rev-list -1 HEAD)
+          mkdir -p "${{targets.destdir}}"/azure-functions-host
+          dotnet publish --verbosity detailed /p:BuildNumber=$BUILD_NUMBER /p:CommitHash=$HOST_COMMIT src/WebJobs.Script.WebHost/WebJobs.Script.WebHost.csproj -c Release --output "${{targets.destdir}}"/azure-functions-host --runtime linux-x64
+          mv "${{targets.destdir}}"/azure-functions-host/workers /home/build/temp_workers
+
+subpackages:
+  - name: azure-functions-host-nodejs-worker
+    description: "NodeJS worker runtime integrated into the Azure Functions Host package."
+    pipeline:
+      - name: Install Azure Functions NodeJS Worker into the Host package
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}"/azure-functions-host/workers
+          mv /home/build/temp_workers/node "${{targets.subpkgdir}}"/azure-functions-host/workers/
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+        - name: Test worker directory exists
+          runs: |
+            test -d /azure-functions-host/workers/node
+
+  - name: azure-functions-host-compat
+    description: "Compatibility package for the Azure Functions image."
+    dependencies:
+      runtime:
+        - bash
+        - busybox
+        - ca-certificates
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/Azure/azure-functions-docker
+          tag: 4.37.1
+          expected-commit: d2a9c3e7cf2e5c9f9bfd34ec244e3cf1f12d3966
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/opt/startup
+          mv ./host/4/bullseye/base/sharedconfig/install_ca_certificates.sh "${{targets.subpkgdir}}"/opt/startup
+          mv ./host/4/bullseye/node/node20/start_nonappservice.sh "${{targets.subpkgdir}}"/opt/startup
+          chmod +x "${{targets.subpkgdir}}"/opt/startup/*.sh
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+        - name: Test compat files
+          runs: |
+            test -f /opt/startup/install_ca_certificates.sh
+            test -f /opt/startup/start_nonappservice.sh
+
+update:
+  enabled: true
+  github:
+    identifier: Azure/azure-functions-host
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - azure-functions-host-nodejs-worker
+        - curl
+    environment:
+      ASPNETCORE_CONTENTROOT: /azure-functions-host
+      FUNCTIONS_WORKER_RUNTIME: node
+      HOST_VERSION: ${{package.version}}
+      AzureWebJobsScriptRoot: /home/site/wwwroot
+      ASPNETCORE_URLS: http://127.0.0.1:8082
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test Azure Functions Host startup
+      runs: |
+        /azure-functions-host/Microsoft.Azure.WebJobs.Script.WebHost &
+        HOST_PID=$!
+
+        # Wait for the host to start
+        sleep 5
+        if (curl -s http://127.0.0.1:8082 | grep -iq 'your azure function app is up and running'); then
+            kill -9 "$HOST_PID"
+        else
+            kill -9 "$HOST_PID"
+            exit 1
+        fi

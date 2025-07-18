@@ -1,0 +1,211 @@
+package:
+  name: nginx-iamguarded
+  # Must also bump njs at the same time
+  version: "1.29.0"
+  epoch: 1
+  description: HTTP and reverse proxy server (mainline version)
+  copyright:
+    - license: BSD-2-Clause
+  options:
+    # Don't provide anything that could wind up providing
+    # something nginx already provides
+    no-provides: true
+  dependencies:
+    runtime:
+      - bash
+      - busybox
+      - coreutils
+      - glibc-locale-en
+      - glibc-locales
+      - grep
+      - merged-usrsbin
+      - net-tools
+      - openssl
+      - pcre
+      - perl-dev
+      - posix-libc-utils
+      - render-template
+      - sed
+      - su-exec
+      - wolfi-baselayout
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - brotli-dev
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gd-dev
+      - geoip-dev
+      - libmaxminddb-dev
+      - libxml2-dev
+      - libxslt-dev
+      - luajit-dev
+      - openssl-dev
+      - pcre-dev
+      - perl-dev
+      - pkgconf
+      - zeromq-dev
+      - zlib-dev
+
+vars:
+  debian-version: '12'
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/nginx/nginx.git
+      tag: release-${{package.version}}
+      expected-commit: 235f409907fd60eb2d8f6ecdc0e5cb163dd6d45f
+      destination: nginx-mainline
+
+  - name: Configure
+    working-directory: nginx-mainline
+    runs: |
+      export LUAJIT_LIB="$(pkgconf --variable=libdir luajit)"
+      export LUAJIT_INC="$(pkgconf --variable=includedir luajit)"
+
+      ./auto/configure \
+          --prefix=/opt/iamguarded/nginx \
+          --sbin-path=/opt/iamguarded/nginx/sbin/nginx \
+          --modules-path=/opt/iamguarded/nginx/modules \
+          --conf-path=/opt/iamguarded/nginx/conf/nginx.conf \
+          --pid-path=/opt/iamguarded/nginx/tmp/nginx.pid \
+          --lock-path=/opt/iamguarded/nginx/tmp/nginx.lock \
+          --http-client-body-temp-path=/opt/iamguarded/nginx/tmp/client_body \
+          --http-proxy-temp-path=/opt/iamguarded/nginx/tmp/proxy \
+          --http-fastcgi-temp-path=/opt/iamguarded/nginx/tmp/fastcgi \
+          --http-uwsgi-temp-path=/opt/iamguarded/nginx/tmp/uwsgi \
+          --http-scgi-temp-path=/opt/iamguarded/nginx/tmp/scgi \
+          --with-perl_modules_path=/usr/lib/perl5/vendor_perl \
+          \
+          --user=nginx \
+          --group=root \
+          --with-threads \
+          --with-file-aio \
+          \
+          --without-pcre2 \
+          \
+          --with-compat \
+          \
+          --with-http_ssl_module \
+          --with-http_v2_module \
+          --with-http_realip_module \
+          --with-http_addition_module \
+          --with-http_xslt_module=dynamic \
+          --with-http_image_filter_module=dynamic \
+          --with-http_geoip_module=dynamic \
+          --with-http_sub_module \
+          --with-http_flv_module \
+          --with-http_mp4_module \
+          --with-http_gunzip_module \
+          --with-http_gzip_static_module \
+          --with-http_auth_request_module \
+          --with-http_random_index_module \
+          --with-http_secure_link_module \
+          --with-http_degradation_module \
+          --with-http_slice_module \
+          --with-http_stub_status_module \
+          --with-http_perl_module=dynamic \
+          --with-mail=dynamic \
+          --with-mail_ssl_module \
+          --with-stream=dynamic \
+          --with-stream_ssl_module \
+          --with-stream_realip_module \
+          --with-stream_geoip_module=dynamic \
+          --with-stream_ssl_preread_module
+
+  - name: Build
+    working-directory: nginx-mainline
+    runs: |
+      make -j$(nproc)
+      make DESTDIR=${{targets.contextdir}} install
+      # The iamguarded pipelines expect binaries to be installed outside contextdir
+      mv ${{targets.contextdir}}/opt/iamguarded /opt/iamguarded
+
+  - name: Print to stderr/stdout
+    runs: |
+      # default error logs to standard error
+      sed -i 's/#error_log  logs\/error.log;$/error_log  stderr  notice;/' /opt/iamguarded/nginx/conf/nginx.conf
+      # and both access logs to stdout
+      sed -i 's/#access_log.*;$/access_log  \/dev\/stdout;/' /opt/iamguarded/nginx/conf/nginx.conf
+
+  - uses: iamguarded/build-compat
+    with:
+      package: nginx
+      version: ${{vars.major-minor-version}}
+
+  - name: Post unpack
+    runs: |
+      bash -x /opt/iamguarded/scripts/nginx/postunpack.sh
+
+      # Copy html
+      mkdir -p ${{targets.contextdir}}/app
+      cp -r /app/* ${{targets.contextdir}}/app/
+
+      # Create expected empty directories
+      mkdir -p /iamguarded/nginx
+      mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+
+  - uses: iamguarded/finalize-compat
+    with:
+      package: nginx
+      version: ${{vars.major-minor-version}}
+
+  - uses: strip
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - shadow
+        - wait-for-it
+  pipeline:
+    - uses: iamguarded/test-compat
+      with:
+        package: nginx
+        version: ${{vars.major-minor-version}}
+    - uses: test/tw/ldd-check
+    - working-directory: /app
+      pipeline:
+        - runs: |
+            useradd -g root nginx
+            chown -R nginx:root /app
+            chown -R nginx:root /iamguarded
+            chown -R nginx:root /opt/iamguarded
+        - name: "Launch the nginx"
+          uses: test/daemon-check-output
+          with:
+            start: |
+              env NGINX_HTTPS_PORT_NUMBER="" \
+                  NGINX_HTTP_PORT_NUMBER="" \
+                  PATH="/opt/iamguarded/common/bin:/opt/iamguarded/nginx/sbin:$PATH" \
+                  IAMGUARDED_DEBUG=true \
+              /opt/iamguarded/scripts/nginx/entrypoint.sh /opt/iamguarded/scripts/nginx/run.sh
+            timeout: 60
+            expected_output: |
+              Welcome to the Iamguarded image for NGINX
+              Starting NGINX setup
+              NGINX setup finished!
+              Starting NGINX
+            post: |
+              wait-for-it -t 10 localhost:8080
+              curl -I http://localhost:8080 || exit 1
+
+update:
+  enabled: true
+  github:
+    identifier: nginx/nginx
+    use-tag: true
+    strip-prefix: release-

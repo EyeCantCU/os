@@ -1,0 +1,124 @@
+# Temporary package created to handle custom request.
+# This package will be removed and withdrawn once we have zookeeper packaging fixed, versioning and official release for zookeeper-3.9.4 is up
+# Image request notes: https://github.com/chainguard-dev/image-requests/issues/5774
+package:
+  name: zookeeper-custom
+  version: "3.9.3"
+  epoch: 3
+  description: Distributed, highly available, robust, fault-tolerant system for distributed coordination
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash # some helper scripts use bash
+      - openjdk-17-default-jvm
+      - xmlstarlet
+      - procps
+      - grep
+      - sed
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - maven
+      - openjdk-17-default-jdk
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/zookeeper
+      tag: release-${{package.version}}
+      expected-commit: c26634f34490bb0ea7a09cc51e05ede3b4e320ee
+
+  - uses: maven/pombump
+    with:
+      # Patch netty version for CVE-2025-24970 GHSA-4g8c-wm8x-jfhw
+      # -Dnetty.version=4.1.118.Final
+      properties-file: pombump-properties.yaml
+      pom: pom.xml
+
+  - runs: |
+      mvn install -DskipTests
+      tar -xf zookeeper-assembly/target/apache-zookeeper-${{package.version}}-bin.tar.gz
+
+      # Cleanup Windows files
+      rm -rf apache-zookeeper-${{package.version}}-bin/bin/*.cmd
+
+      # Install Zookeeper
+      mkdir -p ${{targets.destdir}}/apache-zookeeper-${{package.version}}-bin
+      mkdir -p ${{targets.destdir}}/apache-zookeeper-${{package.version}}-bin/conf
+      mv apache-zookeeper-${{package.version}}-bin/lib ${{targets.destdir}}/apache-zookeeper-${{package.version}}-bin
+      mv apache-zookeeper-${{package.version}}-bin/bin ${{targets.destdir}}/apache-zookeeper-${{package.version}}-bin
+      mv apache-zookeeper-${{package.version}}-bin/docs ${{targets.destdir}}/apache-zookeeper-${{package.version}}-bin
+      mv apache-zookeeper-${{package.version}}-bin/conf ${{targets.destdir}}/
+
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    description: "Entrypoint subpackage for official zookeeper image"
+    dependencies:
+      runtime:
+        - ca-certificates-bundle
+        - dash-binsh
+        - coreutils
+        - glibc-locale-en
+        - netcat-openbsd
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/31z4/zookeeper-docker
+          branch: master
+      - runs: |
+          install -Dm755 ${{package.version}}/docker-entrypoint.sh ${{targets.subpkgdir}}/docker-entrypoint.sh
+      - runs: |
+          # Add needed directories
+          mkdir -p ${{targets.subpkgdir}}/data
+          mkdir -p ${{targets.subpkgdir}}/datalog
+          mkdir -p ${{targets.subpkgdir}}/logs
+    test:
+      pipeline:
+        - name: Verify entrypoint file
+          runs: |
+            test -s /docker-entrypoint.sh
+
+test:
+  environment:
+    environment:
+      LANG: en_US.UTF-8
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+      ZK_HOME: "/apache-zookeeper-${{package.version}}-bin"
+  pipeline:
+    - runs: |
+        # Go to installed dir
+        cd "${ZK_HOME}"
+
+        #
+        bin/zkServer.sh
+
+        # Use sample config
+        cp ../conf/zoo_sample.cfg conf/zoo.cfg
+
+        # Start Zookeeper
+        bin/zkServer.sh start-foreground > /dev/null 2>&1 &
+
+        # Grab PID
+        ZOOKEEPER_PID=$!
+
+        # Start the CLI and check output
+        bin/zkCli.sh | grep "Welcome to ZooKeeper!"
+
+        # Create a node
+        bin/zkCli.sh create /test-$(uuidgen) '$(uuidgen)'
+
+        # Kill Zookeeper
+        kill "${ZOOKEEPER_PID}"
+
+update:
+  enabled: false
+  exclude-reason: |
+    "We'll remove this package once we have official release for zookeeper-3.9.4"

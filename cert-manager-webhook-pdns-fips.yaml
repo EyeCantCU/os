@@ -1,22 +1,30 @@
 package:
   name: cert-manager-webhook-pdns-fips
-  version: 2.5.1
-  epoch: 8
+  version: "2.5.2"
+  epoch: 10
   description: A PowerDNS webhook for cert-manager
   copyright:
-    - license: Apache-2.0
+    - license: MIT
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/zachomedia/cert-manager-webhook-pdns
       tag: v${{package.version}}
-      expected-commit: 4c96aef32157844c40afa685f9d389c94021b637
+      expected-commit: 0c44f1340426a5e910a3fc7b06dbd05611ac1592
+
+  - name: Downgrade Go to 1.23 for FIPS
+    runs: |
+      # we are using go 1.23 because go-fips-1.24 is not available yet
+      sed -i 's/go 1\.24\(\.[0-9]*\)\?/go 1.23/' go.mod
+      go mod tidy
 
   - uses: go/bump
     with:
-      deps: google.golang.org/grpc@v1.56.3 google.golang.org/protobuf@v1.33.0 github.com/golang/protobuf@v1.5.4 go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc@v0.46.0 go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp@v0.46.0 go.opentelemetry.io/otel/sdk@v1.21.0 go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.21.0 golang.org/x/net@v0.23.0
-      go-version: 1.22
+      deps: |-
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.38.0
 
   - uses: go/build
     with:
@@ -30,17 +38,40 @@ update:
     identifier: zachomedia/cert-manager-webhook-pdns
     strip-prefix: v
   ignore-regex-patterns:
-    - 'cert-manager-webhook-pdns-'
+    - "cert-manager-webhook-pdns-"
 
-# https://github.com/zachomedia/cert-manager-webhook-pdns/blob/bf4d525dca7345538aaad8840f6315a73c27f38b/README.md?plain=1#L45
 test:
   environment:
-    contents:
-      packages:
-        - openssl-config-fipshardened
     environment:
       GROUP_NAME: "acme.zacharyseguin.ca"
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: 32764
+    contents:
+      packages:
+        - mkcert
   pipeline:
-    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
     - runs: |
-        webhook -h
+        kubectl create rolebinding default-get-configmap \
+        --clusterrole=view \
+        --serviceaccount=default:default \
+        --namespace=kube-system
+
+        mkcert example.com
+        export CA_OTHER="$(cat ~/.local/share/mkcert/rootCA.pem)"
+        kubectl create configmap extension-apiserver-authentication \
+        --from-literal=client-ca-file="$CA_OTHER" \
+        --from-literal=requestheader-client-ca-file="$CA_OTHER" \
+        -n kube-system \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+        webhook > /tmp/webhook.log 2>&1 &
+        sleep 5
+        if ! grep -q "Starting controller" /tmp/webhook.log; then
+          echo "Webhook server did not start correctly"
+          exit 1
+        fi
+
+        echo "Webhook server started successfully"

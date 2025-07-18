@@ -1,0 +1,108 @@
+From 222ceaa8df4c65a2ba1095845345dcfa8ff2131d Mon Sep 17 00:00:00 2001
+From: Dimitri John Ledkov <dimitri.ledkov@surgut.co.uk>
+Date: Tue, 11 Mar 2025 11:32:12 +0000
+Subject: [PATCH 2/2] Add support for apk installed db
+
+---
+ .../application/dataProvider_unix.go          | 51 +++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+
+diff --git a/agent/plugins/inventory/gatherers/application/dataProvider_unix.go b/agent/plugins/inventory/gatherers/application/dataProvider_unix.go
+index d03ecc7e..fd505f02 100644
+--- a/agent/plugins/inventory/gatherers/application/dataProvider_unix.go
++++ b/agent/plugins/inventory/gatherers/application/dataProvider_unix.go
+@@ -18,15 +18,18 @@
+ package application
+ 
+ import (
++	ctx "context"
+ 	"encoding/json"
+ 	"fmt"
+ 	"io/ioutil"
+ 	"os"
+ 	"os/exec"
++	"sort"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+ 
++	"chainguard.dev/apko/pkg/apk/apk"
+ 	"github.com/aws/amazon-ssm-agent/agent/context"
+ 	"github.com/aws/amazon-ssm-agent/agent/log"
+ 	"github.com/aws/amazon-ssm-agent/agent/platform"
+@@ -66,6 +69,9 @@ var (
+ 
+ 	// platforms that can pass application inventory files, as the agent cannot gather the data from the local package manager
+ 	inventoryApplicationFileSupportedPlatforms = []string{"Bottlerocket"}
++
++	// platforms that have an apk-tools v2 installed db
++	apkToolsInstalledDB = "/lib/apk/db/installed"
+ )
+ 
+ func randomString(length int) string {
+@@ -174,6 +180,19 @@ func collectPlatformDependentApplicationData(context context.T) (appData []model
+ 		}
+ 	}
+ 
++	if fileExists(apkToolsInstalledDB) {
++		noPackageManagerFound = false
++		var apkToolsAppData []model.ApplicationData
++		if apkToolsAppData, err = getApkToolsApplicationData(platformName); err != nil {
++			log.Errorf("Failed to gather inventory data for %v: %v", GathererName, err)
++		} else {
++			log.Infof("Appending application information found using ApkTools v2 Installed DB to application data.")
++			log.Infof("Found %v apk packages", len(apkToolsAppData))
++			appData = append(appData, apkToolsAppData...)
++
++		}
++	}
++
+ 	log.Infof("Found %v packages in total", len(appData))
+ 
+ 	if noPackageManagerFound {
+@@ -237,6 +256,42 @@ func getInventoryApplicationFileData(inventoryApplicationFileBytes []byte) (data
+ 	return
+ }
+ 
++// getApkToolsApplicationData creates ApplicationData from apk-tools
++// v2 installed DB
++func getApkToolsApplicationData(platformName string) (data []model.ApplicationData, err error) {
++	// Create a standard Go context for the apk library
++	ctx := ctx.Background()
++	
++	a, err := apk.New(ctx)
++	if err != nil {
++		return nil, err
++	}
++	pkgs, err := a.GetInstalled()
++	if err != nil {
++		return nil, err
++	}
++	for _, pkg := range pkgs {
++		var item model.ApplicationData
++		item.Name = pkg.Name
++		item.Version = pkg.Version
++		// Not quite right, TODO upgrade to maintainer
++		item.Publisher = platformName
++		// Not quite right, but might be helpful
++		item.InstalledTime = pkg.BuildTime.Format(time.RFC3339)
++		item.Architecture = pkg.Arch
++		item.URL = pkg.URL
++		item.Summary = pkg.Description
++		// PURLs are lowercased IDs
++		item.PackageId = fmt.Sprintf("pkg:apk/%s/%s@%s?arch=%s&source=%s", strings.ToLower(platformName), pkg.Name, pkg.Version, pkg.Arch, pkg.Origin)
++		data = append(data, item)
++	}
++	// Sort, as otherwise this is in a filesystem tree order
++	sort.Slice(data[:], func(i, j int) bool {
++		return data[i].Name < data[j].Name
++	})
++	return data, nil
++}
++
+ // getApplicationData runs a shell command and gets information about all packages/applications
+ func getApplicationData(context context.T, command string, args []string) (data []model.ApplicationData, err error) {
+ 
+-- 
+2.43.0
+

@@ -1,7 +1,7 @@
 package:
   name: apache-beam-python-3.11-sdk
-  version: 2.60.0
-  epoch: 0
+  version: "2.66.0"
+  epoch: 1
   description: Apache Beam Python SDK
   copyright:
     - license: Apache-2.0
@@ -13,8 +13,10 @@ package:
   dependencies:
     runtime:
       - geos-dev
-      - py3.11-google-cloud-sdk
+      - keyutils # mysql library requires libkeyutils.so.1
+      - libudev # for libudev.so.1
       - openjdk-17-default-jvm
+      - py3.11-google-cloud-sdk
       - python-3.11
       - snappy-dev
       - yaml-dev
@@ -27,15 +29,15 @@ environment:
       - ca-certificates-bundle
       - gcc-12-default
       - go
-      - openjdk-17
-      - openjdk-17-default-jvm
+      - openjdk-17-default-jdk
       - py3.11-pip
+      - python-3.11
       - python-3.11-base
       - python-3.11-base-dev
-      - python-3.11
       - python-3.11-dev
       - python-3.9-base
       - python-3.9-base-dev
+      - snappy-dev
   environment:
     JAVA_HOME: /usr/lib/jvm/java-17-openjdk
 
@@ -43,7 +45,7 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/apache/beam
-      expected-commit: 02208fc59887f22d5130310c902bb422f1f0be33
+      expected-commit: 32d2c020bc0535289b1dd3bb3878d12885efc75c
       tag: v${{package.version}}
 
   - runs: |
@@ -56,8 +58,8 @@ pipeline:
 
   - uses: go/build
     with:
-      packages: .
-      modroot: ./sdks/java/container
+      packages: ./java/container
+      modroot: ./sdks
       prefix: /opt
       install-dir: apache/beam
       output: boot
@@ -74,9 +76,14 @@ pipeline:
       pip install --no-deps -v sdks/python/build/apache-beam.tar.gz
       python3.11 -m pip install --no-compile -r sdks/python/container/py311/base_image_requirements.txt
 
-      # Remediates CVE-2024-22195 and CVE-2024-34064. Can be removed once the
-      # next release of beam, bumps to v3.1.4 or later of jinga2.
-      pip install jinja2==3.1.4
+      # Remediate CVE-2025-53643 GHSA-9548-qrrj-x5pj
+      pip install --upgrade "aiohttp>=3.12.14"
+
+      # Remediates CVE-2025-27516
+      pip install jinja2==3.1.6
+
+      # Remediate GHSA-9hjg-9r4m-mvj7
+      pip install --upgrade "requests>=2.32.4"
 
       # Install Python deps related licenses.
       mkdir -p /opt/apache/beam/third_party_licenses/
@@ -87,6 +94,14 @@ pipeline:
       pip install 'pip-licenses<5' pyyaml tenacity && \
       python /tmp/license_scripts/pull_licenses_py.py ; \
       cp -r /opt/apache/beam/third_party_licenses/* ${{targets.destdir}}/opt/apache/beam/third_party_licenses
+
+      # mysql-connector-python links against libcrypto.so.1.1 on arm64, and does not provide the
+      # necessary source files to rebuild the package for arm against libcrypto3 (like the x86 version is),
+      # so instead we'll just remove it as pymysql is also included and should take over for everything.
+      # If a problem is later discovered, this may need to be reverted.
+      if [[ "${{build.arch}}" == "aarch64" ]]; then
+        pip uninstall --yes mysql-connector-python
+      fi
 
       find venv -name "__pycache__" -exec rm -rf {} +
       # Remove pip
@@ -140,10 +155,10 @@ test:
       packages:
         - bash
         - ca-certificates-bundle
-        - openjdk-17
         - openjdk-17-default-jvm
   pipeline:
     - runs: /opt/apache/beam/boot --help
+    - uses: test/tw/ldd-check
 
 update:
   enabled: true

@@ -1,0 +1,417 @@
+package:
+  name: go-fips-1.24
+  version: "1.24.5.1"
+  epoch: 2
+  description: "golang toolchain with patches/enhancements from Microsoft"
+  copyright:
+    - license: BSD-3-Clause
+  dependencies:
+    provider-priority: 15
+    provides:
+      - go-fips=${{package.full-version}}
+      - go-fips-md5=${{package.full-version}}
+    runtime:
+      - bash
+      - build-base
+      - openssl-config-fipshardened
+
+vars:
+  # https://github.com/chainguard-images/images-private/pull/2752/files
+  # uses a different symbol ('_Cfunc__goboringcrypto_')
+  uses-boring-crypto-symbol: "v2._Cfunc_go_openssl"
+
+# Transform melange version to replace last dot "." with "-".
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(.+)\.(\d+)$
+    replace: v$1-$2
+    to: mangled-package-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      # We always use the equivalent non-FIPS branch of Go to build this.
+      - go~1.24
+      - openssl-config-fipshardened
+      - openssl-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/microsoft/go
+      tag: ${{vars.mangled-package-version}}
+      recurse-submodules: true
+      expected-commit: 08382e00ff0118d056016bb010be0ac3f7aae30f
+
+  # Apply microsoft released patches
+  - working-directory: /home/build/go
+    runs: |
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../patches/*.patch
+
+  # Apply chainguard patches
+  - working-directory: /home/build/go
+    runs: |
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0001-cmd-go-always-emit-ldflags-version-information.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0002-Always-enable-CGO-for-tools-for-FIPS.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0003-Change-default-telemetry-setting-from-local-to-off.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0004-default-go-fips-enabled.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0005-set-gofips-as-latest-always.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0006-ed25519-check-rand-beforing-using-boring.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0007-fips-add-back-attempt-to-turn-on-FIPS-mode.patch
+      git -c "user.name=Melange Build" -c "user.email=melange-build@cgr.dev" am ../extra/0008-opensslsetup-add-support-for-portable-libcrypto.patch
+
+  - uses: patch
+    with:
+      patches: use-gnu-ld-arm64.patch
+
+  - runs: |
+      cd go/src
+      GOEXPERIMENT=systemcrypto ./make.bash -v
+
+  - runs: |
+      cd go
+
+      mkdir -p "${{targets.destdir}}"/usr/bin "${{targets.destdir}}"/usr/lib/go/bin "${{targets.destdir}}"/usr/share/doc/go
+
+      for bin in go gofmt; do
+        install -Dm755 bin/$bin "${{targets.destdir}}"/usr/lib/go/bin/$bin
+        ln -s /usr/lib/go/bin/$bin "${{targets.destdir}}"/usr/bin/
+      done
+
+      cp -a pkg lib "${{targets.destdir}}"/usr/lib/go/
+      cp -r doc misc "${{targets.destdir}}"/usr/share/doc/go
+      cp -a src "${{targets.destdir}}"/usr/lib/go/
+      cp -p go.env "${{targets.destdir}}"/usr/lib/go/go.env
+
+      rm -rf "${{targets.destdir}}"/usr/lib/go/pkg/obj
+      rm -rf "${{targets.destdir}}"/usr/lib/go/pkg/bootstrap
+      rm -rf "${{targets.destdir}}"/usr/lib/go/pkg/tool/*/api
+      rm -rf "${{targets.destdir}}"/usr/lib/go/pkg/*/cmd
+      rm -rf "${{targets.destdir}}"/usr/lib/go/pkg/tool/*/api
+      rm -rf "${{targets.destdir}}"/usr/lib/go/pkg/tool/*/go_bootstrap
+      rm -rf "${{targets.destdir}}"/usr/lib/go/src/cmd/dist/dist
+
+      # Remove tests from /usr/lib/go/src, not needed at runtime
+      find "${{targets.destdir}}"/usr/lib/go/src \( -type f -a -name "*_test.go" \) \
+        -exec rm -rf \{\} \+
+      find "${{targets.destdir}}"/usr/lib/go/src \( -type d -a -name "testdata" \) \
+        -exec rm -rf \{\} \+
+      find "${{targets.destdir}}"/usr/lib/go/src \( -type f -a -name "*.rc" \) \
+        -exec rm -rf \{\} \+
+      find "${{targets.destdir}}"/usr/lib/go/src \( -type f -a -name "*.bat" \) \
+        -exec rm -rf \{\} \+
+      find "${{targets.destdir}}"/usr/lib/go/src \( -type f -a -name "*.pem" \) \
+        -exec rm -rf \{\} \+
+
+  - uses: strip
+
+subpackages:
+  - name: "${{package.name}}-doc"
+    description: "go documentation"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/share
+          mv "${{targets.destdir}}"/usr/share/doc "${{targets.subpkgdir}}"/usr/share/
+
+update:
+  enabled: true
+  shared: true
+  version-transform:
+    - match: ^(.+)\-(\d+)$
+      replace: $1.$2
+  github:
+    identifier: microsoft/go
+    strip-prefix: v
+    tag-filter: v1.24
+
+test:
+  environment:
+    contents:
+      packages:
+        - openssl-config-fipshardened
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        go env
+    - runs: |
+        go help
+        gofmt --help
+    - runs: |
+        export HOME=$PWD
+        export GOPATH=$PWD
+        go version
+        cat <<EOF >> /tmp/main.go
+        package main
+
+        import "fmt"
+
+        func main() {
+                fmt.Println("Hello Wolfi")
+        }
+        EOF
+        go run -tags requirefips /tmp/main.go
+    - name: "sha256 test"
+      runs: |
+        fail() { echo "$@" 1>&2; exit 1; }
+        export HOME=$PWD
+        export GOPATH=$PWD
+
+        cat >sha256.go <<"EOF"
+        package main
+
+        import (
+            "crypto/sha256"
+            "fmt"
+            "os"
+        )
+
+        func main() {
+            fmt.Printf("%x\n", sha256.Sum256([]byte(os.Args[1])))
+        }
+        EOF
+
+        go build -cover -tags requirefips -o sha256 sha256.go
+        mkdir coveragedata
+        export GOCOVERDIR=coveragedata
+
+        go tool nm ./sha256 > nm.out
+        if ! grep -q "${{vars.uses-boring-crypto-symbol}}" nm.out; then
+            echo "built sha256 was missing ${{vars.uses-boring-crypto-symbol}} symbol"
+            cat nm.out
+            exit 1
+        fi
+
+        # go is now built in fips mode, mock lack of openssl fips
+        # provider with an empty openssl.conf
+        OPENSSL_CONF=/dev/null ./sha256 "Go Cubs Go" > sha256.out 2>&1 && rc=0 || rc=$?
+        [ $rc -eq 0 ] && fail "ERROR: sha256 ran successfully without fips provider"
+        [ $rc -eq 2 ] || { cat sha256.out; fail "ERROR: expected rc=2 found rc=$rc:"; }
+        grep -q "panic.*opensslcrypto" sha256.out || {
+          cat sha256.out
+          fail "sha256 output did not contain panic.*opensslcrypto"
+        }
+        ./sha256 "Go Cubs Go" >/dev/null
+        go tool covdata percent -i=coveragedata > cov.out 2>&1
+        grep -q "coverage: 100.0% of statements" cov.out || {
+          cat cov.out
+          fail "coverage output did not cover 100.0% of statements"
+        }
+
+        # test portable libcrypto
+        mkdir -p .cgr
+        cp /etc/ssl/openssl.cnf /etc/ssl/fipsmodule.cnf /usr/lib/libcrypto.so.3 /usr/lib/ossl-modules/fips.so .cgr
+        OPENSSL_CONF=/dev/null ./sha256 "Go Cubs Go" >/dev/null
+    - name: "md5 NOT blocked test"
+      runs: |
+        fail() { echo "$@" 1>&2; exit 1; }
+        export HOME=$PWD
+        export GOPATH=$PWD
+
+        cat >md5.go <<"EOF"
+        package main
+
+        import (
+            "crypto/md5"
+            "fmt"
+            "os"
+        )
+
+        func main() {
+            fmt.Printf("%x\n", md5.Sum([]byte(os.Args[1])))
+        }
+        EOF
+
+        go build -tags requirefips -o md5 md5.go
+
+        go tool nm ./md5 > nm.out
+        if ! grep -q "${{vars.uses-boring-crypto-symbol}}" nm.out; then
+            echo "built md5 was missing ${{vars.uses-boring-crypto-symbol}} symbol"
+            cat nm.out
+            exit 1
+        fi
+
+        ./md5 "Go Cubs Go"
+    - name: "NATS ED25519 test"
+      runs: |
+        fail() { echo "$@" 1>&2; exit 1; }
+
+        cat <<EOF > go.mod
+        module natstest
+
+        go 1.24
+
+        require (
+          github.com/nats-io/nkeys v0.4.7
+        )
+        EOF
+
+        cat <<EOF > natstest.go
+        package main
+
+        import (
+          "fmt"
+          "log"
+
+          "github.com/nats-io/nkeys"
+        )
+
+        func main() {
+          kp, err := nkeys.CreateUser()
+          if err != nil {
+            log.Fatalf("failed to create NKey: %v", err)
+          }
+
+          pub, err := kp.PublicKey()
+          if err != nil {
+            log.Fatalf("failed to get public key: %v", err)
+          }
+          fmt.Println("Public Key:", pub)
+
+          message := []byte("hello, world")
+          sig, err := kp.Sign(message)
+          if err != nil {
+            log.Fatalf("failed to sign message: %v", err)
+          }
+          fmt.Println("Signature created successfully!")
+
+          err = kp.Verify(message, sig)
+          if err != nil {
+            log.Fatalf("signature verification failed: %v", err)
+          }
+          fmt.Println("Signature verified successfully!")
+        }
+        EOF
+
+        go mod tidy
+        go build -tags requirefips -o natstest natstest.go
+
+        go tool nm ./natstest > nm.out
+        if ! grep -q "${{vars.uses-boring-crypto-symbol}}" nm.out; then
+            echo "built natstest was missing ${{vars.uses-boring-crypto-symbol}} symbol"
+            cat nm.out
+            exit 1
+        fi
+
+        ./natstest
+    - name: "parallel decrypt test"
+      runs: |
+        fail() { echo "$@" 1>&2; exit 1; }
+        export HOME=$PWD
+        export GOPATH=$PWD
+        cat <<EOF >> /tmp/test-parallel-decrypt.go
+        // Test case from https://github.com/golang-fips/go/issues/187
+        package main
+
+        import (
+                "crypto/aes"
+                "crypto/cipher"
+                "crypto/rand"
+                "flag"
+                "log"
+                "os"
+                "time"
+        )
+
+        func main() {
+                numThreads := flag.Int("threads", 8, "number of threads")
+                timeout := flag.Int("timeout", 10,
+                        "time to run for (considered success if no panics before then")
+                flag.Parse()
+
+                log.Printf("Starting parallel GCM decrypt with %d threads for %ds", *numThreads, *timeout)
+
+                var key [32]byte
+                if _, err := rand.Read(key[:]); err != nil {
+                        panic(err)
+                }
+                block, err := aes.NewCipher(key[:])
+                if err != nil {
+                        panic(err)
+                }
+                gcm, err := cipher.NewGCM(block)
+                if err != nil {
+                        panic(err)
+                }
+                nonce := make([]byte, gcm.NonceSize())
+                if _, err := rand.Read(nonce[:]); err != nil {
+                        panic(err)
+                }
+                ciphertext := gcm.Seal(nil, nonce, []byte("hunter2"), nil)
+
+                for parallel := 0; parallel < *numThreads; parallel++ {
+                        go func() {
+                                for {
+                                        if _, err := gcm.Open(nil, nonce, ciphertext, nil); err != nil {
+                                                panic(err)
+                                        }
+                                }
+                        }()
+                }
+                <-time.After(time.Duration(*timeout) * time.Second)
+                log.Printf("Ran successfully for %d seconds. Exiting 0.", *timeout)
+                os.Exit(0)
+        }
+        EOF
+        go run -tags requirefips /tmp/test-parallel-decrypt.go >decrypt.out 2>&1 || {
+            rc=$?
+            cat decrypt.out
+            fail "test-parallel-decrypt.go exited $rc"
+        }
+    - name: Test telemetry settings - should be off by default.
+      runs: |
+        fail() { echo "FAIL:" "$@" 1>&2; exit 1; }
+
+        tmpd=$(mktemp -d)
+        trap "rm -R '$tmpd'" EXIT
+        export HOME="$tmpd/home"
+        mkdir "$HOME"
+
+        out=$(go telemetry) || fail "'go telemetry' exited $?"
+        [ "$out" = "off" ] ||
+          fail "go telemetry output '$out'. expected 'off'"
+
+        cfgdir="$HOME/.config/go/telemetry"
+        if [ -d "$cfgdir" ]; then
+          fail "$cfgdir was created by running 'go telemetry'"
+        fi
+
+        go telemetry on ||
+          fail "'go telemetry on' exited $?"
+        out=$(go telemetry) || fail "'go telemetry' after 'on' exited $?"
+        [ "$out" = "on" ] ||
+          fail "go telemetry after 'on' output '$out'. expected 'on'"
+
+        [ -f "$cfgdir/mode" ] ||
+          fail "ERROR: 'go telemetry on' did not write ~/${cfgdir#$HOME/}"
+
+        go telemetry local ||
+          fail "'go telemetry local' exited $?"
+        out=$(go telemetry) || fail "'go telemetry' after 'local' exited $?"
+        [ "$out" = "local" ] ||
+          fail "go telemetry after 'local' output '$out'. expected 'local'"
+
+        go telemetry off ||
+          fail "explicit 'go telemetry off' exited $?"
+        out=$(go telemetry) || fail "'go telemetry' after explicit off exited $?"
+        [ "$out" = "off" ] ||
+          fail "go telemetry after explicit off output '$out'. expected 'off'"
+    - name: Test using external linker
+    - runs: |
+        # We need to trick Golang into thinking that we're building a binary
+        # that will be used for linking later.  This way, it will force the use
+        # of an external linker.  The way to do this is to use the "-buildmode=plugin"
+        # option
+        cat > external_linker.go << _EOF_
+        package main
+        func main() {
+            return
+        }
+        _EOF_
+        go build -buildmode=plugin external_linker.go
+    - name: Test building a regular project
+    - runs: |
+        go install github.com/junegunn/fzf@v0.64.0

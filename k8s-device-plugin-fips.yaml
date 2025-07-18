@@ -1,0 +1,105 @@
+package:
+  name: k8s-device-plugin-fips
+  version: "0.17.2"
+  epoch: 2
+  description: meta package providing all NVIDIA device plugins for Kubernetes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - gpu-feature-discovery-fips
+      - mps-control-daemon-fips
+      - nvidia-device-plugin-fips
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go-fips
+  environment:
+    # See https://github.com/wolfi-dev/os/issues/34568
+    GCC_SPEC_FILE: /home/build/openssf.spec
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NVIDIA/k8s-device-plugin
+      tag: v${{package.version}}
+      expected-commit: 390b1f6ae7b4301e65cf1744ccbbb8b0d0b1cc77
+
+  - runs: |
+      gccdir="$(GCC_SPEC_FILE=/dev/null gcc --print-search-dirs | grep ^install: | cut -d' ' -f2)"
+      sed -r 's/-z now//' < "$gccdir/openssf.spec" > /home/build/openssf.spec
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/net@v0.38.0
+
+  - runs: |
+      # disable stripping
+      sed -i 's/-s / /g' Makefile
+      make -j$(nproc)
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+
+subpackages:
+  - name: gpu-feature-discovery-fips
+    description: GPU Feature Discovery - generate labels for NVIDIA devices
+    pipeline:
+      - runs: |
+          cmd="gpu-feature-discovery"
+          mv $cmd ${{targets.destdir}}/usr/bin
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mv ${{targets.destdir}}/usr/bin/$cmd ${{targets.subpkgdir}}/usr/bin
+    test:
+      pipeline:
+        - runs: |
+            gpu-feature-discovery --help
+            gpu-feature-discovery --version
+
+  - name: mps-control-daemon-fips
+    description: NVIDIA MPS Control Daemon
+    pipeline:
+      - runs: |
+          cmd="mps-control-daemon"
+          mv $cmd ${{targets.destdir}}/usr/bin
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mv ${{targets.destdir}}/usr/bin/$cmd ${{targets.subpkgdir}}/usr/bin
+    test:
+      pipeline:
+        - runs: |
+            mps-control-daemon --help
+            mps-control-daemon --version
+
+  - name: nvidia-device-plugin-fips
+    description: NVIDIA device plugin for Kubernetes
+    pipeline:
+      - runs: |
+          cmds="config-manager nvidia-device-plugin"
+          for cmd in $cmds; do
+            mv $cmd ${{targets.destdir}}/usr/bin
+            mkdir -p ${{targets.subpkgdir}}/usr/bin
+            mv ${{targets.destdir}}/usr/bin/$cmd ${{targets.subpkgdir}}/usr/bin
+          done
+    test:
+      pipeline:
+        - runs: |
+            config-manager --help
+            nvidia-device-plugin --help
+            nvidia-device-plugin --version
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/k8s-device-plugin
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
