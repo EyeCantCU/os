@@ -1,7 +1,7 @@
 package:
   name: ansible-operator
-  version: "1.38.1"
-  epoch: 1
+  version: "1.39.0"
+  epoch: 3
   description: Ansible operator to run in kubernetes environments.
   copyright:
     - license: Apache-2.0
@@ -19,13 +19,18 @@ environment:
     packages:
       - py${{vars.py-version}}-build-base
       - py${{vars.py-version}}-pipenv-bin
+  environment:
+    PIP_NO_CACHE_DIR: "1"
+    PIPENV_CLEAR: "1"
+    PIPENV_VENV_IN_PROJECT: "1"
+    VIRTUALENV_SYSTEM_SITE_PACKAGES: "1"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/operator-framework/ansible-operator-plugins
       tag: v${{package.version}}
-      expected-commit: 87d6d1f8c369f5f538ce6f230c891bb9f4e94f12
+      expected-commit: 919b7ea0b1c7404743e0cda6ab8e6790653fe2b5
 
   - uses: go/build
     with:
@@ -40,29 +45,24 @@ pipeline:
     runs: |
       cp images/ansible-operator/Pipfile* .
 
-      # Create the virtual environment
-      export PIP_NO_CACHE_DIR=1 PIPENV_CLEAR=1
-
-      # Dependency bumps
-      pipenv upgrade ansible-core~=2.17.7 cryptography~=44.0.1 jinja2~=3.1.6 setuptools~=78.1.1 requests~=2.32.4
-
-      pipenv install --deploy
+      # Dependency bumps / create virtual environment
+      pipenv install --deploy --extra-pip-args="-I"
+      pipenv upgrade cryptography~=44.0.1 jinja2~=3.1.6 setuptools~=78.1.1 requests~=2.32.4 urllib3~=2.5.0
 
       # Set variables
-      venv="${HOME}/.local/share/virtualenvs/$(ls ~/.local/share/virtualenvs)"
       install_home=${{targets.contextdir}}${{vars.home}}
 
       # Configure the installed paths in the virtual environment
-      sed -i "s|$venv|${{vars.home}}|g" $venv/pyvenv.cfg
-      sed -i "s|$venv|${{vars.home}}|g" $venv/bin/*
+      sed -i "s|/home/build/.venv|${{vars.home}}|g" .venv/pyvenv.cfg
+      sed -i "s|/home/build/.venv|${{vars.home}}|g" .venv/bin/*
 
       # Cleanup
-      find $venv -name "*.pyc" -delete
-      find $venv -name "__pycache__" -exec rm -rf {} +
+      find .venv -name "*.pyc" -delete
+      find .venv -name "__pycache__" -exec rm -rf {} +
 
       # Install the virtual environment
       mkdir -p $install_home
-      cp -r $venv/* $install_home/
+      cp -r .venv/* $install_home/
 
   - name: Install Ansible files
     runs: |
@@ -92,6 +92,8 @@ test:
     contents:
       packages:
         - curl
+        - jq
+        - wait-for-it
   pipeline:
     - name: Check version
       runs: |
@@ -103,6 +105,41 @@ test:
         export \
           PATH="${{vars.home}}/bin:${PATH}" \
           PYTHONPATH="${{vars.home}}/lib/python${{vars.py-version}}/site-packages"
-        ansible-operator run --watches-file=/dev/null >/dev/null 2>&1 &
-        sleep 1
-        curl -sf localhost:6789/healthz >/dev/null 2>&1
+        ansible-operator run --watches-file=/dev/null &
+
+        wait-for-it localhost:6789
+        curl -sf localhost:6789/healthz
+    - name: Test ansible-* binaries functionality
+      runs: |
+        source /usr/share/ansible-operator/bin/activate
+
+        ANSIBLE_VERSION=$(pip inspect | jq -r '.installed[] | select(.metadata.name == "ansible-core") | .metadata.version')
+        TEMP_DIR=$(mktemp -d)
+        cd $TEMP_DIR
+
+        # Test all ansible binaries silently
+        ansible-operator version | grep ${{package.version}}
+        ansible --version | grep $ANSIBLE_VERSION
+        ansible-galaxy --version | grep $ANSIBLE_VERSION
+        ansible-playbook --version | grep $ANSIBLE_VERSION
+        ansible-doc --version | grep $ANSIBLE_VERSION
+        ansible-config --version | grep $ANSIBLE_VERSION
+        ansible-inventory --version | grep $ANSIBLE_VERSION
+        ansible-vault --version | grep $ANSIBLE_VERSION
+
+        # Test playbook execution
+        cat > test-playbook.yml << 'EOF'
+        ---
+        - name: Test playbook
+          hosts: localhost
+          connection: local
+          gather_facts: no
+          tasks:
+            - name: Echo hello
+              debug:
+                msg: "Hello from test playbook"
+        EOF
+
+        ansible-playbook test-playbook.yml -v | grep "Hello from test playbook"
+
+        rm -rf $TEMP_DIR
