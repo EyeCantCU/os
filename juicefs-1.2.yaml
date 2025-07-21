@@ -1,0 +1,132 @@
+package:
+  name: juicefs-1.2
+  version: "1.2.4"
+  epoch: 0
+  description: JuiceFS is a distributed POSIX file system built on top of Redis and S3.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - juicefs=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/juicedata/juicefs
+      tag: v${{package.version}}
+      expected-commit: c7d897f7b69326404df2960d9bc259df194d0dd2
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/net@v0.38.0
+        golang.org/x/oauth2@v0.27.0
+        google.golang.org/protobuf@v1.33.0
+        github.com/golang/glog@v1.2.4
+
+  - uses: go/build
+    with:
+      packages: .
+      output: juicefs
+      ldflags: |
+        -X github.com/juicedata/juicefs/pkg/version.version=${{package.version}}
+        -X github.com/juicedata/juicefs/pkg/version.revision=$(git rev-parse HEAD)
+        -X github.com/juicedata/juicefs/pkg/version.revisionDate=$(date -u -d "@$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '-rc'
+    - '-beta'
+    - '-dev'
+  github:
+    identifier: juicedata/juicefs
+    strip-prefix: v
+    tag-filter: v1.2
+
+test:
+  environment:
+    contents:
+      packages:
+        - redis
+        - minio
+        - mc
+        - wait-for-it
+        - curl
+  pipeline:
+    - name: "Version test"
+      runs: |
+        juicefs --version 2>&1 | grep ${{package.version}}
+    - name: "Start redis for metadata"
+      runs: |
+        redis-server --daemonize yes > /tmp/redis.logs 2>&1 &
+        sleep 2
+    - name: "Start MinIO"
+      runs: |
+        export MINIO_ACCESS_KEY=minioadmin
+        export MINIO_SECRET_KEY=minioadmin
+        mkdir -p /data/minio
+        minio server /data/minio --address :9000 --console-address :9001 > /tmp/minio.log 2>&1 &
+        wait-for-it localhost:9000 -t 30
+    - name: "Create test bucket using mc"
+      runs: |
+        export MINIO_ACCESS_KEY=minioadmin
+        export MINIO_SECRET_KEY=minioadmin
+        mc alias set local http://localhost:9000 minioadmin minioadmin > /tmp/mc.log 2>&1
+        mc mb local/juicefs-bucket
+        sleep 2 # Wait for juicefs bucket to show up
+    - name: "Format juicefs volume"
+      runs: |
+        export ACCESS_KEY=minioadmin
+        export SECRET_KEY=minioadmin
+        juicefs format --bucket http://localhost:9000/juicefs-bucket --access-key $ACCESS_KEY --secret-key $SECRET_KEY redis://localhost testvolume 2>&1 | grep -q "Volume is formatted"
+    - name: "Mount volume and run file tests"
+      runs: |
+        mkdir -p /mnt/jfs
+        juicefs mount -d redis://localhost /mnt/jfs /juice-mount.log 2>&1 &
+        sleep 3
+        touch /mnt/jfs/test.txt
+        echo "hello juicefs" > /mnt/jfs/test.txt
+        grep -q "hello" /mnt/jfs/test.txt
+    - name: "Test Inspect commands"
+      runs: |
+        juicefs status redis://localhost 2>&1 | grep -q "testvolume"
+        juicefs info /mnt/jfs/test.txt 2>&1 | grep -q "testvolume"
+    - name: "Test Admin functions"
+      runs: |
+        # Dump stats into log file
+        juicefs dump redis://localhost /tmp/dump.json
+        grep -q "Sustained" /tmp/dump.json
+        grep -q "DelFiles" /tmp/dump.json
+        grep -q "FSTree" /tmp/dump.json
+    - name: "Test tool commands"
+      runs: |
+        # Warmup cache
+        juicefs warmup /mnt/jfs 2>&1 | grep -q "warmup cache"
+        # Test and validate cloning in Volume
+        juicefs clone /mnt/jfs/test.txt /mnt/jfs/test_clone.txt
+        juicefs summary /mnt/jfs | grep -q "test_clone"
+        # Chunk compaction
+        juicefs compact /mnt/jfs 2>&1 | grep -q "success"
+    - name: "Test service commands"
+      runs: |
+        # Creds needed for JuiceFS's built in S3 gateway
+        export MINIO_ROOT_USER=minioadmin
+        export MINIO_ROOT_PASSWORD=minioadmin
+        export WEBDAV_USER=minioadmin
+        export WEBDAV_PASSWORD=minioadmin
+        # Setup S3 Gateway
+        juicefs gateway redis://localhost localhost:9002 > gateway.logs 2>&1 &
+        wait-for-it localhost:9002
+        # Validate endpoint health
+        curl -v http://localhost:9002/minio/health/ready 2>&1 | grep -q "200 OK"
+        # Validate
+        mc alias set jfs http://localhost:9002 minioadmin minioadmin
+        mc mb jfs/testvolume
+        mc ls jfs 2>&1 | grep "testvolume/"
+        # Start WebDAV server
+        juicefs webdav redis://localhost localhost:9003 > webdav.logs 2>&1 &
+        wait-for-it localhost:9003
+        # Validate
+        curl -sf -u minioadmin:minioadmin http://localhost:9003/ 2>&1 | grep -q "test.txt"
