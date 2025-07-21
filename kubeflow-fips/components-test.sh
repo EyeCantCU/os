@@ -19,7 +19,7 @@ kubeflow.org/creator: kubeflow
 environment: test
 EOF
 
-  /usr/bin/access-management &
+  /usr/bin/access-management --kubeconfig ${HOME}/.kube/config > out.log 2>&1 &
   pid=$!
   sleep 10
 
@@ -45,7 +45,7 @@ admission-webhook)
   kubectl apply -f https://raw.githubusercontent.com/kubeflow/manifests/v$KUBEFLOW_TAG/apps/admission-webhook/upstream/base/crd.yaml
 
   # Launch webhook
-  /usr/bin/webhook -tlsCertFile /tmp/webhook-certs/cert.pem -tlsKeyFile /tmp/webhook-certs/key.pem &
+  /usr/bin/webhook --kubeconfig ${HOME}/.kube/config -tlsCertFile /tmp/webhook-certs/cert.pem -tlsKeyFile /tmp/webhook-certs/key.pem > out.log 2>&1 &
 
   pid=$!
 
@@ -140,3 +140,5 @@ EOF
     exit 0
     ;;
 esac
+
+kubectl delete ns test-ns --force
