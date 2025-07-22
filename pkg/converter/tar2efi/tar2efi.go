@@ -154,6 +154,18 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 
 	diskFile.Close()
 
+	scratchDiskFileName := filepath.Join(tmpd, "scratch.raw")
+	scratchDiskFile, err := os.Create(scratchDiskFileName)
+	if err != nil {
+		return fmt.Errorf("os.Create() failed with %w", err)
+	} else if err := scratchDiskFile.Truncate(numGB * oneGB); err != nil {
+		return fmt.Errorf("f.Truncate() failed with %w", err)
+	} else if err := scratchDiskFile.Close(); err != nil {
+		return fmt.Errorf("f.Close() failed with %w", err)
+	}
+	scratchDiskFile.Close()
+	defer os.RemoveAll(scratchDiskFileName)
+
 	workDir := filepath.Join(tmpd, "workDir")
 	if err := os.Mkdir(workDir, 0755); err != nil {
 		return fmt.Errorf("failed to create results tmpdir")
@@ -192,6 +204,9 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 
 			"-device", "virtio-blk-pci,drive=disk.raw.tmp,serial=install-target-disk,discard=true",
 			"-blockdev", "driver=raw,node-name=disk.raw.tmp,file.driver=file,file.filename="+diskFileName,
+
+			"-device", "virtio-blk-pci,drive=scratch.raw.tmp,serial=scratch-disk,discard=true",
+			"-blockdev", "driver=raw,node-name=scratch.raw.tmp,file.driver=file,file.filename="+scratchDiskFileName,
 
 			// Don't reboot on a kernel panic
 			"-no-reboot",

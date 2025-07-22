@@ -10,10 +10,10 @@ import (
 	"fmt"
 	"os"
 
-	apkofs "chainguard.dev/apko/pkg/apk/fs"
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/apko/pkg/cpio"
+	"chainguard.dev/apko/pkg/tarfs"
 )
 
 // CreateCpio is modeled after the apko build-cpio command.
@@ -24,8 +24,7 @@ func CreateCpio(ctx context.Context, dest string, opts ...build.Option) error {
 	}
 	defer os.RemoveAll(wd)
 
-	fs := apkofs.DirFS(wd, apkofs.WithCreateDir())
-	bc, err := build.New(ctx, fs, opts...)
+	bc, err := build.New(ctx, tarfs.New(), opts...)
 	if err != nil {
 		return err
 	}
@@ -65,8 +64,8 @@ func CreateTar(ctx context.Context, config string, targetArch string) (string, e
 
 	defer os.RemoveAll(wd)
 
-	fs := apkofs.DirFS(wd, apkofs.WithCreateDir())
-	bc, err := build.New(ctx, fs, opts...)
+	// use tarfs instead of apkofs.DirFS as it preserves reproducibility.
+	bc, err := build.New(ctx, tarfs.New(), opts...)
 	if err != nil {
 		return "", err
 	}
