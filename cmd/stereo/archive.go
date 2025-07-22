@@ -8,9 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"runtime"
+	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/apk"
@@ -19,7 +18,6 @@ import (
 	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 func archiveCmd() *cobra.Command {
@@ -71,6 +69,9 @@ type ArchiveContext struct {
 }
 
 func archive(ctx context.Context, duration time.Duration, outputFmt, arch string) error {
+	// Configure log output to stderr
+	log.SetOutput(os.Stderr)
+
 	log.Printf("Searching for APK archive candidates older than %v for architecture %s...", duration, arch)
 
 	// Step 1: Identify older APKs
@@ -114,8 +115,7 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 	log.Printf("After filtering reverse build dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
-	log.Println("Archive candidates:")
-
+	// Output only the APK list to stdout (no header/logs)
 	for _, candidate := range candidates {
 		fmt.Printf("%s=%s %s\n", candidate.Name, candidate.Version, candidate.Repository)
 	}
@@ -492,53 +492,41 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, error) {
 	log.Println("Checking for reverse build dependencies...")
 
-	// Create a set of candidate packages for quick lookup
-	candidateSet := make(map[string]bool)
-	for _, candidate := range candidates {
-		candidateSet[candidate.Name+"="+candidate.Version] = true
-	}
-
-	// Build a map of all build dependencies from active melange configurations
+	// Load cached build dependencies from resolved/build/ directory
 	buildDependencies := make(map[string]bool) // package=version -> true if it's a build dependency
-	var mu sync.Mutex
 
-	// Process melange configurations in parallel
-	var g errgroup.Group
-	g.SetLimit(runtime.GOMAXPROCS(0))
+	for dir := range dirToRepo {
+		buildDepsFile := filepath.Join("resolved", "build", fmt.Sprintf("%s.json", dir))
 
-	for pkgName, cfg := range archiveCtx.ActivePackages {
-		g.Go(func() error {
-			// Capture variables for closure
-			currentPkgName := pkgName
-			currentCfg := cfg
+		if _, err := os.Stat(buildDepsFile); os.IsNotExist(err) {
+			log.Printf("Warning: Build dependencies file not found: %s. Run 'stereo build-dependencies' first.", buildDepsFile)
+			continue
+		}
 
-			log.Printf("Checking build dependencies for melange configuration: %s", currentPkgName)
+		file, err := os.Open(buildDepsFile)
+		if err != nil {
+			log.Printf("Warning: Could not open build dependencies file %s: %v", buildDepsFile, err)
+			continue
+		}
+		defer file.Close()
 
-			// Get the directory for this configuration to determine build repos
-			dir := archiveCtx.ConfigToDir[currentCfg]
-			buildRepos := archiveCtx.BuildRepos[dir]
+		var data struct {
+			Repository        string   `json:"repository"`
+			Architecture      string   `json:"architecture"`
+			BuildDependencies []string `json:"build_dependencies"`
+		}
 
-			// Use the same locking mechanism as the buckets command
-			buildDeps, err := lockBuildDependencies(ctx, currentCfg, archiveCtx.Cache, buildRepos, archiveCtx.Architecture)
-			if err != nil {
-				log.Printf("Error locking build dependencies for %s: %v", currentPkgName, err)
-				return nil // Don't fail the entire operation for one config
-			}
+		if err := json.NewDecoder(file).Decode(&data); err != nil {
+			log.Printf("Warning: Error decoding JSON from %s: %v", buildDepsFile, err)
+			continue
+		}
 
-			// Add all build dependencies to our set (with mutex protection)
-			mu.Lock()
-			for _, dep := range buildDeps {
-				buildDependencies[dep] = true
-			}
-			mu.Unlock()
-
-			return nil
-		})
+		for _, dep := range data.BuildDependencies {
+			buildDependencies[dep] = true
+		}
 	}
 
-	if err := g.Wait(); err != nil {
-		return nil, fmt.Errorf("error processing build dependencies: %w", err)
-	}
+	log.Printf("Loaded %d build dependencies from cache", len(buildDependencies))
 
 	// Filter out candidates that are build dependencies
 	var filtered []ArchiveCandidate

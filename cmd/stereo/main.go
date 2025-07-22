@@ -36,6 +36,7 @@ func main() {
 	root.AddCommand(bucketsCmd())
 	root.AddCommand(lintCmd())
 	root.AddCommand(archiveCmd())
+	root.AddCommand(buildDepsCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)
