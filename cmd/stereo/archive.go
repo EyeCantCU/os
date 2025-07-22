@@ -54,7 +54,7 @@ type ArchiveCandidate struct {
 	Version    string
 	Repository string
 	Age        time.Duration
-	Reason     string
+	Reasons    []string
 }
 
 type ArchiveContext struct {
@@ -115,11 +115,78 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 	log.Printf("After filtering reverse build dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
-	// Output only the APK list to stdout (no header/logs)
-	for _, candidate := range candidates {
-		fmt.Printf("%s=%s %s\n", candidate.Name, candidate.Version, candidate.Repository)
+	// Create archive directory if it doesn't exist
+	archiveDir := "archive"
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		return fmt.Errorf("creating archive directory: %w", err)
 	}
 
+	// Group candidates by repository for JSON output
+	candidatesByRepo := make(map[string][]ArchiveCandidate)
+	for _, candidate := range candidates {
+		candidatesByRepo[candidate.Repository] = append(candidatesByRepo[candidate.Repository], candidate)
+	}
+
+	// Write archive candidates to JSON files per repository
+	for repo, repoCandidates := range candidatesByRepo {
+		archiveFile := filepath.Join(archiveDir, fmt.Sprintf("%s.json", repo))
+
+		// Create JSON structure
+		archiveData := struct {
+			Repository        string `json:"repository"`
+			Architecture      string `json:"architecture"`
+			Duration          string `json:"duration"`
+			ArchiveCandidates []struct {
+				Name    string   `json:"name"`
+				Version string   `json:"version"`
+				Age     string   `json:"age"`
+				Reasons []string `json:"reasons"`
+			} `json:"archive_candidates"`
+		}{
+			Repository:   repo,
+			Architecture: arch,
+			Duration:     formatDurationInDays(duration),
+			ArchiveCandidates: make([]struct {
+				Name    string   `json:"name"`
+				Version string   `json:"version"`
+				Age     string   `json:"age"`
+				Reasons []string `json:"reasons"`
+			}, len(repoCandidates)),
+		}
+
+		for i, candidate := range repoCandidates {
+			archiveData.ArchiveCandidates[i] = struct {
+				Name    string   `json:"name"`
+				Version string   `json:"version"`
+				Age     string   `json:"age"`
+				Reasons []string `json:"reasons"`
+			}{
+				Name:    candidate.Name,
+				Version: candidate.Version,
+				Age:     formatDurationInDays(candidate.Age),
+				Reasons: candidate.Reasons,
+			}
+		}
+
+		// Write to JSON file
+		file, err := os.Create(archiveFile)
+		if err != nil {
+			log.Printf("Warning: Could not create archive file %s: %v", archiveFile, err)
+		} else {
+			log.Printf("Writing %d archive candidates to %s", len(repoCandidates), archiveFile)
+
+			encoder := json.NewEncoder(file)
+			encoder.SetIndent("", "  ")
+			if err := encoder.Encode(archiveData); err != nil {
+				log.Printf("Warning: Error encoding archive JSON to %s: %v", archiveFile, err)
+			} else {
+				log.Printf("Successfully wrote archive candidates for %s to %s", repo, archiveFile)
+			}
+			file.Close()
+		}
+	}
+
+	log.Printf("Archive analysis complete. Results written to %s/", archiveDir)
 	return nil
 }
 
@@ -129,7 +196,7 @@ func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]
 
 	// Check each repository
 	for dir, repoURL := range dirToRepo {
-		log.Printf("Checking repository: %s (%s)", dir, repoURL)
+		log.Printf("Checking repository: %s", dir)
 
 		// Fetch the APK index for specified architecture
 		index, err := fetchAPKIndex(ctx, repoURL, arch)
@@ -138,6 +205,7 @@ func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]
 			continue
 		}
 
+		log.Printf("Processing %d packages from %s", len(index.Packages), dir)
 		// Check each package in the index
 		for _, pkg := range index.Packages {
 			// Use the build timestamp directly
@@ -150,7 +218,7 @@ func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]
 					Version:    pkg.Version,
 					Repository: dir,
 					Age:        time.Since(buildTime),
-					Reason:     "older than duration",
+					Reasons:    []string{"older than duration"},
 				}
 				candidates = append(candidates, candidate)
 			}
@@ -280,8 +348,6 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 					dep.Constraint != "" && strings.HasPrefix(dep.Constraint, "=") {
 					requiredVersion := dep.Constraint[1:]
 					if candidate.Version == requiredVersion {
-						log.Printf("Package %s=%s internal dependency from same origin %s (%s=%s) - not blocking",
-							candidate.Name, candidate.Version, candidateOrigin, dep.DependentPackage, dep.DependentPackageVersion)
 						continue
 					}
 				}
@@ -297,8 +363,6 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 
 					// Check if this non-candidate version satisfies the dependency
 					if versionSatisfiesDependency(version, dep) {
-						log.Printf("Package %s=%s dependency (%s) can be satisfied by non-candidate version %s=%s",
-							candidate.Name, candidate.Version, dep.Constraint, candidate.Name, version)
 						canBeSatisfiedByNonCandidate = true
 						break
 					}
@@ -325,18 +389,12 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 						mostRecentVersion := findMostRecentVersion(satisfyingCandidates)
 
 						if candidate.Version != mostRecentVersion {
-							log.Printf("Package %s=%s can be archived - dependency (%s) can be satisfied by more recent candidate %s=%s",
-								candidate.Name, candidate.Version, dep.Constraint, candidate.Name, mostRecentVersion)
 							continue // This candidate can be archived
 						} else {
-							log.Printf("Package %s=%s cannot be archived - keeping most recent of multiple candidates that satisfy dependency (%s)",
-								candidate.Name, candidate.Version, dep.Constraint)
 							hasBlockingReverseDependency = true
 							break
 						}
 					} else {
-						log.Printf("Package %s=%s cannot be archived - depended upon by %s (%s) and no non-candidate version can satisfy this",
-							candidate.Name, candidate.Version, dep.DependentPackage, dep.Constraint)
 						hasBlockingReverseDependency = true
 						break
 					}
@@ -345,6 +403,7 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 		}
 
 		if !hasBlockingReverseDependency {
+			candidate.Reasons = append(candidate.Reasons, "no blocking reverse dependencies")
 			filtered = append(filtered, candidate)
 		}
 	}
@@ -461,6 +520,7 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 		_, isStillBuilt := archiveCtx.ActivePackages[candidate.Name]
 		if !isStillBuilt {
 			// Package is no longer built from melange, safe to archive any version
+			candidate.Reasons = append(candidate.Reasons, "no longer built from melange")
 			filtered = append(filtered, candidate)
 			continue
 		}
@@ -469,20 +529,14 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 		allVersions := archiveCtx.AllPackages[candidate.Name]
 		if len(allVersions) <= 1 {
 			// Only one version available, don't archive it
-			log.Printf("Package %s=%s cannot be archived - only version of package still built from melange",
-				candidate.Name, candidate.Version)
 			continue
 		}
 
 		mostRecentVersion := findMostRecentVersion(allVersions)
 		if candidate.Version == mostRecentVersion {
-			log.Printf("Package %s=%s cannot be archived - most recent version of package still built from melange",
-				candidate.Name, candidate.Version)
 			continue
 		}
-
-		log.Printf("Package %s=%s can be archived - not the most recent version (most recent: %s)",
-			candidate.Name, candidate.Version, mostRecentVersion)
+		candidate.Reasons = append(candidate.Reasons, "not the most recent version")
 		filtered = append(filtered, candidate)
 	}
 
@@ -533,11 +587,10 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 	for _, candidate := range candidates {
 		packageVersion := candidate.Name + "=" + candidate.Version
 		if buildDependencies[packageVersion] {
-			log.Printf("Package %s=%s cannot be archived - is a build dependency for active melange configuration",
-				candidate.Name, candidate.Version)
 			continue
 		}
 
+		candidate.Reasons = append(candidate.Reasons, "not a build dependency")
 		filtered = append(filtered, candidate)
 	}
 
@@ -571,4 +624,12 @@ func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *
 	}
 
 	return locked.Contents.Packages, nil
+}
+
+func formatDurationInDays(d time.Duration) string {
+	days := d.Hours() / 24
+	if days >= 1 {
+		return fmt.Sprintf("%.0f days", days)
+	}
+	return d.String() // fallback for sub-day durations
 }
