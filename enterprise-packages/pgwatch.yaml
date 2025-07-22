@@ -1,0 +1,107 @@
+package:
+  name: pgwatch
+  version: "3.6.0"
+  epoch: 1
+  description: Postgres monitoring tool for Kubernetes.
+  copyright:
+    - license: BSD-3-Clause
+
+environment:
+  contents:
+    packages:
+      - nodejs-22 # upstream pins to nodejs 22 https://github.com/cybertec-postgresql/pgwatch/blob/master/docker/Dockerfile#L4
+      - npm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/cybertec-postgresql/pgwatch
+      tag: v${{package.version}}
+      expected-commit: 9ced8ecb7b9df5bcd6b0a66b241ed458fdf4c9cd
+
+  - name: Build Web UI # this is embedded into the binary when we go/build
+    working-directory: internal/webui
+    runs: |
+      npm i react-scripts
+      npm run build
+
+  - name: Build gatherer
+    uses: go/build
+    with:
+      packages: ./cmd/pgwatch/
+      output: pgwatch
+      ldflags: |
+        -X 'main.commit=$(git rev-parse HEAD)'
+        -X 'main.date=$(date -u -d "@${SOURCE_DATE_EPOCH}" "+%Y-%m-%dT%H:%M:%SZ")'
+        -X 'main.version=${{package.version}}'
+
+  - name: Build the final package #corresponds to "build the final image" in the original dockerfile
+    runs: |
+      install -Dpm0644 -t "${{targets.destdir}}/pgwatch/metrics/" "internal/metrics/metrics.yaml"
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: compat package to place binaries in location expected by upstream
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/pgwatch
+          ln -sf /usr/bin/pgwatch ${{targets.subpkgdir}}/pgwatch/pgwatch
+    test:
+      pipeline:
+        - name: "Test compat symlink"
+          runs: |
+            stat /pgwatch/pgwatch
+            test -L /pgwatch/pgwatch
+            test "$(realpath /pgwatch/pgwatch)" = "/usr/bin/pgwatch"
+
+update:
+  enabled: true
+  github:
+    identifier: cybertec-postgresql/pgwatch
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: postgres
+          gid: 65532
+      users:
+        - username: postgres
+          gid: 65532
+          uid: 65532
+    contents:
+      packages:
+        - postgresql
+        - postgresql-client
+        - postgresql-contrib
+        - sudo-rs
+    environment:
+      PGDATA: /tmp/pgwatch
+      PGUSER1: postgres
+      PGUSER2: pgwatch
+      PGDB: postgres
+      PGSOURCEDB: pgwatch
+      PGMEASUREMENTDB: measurements
+  pipeline:
+    - name: "Test manager run"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # https://pgwat.ch/latest/howto/config_db_bootstrap.html#choosing-a-database
+          sudo -u $PGUSER1 initdb -D /tmp/$PGDB
+          sudo -u $PGUSER1 pg_ctl -D /tmp/$PGDB -l /tmp/logfile start
+
+          psql -U $PGUSER1 -h localhost -d $PGDB -c "CREATE ROLE $PGUSER2 WITH LOGIN;"
+          psql -U $PGUSER1 -h localhost -d $PGDB -c "CREATE DATABASE $PGSOURCEDB OWNER $PGUSER2;"
+          psql -U $PGUSER1 -h localhost -d $PGDB -c "CREATE DATABASE $PGMEASUREMENTDB OWNER $PGUSER2;"
+
+          pgwatch --sources=postgresql://$PGUSER2@localhost/$PGSOURCEDB config init
+        start: pgwatch --sources=postgresql://$PGUSER2@localhost/$PGSOURCEDB --sink=postgresql://$PGUSER2@localhost/$PGMEASUREMENTDB
+        timeout: 30
+        expected_output: |
+          initialising measurements database...
+          measurements sink is activated
+          sources refreshed
+          metrics and presets refreshed
