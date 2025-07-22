@@ -139,6 +139,16 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 	log.Printf("After filtering image dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
+	// Step 7: Filter out packages that are still in use by VMs
+	filtered, retained, err = filterByVMDependencies(candidates, archiveCtx.Architecture)
+	if err != nil {
+		return fmt.Errorf("filtering by VM dependencies: %w", err)
+	}
+	retainedPackages = append(retainedPackages, retained...)
+
+	log.Printf("After filtering VM dependencies: %d packages remain", len(filtered))
+	candidates = filtered
+
 	// Create archive and retain directories if they don't exist
 	archiveDir := "archive"
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
@@ -780,6 +790,63 @@ func filterByImageDependencies(candidates []ArchiveCandidate, arch string) ([]Ar
 		}
 
 		candidate.Reasons = append(candidate.Reasons, "not used by images")
+		filtered = append(filtered, candidate)
+	}
+
+	return filtered, retained, nil
+}
+
+func filterByVMDependencies(candidates []ArchiveCandidate, arch string) ([]ArchiveCandidate, []RetainCandidate, error) {
+	log.Println("Checking for VM dependencies...")
+
+	// Load cached VM dependencies from resolved/vms/ directory
+	vmDependencies := make(map[string]bool) // package=version -> true if it's used by VMs
+
+	vmDepsFile := filepath.Join("resolved", "vms", "vms.json")
+
+	if _, err := os.Stat(vmDepsFile); os.IsNotExist(err) {
+		log.Printf("Warning: VM dependencies file not found: %s. Run 'stereo vm-dependencies' first.", vmDepsFile)
+	} else {
+		file, err := os.Open(vmDepsFile)
+		if err != nil {
+			log.Printf("Warning: Could not open VM dependencies file %s: %v", vmDepsFile, err)
+		} else {
+			defer file.Close()
+
+			var data struct {
+				Architecture   string   `json:"architecture"`
+				VMDependencies []string `json:"vm_dependencies"`
+			}
+
+			if err := json.NewDecoder(file).Decode(&data); err != nil {
+				log.Printf("Warning: Error decoding JSON from %s: %v", vmDepsFile, err)
+			} else {
+				for _, dep := range data.VMDependencies {
+					vmDependencies[dep] = true
+				}
+			}
+		}
+	}
+
+	log.Printf("Loaded %d VM dependencies from cache", len(vmDependencies))
+
+	// Filter out candidates that are used by VMs
+	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
+	for _, candidate := range candidates {
+		packageVersion := candidate.Name + "=" + candidate.Version
+		if vmDependencies[packageVersion] {
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "is used by active VMs",
+			})
+			continue
+		}
+
+		candidate.Reasons = append(candidate.Reasons, "not used by VMs")
 		filtered = append(filtered, candidate)
 	}
 

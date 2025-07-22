@@ -38,6 +38,7 @@ func main() {
 	root.AddCommand(archiveCmd())
 	root.AddCommand(buildDepsCmd())
 	root.AddCommand(imageDependenciesCmd())
+	root.AddCommand(vmDependenciesCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)
