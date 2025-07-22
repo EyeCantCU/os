@@ -129,6 +129,16 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 	log.Printf("After filtering reverse build dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
+	// Step 6: Filter out packages that are still in use by images
+	filtered, retained, err = filterByImageDependencies(candidates, archiveCtx.Architecture)
+	if err != nil {
+		return fmt.Errorf("filtering by image dependencies: %w", err)
+	}
+	retainedPackages = append(retainedPackages, retained...)
+
+	log.Printf("After filtering image dependencies: %d packages remain", len(filtered))
+	candidates = filtered
+
 	// Create archive and retain directories if they don't exist
 	archiveDir := "archive"
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
@@ -707,6 +717,69 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 		}
 
 		candidate.Reasons = append(candidate.Reasons, "not a build dependency")
+		filtered = append(filtered, candidate)
+	}
+
+	return filtered, retained, nil
+}
+
+func filterByImageDependencies(candidates []ArchiveCandidate, arch string) ([]ArchiveCandidate, []RetainCandidate, error) {
+	log.Println("Checking for image dependencies...")
+
+	// Load cached image dependencies from resolved/images/ directory
+	imageDependencies := make(map[string]bool) // package=version -> true if it's used by images
+
+	// Check both public and private image dependency files
+	for _, imageSet := range []string{"public", "private"} {
+		imageDepsFile := filepath.Join("resolved", "images", fmt.Sprintf("%s.json", imageSet))
+
+		if _, err := os.Stat(imageDepsFile); os.IsNotExist(err) {
+			log.Printf("Warning: Image dependencies file not found: %s. Run 'stereo image-dependencies' first.", imageDepsFile)
+			continue
+		}
+
+		file, err := os.Open(imageDepsFile)
+		if err != nil {
+			log.Printf("Warning: Could not open image dependencies file %s: %v", imageDepsFile, err)
+			continue
+		}
+		defer file.Close()
+
+		var data struct {
+			RepositorySet     string   `json:"repository_set"`
+			Architecture      string   `json:"architecture"`
+			ImageDependencies []string `json:"image_dependencies"`
+		}
+
+		if err := json.NewDecoder(file).Decode(&data); err != nil {
+			log.Printf("Warning: Error decoding JSON from %s: %v", imageDepsFile, err)
+			continue
+		}
+
+		for _, dep := range data.ImageDependencies {
+			imageDependencies[dep] = true
+		}
+	}
+
+	log.Printf("Loaded %d image dependencies from cache", len(imageDependencies))
+
+	// Filter out candidates that are used by images
+	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
+	for _, candidate := range candidates {
+		packageVersion := candidate.Name + "=" + candidate.Version
+		if imageDependencies[packageVersion] {
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "is used by active images",
+			})
+			continue
+		}
+
+		candidate.Reasons = append(candidate.Reasons, "not used by images")
 		filtered = append(filtered, candidate)
 	}
 
