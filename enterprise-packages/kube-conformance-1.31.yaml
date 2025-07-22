@@ -1,0 +1,101 @@
+package:
+  name: kube-conformance-1.31
+  version: "1.31.11"
+  epoch: 0
+  description: Kubernetes Conformance Test Suite
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - kube-conformance=${{package.full-version}}
+    runtime:
+      - ginkgo
+      - kubectl
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - go
+      - make
+      - rsync
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes/kubernetes
+      tag: v${{package.version}}
+      expected-commit: 7e94e1ce5c71407a782db8ef701e290bb0246da0
+
+  - runs: |
+      # Use our Go version instead of downloading another one
+      export FORCE_HOST_GO=true
+      export GOWORK=off
+      export KUBE_GIT_TREE_STATE=clean
+
+      make WHAT="test/e2e/e2e.test test/conformance/image/go-runner"
+
+  - runs: |
+      mkdir -p "${{targets.contextdir}}"/usr/bin/
+      install -m755 _output/bin/e2e.test ${{targets.contextdir}}/usr/bin/e2e.test
+      install -m755 _output/bin/go-runner ${{targets.contextdir}}/usr/bin/kubeconformance
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - kube-conformance-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -sf /usr/bin/ginkgo ${{targets.contextdir}}/usr/local/bin/ginkgo
+          ln -sf /usr/bin/e2e.test ${{targets.contextdir}}/usr/local/bin/e2e.test
+          ln -sf /usr/bin/kubeconformance ${{targets.contextdir}}/usr/local/bin/kubeconformance
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
+  pipeline:
+    - name: Ginkgo Dependency Check
+      runs: |
+        # kubeconformance expects the ginkgo binary in a specific spot
+        /usr/local/bin/ginkgo version
+    - uses: test/kwok/cluster
+    - name: Run Conformance Test with Kwok
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Grant cluster-admin permissions to the default service account
+          kubectl create clusterrolebinding default-admin --clusterrole=cluster-admin --serviceaccount=default:default
+
+          # Create service account directory and copy CA from kwok
+          mkdir -p /var/run/secrets/kubernetes.io/serviceaccount
+          kubectl config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          echo "default" > /var/run/secrets/kubernetes.io/serviceaccount/namespace
+
+          # Create a more permanent token with a longer expiration
+          TOKEN=$(kubectl create token default --duration=1h)
+          echo "$TOKEN" > /var/run/secrets/kubernetes.io/serviceaccount/token
+
+          # Set up and configure for tests
+          mkdir -p ~/.kube
+          kubectl config view --raw > ~/.kube/config
+        start: |
+          kubeconformance
+        expected_output: |
+          Now listening for interrupts
+          Starting e2e run
+          Running Suite: Kubernetes e2e suite
+        timeout: 60
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v1.31.

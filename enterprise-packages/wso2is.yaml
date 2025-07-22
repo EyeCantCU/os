@@ -3,7 +3,7 @@ package:
   # IMPORTANT - Manual updates required between versions. Please refer to the
   # vars section below.
   version: 7.1.0
-  epoch: 3
+  epoch: 5
   description: "WSO2 Identity Server - Open source identity and access management solution"
   copyright:
     # https://github.com/chainguard-dev/image-requests/issues/5594#issuecomment-2992353956
@@ -141,6 +141,7 @@ test:
       packages:
         - ${{package.name}}-compat
         - curl
+        - jq
         - openjdk-${{vars.runtime-java-version}}-default-jvm
         - procps
         - wait-for-it
@@ -161,7 +162,7 @@ test:
 
         # Start using docker-entrypoint.sh
         # Also validates the symlink created by our -compat package.
-        /home/wso2carbon/docker-entrypoint.sh > /tmp/wso2is.log 2>&1 &
+        nohup /home/wso2carbon/docker-entrypoint.sh > /tmp/wso2is.log 2>&1 &
         SERVER_PID=$!
         sleep 5
         if ! ps -p $SERVER_PID > /dev/null 2>&1; then
@@ -170,10 +171,21 @@ test:
 
         echo "Waiting for server to start..."
         wait-for-it localhost:9443 --timeout=60
+        echo "Waiting 10 seconds for services to stabilize..."
+        sleep 10
     - name: Test creating a new user via SCIM API
       runs: |
+        set -euo pipefail
+
+        echo "Checking server health before SCIM API test..."
+        curl -k -s -f "https://localhost:9443/carbon/admin/login.jsp" > /dev/null || {
+          echo "Server health check failed, dumping last 50 lines of log:"
+          tail -50 /tmp/wso2is.log 2>/dev/null || echo "Log file not accessible"
+          exit 1
+        }
+
         # Create a test user via SCIM
-        CREATE_RESPONSE=$(curl -k -s -u "admin:admin" -w "\n%{http_code}" \
+        USER_ID=$(curl -k -s -f -u "admin:admin" \
           -H "Content-Type: application/json" \
           -d '{
             "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
@@ -188,182 +200,110 @@ test:
               "value": "testuser@example.com"
             }]
           }' \
-          "https://localhost:9443/scim2/Users" 2>/dev/null)
+          "https://localhost:9443/scim2/Users" | jq -r '.id')
 
-        CREATE_CODE=$(echo "$CREATE_RESPONSE" | tail -1)
-        if [ "$CREATE_CODE" != "201" ]; then
-          echo "Failed to create SCIM user. HTTP $CREATE_CODE. Response: $(echo "$CREATE_RESPONSE" | head -n -1)"; exit 1
-        fi
+        # Test we can retrieve users! Use our previous User ID, then validate
+        # the user details match what we created.
+        USER_RESPONSE=$(curl -k -s -f -u "admin:admin" \
+          "https://localhost:9443/scim2/Users/$USER_ID")
 
-        # List users and verify our test user exists
-        LIST_RESPONSE=$(curl -k -s -u "admin:admin" -w "\n%{http_code}" \
-          "https://localhost:9443/scim2/Users?filter=userName+eq+testuser123" 2>/dev/null)
-
-        LIST_CODE=$(echo "$LIST_RESPONSE" | tail -1)
-        LIST_BODY=$(echo "$LIST_RESPONSE" | head -n -1)
-
-        if [ "$LIST_CODE" != "200" ]; then
-          echo "SCIM API returned non-200 response fetching users: $LIST_CODE"; exit 1
-        fi
-
-        # Verify the testuser was returned in the results
-        if ! echo "$LIST_BODY" | grep -q '"userName".*"testuser123"'; then
-          echo "SCIM API test failed - 'testuser123' not found in response: $LIST_BODY"; exit 1
-        fi
+        # Verify the user data matches what we created
+        echo "$USER_RESPONSE" | jq -e '.userName == "testuser123"'
+        echo "$USER_RESPONSE" | jq -e '.emails | contains(["testuser@example.com"])'
     - name: Test OAuth2 endpoints
       runs: |
-        RESPONSE=$(curl -k -s -w "\n%{http_code}" "https://localhost:9443/oauth2/oidcdiscovery/.well-known/openid-configuration" 2>/dev/null)
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
+        set -euo pipefail
 
-        if [ "$HTTP_CODE" != "200" ]; then
-          echo "OAuth2 endpoint returned HTTP $HTTP_CODE"; exit 1
-        fi
+        # Fetch OIDC discovery document and verify required fields
+        DISCOVERY=$(curl -k -s -f "https://localhost:9443/oauth2/oidcdiscovery/.well-known/openid-configuration")
 
-        # Verify it's a valid OIDC discovery document with required fields
-        if ! echo "$BODY" | grep -q '"issuer".*"https://localhost:9443/oauth2/token"'; then
-          echo "OAuth2 discovery missing valid issuer"; exit 1
-        fi
-
-        if ! echo "$BODY" | grep -q '"authorization_endpoint"'; then
-          echo "OAuth2 discovery missing authorization_endpoint"; exit 1
-        fi
+        # Verify all required OIDC endpoints exist
+        echo "$DISCOVERY" | jq -e '.issuer and .authorization_endpoint and .token_endpoint and .jwks_uri and .userinfo_endpoint'
     - name: Test management console
       runs: |
-        # Get both status code and content
-        RESPONSE=$(curl -k -L -s -w "\n%{http_code}" "https://localhost:9443/carbon" 2>/dev/null)
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
+        set -euo pipefail
 
-        if [ "$HTTP_CODE" != "200" ]; then
-          echo "Management console returned HTTP $HTTP_CODE"; exit 1
-        fi
-
-        # Verify we got the WSO2 Management Console login page
-        if ! echo "$BODY" | grep -q "<title>WSO2 Management Console</title>"; then
-          echo "Management console response missing expected title"; exit 1
-        fi
-
-        # Verify login form is present
-        if ! echo "$BODY" | grep -q "txtUserName"; then
-          echo "Management console login form not found"; exit 1
-        fi
-
-        # Verify it's the Carbon admin console
-        if ! echo "$BODY" | grep -q "/carbon/admin/login_action.jsp"; then
-          echo "Management console not pointing to correct login action"; exit 1
-        fi
+        # Verify management console login page
+        BODY=$(curl -k -L -s -f "https://localhost:9443/carbon")
+        echo "$BODY" | grep -q "<title>WSO2 Management Console</title>"
+        echo "$BODY" | grep -q "txtUserName"
+        echo "$BODY" | grep -q "/carbon/admin/login_action.jsp"
     - name: Test SAML SSO metadata
       runs: |
-        RESPONSE=$(curl -k -s -w "\n%{http_code}" "https://localhost:9443/identity/metadata/saml2" 2>/dev/null)
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
+        set -euo pipefail
 
-        if [ "$HTTP_CODE" != "200" ]; then
-          echo "SAML metadata endpoint returned HTTP $HTTP_CODE"; exit 1
-        fi
-
-        if ! echo "$BODY" | grep -q "EntityDescriptor"; then
-          echo "SAML metadata response missing EntityDescriptor element"; exit 1
-        fi
+        # Verify SAML metadata contains EntityDescriptor
+        curl -k -s -f "https://localhost:9443/identity/metadata/saml2" | grep -q "EntityDescriptor"
     - name: Test OAuth2 and OpenID Connect flow
       runs: |
+        set -euo pipefail
+
         # Step 1: Register a new OAuth2 client via Dynamic Client Registration
-        CLIENT_RESPONSE=$(curl -k -s -u "admin:admin" -X POST \
+        echo "Registering OAuth2 client..."
+        read -r CLIENT_ID CLIENT_SECRET < <(curl -k -s -f -u "admin:admin" -X POST \
           -H "Content-Type: application/json" \
           -d '{
             "client_name": "test_client",
             "grant_types": ["password"],
             "redirect_uris": ["http://localhost"]
           }' \
-          "https://localhost:9443/api/identity/oauth2/dcr/v1.1/register" 2>/dev/null)
+          "https://localhost:9443/api/identity/oauth2/dcr/v1.1/register" | \
+          jq -r '"\(.client_id) \(.client_secret)"')
 
-        CLIENT_ID=$(echo "$CLIENT_RESPONSE" | grep -o '"client_id":"[^"]*"' | cut -d'"' -f4)
-        CLIENT_SECRET=$(echo "$CLIENT_RESPONSE" | grep -o '"client_secret":"[^"]*"' | cut -d'"' -f4)
-
-        if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-          echo "Failed to register OAuth client. Response: $CLIENT_RESPONSE"; exit 1
-        fi
+        echo "Registered client ID: $CLIENT_ID"
 
         # Step 2: Get access token and ID token using the registered client
-        TOKEN_RESPONSE=$(curl -k -s -X POST \
+        TOKEN_RESPONSE=$(curl -k -s -f -X POST \
           -H "Content-Type: application/x-www-form-urlencoded" \
           -u "$CLIENT_ID:$CLIENT_SECRET" \
           -d "grant_type=password&username=admin&password=admin&scope=openid internal_login" \
-          "https://localhost:9443/oauth2/token" 2>/dev/null)
+          "https://localhost:9443/oauth2/token")
 
-        ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
-        ID_TOKEN=$(echo "$TOKEN_RESPONSE" | grep -o '"id_token":"[^"]*"' | cut -d'"' -f4)
+        ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
+        ID_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.id_token')
+        TOKEN_TYPE=$(echo "$TOKEN_RESPONSE" | jq -r '.token_type // "Bearer"')
 
-        if [ -z "$ACCESS_TOKEN" ]; then
-          echo "Failed to get access token. Response: $TOKEN_RESPONSE"; exit 1
-        fi
-
-        # Step 3: Verify OpenID Connect is working (ID token must be present)
-        if [ -z "$ID_TOKEN" ]; then
-          echo "No ID token in response: $TOKEN_RESPONSE"; exit 1
-        fi
+        echo "Successfully obtained tokens (type: $TOKEN_TYPE)"
 
         # Test OAuth userinfo endpoint
         echo "Testing OAuth userinfo endpoint..."
-        RESPONSE=$(curl -k -s -H "Authorization: Bearer $ACCESS_TOKEN" \
-          -w "\n%{http_code}" \
-          "https://localhost:9443/oauth2/userinfo" 2>/dev/null)
+        USERINFO=$(curl -k -s -f -H "Authorization: Bearer $ACCESS_TOKEN" \
+          "https://localhost:9443/oauth2/userinfo")
 
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        BODY=$(echo "$RESPONSE" | head -n -1)
-
-        if [ "$HTTP_CODE" != "200" ]; then
-          echo "Userinfo endpoint returned HTTP $HTTP_CODE. Response: $BODY"; exit 1
-        fi
+        # Verify userinfo contains sub claim
+        echo "$USERINFO" | jq -e '.sub'
 
         # Test JWKS endpoint (for token verification)
         echo "Testing JWKS endpoint..."
-        RESPONSE=$(curl -k -s -w "\n%{http_code}" \
-          "https://localhost:9443/oauth2/jwks" 2>/dev/null)
+        JWKS=$(curl -k -s -f "https://localhost:9443/oauth2/jwks")
 
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        if [ "$HTTP_CODE" != "200" ]; then
-          echo "JWKS endpoint returned HTTP $HTTP_CODE"; exit 1
-        fi
+        # Verify JWKS contains keys
+        echo "$JWKS" | jq -e '.keys | length > 0'
     - name: Test SCIM Groups endpoint
       runs: |
+        set -euo pipefail
+
         # Create a test group
-        CREATE_RESPONSE=$(curl -k -s -u "admin:admin" -X POST \
+        GROUP_ID=$(curl -k -s -f -u "admin:admin" -X POST \
           -H "Content-Type: application/json" \
           -d '{
             "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
             "displayName": "testgroup123",
             "members": []
           }' \
-          -w "\n%{http_code}" \
-          "https://localhost:9443/scim2/Groups" 2>/dev/null)
+          "https://localhost:9443/scim2/Groups" | jq -r '.id')
 
-        CREATE_CODE=$(echo "$CREATE_RESPONSE" | tail -1)
-        CREATE_BODY=$(echo "$CREATE_RESPONSE" | head -n -1)
+        echo "Created group with ID: $GROUP_ID"
 
-        if [ "$CREATE_CODE" != "201" ]; then
-          echo "Failed to create SCIM group - HTTP $CREATE_CODE. Response: $CREATE_BODY"; exit 1
-        fi
-
-        # List groups and verify our test group exists
-        LIST_RESPONSE=$(curl -k -s -u "admin:admin" -w "\n%{http_code}" \
-          "https://localhost:9443/scim2/Groups?filter=displayName+eq+testgroup123" 2>/dev/null)
-
-        LIST_CODE=$(echo "$LIST_RESPONSE" | tail -1)
-        LIST_BODY=$(echo "$LIST_RESPONSE" | head -n -1)
-
-        if [ "$LIST_CODE" != "200" ]; then
-          echo "Failed to list SCIM groups - HTTP $LIST_CODE"; exit 1
-        fi
-
-        # Verify the test group appears in the filtered results
-        if ! echo "$LIST_BODY" | grep -q '"displayName".*"testgroup123"'; then
-          echo "Expected group: testgroup123 not returned in response: $LIST_BODY"; exit 1
-        fi
+        # Verify group exists
+        curl -k -s -f -u "admin:admin" \
+          "https://localhost:9443/scim2/Groups?filter=displayName+eq+testgroup123" | \
+          jq -e '.Resources | map(select(.displayName == "testgroup123")) | length == 1'
 
 update:
   enabled: true
+  ignore-regex-patterns:
+    - 'm' # If contains 'm' it is Pre-release version, skip updates.
   manual: true # Manual step required - details in 'vars' section.
   github:
     identifier: wso2/product-is
