@@ -37,6 +37,7 @@ func main() {
 	root.AddCommand(lintCmd())
 	root.AddCommand(archiveCmd())
 	root.AddCommand(buildDepsCmd())
+	root.AddCommand(imageDependenciesCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)
