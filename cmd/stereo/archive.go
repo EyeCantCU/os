@@ -57,6 +57,14 @@ type ArchiveCandidate struct {
 	Reasons    []string
 }
 
+type RetainCandidate struct {
+	Name       string
+	Version    string
+	Repository string
+	Age        time.Duration
+	Reason     string
+}
+
 type ArchiveContext struct {
 	DependencyMap   map[string][]Dependency          // package -> list of dependencies on it
 	AllPackages     map[string][]string              // package name -> list of available versions
@@ -88,37 +96,48 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 		return fmt.Errorf("building archive context: %w", err)
 	}
 
+	// Track retained packages across all filtering steps
+	var retainedPackages []RetainCandidate
+
 	// Step 3: Filter out packages with reverse dependencies
-	filtered, err := filterByReverseDependencies(candidates, archiveCtx)
+	filtered, retained, err := filterByReverseDependencies(candidates, archiveCtx)
 	if err != nil {
 		return fmt.Errorf("filtering by reverse dependencies: %w", err)
 	}
+	retainedPackages = append(retainedPackages, retained...)
 
 	log.Printf("After filtering reverse dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
 	// Step 4: Filter out most recent versions that are still built from melange
-	filtered, err = filterByMostRecentVersion(candidates, archiveCtx)
+	filtered, retained, err = filterByMostRecentVersion(candidates, archiveCtx)
 	if err != nil {
 		return fmt.Errorf("filtering by most recent version: %w", err)
 	}
+	retainedPackages = append(retainedPackages, retained...)
 
 	log.Printf("After filtering most recent versions: %d packages remain", len(filtered))
 	candidates = filtered
 
 	// Step 5: Filter out packages that are reverse build dependencies
-	filtered, err = filterByReverseBuildDependencies(ctx, candidates, archiveCtx)
+	filtered, retained, err = filterByReverseBuildDependencies(ctx, candidates, archiveCtx)
 	if err != nil {
 		return fmt.Errorf("filtering by reverse build dependencies: %w", err)
 	}
+	retainedPackages = append(retainedPackages, retained...)
 
 	log.Printf("After filtering reverse build dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
-	// Create archive directory if it doesn't exist
+	// Create archive and retain directories if they don't exist
 	archiveDir := "archive"
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return fmt.Errorf("creating archive directory: %w", err)
+	}
+
+	retainDir := "retain"
+	if err := os.MkdirAll(retainDir, 0755); err != nil {
+		return fmt.Errorf("creating retain directory: %w", err)
 	}
 
 	// Group candidates by repository for JSON output
@@ -186,7 +205,72 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 		}
 	}
 
-	log.Printf("Archive analysis complete. Results written to %s/", archiveDir)
+	// Group retained packages by repository for JSON output
+	retainedByRepo := make(map[string][]RetainCandidate)
+	for _, retained := range retainedPackages {
+		retainedByRepo[retained.Repository] = append(retainedByRepo[retained.Repository], retained)
+	}
+
+	// Write retained packages to JSON files per repository
+	for repo, repoRetained := range retainedByRepo {
+		retainFile := filepath.Join(retainDir, fmt.Sprintf("%s.json", repo))
+
+		// Create JSON structure
+		retainData := struct {
+			Repository         string `json:"repository"`
+			Architecture       string `json:"architecture"`
+			Duration           string `json:"duration"`
+			RetainedCandidates []struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+				Age     string `json:"age"`
+				Reason  string `json:"reason"`
+			} `json:"retained_candidates"`
+		}{
+			Repository:   repo,
+			Architecture: arch,
+			Duration:     formatDurationInDays(duration),
+			RetainedCandidates: make([]struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+				Age     string `json:"age"`
+				Reason  string `json:"reason"`
+			}, len(repoRetained)),
+		}
+
+		for i, retained := range repoRetained {
+			retainData.RetainedCandidates[i] = struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+				Age     string `json:"age"`
+				Reason  string `json:"reason"`
+			}{
+				Name:    retained.Name,
+				Version: retained.Version,
+				Age:     formatDurationInDays(retained.Age),
+				Reason:  retained.Reason,
+			}
+		}
+
+		// Write to JSON file
+		file, err := os.Create(retainFile)
+		if err != nil {
+			log.Printf("Warning: Could not create retain file %s: %v", retainFile, err)
+		} else {
+			log.Printf("Writing %d retained candidates to %s", len(repoRetained), retainFile)
+
+			encoder := json.NewEncoder(file)
+			encoder.SetIndent("", "  ")
+			if err := encoder.Encode(retainData); err != nil {
+				log.Printf("Warning: Error encoding retain JSON to %s: %v", retainFile, err)
+			} else {
+				log.Printf("Successfully wrote retained candidates for %s to %s", repo, retainFile)
+			}
+			file.Close()
+		}
+	}
+
+	log.Printf("Archive analysis complete. Results written to %s/, retained packages written to %s/", archiveDir, retainDir)
 	return nil
 }
 
@@ -321,7 +405,7 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arc
 	return archiveCtx, nil
 }
 
-func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, error) {
+func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, []RetainCandidate, error) {
 	log.Println("Checking for reverse dependencies...")
 
 	// Create a set of candidate packages for quick lookup
@@ -332,6 +416,7 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 
 	// Filter candidates by checking if their dependencies can be satisfied by non-candidate packages
 	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
 	for _, candidate := range candidates {
 		reverseDeps := archiveCtx.DependencyMap[candidate.Name]
 		hasBlockingReverseDependency := false
@@ -405,10 +490,18 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 		if !hasBlockingReverseDependency {
 			candidate.Reasons = append(candidate.Reasons, "no blocking reverse dependencies")
 			filtered = append(filtered, candidate)
+		} else {
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "has blocking reverse dependencies",
+			})
 		}
 	}
 
-	return filtered, nil
+	return filtered, retained, nil
 }
 
 type Dependency struct {
@@ -511,10 +604,11 @@ func findMostRecentVersion(versions []string) string {
 	return mostRecent
 }
 
-func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, error) {
+func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, []RetainCandidate, error) {
 	log.Println("Checking for most recent versions still built from melange...")
 
 	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
 	for _, candidate := range candidates {
 		// Check if this package is still being built from melange
 		_, isStillBuilt := archiveCtx.ActivePackages[candidate.Name]
@@ -529,21 +623,35 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 		allVersions := archiveCtx.AllPackages[candidate.Name]
 		if len(allVersions) <= 1 {
 			// Only one version available, don't archive it
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "only version of package still built from melange",
+			})
 			continue
 		}
 
 		mostRecentVersion := findMostRecentVersion(allVersions)
 		if candidate.Version == mostRecentVersion {
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "most recent version of package still built from melange",
+			})
 			continue
 		}
 		candidate.Reasons = append(candidate.Reasons, "not the most recent version")
 		filtered = append(filtered, candidate)
 	}
 
-	return filtered, nil
+	return filtered, retained, nil
 }
 
-func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, error) {
+func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, []RetainCandidate, error) {
 	log.Println("Checking for reverse build dependencies...")
 
 	// Load cached build dependencies from resolved/build/ directory
@@ -584,9 +692,17 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 
 	// Filter out candidates that are build dependencies
 	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
 	for _, candidate := range candidates {
 		packageVersion := candidate.Name + "=" + candidate.Version
 		if buildDependencies[packageVersion] {
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "is a build dependency for active melange configuration",
+			})
 			continue
 		}
 
@@ -594,7 +710,7 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 		filtered = append(filtered, candidate)
 	}
 
-	return filtered, nil
+	return filtered, retained, nil
 }
 
 func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
