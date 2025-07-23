@@ -57,7 +57,7 @@ func lintCmd() *cobra.Command {
 }
 
 func lint(ctx context.Context) error {
-	pkgss, err := dirToPackages(ctx)
+	pkgss, err := dirToPackages(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func lint(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configuration, error) {
+func dirToPackages(ctx context.Context, subpackages bool) (map[string]map[string]*config.Configuration, error) {
 	pkgss := map[string]map[string]*config.Configuration{}
 
 	var g errgroup.Group
@@ -87,7 +87,7 @@ func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configura
 		g.Go(func() error {
 			local := fmt.Sprintf("./%s", dir)
 			pipelines := fmt.Sprintf("./%s/pipelines/", dir)
-			pkgs, err := NewPackages(ctx, os.DirFS(dir), local, pipelines)
+			pkgs, err := NewPackages(ctx, os.DirFS(dir), local, pipelines, subpackages)
 			if err != nil {
 				return fmt.Errorf("walking %s: %w", dir, err)
 			}
@@ -99,7 +99,7 @@ func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configura
 	return pkgss, g.Wait()
 }
 
-func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (map[string]*config.Configuration, error) {
+func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string, subpackages bool) (map[string]*config.Configuration, error) {
 	pkgs := map[string]*config.Configuration{}
 
 	var (
@@ -168,14 +168,16 @@ func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (
 			}
 
 			pkgs[c.Package.Name] = c
-			for i := range c.Subpackages {
-				subpkg := c.Subpackages[i]
+			if subpackages {
+				for i := range c.Subpackages {
+					subpkg := c.Subpackages[i]
 
-				if _, ok := pkgs[subpkg.Name]; ok {
-					errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml", subpkg.Name, c.Package.Name))
+					if _, ok := pkgs[subpkg.Name]; ok {
+						errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml", subpkg.Name, c.Package.Name))
+					}
+
+					pkgs[subpkg.Name] = c
 				}
-
-				pkgs[subpkg.Name] = c
 			}
 
 			return nil

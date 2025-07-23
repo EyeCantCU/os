@@ -58,7 +58,7 @@ func buckets(ctx context.Context, dirs []string) error {
 		"enterprise-packages": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
 	}
 
-	pkgss, err := dirToPackages(ctx)
+	pkgss, err := dirToPackages(ctx, true)
 	if err != nil {
 		return err
 	}

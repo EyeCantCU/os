@@ -52,7 +52,7 @@ func transition(ctx context.Context, packageName, arch, extraRepo string) error 
 	}
 
 	// Get melange configurations
-	pkgss, err := dirToPackages(ctx)
+	pkgss, err := dirToPackages(ctx, false)
 	if err != nil {
 		return fmt.Errorf("getting package configurations: %w", err)
 	}
@@ -374,19 +374,19 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 
 		// Group packages by origin and package name
 		for _, pkg := range index.Packages {
-			origin := pkg.Origin
-			if origin == "" {
-				origin = pkg.Name // fallback to package name if no origin
-			}
-
-			originKey := repo + "/" + origin
+			originKey := repo + "/" + pkg.Origin
 
 			// Check if we have a melange config for this origin
-			if _, exists := candidates[originKey]; exists {
-				if originPackages[originKey] == nil {
-					originPackages[originKey] = make(map[string][]*apk.Package)
+			if config, exists := candidates[originKey]; exists {
+				// Verify that this APK package is still built by the melange configuration
+				if isPackageBuiltByConfig(pkg.Name, config) {
+					if originPackages[originKey] == nil {
+						originPackages[originKey] = make(map[string][]*apk.Package)
+					}
+					originPackages[originKey][pkg.Name] = append(originPackages[originKey][pkg.Name], pkg)
+				} else {
+					log.Printf("Skipping package %s with origin %s - no longer built by melange config", pkg.Name, pkg.Origin)
 				}
-				originPackages[originKey][pkg.Name] = append(originPackages[originKey][pkg.Name], pkg)
 			}
 		}
 	}
@@ -739,4 +739,20 @@ func lockDependencies(ctx context.Context, c *config.Configuration, cache *apk.C
 	}
 
 	return locked.Contents.Packages, nil
+}
+
+func isPackageBuiltByConfig(packageName string, cfg *config.Configuration) bool {
+	// Check if the package matches the main package name
+	if packageName == cfg.Package.Name {
+		return true
+	}
+
+	// Check if the package matches any subpackage name
+	for _, subpkg := range cfg.Subpackages {
+		if packageName == subpkg.Name {
+			return true
+		}
+	}
+
+	return false
 }
