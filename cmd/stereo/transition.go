@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"chainguard.dev/apko/pkg/apk/apk"
+	apko_build "chainguard.dev/apko/pkg/build"
+	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
 )
@@ -201,6 +203,11 @@ func transition(ctx context.Context, packageName, arch, extraRepo string) error 
 	return nil
 }
 
+type BuildOrderEntry struct {
+	Repository string `json:"repository"`
+	Package    string `json:"package"`
+}
+
 type TransitionPlan struct {
 	TargetPackage         string              `json:"target_package"`
 	Repository            string              `json:"repository"`
@@ -208,7 +215,7 @@ type TransitionPlan struct {
 	SharedLibraryPatterns []string            `json:"shared_library_patterns"`
 	SharedLibraryVersions map[string][]string `json:"shared_library_versions"`
 	PackagesToRebuild     []RebuildCandidate  `json:"packages_to_rebuild"`
-	BuildOrder            [][]string          `json:"build_order"`
+	BuildOrder            [][]BuildOrderEntry `json:"build_order"`
 }
 
 type AffectedPackage struct {
@@ -572,14 +579,14 @@ func checkPackageDependencies(pkg *apk.Package, patterns []*regexp.Regexp, patte
 	return false, "", ""
 }
 
-func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch, extraRepo string) ([][]string, error) {
-	// Create a dependency graph based on runtime dependencies of affected packages
+func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch, extraRepo string) ([][]BuildOrderEntry, error) {
+	// Create a dependency graph based on full dependencies using lockImageConfiguration
 
 	if len(packages) == 0 {
-		return [][]string{}, nil
+		return [][]BuildOrderEntry{}, nil
 	}
 
-	log.Printf("Determining build order for %d packages based on runtime dependencies", len(packages))
+	log.Printf("Determining build order for %d packages based on full dependencies", len(packages))
 
 	// Create maps for quick lookup
 	packageNames := make(map[string]bool)
@@ -591,71 +598,70 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 		packagesByName[pkg.Name] = pkg
 	}
 
-	// Fetch all APK indexes to analyze runtime dependencies
-	allPackages := make(map[string]*apk.Package) // packageName -> APK package info
+	// Build dependency graph using full dependency resolution
+	dependencies := make(map[string][]string)
+	cache := apk.NewCache(true)
 
-	// Create extended repository map including extra repository
-	allRepos := make(map[string]string)
-	for repo, url := range dirToRepo {
-		allRepos[repo] = url
+	// Create repository list including extra repo if provided
+	repoURLs := make([]string, 0, len(dirToRepo)+1)
+	for _, url := range dirToRepo {
+		repoURLs = append(repoURLs, url)
 	}
 	if extraRepo != "" {
-		allRepos["extra"] = extraRepo
+		repoURLs = append(repoURLs, extraRepo)
 	}
 
-	for _, repoURL := range allRepos {
-		index, err := fetchAPKIndex(ctx, repoURL, arch)
-		if err != nil {
-			log.Printf("Warning: Error fetching index for dependency analysis: %v", err)
-			continue
-		}
-
-		for _, pkg := range index.Packages {
-			allPackages[pkg.Name] = pkg
-		}
-	}
-
-	// Build dependency graph: package -> list of packages it depends on (within our rebuild set)
-	dependencies := make(map[string][]string)
-
-	// For each rebuild candidate, analyze its affected packages' runtime dependencies
+	// For each rebuild candidate, resolve full dependencies
 	for _, pkg := range packages {
 		dependencies[pkg.Name] = make([]string, 0)
 		depSet := make(map[string]bool) // to avoid duplicates
 
-		// Check runtime dependencies of all affected packages for this rebuild candidate
-		for _, affectedPkg := range pkg.AffectedPackages {
-			if apkPkg, exists := allPackages[affectedPkg.Name]; exists {
-				// Check each runtime dependency
-				for _, dep := range apkPkg.Dependencies {
-					// Parse dependency to get package name
-					depName := dep
-					if idx := strings.Index(dep, "="); idx != -1 {
-						depName = dep[:idx]
-					}
-					if idx := strings.Index(depName, ">"); idx != -1 {
-						depName = depName[:idx]
-					}
-					if idx := strings.Index(depName, "<"); idx != -1 {
-						depName = depName[:idx]
-					}
-					if idx := strings.Index(depName, "~"); idx != -1 {
-						depName = depName[:idx]
-					}
+		log.Printf("Resolving full dependencies for %s", pkg.Name)
 
-					// Check if this dependency is in our rebuild set
-					if packageNames[depName] && !depSet[depName] && depName != pkg.Name {
-						dependencies[pkg.Name] = append(dependencies[pkg.Name], depName)
-						depSet[depName] = true
-						log.Printf("Found dependency: %s depends on %s", pkg.Name, depName)
-					}
-				}
+		// Create a dummy ImageConfiguration with all affected packages from this rebuild candidate
+		packageList := make([]string, 0, len(pkg.AffectedPackages))
+		for _, affectedPkg := range pkg.AffectedPackages {
+			packageList = append(packageList, affectedPkg.Name)
+		}
+
+		// Create dummy config
+		dummyConfig := &config.Configuration{
+			Environment: apko_types.ImageConfiguration{
+				Contents: apko_types.ImageContents{
+					Packages: packageList,
+				},
+				Archs: []apko_types.Architecture{apko_types.Architecture(arch)},
+			},
+		}
+
+		// Resolve full dependencies
+		fullPackages, err := lockDependencies(ctx, dummyConfig, cache, repoURLs, arch)
+		if err != nil {
+			log.Printf("Warning: Could not resolve full dependencies for %s: %v", pkg.Name, err)
+			continue
+		}
+
+		log.Printf("Found %d full dependencies for %s", len(fullPackages), pkg.Name)
+
+		// Check which full dependencies are in our rebuild set
+		for _, fullPkg := range fullPackages {
+			// Parse package name from package=version format
+			pkgName := fullPkg
+			if idx := strings.Index(fullPkg, "="); idx != -1 {
+				pkgName = fullPkg[:idx]
+			}
+
+			// Check if this full dependency is in our rebuild set and is not the package itself
+			if packageNames[pkgName] && !depSet[pkgName] && pkgName != pkg.Name {
+				dependencies[pkg.Name] = append(dependencies[pkg.Name], pkgName)
+				depSet[pkgName] = true
+				log.Printf("Found full dependency: %s depends on %s", pkg.Name, pkgName)
 			}
 		}
 	}
 
 	// Perform topological sort
-	buildOrder := make([][]string, 0)
+	buildOrder := make([][]BuildOrderEntry, 0)
 	remaining := make(map[string]bool)
 
 	for _, pkg := range packages {
@@ -664,7 +670,7 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 
 	// Keep building levels until all packages are ordered
 	for len(remaining) > 0 {
-		currentLevel := make([]string, 0)
+		currentLevelPkgs := make([]string, 0)
 
 		// Find packages with no unresolved dependencies in remaining set
 		for pkgName := range remaining {
@@ -678,20 +684,40 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 			}
 
 			if !hasUnresolvedDeps {
-				currentLevel = append(currentLevel, pkgName)
+				currentLevelPkgs = append(currentLevelPkgs, pkgName)
 			}
 		}
 
 		// If no packages can be built (circular dependency), build them all
-		if len(currentLevel) == 0 {
+		if len(currentLevelPkgs) == 0 {
 			log.Printf("Warning: Circular dependency detected, building all remaining packages in parallel")
 			for name := range remaining {
-				currentLevel = append(currentLevel, name)
+				currentLevelPkgs = append(currentLevelPkgs, name)
+			}
+		}
+
+		// Group packages by their repository directory
+		repoGroups := make(map[string][]string)
+		for _, pkgName := range currentLevelPkgs {
+			if pkg, exists := packagesByName[pkgName]; exists {
+				repoGroups[pkg.Repository] = append(repoGroups[pkg.Repository], pkgName)
+			}
+		}
+
+		// Create grouped build level entries
+		currentLevel := make([]BuildOrderEntry, 0)
+		for repo, pkgs := range repoGroups {
+			// Add all packages from this repo as structured entries
+			for _, pkg := range pkgs {
+				currentLevel = append(currentLevel, BuildOrderEntry{
+					Repository: repo,
+					Package:    pkg,
+				})
 			}
 		}
 
 		// Remove processed packages
-		for _, name := range currentLevel {
+		for _, name := range currentLevelPkgs {
 			delete(remaining, name)
 		}
 
@@ -700,4 +726,31 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 	}
 
 	return buildOrder, nil
+}
+
+func lockDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
+	// Work around LockImageConfiguration assuming multi-arch.
+	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
+
+	opts := []apko_build.Option{
+		apko_build.WithImageConfiguration(c.Environment),
+		apko_build.WithExtraBuildRepos(apkRepos),
+		apko_build.WithArch(apko_types.Architecture(arch)),
+		// TODO: Allow offline.
+		apko_build.WithCache("", false, cache),
+		// TODO: Fix that.
+		apko_build.WithIgnoreSignatures(true),
+	}
+
+	configs, _, err := apko_build.LockImageConfiguration(ctx, c.Environment, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
+	}
+
+	locked, ok := configs["index"]
+	if !ok {
+		return nil, fmt.Errorf("missing locked config")
+	}
+
+	return locked.Contents.Packages, nil
 }
