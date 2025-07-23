@@ -18,6 +18,7 @@ func transitionCmd() *cobra.Command {
 	var (
 		packageName string
 		arch        string
+		extraRepo   string
 	)
 
 	cmd := &cobra.Command{
@@ -27,22 +28,26 @@ func transitionCmd() *cobra.Command {
 packages that need to be rebuilt during a shared library transition. It generates
 regex patterns for shared libraries and determines build ordering based on dependencies.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return transition(cmd.Context(), packageName, arch)
+			return transition(cmd.Context(), packageName, arch, extraRepo)
 		},
 	}
 
 	cmd.Flags().StringVar(&packageName, "package", "", "Name of the melange package driving the transition (required)")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().StringVar(&extraRepo, "extra-repo", "", "Additional APK repository URL to include in analysis")
 	cmd.MarkFlagRequired("package")
 
 	return cmd
 }
 
-func transition(ctx context.Context, packageName, arch string) error {
+func transition(ctx context.Context, packageName, arch, extraRepo string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
 	log.Printf("Analyzing shared library transition for package: %s (architecture: %s)", packageName, arch)
+	if extraRepo != "" {
+		log.Printf("Including additional repository: %s", extraRepo)
+	}
 
 	// Get melange configurations
 	pkgss, err := dirToPackages(ctx)
@@ -102,16 +107,23 @@ func transition(ctx context.Context, packageName, arch string) error {
 
 	// Find packages built from this melange config in the index
 	builtPackages := make([]*apk.Package, 0)
-	packageNames := []string{targetConfig.Package.Name}
-	for _, subpkg := range targetConfig.Subpackages {
-		packageNames = append(packageNames, subpkg.Name)
-	}
 
 	for _, pkg := range index.Packages {
-		for _, name := range packageNames {
-			if pkg.Name == name {
+		if pkg.Origin == targetConfig.Package.Name {
+			builtPackages = append(builtPackages, pkg)
+		}
+	}
+
+	if extraRepo != "" {
+		log.Printf("Fetching APK index from: %s", extraRepo)
+
+		extraIndex, err := fetchAPKIndex(ctx, extraRepo, arch)
+		if err != nil {
+			return fmt.Errorf("fetching APK index: %w", err)
+		}
+		for _, pkg := range extraIndex.Packages {
+			if pkg.Origin == targetConfig.Package.Name {
 				builtPackages = append(builtPackages, pkg)
-				break
 			}
 		}
 	}
@@ -125,6 +137,9 @@ func transition(ctx context.Context, packageName, arch string) error {
 	}
 
 	log.Printf("Generated %d shared library regex patterns", len(sharedLibPatterns))
+	for _, pattern := range sharedLibPatterns {
+		log.Printf("Target shared library: pattern %s", pattern)
+	}
 	for lib, versions := range sharedLibVersions {
 		log.Printf("Target shared library: %s versions %v", lib, versions)
 	}
@@ -142,7 +157,7 @@ func transition(ctx context.Context, packageName, arch string) error {
 	}
 
 	// Identify packages that need rebuilding
-	packagesToRebuild, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch)
+	packagesToRebuild, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch, extraRepo)
 	if err != nil {
 		return fmt.Errorf("identifying packages to rebuild: %w", err)
 	}
@@ -150,7 +165,7 @@ func transition(ctx context.Context, packageName, arch string) error {
 	log.Printf("Identified %d packages that need rebuilding", len(packagesToRebuild))
 
 	// Determine build order based on dependencies
-	buildOrder, err := determineBuildOrder(ctx, packagesToRebuild, arch)
+	buildOrder, err := determineBuildOrder(ctx, packagesToRebuild, arch, extraRepo)
 	if err != nil {
 		return fmt.Errorf("determining build order: %w", err)
 	}
@@ -242,8 +257,8 @@ func extractSharedLibraryPatternsWithVersions(packages []*apk.Package) (map[stri
 
 				if !seenLibs[baseLib] {
 					// Create regex pattern that matches the base library name with any version
-					// Pattern will match: so:libssl.so.1=1, so:libssl.so.3=3, etc.
-					pattern := `so:` + regexp.QuoteMeta(baseLib) + `(\.\d+)*(=\d+)?`
+					// Pattern will match: so:libssl.so.1, so:libssl.so.3, etc.
+					pattern := `so:` + regexp.QuoteMeta(baseLib) + `(\.\d+)*`
 					patterns = append(patterns, pattern)
 					seenLibs[baseLib] = true
 				}
@@ -313,7 +328,7 @@ func removeVersionSuffix(libName string) string {
 	return libName
 }
 
-func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string) ([]RebuildCandidate, error) {
+func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch, extraRepo string) ([]RebuildCandidate, error) {
 	log.Printf("Analyzing APK repositories for packages with shared library dependencies")
 
 	rebuilds := make(map[string]*RebuildCandidate)
@@ -328,11 +343,20 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 		compiledPatterns[i] = regex
 	}
 
-	// First, collect all packages by origin and find the most recent version of each origin
-	originPackages := make(map[string][]*apk.Package) // originKey -> list of packages from that origin
+	// First, collect all packages by origin and package name to find the most recent version of each distinct package
+	originPackages := make(map[string]map[string][]*apk.Package) // originKey -> packageName -> list of package versions
+
+	// Create extended repository map including extra repository for all checks
+	allRepos := make(map[string]string)
+	for repo, url := range dirToRepo {
+		allRepos[repo] = url
+	}
+	if extraRepo != "" {
+		allRepos["extra"] = extraRepo
+	}
 
 	// Check all repositories for packages
-	for repo, repoURL := range dirToRepo {
+	for repo, repoURL := range allRepos {
 		log.Printf("Checking APK index for repository: %s", repo)
 
 		index, err := fetchAPKIndex(ctx, repoURL, arch)
@@ -341,7 +365,7 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 			continue
 		}
 
-		// Group packages by origin
+		// Group packages by origin and package name
 		for _, pkg := range index.Packages {
 			origin := pkg.Origin
 			if origin == "" {
@@ -352,48 +376,58 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 
 			// Check if we have a melange config for this origin
 			if _, exists := candidates[originKey]; exists {
-				originPackages[originKey] = append(originPackages[originKey], pkg)
+				if originPackages[originKey] == nil {
+					originPackages[originKey] = make(map[string][]*apk.Package)
+				}
+				originPackages[originKey][pkg.Name] = append(originPackages[originKey][pkg.Name], pkg)
 			}
 		}
 	}
 
-	// For each origin, find the most recent version and check if it needs rebuilding
-	for originKey, packages := range originPackages {
-		if len(packages) == 0 {
+	// For each origin, check each distinct package it builds
+	for originKey, packageMap := range originPackages {
+		if len(packageMap) == 0 {
 			continue
 		}
 
-		// Find the most recent package version for this origin
-		mostRecentPkg := packages[0]
-		for _, pkg := range packages[1:] {
-			if isMoreRecent(pkg, mostRecentPkg) {
-				mostRecentPkg = pkg
-			}
-		}
+		repo := strings.Split(originKey, "/")[0]
+		origin := strings.Split(originKey, "/")[1]
+		
+		// Track if any package from this origin needs rebuilding
+		originNeedsRebuild := false
+		var firstMatchedPattern, firstReason string
+		affectedPackagesMap := make(map[string]*apk.Package) // packageName -> most recent package
 
-		log.Printf("Checking most recent version of origin %s: %s v%s", originKey, mostRecentPkg.Name, mostRecentPkg.Version)
-
-		// Check if this most recent package has dependencies matching our patterns
-		needsRebuild, matchedPattern, reason := checkPackageDependenciesWithVersions(mostRecentPkg, compiledPatterns, patterns, targetVersions)
-		if needsRebuild {
-			repo := strings.Split(originKey, "/")[0]
-			origin := strings.Split(originKey, "/")[1]
-
-			log.Printf("Origin %s needs rebuild: %s", origin, reason)
-
-			// Create rebuild candidate with most recent version of each affected package
-			affectedPackagesMap := make(map[string]*apk.Package) // packageName -> most recent package
-
-			// Find the most recent version of each package name in this origin
-			for _, pkg := range packages {
-				if existing, exists := affectedPackagesMap[pkg.Name]; exists {
-					if isMoreRecent(pkg, existing) {
-						affectedPackagesMap[pkg.Name] = pkg
-					}
-				} else {
-					affectedPackagesMap[pkg.Name] = pkg
+		// Check each distinct package name from this origin
+		for packageName, packageVersions := range packageMap {
+			// Find the most recent version of this specific package
+			mostRecentPkg := packageVersions[0]
+			for _, pkg := range packageVersions[1:] {
+				if isMoreRecent(pkg, mostRecentPkg) {
+					mostRecentPkg = pkg
 				}
 			}
+
+			log.Printf("Checking most recent version of %s from origin %s: %s v%s", packageName, origin, mostRecentPkg.Name, mostRecentPkg.Version)
+
+			// Check if this package has dependencies matching our patterns
+			needsRebuild, matchedPattern, reason := checkPackageDependenciesWithVersions(mostRecentPkg, compiledPatterns, patterns, targetVersions)
+			if needsRebuild {
+				log.Printf("Package %s from origin %s needs rebuild: %s", packageName, origin, reason)
+				originNeedsRebuild = true
+				if firstMatchedPattern == "" {
+					firstMatchedPattern = matchedPattern
+					firstReason = reason
+				}
+			}
+
+			// Always include the most recent version of each package in affected packages
+			affectedPackagesMap[packageName] = mostRecentPkg
+		}
+
+		// If any package from this origin needs rebuilding, create a rebuild candidate
+		if originNeedsRebuild {
+			log.Printf("Origin %s needs rebuild", origin)
 
 			// Convert to AffectedPackage slice
 			affectedPackages := make([]AffectedPackage, 0, len(affectedPackagesMap))
@@ -407,12 +441,12 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 			rebuilds[originKey] = &RebuildCandidate{
 				Name:             origin, // Use origin name (main package)
 				Repository:       repo,
-				Reason:           reason,
-				MatchedPattern:   matchedPattern,
+				Reason:           firstReason,
+				MatchedPattern:   firstMatchedPattern,
 				AffectedPackages: affectedPackages,
 			}
 		} else {
-			log.Printf("Origin %s already uses current shared library versions", strings.Split(originKey, "/")[1])
+			log.Printf("Origin %s already uses current shared library versions", origin)
 		}
 	}
 
@@ -539,7 +573,7 @@ func checkPackageDependencies(pkg *apk.Package, patterns []*regexp.Regexp, patte
 	return false, "", ""
 }
 
-func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch string) ([][]string, error) {
+func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch, extraRepo string) ([][]string, error) {
 	// Create a dependency graph based on runtime dependencies of affected packages
 
 	if len(packages) == 0 {
@@ -561,7 +595,16 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch 
 	// Fetch all APK indexes to analyze runtime dependencies
 	allPackages := make(map[string]*apk.Package) // packageName -> APK package info
 
-	for _, repoURL := range dirToRepo {
+	// Create extended repository map including extra repository
+	allRepos := make(map[string]string)
+	for repo, url := range dirToRepo {
+		allRepos[repo] = url
+	}
+	if extraRepo != "" {
+		allRepos["extra"] = extraRepo
+	}
+
+	for _, repoURL := range allRepos {
 		index, err := fetchAPKIndex(ctx, repoURL, arch)
 		if err != nil {
 			log.Printf("Warning: Error fetching index for dependency analysis: %v", err)
