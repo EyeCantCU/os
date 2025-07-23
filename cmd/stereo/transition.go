@@ -392,7 +392,7 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 
 		repo := strings.Split(originKey, "/")[0]
 		origin := strings.Split(originKey, "/")[1]
-		
+
 		// Track if any package from this origin needs rebuilding
 		originNeedsRebuild := false
 		var firstMatchedPattern, firstReason string
@@ -419,10 +419,9 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 					firstMatchedPattern = matchedPattern
 					firstReason = reason
 				}
+				affectedPackagesMap[packageName] = mostRecentPkg
 			}
 
-			// Always include the most recent version of each package in affected packages
-			affectedPackagesMap[packageName] = mostRecentPkg
 		}
 
 		// If any package from this origin needs rebuilding, create a rebuild candidate
