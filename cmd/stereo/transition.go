@@ -565,20 +565,6 @@ func extractBaseLibraryName(dep string) string {
 	return dep
 }
 
-func checkPackageDependencies(pkg *apk.Package, patterns []*regexp.Regexp, patternStrs []string) (bool, string, string) {
-	// Check if any of the package's dependencies match our shared library patterns
-	for _, dep := range pkg.Dependencies {
-		for i, pattern := range patterns {
-			if pattern.MatchString(dep) {
-				reason := fmt.Sprintf("depends on shared library matching pattern: %s", patternStrs[i])
-				return true, patternStrs[i], reason
-			}
-		}
-	}
-
-	return false, "", ""
-}
-
 func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch, extraRepo string) ([][]BuildOrderEntry, error) {
 	// Create a dependency graph based on full dependencies using lockImageConfiguration
 
