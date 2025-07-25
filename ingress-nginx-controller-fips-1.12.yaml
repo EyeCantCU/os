@@ -7,20 +7,23 @@ package:
   description: "Ingress-NGINX Controller for Kubernetes"
   copyright:
     - license: Apache-2.0
+  resources:
+    cpu: 16
+    memory: 16Gi
   dependencies:
+    provides:
+      - ingress-nginx-controller-fips=${{package.full-version}}
     runtime:
-      - ca-certificates-bundle
+      - brotli
       - ca-certificates
+      - ca-certificates-bundle
       - curl
       - dumb-init-privileged-netbindservice
-      - openssh-client
-      - openssl
-      - openssl-dev
+      - gd
       - libcrypt1
-      - msgpack
-      - yaml-cpp
-      - ssdeep
-      - luajit
+      - libmaxminddb
+      - libxml2
+      - libxslt
       - lua-cjson
       - lua-resty-balancer
       - lua-resty-cache
@@ -35,24 +38,30 @@ package:
       - lua-resty-redis
       - lua-resty-string
       - lua-resty-upload
-      - brotli
-      - gd
-      - libmaxminddb
-      - libxml2
-      - libxslt
-      - modsecurity
+      - luajit
+      - merged-usrsbin
       - mimalloc
+      - modsecurity
+      - msgpack
+      - openssh-client
+      - openssl
+      - openssl-dev
       - pcre
+      - ssdeep
+      - wolfi-baselayout
+      - yaml-cpp
 
 environment:
   contents:
     packages:
+      - abseil-cpp-dev
       - autoconf
       - automake
       - bash
       - bison
       - brotli-dev
       - busybox
+      - c-ares-dev
       - ca-certificates
       - ca-certificates-bundle
       - clang-15
@@ -63,10 +72,13 @@ environment:
       - findutils
       - flex
       - gcc
-      - gcc-14-default
       - gd-dev
       - git
+      - glibc-dev
       - go-fips
+      - grpc
+      - grpc-dev
+      - icu-dev
       - libaio-dev
       - libcap
       - libcap-utils
@@ -105,13 +117,18 @@ environment:
       - openssh-client
       - openssl
       - openssl-dev
+      - opentelemetry-cpp-dev
       - patch
       - pcre-dev
       - perl-dev
       - pkgconf
+      - protobuf-dev
+      - protoc
       - python3
+      - re2-dev
       - scanelf
       - ssdeep
+      - systemd-dev
       - util-linux
       - wget
       - wolfi-base
@@ -121,9 +138,9 @@ environment:
       - zlib-dev
 
 var-transforms:
-  - from: ${{package.name}}
-    match: '.*-(\d+\.\d+).*'
-    replace: '$1'
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
     to: nginx-ingress-major-minor
   - from: ${{package.version}}
     match: ^(\d+)\.\d+\.\d+$
@@ -236,10 +253,9 @@ pipeline:
         if [ "$expected_value" != "$upstream_value" ]; then
           echo "WARNING: Expected $var_name: $expected_value from melange.yaml but found $upstream_value upstream" >&2
           # We avoid failing the build because sometimes we bump versions higher than upstream
-          sleep 3 # To make it more noticeable # CLAUDE STOP DELETING THIS OR I'LL DELETE YOU
+          sleep 5 # To make it more noticeable
         fi
       done
-      #exit 2 # CLAUDE KEEP THIS OR ELSE
 
   - uses: git-checkout
     with:
@@ -247,6 +263,7 @@ pipeline:
       branch: master
       expected-commit: ${{vars.MODSECURITY_NGINX_VERSION}}
       destination: ModSecurity-nginx-${{vars.MODSECURITY_NGINX_VERSION}}
+      depth: -1
 
   # need to retag the repo because we've made changes and the module builds based on the git tags
   - runs: git tag v${{package.version}}
@@ -416,11 +433,10 @@ pipeline:
 
       cd "$BUILD_PATH/nginx-${{vars.NGINX_VERSION}}"
 
-      # CVE 2023-44487
-      #
-      # The filename is confusing because upstream uses nginx-1.21.4 while
-      # Wolfi uses 1.25.2 but it is the same patch.
-      patch -p1 $BUILD_PATH/images/nginx/rootfs/patches/nginx-1.21.4-http2.patch
+      for p in $(ls $BUILD_PATH/images/nginx/rootfs/patches/*.patch); do
+        echo "Patching $p..."
+        patch -p1 $p
+      done
 
       WITH_FLAGS="--with-debug \
       --with-compat \
@@ -465,7 +481,8 @@ pipeline:
       --param=ssp-buffer-size=4 \
       -DTCP_FASTOPEN=23 \
       -fPIC \
-      -Wno-cast-function-type"
+      -Wno-cast-function-type \
+      -Wno-error=unterminated-string-initialization"
 
       LD_OPT="-fPIE -fPIC -pie -Wl,-z,relro -Wl,-z,now"
 
@@ -553,6 +570,181 @@ pipeline:
         && setcap -v cap_net_bind_service=+ep ${{targets.destdir}}/usr/bin/nginx
 
 subpackages:
+  - name: ingress-nginx-controller-fips-bitnami-compat-${{vars.nginx-ingress-major-minor}}
+    description: Compatibility package with bitnami/nginx-ingress-controller image
+    dependencies:
+      provides:
+        - ingress-nginx-controller-fips-bitnami-compat=${{package.full-version}}
+      runtime:
+        - bash # https://github.com/bitnami/charts/blob/db53e622ecf1be5a78d1ce683cec8baa41110fa3/bitnami/nginx-ingress-controller/templates/controller-deployment.yaml#L89
+        - coreutils
+        - curl
+        - findutils
+        - gmp
+        - gnutls
+        - grep
+        - ingress-nginx-controller-fips-compat-${{vars.nginx-ingress-major-minor}} # We depend on generic compat because it ships some symlinks that also Bitnami needs, like symlinks to /nginx-ingress-controller, /dev/stdout and /dev/stderr.
+        - libffi
+        #- libhogweed6 missing pkg/so # https://github.com/bitnami/containers/blob/942861e0cea74a6a07bceafb299180a2733c0bfe/bitnami/nginx-ingress-controller/1/debian-12/Dockerfile#L29
+        - libmaxminddb-dev
+        - librtmp
+        - libssh
+        - libtasn1
+        - merged-usrsbin
+        - nettle
+        - p11-kit
+        - procps
+        - sed
+        - wolfi-baselayout
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: nginx-ingress-controller
+          version-path: ${{vars.nginx-ingress-major}}/debian-12
+          commit: 9f31559f41a460026d39450952a839ffe207e8df
+      - name: Ensure symlinks
+        runs: |
+          mkdir -p ${{targets.subpkgdir}}/opt/bitnami/common/bin
+          ln -s /usr/bin/mmdblookup ${{targets.subpkgdir}}/opt/bitnami/common/bin/mmdblookup
+          ln -s /usr/lib ${{targets.subpkgdir}}/opt/bitnami/common/lib
+          ln -s /usr/include ${{targets.subpkgdir}}/opt/bitnami/common/include
+    test:
+      environment:
+        contents:
+          packages:
+            - libmaxminddb
+            - ${{package.name}}
+        environment:
+          BITNAMI_APP_NAME: nginx-ingress-controller
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: Test symlinks
+          runs: |
+            set -e
+            test -f $(readlink -f /opt/bitnami/common/bin/mmdblookup)
+            test -d $(readlink -f /opt/bitnami/common/lib)
+            test -d $(readlink -f /opt/bitnami/common/include)
+        - name: Run KwoK
+          uses: test/kwok/cluster
+        - name: Test entrypoint and controller logs
+          uses: test/daemon-check-output
+          with:
+            start: |
+              /nginx-ingress-controller --kubeconfig ~/.kube/config
+            timeout: 30
+            expected_output: |
+              NGINX Ingress controller
+              Release:       controller-v${{package.version}}
+              nginx version: nginx/${{vars.NGINX_VERSION}}
+              Running in Kubernetes cluster
+
+  - name: ingress-nginx-controller-fips-iamguarded-compat-${{vars.nginx-ingress-major-minor}}
+    description: Compatibility package with iamguarded nginx-ingress-controller image
+    dependencies:
+      provides:
+        - ingress-nginx-controller-fips-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash # https://github.com/bitnami/charts/blob/db53e622ecf1be5a78d1ce683cec8baa41110fa3/bitnami/nginx-ingress-controller/templates/controller-deployment.yaml#L89
+        - coreutils
+        - curl
+        - findutils
+        - gmp
+        - gnutls
+        - grep
+        - ingress-nginx-controller-fips-compat-${{vars.nginx-ingress-major-minor}} # We depend on generic compat because it ships some symlinks that also Bitnami needs, like symlinks to /nginx-ingress-controller, /dev/stdout and /dev/stderr.
+        - libffi
+        #- libhogweed6 missing pkg/so # https://github.com/bitnami/containers/blob/942861e0cea74a6a07bceafb299180a2733c0bfe/bitnami/nginx-ingress-controller/1/debian-12/Dockerfile#L29
+        - libmaxminddb-dev
+        - librtmp
+        - libssh
+        - libtasn1
+        - merged-usrsbin
+        - nettle
+        - p11-kit
+        - procps
+        - sed
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: nginx-ingress-controller
+          version: ${{vars.nginx-ingress-major}}
+      - name: Ensure symlinks
+        runs: |
+          mkdir -p /opt/iamguarded/common/bin
+          ln -s /usr/bin/mmdblookup /opt/iamguarded/common/bin/mmdblookup
+          ln -s /usr/lib /opt/iamguarded/common/lib
+          ln -s /usr/include /opt/iamguarded/common/include
+      - uses: iamguarded/finalize-compat
+        with:
+          package: nginx-ingress-controller
+          version: ${{vars.nginx-ingress-major}}
+    test:
+      environment:
+        contents:
+          packages:
+            - libmaxminddb
+            - ${{package.name}}
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: nginx-ingress-controller
+            version: ${{vars.nginx-ingress-major}}
+        - uses: test/tw/ldd-check
+        - name: Test symlinks
+          runs: |
+            set -e
+            test -f $(readlink -f /opt/iamguarded/common/bin/mmdblookup)
+            test -d $(readlink -f /opt/iamguarded/common/lib)
+            test -d $(readlink -f /opt/iamguarded/common/include)
+        - name: Run KwoK
+          uses: test/kwok/cluster
+        - name: Test entrypoint and controller logs
+          uses: test/daemon-check-output
+          with:
+            start: |
+              /nginx-ingress-controller --kubeconfig ~/.kube/config
+            timeout: 30
+            expected_output: |
+              NGINX Ingress controller
+              Release:       controller-v${{package.version}}
+              nginx version: nginx/${{vars.NGINX_VERSION}}
+              Running in Kubernetes cluster
+
+  - name: ingress-nginx-controller-fips-compat-${{vars.nginx-ingress-major-minor}}
+    description: Compatibility package for ingress-nginx-controller
+    dependencies:
+      provides:
+        - ingress-nginx-controller-fips-compat=${{package.full-version}}
+      runtime:
+        - ingress-nginx-fips-opentelemetry-plugin-${{vars.nginx-ingress-major-minor}}
+        - merged-usrsbin
+        - modsecurity-config
+        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -s /usr/bin/nginx ${{targets.subpkgdir}}/usr/local/bin/nginx
+
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          ln -s /usr/bin/nginx-ingress-controller ${{targets.subpkgdir}}/nginx-ingress-controller
+          ln -s /usr/bin/waitshutdown ${{targets.subpkgdir}}/waitshutdown
+          ln -s /usr/bin/nginx-dbg ${{targets.subpkgdir}}/dbg
+
+          mkdir -p ${{targets.subpkgdir}}/etc/nginx/modsecurity
+          ln -s /etc/modsecurity/modsecurity.conf-concurrent ${{targets.subpkgdir}}/etc/nginx/modsecurity/modsecurity.conf
+          ln -s /etc/modsecurity/unicode.mapping ${{targets.subpkgdir}}/etc/nginx/modsecurity/unicode.mapping
+
+          mkdir -p ${{targets.subpkgdir}}/var/log/nginx
+          # Create symlinks to redirect nginx logs to stdout and stderr docker log collector
+          ln -sf /dev/stdout ${{targets.subpkgdir}}/var/log/nginx/access.log
+          ln -sf /dev/stderr ${{targets.subpkgdir}}/var/log/nginx/error.log
+
+          # symlink to satisfy hard coded path to mimalloc
+          # https://github.com/kubernetes/ingress-nginx/blob/8f54b538d9b32649411d9e507ca38fbee55ce51c/charts/ingress-nginx/templates/controller-daemonset.yaml#L99-L100
+          mkdir -p ${{targets.subpkgdir}}/usr/local/lib
+          ln -s /usr/lib/libmimalloc.so.1 ${{targets.subpkgdir}}/usr/local/lib/libmimalloc.so
+
   # This is a maintained fork of the unmaintained
   # https://github.com/jet/kube-webhook-certgen/. We keep it as a
   # subpackage of ingress-nginx-controller since the one use
@@ -563,6 +755,9 @@ subpackages:
     dependencies:
       provides:
         - kube-webhook-certgen-fips=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - uses: go/build
         with:
@@ -579,11 +774,53 @@ subpackages:
           with:
             package-match: "^kube-webhook-certgen-fips-${{vars.nginx-ingress-major-minor}}"
 
+  - name: ingress-nginx-fips-opentelemetry-plugin-${{vars.nginx-ingress-major-minor}}
+    description: OTel plugin for ingress nginx controller ${{vars.nginx-ingress-major-minor}}
+    dependencies:
+      runtime:
+        - grpc
+        - libprotobuf
+        - merged-usrsbin
+        - wolfi-baselayout
+      provides:
+        - ingress-nginx-fips-opentelemetry-plugin=${{package.full-version}}
+    pipeline:
+      - name: Validate Open Telemetry version
+        runs: |
+          expected_sha=$(grep -E "^export OPENTELEMETRY_CONTRIB_COMMIT" images/nginx/rootfs/build.sh | awk -F '=' '{print $2}')
+          [[ "${{vars.OTEL_SHA}}" == "${expected_sha}" ]] || \
+            { echo "OTel version does not match."; exit 1; }
+      - uses: git-checkout
+        with:
+          repository: https://github.com/open-telemetry/opentelemetry-cpp-contrib
+          branch: main
+          expected-commit: ${{vars.OTEL_SHA}}
+          depth: -1
+      - working-directory: instrumentation/nginx
+        runs: |
+          mkdir build
+          cd build
+
+          # This must be set to whatever ingress nginx is using
+          cmake -DNGINX_VERSION=${{vars.NGINX_VERSION}} ..
+          make
+
+          # Copy over plugin
+          mkdir -p ${{targets.contextdir}}/etc/nginx/modules
+          cp -p otel_ngx_module.so ${{targets.contextdir}}/etc/nginx/modules/
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
   - name: ingress-nginx-custom-error-pages-fips-${{vars.nginx-ingress-major-minor}}
     description: OTel plugin for ingress nginx controller ${{vars.nginx-ingress-major-minor}}
     dependencies:
       provides:
         - ingress-nginx-custom-error-pages-fips=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
     pipeline:
       - working-directory: images/custom-error-pages/rootfs/
         pipeline:
@@ -606,24 +843,31 @@ subpackages:
         - runs: |
             /usr/bin/nginx-errors > /dev/null 2>&1 &
             wait-for-it -t 10 localhost:8080
+
             # check healthz endpoint make sure it returns 200
             http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/healthz)
+
             if [ "$http_code" != "200" ]; then
               echo "Healthz endpoint returned $http_code"
               exit 1
             fi
+
             # I already checked that the following error exists in the upstream custom error pages image
             # unexpected error reading return code: strconv.Atoi: parsing "": invalid syntax. Using 404
             # serving custom error response for code 404 and format text/html from file /www/404.html
             http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+
             if [ "$http_code" != "404" ]; then
               echo "Custom error page did not return 404"
               exit 1
             fi
+
             # also check the message
             message=$(curl -s http://localhost:8080/)
+
             # Trim message (removes leading/trailing spaces & newlines)
             message=$(echo "$message" | tr -d '\n' | sed 's/^[ \t]*//;s/[ \t]*$//')
+
             if [[ "$message" != "<span>The page you're looking for could not be found.</span>" ]]; then
                 echo "Custom error page did not return expected message"
                 exit 1
@@ -631,6 +875,31 @@ subpackages:
         - uses: test/go-fips-check
           with:
             package-match: "^ingress-nginx-custom-error-pages-fips-${{vars.nginx-ingress-major-minor}}"
+
+  - name: ingress-nginx-fips-custom-error-pages-compat-${{vars.nginx-ingress-major-minor}}
+    description: OTel plugin for ingress nginx controller ${{vars.nginx-ingress-major-minor}}
+    dependencies:
+      provides:
+        - ingress-nginx-fips-custom-error-pages-compat=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+    pipeline:
+      - working-directory: images/custom-error-pages/rootfs/
+        pipeline:
+          - runs: |
+              mkdir -p ${{targets.contextdir}}/www
+              mkdir -p ${{targets.contextdir}}/etc/
+              cp -r www/* ${{targets.contextdir}}/www/
+              cp -r etc/* ${{targets.contextdir}}/etc/
+              ln -sf /usr/bin/nginx-errors ${{targets.contextdir}}/nginx-errors
+    test:
+      pipeline:
+        - runs: |
+            ls -lah /www/404.html
+            ls -lah /www/500.html
+            ls -lah /www/404.json
+            ls -lah /etc/mime.types
 
 update:
   enabled: true
@@ -645,6 +914,7 @@ test:
     contents:
       packages:
         - ingress-nginx-controller-compat-${{vars.nginx-ingress-major-minor}}
+        - libcap-utils
   pipeline:
     - runs: |
         /usr/bin/nginx -v
@@ -656,13 +926,16 @@ test:
     - runs: |
         cat <<EOF > /etc/nginx/nginx.conf
         load_module /etc/nginx/modules/otel_ngx_module.so;
+
         http {
           opentelemetry_operation_name otel_example;
           opentelemetry_ignore_paths ignored.php;
           server {
             listen 80;
             server_name otel_example;
+
             root /var/www/html;
+
             location = / {
               opentelemetry_operation_name my_example_backend;
               opentelemetry_propagate;
@@ -672,12 +945,32 @@ test:
         }
         events {}
         EOF
+
         # Not sure why this isn't included in main package.
         mkdir -p /var/lib/nginx/tmp/
         adduser -D -H -s /sbin/nologin www-data
     # -T: test the configuration file: nginx checks the configuration for correct syntax, and then tries to open files referred in the configuration.
     # additionally dump configuration files to standard output (1.9.2).
     - runs: nginx -T
+    - name: Test opentelemetry_config directive
+      runs: |
+        touch empty
+        cat <<"EOF" >/etc/nginx/nginx.conf
+        pid /tmp/nginx/nginx.pid;
+        load_module /etc/nginx/modules/otel_ngx_module.so;
+        error_log stderr;
+        events {}
+        http {
+        opentelemetry_config empty;
+        }
+        daemon off;
+        EOF
+        nginx -T 2>&1 | grep "Missing required exporter field"
+    - uses: test/tw/ldd-check
+    - name: Test file capabilities
+      runs: |
+        getcap /usr/bin/nginx-ingress-controller | cut -d ' ' -f2 | grep -q -E '^cap_net_bind_service=ep$'
+        getcap /usr/bin/nginx | cut -d ' ' -f2 | grep -q -E '^cap_net_bind_service=ep$'
     - name: Run KwoK
       uses: test/kwok/cluster
     - name: Check controller logs
