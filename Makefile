@@ -12,7 +12,7 @@ endef
 
 disks_aws := $(call list_cloud_images,aws)
 disks_gcp := $(call list_cloud_images,gcp)
-disks_qemu = generic
+disks_qemu := $(call list_cloud_images,generic)
 disks_azure := $(call list_cloud_images,azure)
 
 group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
