@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,7 +12,11 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
+	"chainguard.dev/apko/pkg/apk/apk"
+	apko_build "chainguard.dev/apko/pkg/build"
+	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/build"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
@@ -194,4 +199,71 @@ func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string, s
 	}
 
 	return pkgs, errors.Join(errs...)
+}
+
+// lock build dependencies for a Melange confiugration
+func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
+	// Work around LockImageConfiguration assuming multi-arch.
+	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
+
+	opts := []apko_build.Option{apko_build.WithImageConfiguration(c.Environment),
+		apko_build.WithExtraBuildRepos(apkRepos),
+		apko_build.WithArch(apko_types.Architecture(arch)),
+		// TODO: Allow offline.
+		apko_build.WithCache("", false, cache),
+		// TODO: Fix that.
+		apko_build.WithIgnoreSignatures(true),
+	}
+
+	configs, _, err := apko_build.LockImageConfiguration(ctx, c.Environment, opts...)
+	if err != nil {
+		if err := json.NewEncoder(os.Stderr).Encode(c.Environment); err != nil {
+			return nil, fmt.Errorf("encoding %s: %w", c.Name)
+		}
+		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
+	}
+
+	locked, ok := configs["index"]
+	if !ok {
+		return nil, errors.New("missing locked config")
+	}
+
+	return locked.Contents.Packages, nil
+}
+
+// lock build dependencies for an Image configuration
+func lockImageDependencies(ctx context.Context, cfg *apko_types.ImageConfiguration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
+	// Work around LockImageConfiguration assuming multi-arch.
+	cfg.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
+
+	opts := []apko_build.Option{
+		apko_build.WithImageConfiguration(*cfg),
+		apko_build.WithExtraBuildRepos(apkRepos),
+		apko_build.WithArch(apko_types.Architecture(arch)),
+		// TODO: Allow offline.
+		apko_build.WithCache("", false, cache),
+		// TODO: Fix that.
+		apko_build.WithIgnoreSignatures(true),
+	}
+
+	configs, _, err := apko_build.LockImageConfiguration(ctx, *cfg, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
+	}
+
+	locked, ok := configs["index"]
+	if !ok {
+		return nil, fmt.Errorf("missing locked config")
+	}
+
+	return locked.Contents.Packages, nil
+}
+
+// format a time duration as days
+func formatDurationInDays(d time.Duration) string {
+	days := d.Hours() / 24
+	if days >= 1 {
+		return fmt.Sprintf("%.0f days", days)
+	}
+	return d.String() // fallback for sub-day durations
 }

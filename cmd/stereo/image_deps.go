@@ -11,8 +11,6 @@ import (
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
-	apko_build "chainguard.dev/apko/pkg/build"
-	apko_types "chainguard.dev/apko/pkg/build/types"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
@@ -207,31 +205,4 @@ func imageDependencies(ctx context.Context, private bool, arch string) error {
 
 	log.Printf("Image dependency pre-computation complete. Results written to %s/", resolvedDir)
 	return nil
-}
-
-func lockImageDependencies(ctx context.Context, cfg *apko_types.ImageConfiguration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
-	// Work around LockImageConfiguration assuming multi-arch.
-	cfg.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
-
-	opts := []apko_build.Option{
-		apko_build.WithImageConfiguration(*cfg),
-		apko_build.WithExtraBuildRepos(apkRepos),
-		apko_build.WithArch(apko_types.Architecture(arch)),
-		// TODO: Allow offline.
-		apko_build.WithCache("", false, cache),
-		// TODO: Fix that.
-		apko_build.WithIgnoreSignatures(true),
-	}
-
-	configs, _, err := apko_build.LockImageConfiguration(ctx, *cfg, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
-	}
-
-	locked, ok := configs["index"]
-	if !ok {
-		return nil, fmt.Errorf("missing locked config")
-	}
-
-	return locked.Contents.Packages, nil
 }
