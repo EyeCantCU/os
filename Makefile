@@ -172,20 +172,24 @@ ifeq ($(PUBLISH_TARGET),dev)
 AZGALLERY = vmtesting_dev
 GCPPROJECT = $(shell gcloud config get project)
 GCPBUCKET = $(GCPPROJECT)
+QEMUBUCKET = gs://$(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
 AZGALLERY = vmtesting
 GCPPROJECT = staging-vms-h8zx
 GCPBUCKET = wolfi-vm-images-workloads
+QEMUBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
 AZGALLERY = chainguard_vms_eap
 GCPPROJECT = chainguard-vms-eap
 GCPBUCKET = wolfi-vm-images-workloads
+QEMUBUCKET = gs://chainguard-vms-eap
 else ifeq ($(PUBLISH_TARGET),production)
 # Currently we are using wolfi-vm for internal images for workstations and other cases.
 # TODO: Move production workstation images to the chainguard-workstations project.
 GCPPROJECT = wolfi-vm
 GCPBUCKET = wolfi-vm-images-workloads
+QEMUBUCKET = gs://wolfi-vm-images-workloads
 else
 $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
@@ -248,6 +252,24 @@ $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
 	$(TOOLS_D)/google-image-upload --family="$(GCPFAMILY)" --name="$(GCPNAME)" \
 		--arch="$(GCPARCH)" --labels="$(GCPLABELS),local-name=gcp-$*" "$(dir $@)disk.raw" "$(GCPBUCKET)"
 	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
+
+.PHONY: publish-qemu
+publish-qemu: $(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name)))
+$(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name))): publish-qemu-%: $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json
+
+$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: QEMUNAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
+$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/disk.raw $(ARCH_OUT_D)/generic-%/disk.qcow2
+	@mkdir -p $(dir $@)
+	@echo "Publishing QEMU images for $* ($(ARCH))"
+	@artifact_name="$(QEMUNAME).raw"; \
+	gcs_raw_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
+	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
+	@artifact_name="$(QEMUNAME).qcow2"; \
+	gcs_qcow2_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	echo "Uploading $(dir $@)disk.qcow2 to $$gcs_qcow2_path"; \
+	gcloud storage cp "$(dir $@)disk.qcow2" "$$gcs_qcow2_path"
+	@$(call capture_stdout,$@, echo "{ \"raw\": \"$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).raw\", \"qcow2\": \"$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).qcow2\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
