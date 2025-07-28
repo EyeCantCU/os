@@ -115,7 +115,7 @@ func archive(ctx context.Context, duration time.Duration, arch string) error {
 	candidates = filtered
 
 	// Step 5: Filter out packages that are reverse build dependencies
-	filtered, retained, err = filterByReverseBuildDependencies(ctx, candidates, archiveCtx)
+	filtered, retained, err = filterByReverseBuildDependencies(candidates)
 	if err != nil {
 		return fmt.Errorf("filtering by reverse build dependencies: %w", err)
 	}
@@ -666,7 +666,7 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 	return filtered, retained, nil
 }
 
-func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, []RetainCandidate, error) {
+func filterByReverseBuildDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
 	log.Println("Checking for reverse build dependencies...")
 
 	// Load cached build dependencies from resolved/build/ directory
