@@ -566,13 +566,13 @@ func extractBaseLibraryName(dep string) string {
 }
 
 func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch, extraRepo string) ([][]BuildOrderEntry, error) {
-	// Create a dependency graph based on full dependencies using lockImageConfiguration
+	// Create a dependency graph based on dependencies using lockImageConfiguration
 
 	if len(packages) == 0 {
 		return [][]BuildOrderEntry{}, nil
 	}
 
-	log.Printf("Determining build order for %d packages based on full dependencies", len(packages))
+	log.Printf("Determining build order for %d packages based on dependencies", len(packages))
 
 	// Create maps for quick lookup
 	packageNames := make(map[string]bool)
@@ -597,12 +597,12 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 		repoURLs = append(repoURLs, extraRepo)
 	}
 
-	// For each rebuild candidate, resolve full dependencies
+	// For each rebuild candidate, resolve dependencies
 	for _, pkg := range packages {
 		dependencies[pkg.Name] = make([]string, 0)
 		depSet := make(map[string]bool) // to avoid duplicates
 
-		log.Printf("Resolving full dependencies for %s", pkg.Name)
+		log.Printf("Resolving dependencies for %s", pkg.Name)
 
 		// Create a dummy ImageConfiguration with all affected packages from this rebuild candidate
 		packageList := make([]string, 0, len(pkg.AffectedPackages))
@@ -620,16 +620,16 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 			},
 		}
 
-		// Resolve full dependencies
+		// Resolve dependencies
 		fullPackages, err := lockDependencies(ctx, dummyConfig, cache, repoURLs, arch)
 		if err != nil {
-			log.Printf("Warning: Could not resolve full dependencies for %s: %v", pkg.Name, err)
+			log.Printf("Warning: Could not resolve dependencies for %s: %v", pkg.Name, err)
 			continue
 		}
 
-		log.Printf("Found %d full dependencies for %s", len(fullPackages), pkg.Name)
+		log.Printf("Found %d dependencies for %s", len(fullPackages), pkg.Name)
 
-		// Check which full dependencies are in our rebuild set
+		// Check which dependencies are in our rebuild set
 		for _, fullPkg := range fullPackages {
 			// Parse package name from package=version format
 			pkgName := fullPkg
@@ -637,11 +637,11 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 				pkgName = fullPkg[:idx]
 			}
 
-			// Check if this full dependency is in our rebuild set and is not the package itself
+			// Check if this dependency is in our rebuild set and is not the package itself
 			if packageNames[pkgName] && !depSet[pkgName] && pkgName != pkg.Name {
 				dependencies[pkg.Name] = append(dependencies[pkg.Name], pkgName)
 				depSet[pkgName] = true
-				log.Printf("Found full dependency: %s depends on %s", pkg.Name, pkgName)
+				log.Printf("Found dependency: %s depends on %s", pkg.Name, pkgName)
 			}
 		}
 	}
