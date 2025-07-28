@@ -19,9 +19,8 @@ import (
 
 func archiveCmd() *cobra.Command {
 	var (
-		duration  time.Duration
-		outputFmt string
-		arch      string
+		duration time.Duration
+		arch     string
 	)
 
 	cmd := &cobra.Command{
@@ -35,12 +34,11 @@ based on the following criteria:
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or other seeds`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return archive(cmd.Context(), duration, outputFmt, arch)
+			return archive(cmd.Context(), duration, arch)
 		},
 	}
 
 	cmd.Flags().DurationVar(&duration, "duration", 365*24*time.Hour, "Age threshold for archive candidates (default: 1 year)")
-	cmd.Flags().StringVar(&outputFmt, "output", "text", "Output format: text, json, yaml")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
 
 	return cmd
@@ -73,7 +71,7 @@ type ArchiveContext struct {
 	Architecture    string                           // target architecture
 }
 
-func archive(ctx context.Context, duration time.Duration, outputFmt, arch string) error {
+func archive(ctx context.Context, duration time.Duration, arch string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
