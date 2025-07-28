@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,8 +13,6 @@ import (
 
 	"chainguard.dev/apko/pkg/apk/apk"
 	"chainguard.dev/apko/pkg/apk/auth"
-	apko_build "chainguard.dev/apko/pkg/build"
-	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
 )
@@ -130,7 +127,7 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 	candidates = filtered
 
 	// Step 6: Filter out packages that are still in use by images
-	filtered, retained, err = filterByImageDependencies(candidates, archiveCtx.Architecture)
+	filtered, retained, err = filterByImageDependencies(candidates)
 	if err != nil {
 		return fmt.Errorf("filtering by image dependencies: %w", err)
 	}
@@ -140,7 +137,7 @@ func archive(ctx context.Context, duration time.Duration, outputFmt, arch string
 	candidates = filtered
 
 	// Step 7: Filter out packages that are still in use by VMs
-	filtered, retained, err = filterByVMDependencies(candidates, archiveCtx.Architecture)
+	filtered, retained, err = filterByVMDependencies(candidates)
 	if err != nil {
 		return fmt.Errorf("filtering by VM dependencies: %w", err)
 	}
@@ -733,7 +730,7 @@ func filterByReverseBuildDependencies(ctx context.Context, candidates []ArchiveC
 	return filtered, retained, nil
 }
 
-func filterByImageDependencies(candidates []ArchiveCandidate, arch string) ([]ArchiveCandidate, []RetainCandidate, error) {
+func filterByImageDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
 	log.Println("Checking for image dependencies...")
 
 	// Load cached image dependencies from resolved/images/ directory
@@ -796,7 +793,7 @@ func filterByImageDependencies(candidates []ArchiveCandidate, arch string) ([]Ar
 	return filtered, retained, nil
 }
 
-func filterByVMDependencies(candidates []ArchiveCandidate, arch string) ([]ArchiveCandidate, []RetainCandidate, error) {
+func filterByVMDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
 	log.Println("Checking for VM dependencies...")
 
 	// Load cached VM dependencies from resolved/vms/ directory
@@ -851,41 +848,4 @@ func filterByVMDependencies(candidates []ArchiveCandidate, arch string) ([]Archi
 	}
 
 	return filtered, retained, nil
-}
-
-func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
-	// Work around LockImageConfiguration assuming multi-arch.
-	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
-
-	opts := []apko_build.Option{apko_build.WithImageConfiguration(c.Environment),
-		apko_build.WithExtraBuildRepos(apkRepos),
-		apko_build.WithArch(apko_types.Architecture(arch)),
-		// TODO: Allow offline.
-		apko_build.WithCache("", false, cache),
-		// TODO: Fix that.
-		apko_build.WithIgnoreSignatures(true),
-	}
-
-	configs, _, err := apko_build.LockImageConfiguration(ctx, c.Environment, opts...)
-	if err != nil {
-		if err := json.NewEncoder(os.Stderr).Encode(c.Environment); err != nil {
-			return nil, fmt.Errorf("encoding %s: %w", c.Name)
-		}
-		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
-	}
-
-	locked, ok := configs["index"]
-	if !ok {
-		return nil, errors.New("missing locked config")
-	}
-
-	return locked.Contents.Packages, nil
-}
-
-func formatDurationInDays(d time.Duration) string {
-	days := d.Hours() / 24
-	if days >= 1 {
-		return fmt.Sprintf("%.0f days", days)
-	}
-	return d.String() // fallback for sub-day durations
 }
