@@ -201,8 +201,8 @@ func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string, s
 	return pkgs, errors.Join(errs...)
 }
 
-// lock build dependencies for a Melange confiugration
-func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
+// lock dependencies for a Melange confiugration
+func lockMelangeDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
 	// Work around LockImageConfiguration assuming multi-arch.
 	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
 

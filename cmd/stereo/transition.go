@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"chainguard.dev/apko/pkg/apk/apk"
-	apko_build "chainguard.dev/apko/pkg/build"
 	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
@@ -621,7 +620,7 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 		}
 
 		// Resolve dependencies
-		fullPackages, err := lockDependencies(ctx, dummyConfig, cache, repoURLs, arch)
+		fullPackages, err := lockMelangeDependencies(ctx, dummyConfig, cache, repoURLs, arch)
 		if err != nil {
 			log.Printf("Warning: Could not resolve dependencies for %s: %v", pkg.Name, err)
 			continue
@@ -712,33 +711,6 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 	}
 
 	return buildOrder, nil
-}
-
-func lockDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
-	// Work around LockImageConfiguration assuming multi-arch.
-	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
-
-	opts := []apko_build.Option{
-		apko_build.WithImageConfiguration(c.Environment),
-		apko_build.WithExtraBuildRepos(apkRepos),
-		apko_build.WithArch(apko_types.Architecture(arch)),
-		// TODO: Allow offline.
-		apko_build.WithCache("", false, cache),
-		// TODO: Fix that.
-		apko_build.WithIgnoreSignatures(true),
-	}
-
-	configs, _, err := apko_build.LockImageConfiguration(ctx, c.Environment, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
-	}
-
-	locked, ok := configs["index"]
-	if !ok {
-		return nil, fmt.Errorf("missing locked config")
-	}
-
-	return locked.Contents.Packages, nil
 }
 
 func isPackageBuiltByConfig(packageName string, cfg *config.Configuration) bool {

@@ -102,7 +102,7 @@ func buildDeps(ctx context.Context, arch string) error {
 				repos := buildRepos[dir]
 
 				// Use the same locking mechanism as the buckets command
-				buildDeps, err := lockBuildDependencies(ctx, currentCfg, cache, repos, arch)
+				buildDeps, err := lockMelangeDependencies(ctx, currentCfg, cache, repos, arch)
 				if err != nil {
 					log.Printf("Error locking build dependencies for %s: %v", currentPkgName, err)
 
