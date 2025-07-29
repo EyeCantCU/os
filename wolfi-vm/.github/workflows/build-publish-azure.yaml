@@ -1,0 +1,181 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Build and push AZURE VMs images"
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      with-compliance-scan:
+        type: boolean
+        required: true
+        description: Run CIS Benchmarks compliance scanning and generate a report
+
+permissions: {}
+
+# Allow only one workflow run at a time
+concurrency:
+  group: 'release-azure'
+  cancel-in-progress: false
+
+jobs:
+  init:
+    if: ${{ github.repository == 'chainguard-dev/wolfi-vm' }}
+
+    runs-on: ubuntu-8-core
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
+
+  azure-build-push:
+    runs-on: ubuntu-8-core
+    needs:
+      - init
+
+    permissions:
+      id-token: write # federated identity
+      contents: read # read repo
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
+
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_ARCH: ${{ matrix.arch }}
+      VM_CLOUD: "azure"
+      WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'false' }}
+
+    steps:
+      - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: chainguard-dev/actions/apt-faster@ae2f0393ff2a60c572ff4d3485f406e8f36dfd38 # v1.4.6
+
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build vms disks
+        uses: './.github/actions/build-disks'
+        with:
+          cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          vm_group: "azure"
+          arch: '${{ matrix.arch }}'
+
+      - name: Scan disks
+        uses: './.github/actions/scan-disks'
+        with:
+          cloud_provider: "azure"
+          arch: '${{ matrix.arch }}'
+
+      - name: Setup environment variables
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - name: "Install Azure Deps"
+        run: |
+          # Install the azure cli
+          # The script sets up the key, repos and then installs the package
+          # https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-linux?pivots=apt
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: "Azure Login"
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # generated in mono https://github.com/chainguard-dev/mono/tree/main/env/azure/chainguard-vms/iac/200-infra
+          client-id: "9097cd23-3633-4e75-a7a4-213b1f89a0d5"
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: "ad60e736-b0ce-432e-b77c-4b8218f452ae"
+
+      - name: "Publish Azure Images to staging"
+        run: |
+          make publish-azure -j$(nproc) --output-sync=recurse ARCH="${{ env.VM_ARCH }}" PUBLISH_TARGET=staging PREFIX=chainguard
+
+      - name: "Test Azure Images in staging"
+        uses: "./.github/actions/vms-test"
+        with:
+          cloud_provider: "azure"
+          vm_group: "azure"
+          arch: "${{ matrix.arch }}"
+          opts: |
+            -- --subscription-id="ad60e736-b0ce-432e-b77c-4b8218f452ae" \
+            --resource-group=chainguard-vms \
+            --azure-inputs="./output" --azure-input-filename="publish.staging.json"
+          with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
+
+      - name: "Publish Azure Images to EAP"
+        run: |
+          make publish-azure-eap-dev ARCH="${{ env.VM_ARCH }}" PUBLISH_TARGET=eap PREFIX=chainguard
+
+  azure-partnercenter-marketplace-update:
+    runs-on: ubuntu-8-core
+    needs:
+      - azure-build-push
+      - init
+
+    permissions:
+      id-token: write # federated identity
+      contents: read # read repo
+
+    env:
+      VM_CLOUD: "azure"
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+
+    steps:
+      - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: chainguard-dev/actions/apt-faster@ae2f0393ff2a60c572ff4d3485f406e8f36dfd38 # v1.4.6
+
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: "Install Azure Deps"
+        run: |
+          # Install the azure cli
+          # The script sets up the key, repos and then installs the package
+          # https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-linux?pivots=apt
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: "Azure Login"
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # TODO: These will need to be replaced with the new cred in mono that
+          # have reduce permission compared to the normal uploader.
+          #
+          # generated in mono https://github.com/chainguard-dev/mono/tree/main/env/azure/chainguard-vms/iac/200-infra
+          client-id: "ab653c9a-3cf1-4ae7-a7df-7cf96d4031c3"
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: "ad60e736-b0ce-432e-b77c-4b8218f452ae"
+
+      - name: "Update Marketplace Technical Configuration"
+        run: |
+          # Update to my test offer for now
+          make azure-marketplace-update-technical-plan-eap-dev \
+          AZGALLERY="chainguard_vms_eap" \
+          AZMARKETPLACE_PLAN=eap \
+          AZMARKETPLACE_OFFER=chainguard_eap \
+          AZNAME="chainguard-eap-dev"

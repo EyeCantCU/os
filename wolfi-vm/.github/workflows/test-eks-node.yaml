@@ -1,0 +1,95 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Test AWS EKS Node
+
+on:
+  workflow_dispatch:
+    inputs:
+      ami:
+        type: string
+        required: true
+        description: AWS AMI to use for the VM
+
+      region:
+        type: string
+        description: the aws region to use
+        default: us-west-1
+
+      cluster-name:
+        type: string
+        description: Name of the k8s cluster to create.
+        default: test-vm-k8s-cluster
+
+permissions: {}
+
+jobs:
+  test-k8s-vm:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: "Setup AWS Creds"
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          # AWS account chainguard-test-vms
+          role-to-assume: arn:aws:iam::677043465004:role/cg-test-vms-postsubmit-role
+          aws-region: ${{ github.event.inputs.region }}
+
+      - name: Install deps
+        run: |
+          sudo apt-get install --assume-yes petname
+          petname
+
+      - name: "Install eksctl"
+        uses: chainguard-dev/actions/setup-eksctl@ae2f0393ff2a60c572ff4d3485f406e8f36dfd38 # v1.4.6
+
+      - name: Validate ami-id and region
+        env:
+          AMI: ${{ github.event.inputs.ami }}
+          AWS_REGION: ${{ github.event.inputs.region }}
+        run: |
+          out=$(aws --region="$AWS_REGION" ec2 describe-images --output=json --image-id="$AMI") ||
+             {
+               echo "Checking for ami '$AMI' in region '$AWS_REGION' failed $?";
+               exit 1;
+             }
+          name=$(echo "$out" | jq -r .Images[0].Name) ||
+             { echo "parsing output of describe-images with jq failed"; exit 1; }
+
+          if [ "$name" = "null" ]; then
+            echo "ami $AMI is not present or readable in region $AWS_REGION"
+            exit 1
+          fi
+
+          case "$name" in
+             *-eks-*) echo "Using ami $AMI in region $AWS_REGION. name=$name";;
+             *) echo "Refusing to use $AMI in region $AWS_REGION due to name=$name"
+                exit 1;;
+          esac
+
+      - name: Test EKS cluster
+        env:
+          # test-eks reads AWS_REGION
+          AWS_REGION: ${{ github.event.inputs.region }}
+          AMI: ${{ github.event.inputs.ami }}
+          CLUSTER: ${{ github.event.inputs.cluster-name }}
+        run: |
+          ngname=$(petname)
+          ./vms-test/helpers/test-eks run-test \
+              --cluster-name="$CLUSTER" --ami="$AMI" \
+              --nodegroup-name="$ngname" test-results/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: test-results
+          path: test-results

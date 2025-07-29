@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2166,SC3043
+#
+# Docs:
+# - https://learn.microsoft.com/en-us/azure/virtual-machines/linux/create-upload-generic
+# - https://learn.microsoft.com/en-us/azure/virtual-machines/linux/disks-upload-vhd-to-managed-disk-cli
+# Create Vm with something like this:
+# az vm create --name jvreeland-test-cli-2
+# --image /subscriptions/ad60e736-b0ce-432e-b77c-4b8218f452ae/resourceGroups/chainguard-vms/providers/Microsoft.Compute/galleries/vmtesting/images/jvreeland-azure-no-sb-1/versions/0.0.2
+# --admin-username azureuser --generate-ssh-keys --resource-group chainguard-vms --size Standard_E4pds_v6 --admin-password PassWord1!!
+# The image can be pulled from the JSON output from the VM image version create
+#
+# Example to generate an entirely new disk, image definition and image version:
+# ./tools/azure-image-upload -v --name jvreeland-azure-no-sb --arch Arm64 ./output/aarch64/azure-agents/disk-debug.raw
+# Example to generate a new disk and add it to an existing definition as a new version:
+# ./tools/azure-image-upload -v --name jvreeland-azure-no-sb-1 --arch Arm64 --image-version 0.0.2 ./output/aarch64/azure-agents/disk-debug.raw
+#
+
+TEMP_D=""
+VERBOSITY=1
+DEF_RESOURCE_GROUP="chainguard-vms"
+# Galleries need to be unique per subscription
+DEF_GALLERY="vmtesting"
+DEF_PUBLISHER="TestingPublisher"
+DEF_OFFER="TestingOffer"
+DEF_VERSION="0.0.1"
+MAKE_DEFINITION=0
+DEFAULT_REGIONS="eastus westus2"
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [--name=name] image
+
+  Publish raw disk image 'image'.
+
+    options:
+
+      -v | --verbose        be more verbose
+           --name    NAME   register image under provided name.
+                            default is to use the basename of 'image' with
+                            extensions removed.
+           --arch    ARCH   register image as architecture ARCH
+           --resource-group GRP  use resource-group for publishing. [$DEF_RESOURCE_GROUP]
+           --gallery        GAL  publish to gallery. [$DEF_GALLERY]
+           --image-definition    use this image definition
+           --make-definition     atempt to make the definition before using
+           --image-version       image version to create
+           --existing-disk       use and existing disk
+           --disk-name           use this name for the disk [NAME]
+           --regions             Specify regions to deploy. [$DEFAULT_REGIONS]
+           --upload-only         Only upload this provide image as a disk
+           --tags                 Add the tag to resources we create
+
+  Publish raw disk image 'image' to azure using 'az' and 'azcopy' cli.
+  If image ends in .vhd it is assumed to be in the right format
+  (subformat=fixed,force_size).  Raw disk images will be converted
+  using 'qemu-img convert'.
+
+EOF
+}
+
+cleanup() {
+    [ -n "$TEMP_D" ] || return 0
+    rm -Rf "$TEMP_D"
+}
+
+stderr() { echo "$@" 1>&2; }
+
+assert_cmds() {
+    local p="" missing=""
+    for p in "$@"; do
+        command -v "$p" >/dev/null 2>&1 || missing="${missing} $p"
+    done
+    [ -z "$missing" ] && return 0
+    stderr "missing commands ${missing# }"
+    return 1
+}
+
+create_vhd() {
+    assert_cmds qemu-img || return
+    local file="$1" out="$2"
+    # https://learn.microsoft.com/en-us/legal/marketplace/certification-policies#2006-testing-and-certification
+    # 200.3.3 Linux
+    # OS disk size validation should be between 30GB and 1023GB.
+    stderr "Resizing VM image to 30GB"
+    vr resizing-image qemu-img resize -f raw "$file" 30G || { stderr "failed to resized $file to 30G"; }
+    stderr "creating vhd $out from $file"
+    vr convert-to-vhd qemu-img convert -f raw -o subformat=fixed,force_size -O vpc "$file" "$out" ||
+        { stderr "failed conversion of $file to vpc in $out"; return 1; }
+}
+
+vr() {
+    local name="$1" rc="" sstart="$SECONDS"
+    shift
+    stderr "execute[$name]:" "$@"
+    "$@"
+    rc=$?
+    stderr "finished[$name] rc=$rc in $((SECONDS-$sstart))s"
+    return "$rc"
+}
+
+# Takes file, name, resource_group
+create_and_upload_disk() {
+    local file="$1" name="$2" resource_group="$3" tags="$4"
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        { stderr "failed to create tempdir"; return 1; }
+    trap cleanup EXIT
+
+    local vhd=""
+    case "$file" in
+        *.vhd)
+            vhd="$file"
+            stderr "Assuming $file is a suitably prepared vhd image"
+            ;;
+        *)
+            vhd="${TEMP_D}/$name.vhd"
+            create_vhd "$file" "$vhd" ||
+                { stderr "failed creating a vhd image from $file"; return 1; }
+        ;;
+    esac
+
+    local infojs="" disk_size="" sparse_size=""
+    infojs=$(qemu-img info --format=vpc --output=json "$vhd")
+    sparse_size=$(echo "$infojs" | jq -r '.children[0].info."actual-size"')
+        [ -n "$disk_size" ] && [ -n "$sparse_size" ] ||
+    disk_size=$(wc -c < "$vhd") || {
+        stderr "failed to get size of $vhd with 'wc -c'"
+        return 1
+    }
+
+    #local gib=$((1024*1024*1024))
+    #if [ "$((((disk_size-512)/gib)*gib))" != "$disk_size" ]; then
+    #    stderr "disk size (${disk_size} bytes - 512) of vhd $vhd from $file is not even GiB"
+    #    exit 1
+    #fi
+    #out=$(wc -c <"$vhd")
+    #echo "out: $out $((out/1024/1024)) MiB"
+    #echo "sps: $sparse_size $((sparse_size/1024/1024)) MiB"
+    #echo "dis: $disk_size $((disk_size/1024/1024)) MiB"
+    stderr "uploading $vhd ($((disk_size/1024/1024))MiB" \
+        "sparse=$((sparse_size/1024/1024))MiB) to azure"
+
+    # Create disk
+    local out="" diskid=""
+    out=$(vr "create disk" az disk create \
+        --resource-group="${resource_group}" \
+        --name="$name" \
+        --os-type=Linux \
+        --upload-type=Upload \
+        --upload-size-bytes="$disk_size" \
+        --sku=standard_lrs \
+        --hyper-v-generation=V2 \
+        --architecture="$azarch" \
+        --tags="${tags}") || {
+            stderr "publishing $file failed"
+            return 1
+        }
+
+    diskid=$(printf "%s" "$out" | jq -r .id) && [ -n "$diskid" ] || {
+        stderr "failed parsing jq output of az disk create"
+        return 1
+    }
+
+    # Enable Write access on disk 86400 (1 day) pulled from docs
+    local duration=$((60*60*24)) aurl=""
+    out=$(vr enable-disk-write az disk grant-access \
+        --resource-group="$resource_group" --name="$name" \
+        --access-level=Write --duration-in-seconds="$duration") || {
+        stderr "granting access to $name failed"
+        return 1
+    }
+
+    # Copy image to disk
+    # aurl is is a long url like # https://...blob.storage.azure.net/...?sv=...&sig=...
+    aurl=$(printf "%s" "$out" | jq -r .accessSAS) && [ -n "$aurl" ] || {
+        stderr "failed parsing jq output of az disk grant-access"
+        stderr "$out"
+        return 1
+    }
+    stderr "uploading $vhd ($((disk_size/1024/1024))MiB " \
+        "sparse=$((sparse_size/1024/1024))MiB) to azure"
+    vr "copy-image-to-disk" \
+        azcopy copy "$vhd" "$aurl" --blob-type=PageBlob || {
+        stderr "Failed copying image to disk"
+        return 1
+    }
+
+    vr "revoke-access" az disk revoke-access \
+        --name="$name" --resource-group="$resource_group" || {
+        stderr "failed revoking access to $name"
+        return 1
+    }
+
+    echo "$diskid"
+
+    return 0
+}
+
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,arch:,name:,resource-group:,gallery:,image-version:,definition-name:,make-definition,verbose,existing-disk,upload-only,disk-name:,regions:,tags:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local name="" out="" arch="" file="" name="" defname=""
+    local resource_group="${DEF_RESOURCE_GROUP}"
+    local gallery="${DEF_GALLERY}"
+    local image_version="${DEF_VERSION}"
+    local disk_name="" definition_name=""
+    local make_definition="" existing_disk="" upload_only=""
+    local regions="${DEFAULT_REGIONS}"
+    local tags="env=dev"
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            --arch) archin="$next"; shift;;
+            --name) name=$2; shift;;
+            --resource-group) resource_group=$2; shift;;
+            --gallery) gallery=$2; shift;;
+            --image-version) image_version=$2; shift;;
+            --make-definition) make_definition=1 ;;
+            --definition-name) definition_name=$2; shift;;
+            --existing-disk) existing_disk=1 ;;
+            --disk-name) disk_name=$2; shift;;
+            --upload-only) upload_only=1 ;;
+            --regions) regions=$2; shift;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --tags) tags="$2"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    if [ $# -ne 1 ]; then
+        Usage 1>&2
+        stderr "Got $# args, expected 1"
+        return 1
+    fi
+    assert_cmds az azcopy jq wc || return
+
+    if [ -z "$definition_name" ] && [ -z "$make_definition" ]; then
+        definition_name="${name}"
+    fi
+
+    file="$1"
+    defname=$(basename "$file")
+    defname=${defname%.vhd}
+
+    if [ -z "$name" ]; then
+        name=$defname
+    fi
+
+    if [ -z "$disk_name" ]; then
+        disk_name="$name"
+    fi
+
+    if [ ! -f "$file" ]; then
+        stderr "$file: not a file"
+        return 1
+    fi
+
+    local azarch=""
+    if [ -z "$archin" ]; then
+        arch=$(uname -m)
+    else
+        arch="${archin}"
+    fi
+
+    case "$arch" in
+        aarch64|arm64) azarch="arm64";;
+        x86_64|amd64|x64) azarch="x64";;
+        *) stderr "unknown arch $arch"; return 1;;
+    esac
+
+    if [ -z "$archin" ]; then
+        stderr "arbitrarily decided that $file is arch '$azarch' [use --arch=$azarch]"
+    fi
+
+    if [ -z "$existing_disk" ]; then
+        diskid=$(vr "create and upload disk" create_and_upload_disk "$file" "$disk_name" "$resource_group" "$tags" || {
+        stderr "failed to create and upload disk"
+        return 1
+        } )
+        if [ -n "${upload_only}" ]; then
+           return 0
+        fi
+    fi
+
+    disk_json=$(az disk list)
+    diskid=$(printf "%s" "$disk_json" | jq -r "map(select(.name | test(\"${disk_name}\$\"))).[0].id")
+
+    if [ -z "$diskid" ]; then
+        stderr "Could not retrieve disk id for ${disk_name}"
+        return 1
+    fi
+
+    if [ -n "$MAKE_DEFINITION" ]; then
+       # TODO add publisher information
+        # shellcheck disable=SC2086
+        # --tags                                   : Space-separated tags:
+        vr "create image definition in gallery" az sig image-definition create \
+            --resource-group "$resource_group" \
+            --gallery-name "$gallery" \
+            --gallery-image-definition "$name" \
+            --publisher "$DEF_PUBLISHER" \
+            --offer "$DEF_OFFER" \
+            --sku "$name" \
+            --os-type Linux \
+            --os-state generalized \
+            --architecture "$azarch" \
+            --features 'SecurityType=Standard' \
+            --tags $tags || {
+            stderr "failed creating Image definition"
+            return 1
+        }
+    fi
+
+    # shellcheck disable=SC2086
+    #     --target-regions                                : Space-separated list of regions and their
+    #     --target-regions eastus2 ukwest=3 southindia=standard_lrs \
+    #     --tags                                   : Space-separated tags:
+    vr "create image version" az sig image-version create \
+       --gallery-image-definition "$name" \
+       --gallery-image-version "$image_version" \
+       --gallery-name "$gallery" \
+       --resource-group "$resource_group" \
+       --os-snapshot "$diskid" \
+       --target-regions $regions \
+       --tags $tags || {
+       stderr "failed creating image version"
+       return 1
+    }
+
+    return 0
+}
+
+if [ "$1" = "create-vhd" ]; then
+    shift
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        { stderr "failed to create tempdir"; exit 1; }
+    create_vhd "$@"
+    exit
+fi
+
+if [ "$(uname)" == "Darwin" ]; then
+    if [ "$(which getopt)" == "/usr/bin/getopt" ]; then
+        echo "📎: It looks like you're trying to run this script on macOS!"
+        echo "However you need to install compatible tools."
+        echo "Please install gnu-getopt via 'brew install gnu-getopt'"
+        echo "And add it's path: /opt/homebrew/opt/gnu-getopt/bin before /usr/bin"
+        exit 1
+    fi
+fi
+
+main "$@"

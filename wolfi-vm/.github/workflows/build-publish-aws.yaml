@@ -1,0 +1,230 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Build and push AWS VMs images"
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      publish-to-marketplace:
+        type: boolean
+        required: true
+        description: Publish uploaded and tested AMIs to the AWS Marketplace
+      with-compliance-scan:
+        type: boolean
+        required: true
+        description: Run CIS Benchmarks compliance scanning and generate a report
+
+permissions: {}
+
+# awspub locks marketplace listings, thus can only have one of them
+# running at a given time.
+#
+# also last one, gets marked as latest in SSM parameteres, thus best
+# to wait for previous run to finish (or get cancelled) before
+# starting a new one. To avoid earlier build, finishing later, and
+# getting marked as latest.
+#
+# Allow only one workflow run at a time
+concurrency:
+  group: 'release-aws'
+  cancel-in-progress: false
+
+jobs:
+  init:
+    if: ${{ github.repository == 'chainguard-dev/wolfi-vm' }}
+
+    runs-on: ubuntu-8-core
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
+
+  aws-build-push:
+    runs-on: ubuntu-8-core
+    needs:
+      - init
+
+    permissions:
+      id-token: write # federated identity
+      contents: read # read repo
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
+        group:
+          - aws-eks
+          - aws-noneks
+
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_ARCH: ${{ matrix.arch }}
+      VM_GROUP: ${{ matrix.group }}
+      PUBLISH_TO_MP: ${{ github.event.inputs.publish-to-marketplace || 'on-schedule' }}
+      WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'false' }}
+
+    steps:
+      - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: chainguard-dev/actions/apt-faster@ae2f0393ff2a60c572ff4d3485f406e8f36dfd38 # v1.4.6
+
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build vms disks
+        uses: './.github/actions/build-disks'
+        with:
+          cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          vm_group: "${{ matrix.group }}"
+          arch: '${{ matrix.arch }}'
+
+      - name: Scan disks
+        uses: './.github/actions/scan-disks'
+        with:
+          vm_group: "aws-${{matrix.group}}"
+          arch: '${{ matrix.arch }}'
+
+      - name: add HOME/bin to PATH
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - name: "Setup AWS Creds"
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          # the secret used is the marketplace AWS account id
+          # AWS account aws-marketplace
+          role-to-assume: arn:aws:iam::607334848609:role/wolfi-vms-github-postsubmit-role
+          aws-region: us-east-1
+
+      - name: "Install AWS Deps"
+        run: |
+          if out=$(command -v aws); then
+              echo "already had aws: $out"
+          else
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip
+              ./aws/install --install-dir $HOME/aws-cli --bin-dir $HOME/bin
+          fi
+          aws --version
+
+          if ! dpkg-query --show | grep python3-venv ; then
+              sudo apt-get install --assume-yes python3-venv
+          fi
+          mkdir -p $HOME/venvs
+          python3 -m venv $HOME/venvs/awspub
+
+          $HOME/venvs/awspub/bin/pip install awspub
+          $HOME/venvs/awspub/bin/pip show awspub
+
+          ln -s $HOME/venvs/awspub/bin/awspub $HOME/bin/
+
+      - name: "Create AWS Images"
+        run: |
+          make -j4 --output-sync=recurse aws-create-${VM_GROUP} BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
+
+      - name: "Show publish output"
+        run: |
+          for f in output/${{ matrix.arch }}/awspub/create/*.json; do
+            echo == $f ==
+            cat $f
+            echo
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: awspub-create-${{ matrix.group}}-${{ matrix.arch }}
+          path: ./output/${{ matrix.arch }}/awspub/create
+
+      - name: "[BASE] Setup Test AWS Creds"
+        if: ${{ matrix.group != 'aws-eks' }}
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          # AWS account chainguard-vms
+          role-to-assume: arn:aws:iam::235494789672:role/wolfi-vms-github-postsubmit-role
+          aws-region: us-east-1
+
+      - name: "[EKS] Setup Test AWS Creds"
+        if: ${{ matrix.group == 'aws-eks' }}
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          # AWS account chainguard-vms
+          role-to-assume: arn:aws:iam::677043465004:role/cg-test-vms-postsubmit-role
+          aws-region: us-east-1
+
+      - name: "Test AWS Images"
+        uses: './.github/actions/vms-test'
+        with:
+          cloud_provider: "aws"
+          vm_group: '${{ matrix.group }}'
+          arch: '${{ matrix.arch }}'
+          opts: >-
+            --
+            --launch-group=wolfi-vm-test
+            --awspub-inputs=./output/${{ env.VM_ARCH }}/awspub/create/
+          with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
+
+      - name: "[EKS] AWS EKS Nodes"
+        if: matrix.group == 'aws-eks'
+        uses: './.github/actions/test-eks-node'
+        with:
+          aws-region: us-east-1
+          artifact-suffix: "-${{ matrix.arch }}-${{ matrix.group }}"
+          awspub-inputs-dir: ./output/${{ matrix.arch }}/awspub/create
+
+      - name: "Setup AWS Creds"
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          # the secret used is the marketplace AWS account id
+          # AWS account aws-marketplace
+          role-to-assume: arn:aws:iam::607334848609:role/wolfi-vms-github-postsubmit-role
+          aws-region: us-east-1
+
+      - name: "Publish AWS Images to marketplace"
+        run: |
+          if [ "$PUBLISH_TO_MP" = 'on-schedule' ]; then
+            if ! weekday=$(date +%A); then
+              echo 'Trying to publish once a week only, but failed to determine the weekday. Bailing!'
+              exit 1
+            fi
+            echo "The automated job is publishing to the AWS Marketplace once a week on Mondays only. Today is $weekday."
+            if [ "$weekday" = 'Monday' ]; then
+              echo 'Will publish.'
+              PUBLISH_TO_MP=true
+            else
+              echo 'Will not publish.'
+              PUBLISH_TO_MP=false
+            fi
+          fi
+
+          case "$PUBLISH_TO_MP" in
+            true)
+              :
+              ;;
+            false)
+              exit 0
+              ;;
+            *)
+              echo "Unexpected value for PUBLISH_TO_MP: '$PUBLISH_TO_MP'. Allowed values: 'true', 'false', 'on-schedule.'"
+              exit 1
+          esac
+
+          make -j4 --output-sync=recurse "aws-publish-${VM_GROUP}" BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}

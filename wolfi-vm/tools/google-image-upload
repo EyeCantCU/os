@@ -1,0 +1,190 @@
+#!/bin/sh
+# shellcheck disable=SC2015,SC2166,SC3043
+TEMP_D=""
+VERBOSITY=1
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [--name=name] image bucket
+
+  Publish raw disk image 'image' to google cloud using gcloud cli.
+
+    options:
+
+      -v | --verbose        be more verbose
+           --name    NAME   register image under provided name.
+                            default is to use the basename of 'image' with
+                            extensions removed.
+           --arch    ARCH   register image as architecture ARCH
+           --family  FAMILY the family for the image.
+           --labels  LABELS key-value labels for the  image.
+
+    Environment:
+
+       GCP_PROJECT - if GCP_PROJECT is set, the image will be created in
+                     that project rather than the default gcloud project.
+
+EOF
+}
+
+cleanup() {
+    [ -n "$TEMP_D" ] || return 0
+    rm -Rf "$TEMP_D"
+}
+
+stderr() { echo "$@" 1>&2; }
+
+_gcloud() {
+    local rc=0
+    set -- gcloud ${GCP_PROJECT:+"--project=$GCP_PROJECT"} "$@"
+    if [ $VERBOSITY -ge 1 ]; then
+        echo "$" "$@"
+    fi
+    "$@" && return 0
+    rc=$?
+    stderr "failed $rc"
+    return $rc
+}
+
+create_image_tgz() {
+    local file="$1" out="$2" d="" fp=""
+    d=$(dirname "$file") ||
+        { stderr "failed to get dirname for $file"; return 1; }
+    fp=$(cd "$d" && [ -f "${file##*/}" ] && echo "$PWD/${file##*/}") ||
+        { stderr "failed to get full path to $file"; return 1; }
+    if [ $(stat -c%s "$file") -lt 10737418240 ]; then
+      stderr "Resizing disk image to 10GB"
+      qemu-img resize -f raw "$file" 10G || { stderr "failed to resized $file to 10G"; }
+    fi
+    ln -s "$fp" "${TEMP_D}/disk.raw" ||
+        { stderr "failed symlink to $fp from ${TEMP_D}/disk.raw"; return 1; }
+    stderr "creating tarball ${out##*/}"
+    # https://cloud.google.com/compute/docs/import/import-existing-image
+    # file must be named disk.raw. symlink and dereference to rename.
+    tar -C "$TEMP_D" -S -czf "$out" --format=oldgnu --numeric-owner --clamp-mtime --mtime=0 --dereference --dereference disk.raw ||
+        { stderr "failed creating .tar.gz with $file"; return 1; }
+}
+
+main() {
+    local short_opts="a:hv"
+    local long_opts="help,arch:,name:,family:,verbose,labels:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local name="" out="" arch="" archin="" garch="" family="" labels="env=dev"
+    while [ $# -ne 0 ]; do
+        { cur="$1"; _next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -a|--arch) archin=$2; shift;;
+               --name) name=$2; shift;;
+               --family) family=$2; shift;;
+               --labels) labels=$2; shift;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    if [ $# -ne 2 ]; then
+        Usage 1>&2
+        stderr "Got $# args, expected 2"
+        return 1
+    fi
+
+    file="$1"
+    bucket="$2"
+
+    if [ ! -f "$file" ]; then
+        stderr "$file: not a file"
+        return 1
+    fi
+
+    if [ -z "$bucket" ]; then
+        stderr "bucket was empty"
+        return 1
+    fi
+
+    if [ -n "$archin" ]; then
+        arch="$archin"
+    else
+        arch=$(uname -m)
+    fi
+
+    case "$arch" in
+        aarch64|arm64) garch="ARM64";;
+        x86_64|amd64) garch="X86_64";;
+        *) stderr "unknown arch '$arch'"; return 1;;
+    esac
+
+    if [ -z "$archin" ]; then
+        stderr "arbitrarily decided that $file is arch '$garch' [use --arch=$garch]"
+    fi
+
+    command -v gcloud >/dev/null 2>&1 || {
+        stderr "no 'gcloud' in PATH"
+        return 1
+    }
+
+    if [ -n "$GCP_PROJECT" ]; then
+        if [ -z "$(gcloud projects describe ${GCP_PROJECT})" ]; then
+            stderr "GCP_PROJECT '$GCP_PROJECT' does not seem like a valid project"
+            return 1
+        fi
+    fi
+
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        { stderr "failed to create tempdir"; return 1; }
+    trap cleanup EXIT
+
+    local defname="" tarball=""
+    defname=$(basename "$file")
+
+    if [ -z "$name" ]; then
+        name=$defname
+    fi
+
+    case "$file" in
+        *.tar.gz)
+            stderr "Assuming $file is a suitably prepared tarball"
+            defname=${defname%.tar.gz}
+            tarball="$file"
+            ;;
+        *)
+            defname=${defname%.*}
+            tarball="${TEMP_D}/$name.tar.gz"
+            create_image_tgz "$file" "${TEMP_D}/$name.tar.gz" ||
+                { stderr "failed creating an image tarball from $file"; return 1; }
+           ;;
+    esac
+
+    local imgurl="gs://$bucket/$name.tar.gz"
+    stderr "publishing ${tarball##*/} to $imgurl"
+    _gcloud storage cp "$tarball" "$imgurl" ||
+        { stderr "failed copying $tarball to gs://$bucket"; return 1; }
+
+    _gcloud compute images create "$name" \
+        ${family:+"--family=$family"} \
+        "--source-uri=$imgurl" \
+        "--labels=$labels" \
+        "--architecture=$garch" \
+        "--guest-os-features=UEFI_COMPATIBLE,VIRTIO_SCSI_MULTIQUEUE,GVNIC" || {
+            stderr "failed compute images create $name"
+            return 1
+        }
+
+    return 0
+}
+
+if [ "$1" = "create-image-tgz" ]; then
+    shift
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        { stderr "failed to create tempdir"; exit 1; }
+    create_image_tgz "$@"
+    exit
+fi
+
+main "$@"

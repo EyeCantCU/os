@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2162
+# To be sourced by test-wolfi-vm
+
+bad_aws_usage() { aws_usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+
+aws_usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] aws out-dir -- [ aws-options ]
+
+    aws options:
+        --launch-group                      the tag to find vpc/subnet...
+                                            as passed to 'aws setup --tag='
+
+        --awspub-inputs DIR or FILE         directory of files with
+                                            'awspub create' output
+
+        --instance-type  TYPE               size to test. default to t3.medium.
+
+awspub input is json format. An example is:
+
+    $ cat ./my-inputs/aws-base-x86_64.json
+    {
+       "images": {
+           "chainguard-base-x86_64-20250501-1545-prod-pprbi7od3pt3q": {
+               "us-west-2": "ami-03e36b33dc4d57b34"
+           }
+       },
+       "images-by-group": {}
+    }
+EOF
+}
+
+cleanup_aws() {
+    cleanup
+}
+
+dump_awspubin() {
+    local f="$1" out="" arch="" localname=""
+    out=$(jq -r '.images | to_entries[] | . as $entry | $entry.value |
+        to_entries[] | "\(.key) \(.value) \($entry.key)"' < "$f")
+    # shellcheck disable=SC2030
+    localname="${f##*/}"
+    localname="${localname/.json/}"
+    echo "$out" |
+        while read region ami name ; do
+            # 'name' looks like chainguard-docker-x86_64-20250501-1545
+            case "$name" in
+                *-arm64-*)
+                    arch=aarch64
+                    family=${name%-arm64-*}
+                    ;;
+                *-x86_64-*)
+                    arch=x86_64
+                    family=${name%-x86_64-*}
+                    ;;
+                *) stderr "could not find arch in $name"; return 1;;
+            esac
+            echo "$region $ami $arch $family $localname"
+        done
+}
+
+parse_awspubins() {
+    local i="" f="" n=0
+    for i in "$@"; do
+        if [ -d "$i" ]; then
+            for f in "$i"/*.json; do
+                dump_awspubin "$f" || { stderr "failed reading $f in $i"; return 1; }
+                n=$((n+1))
+            done
+        elif [ -f "$i" ]; then
+            dump_awspubin "$i" || { stderr "failed reading $f"; return 1; }
+            n=$((n+1))
+        else
+            stderr "$f: not a file"
+            return 1
+        fi
+    done
+    [ $n -ne 0 ] || { stderr "did not process any files"; return 1; }
+    return 0
+}
+
+test_aws() {
+    # shellcheck disable=SC2034
+    local short_opts="h"
+    local long_opts="help,awspub-inputs:,instance-type:,launch-group:"
+    local getopt_out=""
+    getopt_out=$(getopt --options "${short_opts}" \
+        --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_aws_usage; return; }
+
+    local cur="" next=""
+    local awspubin="" launchgroup=""
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            --help) aws_usage ; exit 0;;
+            --awspub-inputs) awspubin="$next"; shift;;
+            --launch-group) launchgroup="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ $# -eq 2 ] || { bad_aws_usage "confused by $# args. expected 2"; return 1; }
+
+    [ -n "$launchgroup" ] || { bad_aws_usage "--launch-group required"; return 1; }
+    [ -n "$awspubin" ] || { bad_aws_usage "--awspub-inputs required"; return 1; }
+
+    local wolfivmd="$1" outd="$2"
+    shift 2
+
+    trap cleanup_aws EXIT
+
+    TEMP_D=$(mktemp -d) || return
+    local runner="$TOP_D/runner/aws"
+    rund="$TEMP_D/run"
+    mkdir "$rund" || return
+
+    parse_awspubins "$awspubin" > "$rund/inputs" ||
+        { stderr "failed parsing awspub inputs in $awspubin"; return 1; }
+
+    local n=""
+    n=$(wc -l < "$rund/inputs")
+    log "testing $n images"
+
+    key="$rund/id_rsa"
+    rq ssh-keygen -t rsa -N '' -f "$key" ||
+        { stderr "failed creating ssh key"; return 1; }
+
+    local region="" ami="" family="" arch="" fails="" tagid="" localname=""
+    while read region ami arch family localname; do
+        tagid="vmt-$family-$RANDOM"
+        vr aws_testimage "$launchgroup" "$outd/$arch/$family" "$tagid" \
+            "$key" "$region" "$ami" "$arch" "$family" "$wolfivmd/configs/$localname/test.yaml" ||
+            { fails="$fails $region/$ami"; return 1; }
+    done < "$rund/inputs"
+
+    if [ -n "$fails" ]; then
+        echo "FAIL: ${fails# }"
+        return 1
+    fi
+    return 0
+}
+
+aws_testimage() {
+    local launchgroup="$1" imageoutd="$2" tagbase="$3" key="$4" region="$5"
+    local ami="$6" arch="$7" vmname="${8}" testconfig="$9"
+    local tfile="" tname="" vfails="" fails=""
+    local pubkey="$key.pub"
+
+    rq mkdir -p "$imageoutd" || { stderr "failed creating $imageoutd"; return 1; }
+
+    [ -f "$testconfig" ] || {
+          vfails="$arch-$vmname/missing-test-config"
+          log "finished $arch-$vmname FAIL - $vfails"
+          return 1
+    }
+    yqassert "1" -re 'explode(.) | .version' "$testconfig" || {
+        vfails="$arch-$vmname/version-mismatch"
+        log "finished $arch-$vmname FAIL - $vfails"
+        return 1
+    }
+    yqassert "aws" -re 'explode(.) | .cloud' "$testconfig" || {
+        vfails="$arch-$vmname/cloud-mismatch"
+        log "finished $arch-$vmname FAIL - $vfails"
+        return 1
+    }
+    # convert to json because bash mangles yaml
+    vmconfigs=$(yq -o json -re "explode(.) | .vmconfigs.$arch" "$testconfig") || {
+        vfails="$arch-$vmname/read-vmconfigs"
+        log "finished $arch-$vmname FAIL - $vfails"
+        return 1
+    }
+    user=$(yq -re "explode(.) | .data.vmuser" "$testconfig") || {
+        log "using default user 'ec2-user'"
+        user="ec2-user"
+    }
+    num_vmconfigs=$(echo "$vmconfigs" | jq 'length') || {
+        vfails="$arch-$vmname/malformed-vmconfigs"
+        log "finished $arch-$vmname FAIL - $vfails"
+        return 1
+    }
+
+    local testconfig_dir=""
+    testconfig_dir=$(dirname "$testconfig") || {
+        vfails="$arch-$vmname/dirname-failed"
+        log "finished $arch-$vmname FAIL - $vfails"
+        return 1
+    }
+
+    local i="" vmtag="" instance_type="" vmconfig_name="" user_data="" named_tests="" test_groups="" group="" testuser="" vm_testd="" voutd="" launcher="" tid="" tgroup="" tname="" tname_pretty="" tfile="" location="" vm_ready=""
+    for i in $(seq 0 $((num_vmconfigs-1))); do
+        vmtag="$tagbase-$RANDOM"
+        instance_type=$(echo "$vmconfigs" | jq -re ".[$i].instance_type") || {
+            vfails="$vfails $arch-$vmname/missing-vm-size"
+            continue
+        }
+        vmconfig_name=$(echo "$vmconfigs" | jq -re ".[$i].name" 2>/dev/null) || vmconfig_name="$instance_type"
+        user_data=$(echo "$vmconfigs" | jq -re ".[$i].user_data" 2>/dev/null) || user_data=""
+        named_tests=$(echo "$vmconfigs" | jq -re ".[$i].tests[].name | select (. != null)" 2>/dev/null) || named_tests=""
+        test_groups=$(echo "$vmconfigs" | jq -re ".[$i].tests[].group | select (. != null)" 2>/dev/null) || test_groups=""
+        for group in $test_groups; do
+            for tname in "$TOP_D/pkg/test/$group/"*; do
+                named_tests="$named_tests $group/$(basename "$tname")"
+            done
+        done
+        if [ -z "$named_tests" ]; then
+           vfails="$vfails $arch-$/$vmconfig_name/no-tests-defined"
+           continue
+        fi
+
+        testuser=$(echo "$vmconfigs" | jq -re ".[$i].vmuser" 2>/dev/null) || testuser="$user"
+
+        vm_testd="$TEMP_D/$arch/$vmname/$vmconfig_name"
+        rq mkdir -p "$vm_testd" || {
+            stderr "failed creating $vm_testd"
+            continue
+        }
+        voutd="$imageoutd/$vmconfig_name"
+        rq mkdir -p "$voutd" || {
+            stderr "failed creating $voutd"
+            continue
+        }
+        if launcher=$(echo "$vmconfigs" | jq -re ".[$i].launch"); then
+            launcher="$testconfig_dir/$launcher"
+        else
+            log "launch option is unspecified for $vmconfig_name, using default runner"
+            launcher=("$runner" "launch")
+        fi
+
+        local user_data_args=()
+        if [[ -n $user_data ]]; then
+            user_data="$testconfig_dir/$user_data"
+            user_data_args=( '--user-data' "$user_data" )
+        fi
+
+        vr env RUNNER="$runner" "${launcher[@]}" \
+            --launch-group="$launchgroup" --region="$region" --instance-type="$instance_type" \
+            --public-key="$pubkey" --tag="$vmtag" --ami-id="$ami" "${user_data_args[@]}"
+        vm_ready=$?
+
+        [ $vm_ready -eq 0 ] && vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
+                --region="$region" --tag="$vmtag" || {
+                    stderr "failed runner wait-for-ssh $arch-$vmname-$vmconfig_name"
+                    vfails="$vfails $arch-$vmname-$vmconfig_name/wait-for-ssh"
+                    vm_ready=$?
+                }
+
+        if [ $vm_ready -eq 0 ]; then
+            log "started testing $arch/$vmname/$vmconfig_name"
+            for tid in $named_tests; do
+                 case "$tid" in
+                     *"/"*)
+                         tname="${tid##*/}"
+                         tgroup="${tid%%/*}"
+                         ;;
+                     *)
+                         tname="$tid"
+                         tgroup=""
+                         ;;
+                 esac
+                 if [ -n "$tgroup" ]; then
+                     tname_pretty="$tgroup-$tname"
+                     tfile="$TOP_D/test/$arch/$tgroup/$tname"
+                 else
+                     tname_pretty="$tname"
+                     location=$(dirname "$testconfig")"/"$(echo "$vmconfigs" | jq -re ".[$i].tests[] | select(.name==\"$tname\").location") || {
+                         vfails="$vfails $arch/$vmname/$vmconfig_name/missing-test-location-$tname"
+                         continue
+                     }
+                     goarch=$(goarch "$arch") || {
+                         vfails="$vfails $arch/$vmname/$vmconfig_name/invalid-test-arch-$tname"
+                         continue
+                     }
+                     tfile="$vm_testd/$tname"
+                     rq env GOOS="linux" GOARCH="$goarch" go test -C "$location" -c -o "$tfile" -tags vmtest || {
+                         vfails="$vfails $arch/$vmname/$vmconfig_name/compile-test-$tname"
+                         continue
+                     }
+                 fi
+
+                 test_emits_metrics "$tfile"
+                 local emits_metrics=$? metric_args=()
+                 if [ $emits_metrics -eq 0 ]; then
+                     metric_args=("-metric-tags" "arch:$arch,$METRIC_TAGS")
+                 fi
+                 vrl "$voutd/test-$tname" "$runner" run-remote --sudo \
+                     --region="$region" --tag="$vmtag" --private-key="$key" \
+                     --user="$testuser" --file="$tfile" -- \
+                     -test.v "${metric_args[@]}" ||
+                         vfails="$vfails $arch-$vmname-$vmconfig_name/test-$tname_pretty"
+                 if [ $emits_metrics -eq 0 ]; then
+                     "$runner" ssh \
+                         --region="$region" --tag="$vmtag" --private-key="$key" \
+                         --user="$testuser" "cat $METD/$tname" \
+                         > "$voutd/$tname-artifacts.json" ||
+                             vfails="$vfails $arch-$vmname-$vmconfig_name/$tname_pretty-artifacts"
+                 fi
+            done
+        else
+            vfails="$vfails $arch-$vmname-$vmconfig_name/launch"
+        fi
+
+        # Get the console logs before termination. While we won't get the logs of the shutdown we will avoid what appears to be a common race where we are unable to get logs within the timeout after the termination call.
+        vr "$runner" console-log --region="$region" --tag="$vmtag" --timeout="$WAIT_CONSOLE_TIMEOUT" --wait > "$voutd/console.log" ||
+            vfails="$vfails $arch-$vmname/$tname-console-log"
+
+        # Terminate VM
+        vr "$runner" terminate --region="$region" --tag="$vmtag" || {
+            vfails="$vfails $arch-$vmname-$vmconfig_name/terminate"
+            log "termination failed for $arch/$vmname/$vmconfig_name"
+        }
+
+        vr "$runner" console-log --region="$region" --tag="$vmtag" --timeout="$WAIT_CONSOLE_TIMEOUT" --wait > "$voutd/console.log" ||
+            vfails="$vfails $arch-$vmname-$vmconfig_name/$tname-console-log"
+
+    done
+
+    vfails=${vfails# }
+    if [ -z "$vfails" ]; then
+        log "finished $arch/$vmname PASS"
+        return 0
+    fi
+
+    log "finished $arch/$vmname FAIL - $vfails"
+    return 1
+}

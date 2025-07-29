@@ -1,0 +1,278 @@
+#!/bin/sh
+# shellcheck disable=SC2015,SC2166,SC3043
+TEMP_D=""
+VERBOSITY=1
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [--name=name] image bucket
+
+  Publish raw disk image 'image' to aws using awspub.
+  If image is a vmdk it is assumed to be in the right format.
+  Raw disk images will be converted.
+
+  Requires awspub [https://github.com/canonical/awspub] in PATH
+
+    options:
+
+      -v | --verbose        be more verbose
+           --name    NAME   register image under provided name.
+                            default is to use the basename of 'image' with
+                            extensions removed.
+           --arch    ARCH   register image as architecture ARCH
+           --ssm     SSM    ssm paramemter prefix
+
+    Environment:
+
+       AWS_DEFAULT_PROFILE should probably be set.
+EOF
+}
+
+fullpath() {
+    [ -e "$1" ] || { stderr "$1: does not exist"; return 1; }
+    readlink -f "$1" || { stderr "failed readlink -f $1"; return 1; }
+}
+
+cleanup() {
+    [ -n "$TEMP_D" ] || return 0
+    rm -Rf "$TEMP_D"
+}
+
+stderr() { echo "$@" 1>&2; }
+
+create_vmdk() {
+    local file="$1" out="$2"
+    stderr "creating vmdk ${out##*/} from $file"
+	qemu-img convert -f raw -O vmdk -o subformat=streamOptimized "$file" "$out" ||
+        { stderr "failed conversion of $file to $out"; return 1; }
+}
+
+assert_cmds() {
+    local p="" missing=""
+    for p in "$@"; do
+        command -v "$p" >/dev/null 2>&1 || missing="${missing} $p"
+    done
+    [ -z "$missing" ] && return 0
+    stderr "missing commands ${missing# }"
+    return 1
+}
+
+region_blob() {
+    local indent="      " regions=""
+    # shellcheck disable=SC2086
+    [ -n "$REGIONS" ] && set -- ${REGIONS} || set -- us-east-1
+    regions=""
+    for r in "$@"; do regions="${regions:+${regions}, }$r"; done
+    printf "%sregions: [ %s ]\n" "$indent" "$regions"
+}
+
+share_blob() {
+    local indent="      " shares=""
+    [ -n "$SHARES" ] && set -- ${SHARES} || set --
+    for r in "$@"; do shares="${shares:+${shares}, }'$r'"; done
+    printf "%sshare: [ %s ]\n" "$indent" "$shares"
+}
+
+write_tmpl() {
+    local OPTIND
+    local debug=false
+    local ssm=false
+    while true; do
+        case "$1" in
+            --debug) debug=true; shift ;;
+            --ssm) ssm=true; shift ;;
+            *) break ;;
+        esac
+    done
+
+    cat <<"EOF"
+awspub:
+  source:
+    path: "$diskimg"
+    architecture: "$awsarch"
+  s3:
+    bucket_name: "$bucket"
+  images:
+    "$name":
+      description: "$description"
+      boot_mode: "uefi"
+      public: false
+      tpm_support: "v2.0"
+      imds_support: "v2.0"
+EOF
+    share_blob
+    if [ "$ssm" = "true" ]; then
+        cat <<"EOF"
+      ssm_parameter:
+        - name: "$ssm_name/$ssm_version"
+          description: $description
+        - name: "$ssm_name/latest"
+          allow_overwrite: true
+          description: Latest image of $description
+EOF
+    fi
+    region_blob
+    if [ "$debug" = "true" ]; then
+        cat <<"EOF"
+    "$name-debug":
+      description: "$description-debug"
+      boot_mode: "uefi"
+      public: false
+      tpm_support: "v2.0"
+      imds_support: "v2.0"
+      uefi_data: "$debug_efi_vars"
+EOF
+    share_blob
+    if [ "$ssm" = "true" ]; then
+        cat <<"EOF"
+      ssm_parameter:
+        - name: "$ssm_name/$ssm_version/debug"
+          description: $description-debug
+        - name: "$ssm_name/latest/debug"
+          allow_overwrite: true
+          description: Latest debug image of $description
+EOF
+    fi
+        region_blob
+    fi
+}
+
+main() {
+    local short_opts="a:hv"
+    local long_opts="help,debug-efi-vars:,arch:,name:,ssm:,share:,verbose"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local name="" out="" arch="" archin="" name="" awsarch="" debug_efi_vars="" ssm=""
+    local SHARES=""
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -a|--arch) archin="$next"; shift;;
+               --name) name="$next"; shift;;
+               --ssm) ssm="$next"; shift;;
+               --share) SHARES="${SHARES} $next"; shift;;
+               --debug-efi-vars)
+                   debug_efi_vars=$(fullpath "$next") ||
+                       { stderr "bad value for --debug-efi-vars"; return 1; };;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --) shift; break;;
+        esac
+        shift;
+    done
+    SHARES=${SHARES# }
+
+    if [ $# -ne 2 ]; then
+        Usage 1>&2
+        stderr "Got $# args, expected 2"
+        return 1
+    fi
+
+    assert_cmds aws awspub || return
+
+    file="$1"
+    bucket="$2"
+
+    if [ ! -f "$file" ]; then
+        stderr "$file: not a file"
+        return 1
+    fi
+
+    if [ -z "$bucket" ]; then
+        stderr "bucket was empty"
+        return 1
+    fi
+
+    if [ -n "$archin" ]; then
+        arch="$archin"
+    else
+        arch=$(uname -m)
+    fi
+
+    case "$arch" in
+        aarch64|arm64) awsarch="arm64";;
+        x86_64|amd64) awsarch="x86_64";;
+        *) stderr "unknown arch '$arch'"; return 1;;
+    esac
+
+    if [ -z "$archin" ]; then
+        stderr "arbitrarily decided that $file is arch '$awsarch' [use --arch=$awsarch]"
+    fi
+
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        { stderr "failed to create tempdir"; return 1; }
+    trap cleanup EXIT
+
+    local defname="" vmdk=""
+
+    defname=$(basename "$file")
+    case "$file" in
+        *.vmdk)
+            stderr "Assuming $file is a suitably prepared vmdk image"
+            defname=${defname%.vmdk}
+            vmdk="$file"
+            ;;
+        *)
+            defname=${defname%.*}
+            vmdk="${TEMP_D}/$defname.vmdk"
+            create_vmdk "$file" "$vmdk" ||
+                { stderr "failed creating a vmdk image from $file"; return 1; }
+           ;;
+    esac
+
+    if [ -z "$name" ]; then
+        name=$defname
+    fi
+
+    if [ -n "$ssm" ]; then
+        ssm_name="$(echo /$ssm | tr - /)"
+        ssm_version=${name#"$ssm-"}
+    fi
+
+    stderr "publishing $vmdk to $name via $bucket"
+    local fpvmdk=""
+    local description="$name"
+    fpvmdk=$(fullpath "$vmdk") || { stderr "failed getting path to $vmdk"; return 1; }
+
+    local tmpl="${TEMP_D}/awspub.yaml" mapping="${TEMP_D}/mapping.yaml"
+    write_tmpl ${debug_efi_vars:+--debug} ${ssm:+--ssm} > "$tmpl" ||
+        { stderr "failed writing tmpl to $tmpl"; return 1; }
+    cat > "$mapping" <<EOF
+diskimg: "$fpvmdk"
+awsarch: "$awsarch"
+name: "$name"
+description: "$description"
+bucket: "$bucket"
+debug_efi_vars: "$debug_efi_vars"
+ssm_name: "$ssm_name"
+ssm_version: "$ssm_version"
+EOF
+
+    echo "===== awspub.yaml ====" ;
+    cat "$tmpl"
+    echo "===== mapping.yaml ====";
+    cat "$mapping"
+
+    stderr "execute:" "awspub create --config=mapping=\"$mapping\" \"$tmpl\""
+    awspub create "--config-mapping=$mapping" "$tmpl" ||
+        { stderr "that failed. sad face"; return 1; }
+    if [ -n "$ssm" ]; then
+        stderr "execute:" "awspub publish --config=mapping=\"$mapping\" \"$tmpl\""
+        awspub publish "--config-mapping=$mapping" "$tmpl" ||
+            { stderr "that failed. sad face"; return 1; }
+    fi
+
+    return 0
+}
+
+if [ "$1" = "create-vmdk" ]; then
+    shift
+    create_vmdk "$@"
+    exit
+fi
+
+main "$@"
