@@ -63,7 +63,7 @@ This command pre-computes and caches the build dependencies for all melange conf
 Identifies APK packages that can be archived based on age and dependency criteria and should be run after all of the *-dependencies commands have been executed.
 
 ```bash
-stereo archive --duration 365d --arch x86_64
+stereo archive --duration 365 --arch x86_64
 ```
 
 The archive command analyzes packages across repositories and identifies candidates for archival based on:
@@ -76,7 +76,7 @@ The archive command analyzes packages across repositories and identifies candida
 Results (including reasons for archival or retention) are written to `archive/` and `retain/` directories as JSON files per repository.
 
 **Flags:**
-- `--duration`: Age threshold for archive candidates (default: 1 year)
+- `--duration`: Age threshold for archive candidates in days (default: 365 days)
 - `--arch`: Architecture to evaluate (default: x86_64)
 
 ## Repository Structure
