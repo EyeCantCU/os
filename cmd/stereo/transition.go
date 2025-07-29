@@ -19,7 +19,7 @@ func transitionCmd() *cobra.Command {
 	var (
 		packageName string
 		arch        string
-		extraRepo   string
+		extraRepos  []string
 	)
 
 	cmd := &cobra.Command{
@@ -29,25 +29,25 @@ func transitionCmd() *cobra.Command {
 packages that need to be rebuilt during a shared library transition. It generates
 regex patterns for shared libraries and determines build ordering based on dependencies.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return transition(cmd.Context(), packageName, arch, extraRepo)
+			return transition(cmd.Context(), packageName, arch, extraRepos)
 		},
 	}
 
 	cmd.Flags().StringVar(&packageName, "package", "", "Name of the melange package driving the transition (required)")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
-	cmd.Flags().StringVar(&extraRepo, "extra-repo", "", "Additional APK repository URL to include in analysis")
+	cmd.Flags().StringSliceVar(&extraRepos, "extra-repo", []string{}, "Additional APK repository URLs to include in analysis (can be specified multiple times)")
 	cmd.MarkFlagRequired("package")
 
 	return cmd
 }
 
-func transition(ctx context.Context, packageName, arch, extraRepo string) error {
+func transition(ctx context.Context, packageName, arch string, extraRepos []string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
 	log.Printf("Analyzing shared library transition for package: %s (architecture: %s)", packageName, arch)
-	if extraRepo != "" {
-		log.Printf("Including additional repository: %s", extraRepo)
+	if len(extraRepos) > 0 {
+		log.Printf("Including additional repositories: %v", extraRepos)
 	}
 
 	// Get melange configurations
@@ -115,7 +115,7 @@ func transition(ctx context.Context, packageName, arch, extraRepo string) error 
 		}
 	}
 
-	if extraRepo != "" {
+	for _, extraRepo := range extraRepos {
 		log.Printf("Fetching APK index from: %s", extraRepo)
 
 		extraIndex, err := fetchAPKIndex(ctx, extraRepo, arch)
@@ -158,7 +158,7 @@ func transition(ctx context.Context, packageName, arch, extraRepo string) error 
 	}
 
 	// Identify packages that need rebuilding
-	packagesToRebuild, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch, extraRepo)
+	packagesToRebuild, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch, extraRepos)
 	if err != nil {
 		return fmt.Errorf("identifying packages to rebuild: %w", err)
 	}
@@ -166,7 +166,7 @@ func transition(ctx context.Context, packageName, arch, extraRepo string) error 
 	log.Printf("Identified %d packages that need rebuilding", len(packagesToRebuild))
 
 	// Determine build order based on dependencies
-	buildOrder, err := determineBuildOrder(ctx, packagesToRebuild, arch, extraRepo)
+	buildOrder, err := determineBuildOrder(ctx, packagesToRebuild, arch, extraRepos)
 	if err != nil {
 		return fmt.Errorf("determining build order: %w", err)
 	}
@@ -334,7 +334,7 @@ func removeVersionSuffix(libName string) string {
 	return libName
 }
 
-func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch, extraRepo string) ([]RebuildCandidate, error) {
+func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string, extraRepos []string) ([]RebuildCandidate, error) {
 	log.Printf("Analyzing APK repositories for packages with shared library dependencies")
 
 	rebuilds := make(map[string]*RebuildCandidate)
@@ -352,17 +352,8 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 	// First, collect all packages by origin and package name to find the most recent version of each distinct package
 	originPackages := make(map[string]map[string][]*apk.Package) // originKey -> packageName -> list of package versions
 
-	// Create extended repository map including extra repository for all checks
-	allRepos := make(map[string]string)
-	for repo, url := range dirToRepo {
-		allRepos[repo] = url
-	}
-	if extraRepo != "" {
-		allRepos["extra"] = extraRepo
-	}
-
-	// Check all repositories for packages
-	for repo, repoURL := range allRepos {
+	// Check dirToRepo repositories for packages
+	for repo, repoURL := range dirToRepo {
 		log.Printf("Checking APK index for repository: %s", repo)
 
 		index, err := fetchAPKIndex(ctx, repoURL, arch)
@@ -385,6 +376,36 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 					originPackages[originKey][pkg.Name] = append(originPackages[originKey][pkg.Name], pkg)
 				} else {
 					log.Printf("Skipping package %s with origin %s - no longer built by melange config", pkg.Name, pkg.Origin)
+				}
+			}
+		}
+	}
+
+	// Check extra repositories for packages, trying to match them against all known melange configs
+	for _, extraRepoURL := range extraRepos {
+		log.Printf("Checking APK index for extra repository: %s", extraRepoURL)
+
+		index, err := fetchAPKIndex(ctx, extraRepoURL, arch)
+		if err != nil {
+			log.Printf("Error fetching index for %s: %v", extraRepoURL, err)
+			continue
+		}
+
+		// Group packages by origin and package name
+		for _, pkg := range index.Packages {
+			// Try to find a melange config for this origin in any of the source repositories
+			for repo := range dirToRepo {
+				originKey := repo + "/" + pkg.Origin
+				if config, exists := candidates[originKey]; exists {
+					// Verify that this APK package is still built by the melange configuration
+					if isPackageBuiltByConfig(pkg.Name, config) {
+						if originPackages[originKey] == nil {
+							originPackages[originKey] = make(map[string][]*apk.Package)
+						}
+						originPackages[originKey][pkg.Name] = append(originPackages[originKey][pkg.Name], pkg)
+						log.Printf("Found package %s from extra repo matching melange config in %s", pkg.Name, repo)
+					}
+					break // Found matching config, no need to check other repos
 				}
 			}
 		}
@@ -564,7 +585,7 @@ func extractBaseLibraryName(dep string) string {
 	return dep
 }
 
-func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch, extraRepo string) ([][]BuildOrderEntry, error) {
+func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch string, extraRepos []string) ([][]BuildOrderEntry, error) {
 	// Create a dependency graph based on dependencies using lockImageConfiguration
 
 	if len(packages) == 0 {
@@ -587,12 +608,12 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch,
 	dependencies := make(map[string][]string)
 	cache := apk.NewCache(true)
 
-	// Create repository list including extra repo if provided
-	repoURLs := make([]string, 0, len(dirToRepo)+1)
+	// Create repository list including extra repos if provided
+	repoURLs := make([]string, 0, len(dirToRepo)+len(extraRepos))
 	for _, url := range dirToRepo {
 		repoURLs = append(repoURLs, url)
 	}
-	if extraRepo != "" {
+	for _, extraRepo := range extraRepos {
 		repoURLs = append(repoURLs, extraRepo)
 	}
 
