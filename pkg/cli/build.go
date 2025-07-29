@@ -15,7 +15,6 @@
 package cli
 
 import (
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -115,7 +114,7 @@ func buildCmd() *cobra.Command {
 	return cmd
 }
 
-func createDisk(ctx context.Context, converter converter.Interface, buildTargetPath, arch string, inputTar *gzip.Reader, output string) error {
+func createDisk(ctx context.Context, converter converter.Interface, buildTargetPath, arch string, inputTar io.Reader, output string) error {
 	var err error
 
 	err = os.MkdirAll(filepath.Dir(output), os.ModePerm)
@@ -171,13 +170,7 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 	}
 	defer tar.Close()
 
-	gz, err := gzip.NewReader(tar)
-	if err != nil {
-		return fmt.Errorf("error opening image.tar: %w", err)
-	}
-	defer gz.Close()
-
-	err = createDisk(ctx, converter, buildFilePath, arch, gz, output)
+	err = createDisk(ctx, converter, buildFilePath, arch, tar, output)
 	if err != nil {
 		return fmt.Errorf("error converting to disk image: %w", err)
 	}

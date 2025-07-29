@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/auth"
-	apkfs "chainguard.dev/apko/pkg/apk/fs"
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
 	"github.com/anchore/syft/syft/file"
@@ -23,6 +22,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"chainguard.dev/apko/pkg/tarfs"
 )
 
 var ic types.ImageConfiguration = types.ImageConfiguration{
@@ -95,9 +95,8 @@ func buildImage(t *testing.T) v1.Layer {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
 
-	fs := apkfs.DirFS(t.TempDir(), apkfs.WithCreateDir())
 	arch := types.ParseArchitecture("amd64")
-	bc, err := build.New(ctx, fs,
+	bc, err := build.New(ctx, tarfs.New(),
 		build.WithAuthenticator(auth.CGRAuth{}),
 		build.WithArch(arch),
 		build.WithImageConfiguration(ic),
