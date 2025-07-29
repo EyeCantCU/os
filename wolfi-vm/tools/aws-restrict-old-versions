@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+
+# Generate a script to restrict old versions of products on the AWS Marketplace.
+#
+# Invoke with short-lived credentials for the aws-marketplace account. The script
+# does not perform any mutating actions (yet). It scans for AMI products that are
+# approaching the limit of 100 versions per product and generates a throw-away
+# script that, when invoked, requests the oldest versions of each product to be
+# restricted.
+
+# Maximum number of versions to keep. With daily publishing, a value of 60
+# keeps about 2 months of images. AWS sets a limit of 100 versions per product.
+# After being restricted the images still need to be manually archived by the
+# Managed Catalog Operations team, so this intentionally gives some wide buffer.
+readonly num_versions_max=60
+
+bail() {
+    >&2 echo "Error: $*"
+    exit 1
+}
+
+get_ami_products() {
+    aws marketplace-catalog list-entities \
+        --catalog AWSMarketplace \
+        --entity-type AmiProduct \
+        --output json \
+    | jq -r '.EntitySummaryList
+             | map(select(.Name | startswith("Chainguard")))
+             | sort_by(.Name)
+             | .[]
+             | .EntityId'
+}
+
+get_product_sku() {
+    local product_id=$1
+
+    aws marketplace-catalog describe-entity \
+        --catalog AWSMarketplace \
+        --entity-id "${product_id}" \
+        --output json \
+    | jq -r '.DetailsDocument.Description.Sku'
+}
+
+list_product_versions() {
+    local product_id=$1
+
+    aws marketplace-catalog describe-entity \
+        --catalog AWSMarketplace \
+        --entity-id "$product_id" \
+        --output json \
+    | jq -r '
+        .DetailsDocument.Versions
+        | to_entries
+        | map(select(.value.DeliveryOptions[0].Visibility == "Public"))
+        | map({
+            VersionTitle: .value.VersionTitle,
+            CreationDate: .value.CreationDate,
+            DeliveryOptionId: .value.DeliveryOptions[0].Id,
+            Index: .key
+        })
+        | sort_by(.CreationDate)
+        | reverse'
+}
+
+create_restrict_change_document() {
+    local product_id=$1
+    local delivery_options_json=$2
+
+    jq -n \
+        --arg product_id "${product_id}" \
+        --argjson delivery_options "${delivery_options_json}" \
+        '[{
+            ChangeType: "RestrictDeliveryOptions",
+            Entity: {
+                Type: "AmiProduct@1.0",
+                Identifier: $product_id
+            },
+            DetailsDocument: {
+                DeliveryOptionIds: $delivery_options
+            }
+        }]'
+}
+
+main() {
+    local scratch=
+    scratch=$(mktemp -d) || bail 'Cannot create scratch directory'
+
+    local -a product_ids
+    get_ami_products >"${scratch}/product-ids" || bail 'Cannot retrieve product IDs'
+    mapfile -t product_ids <"${scratch}/product-ids"
+
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'set -e -x'
+    } >"${scratch}/send-change-request"
+
+    local sku num_versions num_old_versions oldest youngest delivery_option_ids change name
+    for id in "${product_ids[@]}"; do
+        mkdir "${scratch}/${id}" || bail "Cannot create scratch directory for '${id}'"
+
+        sku=$(get_product_sku "${id}") || bail "Cannot retrieve SKU for '${id}'"
+
+        list_product_versions "${id}" >"${scratch}/${id}/versions" \
+            || bail "Cannot retrieve product versions for '${id}'"
+        num_versions=$(jq length "${scratch}/${id}/versions")
+
+        jq ".[${num_versions_max}:]" "${scratch}/${id}/versions" >"${scratch}/${id}/old-versions"
+        read -r num_old_versions oldest youngest < <(
+            jq -r '. as $input
+                   | ($input | length) as $num_old_versions
+                   | if $num_old_versions > 0
+                     then "\($input | length) \($input[-1].VersionTitle) \($input[0].VersionTitle)"
+                     else "0 n/a n/a"
+                     end' \
+                <"${scratch}/${id}/old-versions"
+        )
+
+        echo "${sku} (${id})"
+        echo
+        echo "         Unrestricted versions: ${num_versions}"
+        echo "                  Old versions: ${num_old_versions}"
+        echo "      Oldest build to restrict: ${oldest}"
+        echo "    Youngest build to restrict: ${youngest}"
+        echo
+        echo
+
+        if [[ ${num_old_versions} -eq 0 ]]; then
+            continue
+        fi
+
+        delivery_option_ids=$(jq 'map(.DeliveryOptionId)' "${scratch}/${id}/old-versions")
+        change=$(create_restrict_change_document "${id}" "${delivery_option_ids}")
+
+        {
+            name="Restrict ${num_old_versions} versions from ${oldest} to ${youngest}"
+            echo
+            echo "# ${sku} (${id})"
+            echo "# ${name}"
+            echo "aws marketplace-catalog start-change-set --catalog AWSMarketplace --change-set-name '${name}' --change-set '${change}'"
+        } >>"${scratch}/send-change-request"
+    done
+
+    >&2 echo "Placed a script to send the change requests at '${scratch}/send-change-request'. " \
+             "Run the script at your discretion."
+}
+
+main

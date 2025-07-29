@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# To fetch the last images the CI published to staging, do ./hack/fetch-gcp-publish -p wolfi-vm
+# To fetch the last images you pushed to dev with the Makefile, do ./hack/fetch-gcp-publish -p $(gcloud config get project) -r $(id -un)
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/}
+
+  Fetch gcp publish details for latest images published to a gallery.
+
+    options:
+
+          -a|--arch           ARCH    fetch details for ARCH
+          -p|--PROJECT        PROJECT project to look for images in
+          -r|--prefix         PREFIX  naming prefix for remote images
+          -i|--images         IMAGES  images to look for
+
+  Fetch latest gcp publish details and write them to standard publish.*.yaml files as if you had just published them yourself.
+
+EOF
+}
+
+stderr() { echo "$@" 1>&2; }
+
+main() {
+    local short_opts="-h,a:,r:,p:,i:"
+    local long_opts="help,arch:,project:,prefix:,images:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local arch="$(uname -m)" project="" prefix="chainguard" images="$(make list-gcp)"
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -a|--arch) arch="$next"; shift;;
+            -p|--project) project="$next"; shift;;
+            -r|--prefix) prefix="$next"; shift;;
+            -i|--images) images="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ -n "$project" ] || { stderr "--project is required"; return 1; }
+
+    local gcparch=""
+
+    case "$arch" in
+        aarch64|arm64) gcparch="arm64";;
+        x86_64|amd64|x64) gcparch="amd64";;
+        *) stderr "unknown arch $arch"; return 1;;
+    esac
+
+    local output_filename=""
+
+    case "$project" in
+        wolfi-vm) output_filename="publish.staging.yaml";;
+        chainguard-vms-eap) output_filename="publish.eap.yaml";;
+        *) output_filename="publish.dev.yaml";;
+    esac
+
+    echo "Writing to filename $output_filename"
+    local ok=0
+
+    local remote_image=""
+    for image in $images; do
+        mkdir -p "output/$arch/$image"
+        remote_image="$prefix${image#gcp}-$gcparch"
+        echo "Looking for $image as family $remote_image"
+        gcloud compute images describe-from-family "projects/$project/global/images/family/$remote_image" \
+          > "output/$arch/$image/$output_filename" || { stderr "Could not find image definition for $image"; ok=1; continue; }
+    done
+    return $ok
+}
+main "$@"
