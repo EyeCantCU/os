@@ -17,26 +17,24 @@ import (
 
 func transitionCmd() *cobra.Command {
 	var (
-		packageName string
-		arch        string
-		extraRepos  []string
+		arch       string
+		extraRepos []string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "transition",
+		Use:   "transition <package-name>",
 		Short: "Manage shared library transitions for melange packages",
 		Long: `This command analyzes a melange configuration with -dev package to identify
 packages that need to be rebuilt during a shared library transition. It generates
 regex patterns for shared libraries and determines build ordering based on dependencies.`,
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return transition(cmd.Context(), packageName, arch, extraRepos)
+			return transition(cmd.Context(), args[0], arch, extraRepos)
 		},
 	}
 
-	cmd.Flags().StringVar(&packageName, "package", "", "Name of the melange package driving the transition (required)")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
 	cmd.Flags().StringSliceVar(&extraRepos, "extra-repo", []string{}, "Additional APK repository URLs to include in analysis (can be specified multiple times)")
-	cmd.MarkFlagRequired("package")
 
 	return cmd
 }
