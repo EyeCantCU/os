@@ -1,7 +1,7 @@
 package:
   name: py3-tensorrt-cuda-12
   version: "10.13.0"
-  epoch: 0
+  epoch: 1
 
 vars:
   # It's versioned for the latest minor version it supports, but is backwards compatible.
@@ -31,8 +31,8 @@ environment:
   environment:
     CUDA_ROOT: "/usr/local/cuda-${{vars.cuda-version}}"
     TENSORRT_MODULE: "tensorrt"
-    TRT_OSSPATH: "/home/build/TensorRT"
     CPLUS_INCLUDE_PATH: "/home/build/TensorRT/parsers/"
+    VERBOSE: 1
   contents:
     packages:
       - bash
@@ -43,7 +43,7 @@ environment:
       - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
       - py3-supported-build-base-dev
       - py3-supported-pybind11
-      - tensorrt-cuda-${{vars.cuda-major-version}}-dev
+      - tensorrt-cuda-${{vars.cuda-major-version}}-dev=~${{package.version}}
 
 pipeline:
   - uses: git-checkout
@@ -58,6 +58,10 @@ pipeline:
     with:
       patches: remove-bindings-wheel.patch
 
+  - uses: patch
+    with:
+      patches: drop-cuda-runtime-dep.patch
+
 subpackages:
   - range: py-versions
     name: py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-major-version}}
@@ -67,12 +71,16 @@ subpackages:
     dependencies:
       runtime:
         - python-${{range.key}}-base
-        - libnvinfer-cuda-${{vars.cuda-major-version}}
-        - libnvinfer-plugin-cuda-${{vars.cuda-major-version}}
-        - libnvonnxparser-cuda-${{vars.cuda-major-version}}
+        # Depend on the version of tensorrt we built against.
+        - libnvinfer-cuda-${{vars.cuda-major-version}}=~${{package.version}}
+        - libnvinfer-plugin-cuda-${{vars.cuda-major-version}}=~${{package.version}}
+        - libnvonnxparser-cuda-${{vars.cuda-major-version}}=~${{package.version}}
+        - py${{range.key}}-${{vars.pypi-package}}-libs-cuda-${{vars.cuda-major-version}}
     pipeline:
+      - runs: |
+          cp -a TensorRT "${{range.key}}"
       - name: build
-        working-directory: TensorRT/python
+        working-directory: "${{range.key}}/python"
         runs: |
           PYVER=${{range.key}}
           PYMAJOR=$(echo "$PYVER" | cut -d. -f1)
@@ -83,6 +91,7 @@ subpackages:
 
           export TRT_LIBS="/usr/local/tensorrt/targets/${{build.arch}}-linux-gnu/lib"
           export LIBRARY_PATH="$TRT_LIBS"
+          export TRT_OSSPATH="$(dirname $(pwd))"
 
           export PYBIND11_DIR="/usr/lib/python${PYVER}/site-packages/pybind11/include"
           export CPLUS_INCLUDE_PATH="${PYBIND11_DIR}:${CPLUS_INCLUDE_PATH}"
@@ -91,22 +100,9 @@ subpackages:
           bash ./build.sh
       - name: install bindings
         uses: py/pip-build-install
-        working-directory: TensorRT/python/build/bindings_wheel
+        working-directory: "${{range.key}}/python/build/bindings_wheel"
         with:
           python: python${{range.key}}
-      - name: clean
-        working-directory: TensorRT/python
-        runs: |
-          rm -rf build/ dist/ tensorrt.egg-info __pycache__
-      - uses: strip
-    test:
-      pipeline:
-        - uses: test/tw/pip-check
-        - uses: test/tw/ldd-check
-        - uses: python/import
-          with:
-            python: python${{range.key}}
-            import: ${{vars.import}}
 
   - name: py3-supported-${{vars.pypi-package}}-cuda-${{vars.cuda-major-version}}
     description: meta package providing ${{vars.pypi-package}} built for CUDA ${{vars.cuda-major-version}} for supported python versions
@@ -134,6 +130,73 @@ subpackages:
           with:
             python: python3.13
             import: ${{vars.import}}
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-libs-cuda-${{vars.cuda-major-version}}
+    description: python${{range.key}} version of ${{vars.pypi-package}}-libs built for CUDA ${{vars.cuda-major-version}}
+    options:
+      no-depends: true # avoid sca deps on incorrect tensorrt libs
+    dependencies:
+      runtime:
+        - python-${{range.key}}-base
+        # py3.x-tensorrt-libs' version should match the system library versions
+        # so pip has accurate dependency information. It also avoids broken
+        # symlinks when so names change or libraries are added/removed.
+        - tensorrt-cuda-${{vars.cuda-major-version}}=~${{package.version}}
+    pipeline:
+      - name: fixup CUDA_MAJOR
+        runs: |
+          sed -i 's/##CUDA_MAJOR##/${{vars.cuda-major-version}}/g' setup.py
+        working-directory: "${{range.key}}/python/build/libs_wheel"
+      - name: build tensorrt_libs
+        uses: py/pip-build-install
+        working-directory: "${{range.key}}/python/build/libs_wheel"
+        with:
+          python: python${{range.key}}
+      - name: symlink libs into python tree
+        runs: |
+          trtlibd="/usr/local/tensorrt/targets/${{build.arch}}-linux-gnu/lib"
+          sitepkgd=$(python${{range.key}} -c 'import site; print(site.getsitepackages()[0])')
+          for lib in $(echo $trtlibd/*.so.*); do
+            libbase="$(basename $lib)"
+            ln -s "$lib" "${{targets.contextdir}}/${sitepkgd}/tensorrt_libs/$libbase"
+          done
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: test/tw/ldd-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: tensorrt_libs
+
+  - name: py3-supported-${{vars.pypi-package}}-libs-cuda-${{vars.cuda-major-version}}
+    description: meta package providing ${{vars.pypi-package}} built for CUDA ${{vars.cuda-major-version}} for supported python versions
+    dependencies:
+      runtime:
+        - py3.10-${{vars.pypi-package}}-libs-cuda-${{vars.cuda-major-version}}
+        - py3.11-${{vars.pypi-package}}-libs-cuda-${{vars.cuda-major-version}}
+        - py3.12-${{vars.pypi-package}}-libs-cuda-${{vars.cuda-major-version}}
+        - py3.13-${{vars.pypi-package}}-libs-cuda-${{vars.cuda-major-version}}
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python3.10
+            import: tensorrt_libs
+        - uses: python/import
+          with:
+            python: python3.11
+            import: tensorrt_libs
+        - uses: python/import
+          with:
+            python: python3.12
+            import: tensorrt_libs
+        - uses: python/import
+          with:
+            python: python3.13
+            import: tensorrt_libs
 
 test:
   pipeline:
