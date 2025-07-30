@@ -1,0 +1,159 @@
+#!/bin/bash
+
+Usage() {
+    cat <<EOF
+    Usage: ${0##*/}
+
+
+    Add VM Image version to existing technical plan.
+
+    --image-version     version of the image
+    --image-name        name of the image without architecture (i.e. chainguard-eap-dev)
+    --resource-group    the resource group the gallery is in (defaults to chainguard-vms)
+    --gallery           the gallery the image is in
+    --plan              the plan to submit the image to
+    --offer            the offer the plan is associated with
+
+    This takes a image-name, version and gallery to add the arm64 and x86_64
+    versions of the image to the specified plan.
+EOF
+}
+
+DEFAULT_RESOURCE_GROUP="chainguard-vms"
+
+stderr() { echo "$@" 1>&2; }
+
+vr() {
+    local name="$1" rc="" sstart="$SECONDS"
+    shift
+    stderr "execute[$name]:" "$@"
+    "$@"
+    rc=$?
+    stderr "finished[$name] rc=$rc in $((SECONDS-$sstart))s"
+    return "$rc"
+}
+
+assert_cmds() {
+    local p="" missing=""
+    for p in "$@"; do
+        command -v "$p" >/dev/null 2>&1 || missing="${missing} $p"
+    done
+    [ -z "$missing" ] && return 0
+    stderr "missing commands ${missing# }"
+    return 1
+}
+
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,image-version:,image-name:,resource-group:,gallery:,plan:,offer:,"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1&2; return 1; }
+
+    local image_name="" image_version="" gallery="" plan="" offer=""
+
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage; exit 0;;
+            --image-name) image_name="$next"; shift;;
+            --image-version) image_version="$next"; shift;;
+            --resource-group) resource_group="$next"; shift;;
+            --gallery) gallery="$next"; shift;;
+            --plan) plan="$next"; shift;;
+            --offer) offer="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+
+    if [ $# -ne 0 ]; then
+        Usage 1<&2
+        stderr  "Got $# args, expected 5"
+        return 1
+    fi
+    assert_cmds az jq
+
+    if [ -z "$resource_group" ]; then
+        resource_group="$DEFAULT_RESOURCE_GROUP"
+    fi
+
+    if [ -z "$image_name" ] || [ -z "$image_version" ] || [ -z "$gallery" ] || [ -z "$plan" ] || [ -z "$offer" ] ; then
+        stderr "All arguments are required and must be non empty"
+        return 1
+    fi
+
+    tenant=$(az account show 2> /dev/null | jq -r '.tenantId')
+    subscription=$(az account show 2> /dev/null | jq -r '.id')
+
+    arm_resource_id="/subscriptions/$subscription/resourceGroups/$resource_group/providers/Microsoft.Compute/galleries/$gallery/images/$image_name-arm64/versions/$image_version"
+    x86_resource_id="/subscriptions/$subscription/resourceGroups/$resource_group/providers/Microsoft.Compute/galleries/$gallery/images/$image_name-x64/versions/$image_version"
+
+
+    tmp_image_version=$(mktemp -t image_version-XXXX)
+    jq -n --arg image_version "$image_version" \
+                            --arg arm_resource_id  "$arm_resource_id" \
+                            --arg x86_resource_id  "$x86_resource_id" \
+                            --arg tenant           "$tenant" \
+                            --arg resource_group   "$resource_group" \
+    '[{
+          "lifecycleState": "generallyAvailable",
+          "versionNumber": $image_version,
+          "vmImages": [
+            {
+              "imageType": "arm64Gen2",
+              "source": {
+                "sharedImage": {
+                  "resourceId": $arm_resource_id,
+                  "tenantId": $tenant
+                },
+                "sourceType": "sharedImageGallery"
+              }
+            },
+            {
+              "imageType": "x64Gen2",
+              "source": {
+                "sharedImage": {
+                  "resourceId": $x86_resource_id,
+                  "tenantId": $tenant
+                },
+                "sourceType": "sharedImageGallery"
+              }
+            }
+          ]
+    }]' > "$tmp_image_version"
+
+    vr "Update Azure Marketplace Configuration" \
+        az partnercenter marketplace offer plan technical-configuration vm-image-version add \
+        --offer-id "$offer" \
+        --plan-id "$plan" \
+        --vm-image-version "$tmp_image_version" || {
+        stderr "Failed to upload azure marketplace image"
+        return 1
+    }
+
+    vr "Publish Azure Marketplace configuarion for preview" \
+        az partnercenter marketplace offer publish --offer-id "$offer" --target preview || {
+        stderr "Failed to publish marketplace offer to preview"
+        return 1
+    }
+
+    rm "$tmp_image_version"
+}
+
+if [ "$(uname)" == "Darwin" ]; then
+    if [ "$(which getopt)" == "/usr/bin/getopt" ]; then
+        echo "📎: It looks like you're trying to run this script on macOS!"
+        echo "However you need to install compatible tools."
+        echo "Please install gnu-getopt via 'brew install gnu-getopt'"
+        echo "And add it's path: /opt/homebrew/opt/gnu-getopt/bin before /usr/bin"
+        exit 1
+    fi
+fi
+
+main "$@"

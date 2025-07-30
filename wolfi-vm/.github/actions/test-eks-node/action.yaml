@@ -1,0 +1,86 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+name: "test-eks node"
+description: "Test an eks node"
+inputs:
+  artifact-suffix:
+    required: false
+    default: ""
+    description: "suffix on artifact name. artifacts will be named test-eks-results<suffix>"
+  awspub-inputs-dir:
+    required: true
+    default: ""
+    description: "a directory of awspub inputs to operate on"
+  aws-region:
+    required: false
+    default: "us-east-1"
+    description: "an aws region to run in"
+
+runs:
+  using: composite
+  steps:
+    - name: "Install eksctl"
+      uses: chainguard-dev/actions/setup-eksctl@42c3aae0357e6493d93319b80c78fabada336849 # v1.4.1
+
+    - name: Install deps
+      shell: bash
+      run: |
+        sudo apt-get install --assume-yes petname
+        petname
+
+    - name: Test EKS cluster
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_PUBIN_DIR: ${{ inputs.awspub-inputs-dir }}
+      run: |
+        cluster="test-eks-node-VERSION"
+
+        fail() { echo "FATAL:" "$@" 1>&2; exit 1; }
+
+        tmpd=$(mktemp -d)
+        mkdir test-eks-results ||
+            fail "failed to create output dir"
+        fails=""
+
+        for f in "${AWS_PUBIN_DIR}"/*.json; do
+          [ -f "$f" ] || fail "'$f' is not file"
+
+          ./vms-test/helpers/test-eks dump-awspubin "$f" > "$tmpd/pubin.txt" ||
+            fail "dump-awspubin $f exited $?"
+
+          read region ami arch family fname < "$tmpd/pubin.txt" ||
+            fail "failed read from dump-awspubin output"
+
+          [ "$region" = "$AWS_REGION" ] ||
+            fail "ami $ami from $fname is in $region. AWS_REGION=$AWS_REGION"
+
+          # we expect the version in family name (eks-1.32-dev)
+          version=$(echo "$family" | sed 's,.*-\(1.[34][0-9]\).*,\1,')
+          [ "$version" != "$family" ] ||
+            fail "did not find a version in family '$family' from $f"
+
+          vernodot=$(echo "$version" | sed -e 's,[.],,')
+          cname=$(echo "$cluster" | sed -e "s,VERSION,$vernodot,")
+          ngname=$(petname)
+
+          echo "===== testing $region/$ami ($family/$arch)" \
+            "in cluster=$cname nodegroup=$ngname"
+          AWS_REGION="$AWS_REGION" \
+            ./vms-test/helpers/test-eks run-test \
+              --cluster-name="$cname" --ami="$ami" \
+              --nodegroup-name="$ngname" "test-eks-results/$family-$arch" || {
+                  echo "FAIL[$?]: $family/$arch/$ami"
+                  fails="$fails $family/$arch/$ami"
+              }
+        done
+        if [ -n "$fails" ]; then
+          fail "failures: $fails"
+        fi
+        exit 0
+
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      if: ${{ always() }}
+      with:
+        name: test-eks-results${{ inputs.artifact-suffix }}
+        path: test-eks-results

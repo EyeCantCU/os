@@ -19,8 +19,8 @@ import (
 
 func archiveCmd() *cobra.Command {
 	var (
-		duration time.Duration
-		arch     string
+		durationDays int
+		arch         string
 	)
 
 	cmd := &cobra.Command{
@@ -28,17 +28,18 @@ func archiveCmd() *cobra.Command {
 		Short: "Identify APK packages that can be archived based on age and dependency criteria",
 		Long: `This command identifies APK packages that can be withdrawn from APK repositories
 based on the following criteria:
-- Age: Packages older than the specified duration (default: 1 year)
+- Age: Packages older than the specified duration (default: 365 days)
 - No reverse dependencies across any archive
 - Not the most recent version if still built from origin melange configuration
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or other seeds`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			duration := time.Duration(durationDays * 24) * time.Hour
 			return archive(cmd.Context(), duration, arch)
 		},
 	}
 
-	cmd.Flags().DurationVar(&duration, "duration", 365*24*time.Hour, "Age threshold for archive candidates (default: 1 year)")
+	cmd.Flags().IntVar(&durationDays, "duration", 365, "Age threshold for archive candidates in days (default: 365)")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
 
 	return cmd

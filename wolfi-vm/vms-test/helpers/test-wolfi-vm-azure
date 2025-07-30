@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015
+# To be sourced by test-wolfi-vm
+
+bad_azure_usage() { azure_usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+
+azure_usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] cloud out-dir -- [ azure options ]
+
+    azure options:
+       -s|--subscription-id SUBSCRIPTION       subscription id for running tests
+       -r|--region REGION                      azure region to run tests in
+       -g|--resource-group GROUP               azure resource group to run tests in
+       -i|--azure-inputs DIR or FILE           directory of files with 'az sig image-defintion' and 'az sig image-version create' output
+          --azure-input-filename PATTERN       look for filenames matching this pattern
+
+EOF
+}
+
+# cleanup_azure(subscription, resource_group, tag)
+# remove all resources with a certain tag
+cleanup_azure() {
+    local subscription="$1" resource_group="$2" tag="$3"
+    shift 3
+    runner="$TOP_D/runner/azure"
+    vr "$runner" teardown --resource-group "$resource_group" --subscription-id "$subscription" --tag "$tag"
+}
+
+# setup_azure(state_dir, subscription, resource_group, tag, region)
+# ensure setup resources with the given tag exist in the region
+# no-op if setup was already done, tracked via state dir
+setup_azure() {
+    local state_dir="$1" subscription="$2" resource_group="$3" tag="$4" region="$5"
+    shift 5
+    grep "$tag" "$state_dir/$region" >/dev/null 2>&1 && return 0
+    runner="$TOP_D/runner/azure"
+    vr "$runner" setup --resource-group "$resource_group" --subscription-id "$subscription" --tag "$tag" \
+        --nsg-name "$tag-$region-nsg" --vnet-name "$tag-$region-vnet" --route-table-name "$tag-$region-routetable" --subnet-name "$tag-$region-subnet" \
+        --region "$region" || return $?
+    echo "$tag" >> "$state_dir/$region"
+}
+
+test_azure() {
+    local short_opts="h,s:,r:,g:,i:"
+    local long_opts="help,subscription-id:,region:,resource-group:,azure-inputs:,azure-input-filename:"
+    local getopt_out=""
+    getopt_out=$(getopt --options "${short_opts}" \
+        --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_azure_usage; return; }
+
+    local cur="" next=""
+    local subscription="" region_flag="" resource_group="" azure_inputs="" azure_input_filename="publish.*.json"
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) azure_usage ; exit 0;;
+            -s|--subscription-id) subscription="$next"; shift;;
+            -r|--region) region_flag="$next"; shift;;
+            -g|--resource-group) resource_group="$next"; shift;;
+            -i|--azure-inputs) azure_inputs="$next"; shift;;
+               --azure-input-filename) azure_input_filename="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ -n "$subscription" ] || { bad_azure_usage "--subscription-id is required"; return 1; }
+    [ -n "$resource_group" ] || { bad_azure_usage "--resource-group is required"; return 1; }
+    [ -n "$azure_inputs" ] || { bad_azure_usage "--azure-inputs is required"; return 1; }
+    if [ -f "$azure_inputs" ] && [ -d "$azure_inputs" ]; then
+        { bad_azure_usage "--azure-inputs '$azure_inputs' is not a file or directory"; return 1; }
+    fi
+
+    local resource_basename="vms-test-$RANDOM"
+    local wolfivmd="$1" outd="$2"
+    shift 2
+
+    # shellcheck disable=SC2064
+    # Expanding now is fine, these are static
+    # We trap this once outside the loop because we use the same tag across all
+    # images so we only need to clean up once to catch resources across all regions.
+    trap "cleanup_azure '$subscription' '$resource_group' '$resource_basename'" EXIT
+
+    TEMP_D=$(mktemp -d) || return
+    runner="$TOP_D/runner/azure"
+    rund="$TEMP_D/run"
+    mkdir "$rund" || return
+    setupd="$TEMP_D/setup"
+    mkdir "$setupd" || return
+
+    local publish_files=""
+    if [ -f "$azure_inputs" ]; then
+        publish_files="$azure_inputs"
+    else
+        publish_files=$(find "$azure_inputs" -type f -name "$azure_input_filename")
+        [ -n "$publish_files" ] || { stderr "no files matching '$azure_input_filename' in '$azure_inputs'"; return 1; }
+    fi
+    log "using publish files '$publish_files'"
+
+    known_hosts="$rund/known_hosts"
+    key="$rund/id_rsa"
+    rq ssh-keygen -t rsa -N '' -f "$key" ||
+        { stderr "failed creating ssh key"; return 1; }
+
+    local region="" publish_file="" vfails="" fails="" image_uri="" arch="" az_arch="" imagename="" localname="" testconfig="" vmconfigs="" user="" num_vmconfigs=""
+    for publish_file in $publish_files; do
+        vfails=""
+        image_uri=$(jq -rse '.[1].id' < "$publish_file") || {
+            vfails="$publish_file/read-image-uri"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        az_arch=$(jq -rse '.[0].architecture' < "$publish_file") || {
+            vfails="$publish_file/read-architecture"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        [ "$az_arch" == "x64" ] && arch="x86_64" || arch="aarch64"
+        # Should look like $image_name-$image_version
+        imagename=$(jq -rse '"\(.[0].name)-\(.[1].name)"' < "$publish_file") || {
+            vfails="$publish_file/read-image-name"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        localname=$(jq -rse '.[0].tags."local-name"' < "$publish_file" ) || {
+            vfails="$publish_file/read-local-name"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        testconfig="$wolfivmd/configs/$localname/test.yaml"
+        [ -f "$testconfig" ] || {
+            vfails="$arch-$imagename/missing-test-config"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        yqassert "1" -re 'explode(.) | .version' "$testconfig" || {
+            vfails="$arch-$imagename/version-mismatch"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        yqassert "azure" -re 'explode(.) | .cloud' "$testconfig" || {
+            vfails="$arch-$imagename/cloud-mismatch"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        # convert to json because bash mangles yaml
+        vmconfigs=$(yq -o json -re "explode(.) | .vmconfigs.$arch" "$testconfig") || {
+            vfails="$arch-$imagename/read-vmconfigs"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        user=$(yq -re "explode(.) | .data.vmuser" "$testconfig") || {
+            log "using default user 'azureuser'"
+            user="azureuser"
+        }
+        region="$region_flag"
+        if [ -z "$region" ]; then
+            region=$(yq -re "explode(.) | .data.region" "$testconfig") || {
+                vfails="$arch-$imagename/empty-region"
+                log "finished $arch-$imagename FAIL - $vfails"
+                fails="${fails+$fails }$vfails"
+                continue
+            }
+        fi
+        num_vmconfigs=$(echo "$vmconfigs" | jq 'length') || {
+            vfails="$arch-$imagename/malformed-vmconfigs"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+
+        local testconfig_dir=""
+        testconfig_dir=$(dirname "$testconfig") || {
+            vfails="$arch-$imagename/dirname-failed"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            return 1
+        }
+
+        log "setting up $imagename in $region, detected arch $arch"
+        setup_azure "$setupd" "$subscription" "$resource_group" "$resource_basename" "$region" || {
+            vfails="$arch-$imagename/setup"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+
+        local i="" vmtag="" vm_size="" disk_type="" vmconfig_name="" custom_data="" named_tests="" test_groups="" group="" launchuser="" vm_testd="" voutd="" launcher="" launch_code="" tid="" tgroup="" tname="" tname_pretty="" tfile="" location=""
+        for i in $(seq 0 $((num_vmconfigs-1))); do
+            vmtag="$resource_basename-vm-$RANDOM"
+            vm_size=$(echo "$vmconfigs" | jq -re ".[$i].vm_size") || {
+                vfails="$vfails $arch-$imagename/missing-vm-size"
+                continue
+            }
+            disk_type=$(echo "$vmconfigs" | jq -re ".[$i].disk_type") || {
+                vfails="$vfails $arch-$imagename/missing-disk-type"
+                continue
+            }
+            vmconfig_name=$(echo "$vmconfigs" | jq -re ".[$i].name" 2>/dev/null) || vmconfig_name="$vm_size-$disk_type"
+            custom_data=$(echo "$vmconfigs" | jq -re ".[$i].user_data" 2>/dev/null) || custom_data=""
+            named_tests=$(echo "$vmconfigs" | jq -re ".[$i].tests[].name | select (. != null)" 2>/dev/null) || named_tests=""
+            test_groups=$(echo "$vmconfigs" | jq -re ".[$i].tests[].group | select (. != null)" 2>/dev/null) || test_groups=""
+            for group in $test_groups; do
+                for tname in "$TOP_D/pkg/test/$group/"*; do
+                    named_tests="$named_tests $group/$(basename "$tname")"
+                done
+            done
+            if [ -z "$named_tests" ]; then
+                vfails="$vfails $arch-$imagename/$vmconfig_name/no-tests-defined"
+                continue
+            fi
+            launchuser=$(echo "$vmconfigs" | jq -re ".[$i].launchuser" 2>/dev/null) || launchuser=$(yq -re "explode(.) | .data.launchuser" "$testconfig" 2>/dev/null) || launchuser="$user"
+
+            vm_testd="$TEMP_D/$arch/$imagename/$vmconfig_name"
+            rq mkdir -p "$vm_testd" || {
+                stderr "failed creating $vm_testd"
+                return 1
+            }
+            voutd="$outd/$arch/$imagename/$vmconfig_name"
+            rq mkdir -p "$voutd" || {
+                stderr "failed creating $voutd"
+                return 1
+            }
+            if launcher=$(echo "$vmconfigs" | jq -re ".[$i].launch"); then
+                launcher="$testconfig_dir/$launcher"
+            else
+                log "launch option is unspecified for $vmconfig_name, using default runner"
+                launcher=("$runner" "launch")
+            fi
+
+            local custom_data_args=()
+            if [[ -n $custom_data ]]; then
+                custom_data="$testconfig_dir/$custom_data"
+                custom_data_args=( '--custom-data' "${custom_data}" )
+            fi
+
+            # Start VM
+            vr env RUNNER="$runner" "${launcher[@]}" --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                --vnet "$resource_basename-$region-vnet" --subnet "$resource_basename-$region-subnet" --name "$vmtag" --region "$region" \
+                --image-uri="$image_uri" --public-key="$key.pub" --user "$launchuser" --vm-size="$vm_size" --disk-type="$disk_type" \
+                "${custom_data_args[@]}"
+            launch_code=$?
+            if [ $launch_code -eq 0 ]; then
+                vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
+                    --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                    >> "$known_hosts"
+                log "started testing $arch/$imagename/$vmconfig_name"
+                # Run tests, collect metrics
+                for tid in $named_tests; do
+                    case "$tid" in
+                        *"/"*)
+                            tname="${tid##*/}"
+                            tgroup="${tid%%/*}"
+                            ;;
+                        *)
+                            tname="$tid"
+                            tgroup=""
+                            ;;
+                    esac
+                    if [ -n "$tgroup" ]; then
+                        tname_pretty="$tgroup-$tname"
+                        tfile="$TOP_D/test/$arch/$tgroup/$tname"
+                    else
+                        tname_pretty="$tname"
+                        location=$(dirname "$testconfig")"/"$(echo "$vmconfigs" | jq -re ".[$i].tests[] | select(.name==\"$tname\").location") || {
+                            vfails="$vfails $arch/$imagename/$vmconfig_name/missing-test-location-$tname"
+                            continue
+                        }
+                        goarch=$(goarch "$arch") || {
+                            vfails="$vfails $arch/$imagename/$vmconfig_name/invalid-test-arch-$tname"
+                            continue
+                        }
+                        tfile="$vm_testd/$tname"
+                        rq env GOOS="linux" GOARCH="$goarch" go test -C "$location" -c -o "$tfile" -tags vmtest || {
+                            vfails="$vfails $arch/$imagename/$vmconfig_name/compile-test-$tname"
+                            continue
+                        }
+                    fi
+                    test_user=$(echo "$vmconfigs" | jq -re ".[$i].vmuser" 2>/dev/null) || test_user="$user"
+
+                    test_emits_metrics "$tfile"
+                    local emits_metrics=$? metric_args=()
+                    if [ $emits_metrics -eq 0 ]; then
+                        metric_args=( "-metric-tags" "arch:$arch,$METRIC_TAGS" )
+                    fi
+                    vrl "$voutd/test$tname_pretty" "$runner" run-remote --sudo --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                        --private-key "$key" --user "$test_user" --file="$tfile" --known-hosts="$known_hosts" -- \
+                        -test.v "${metric_args[@]}" ||
+                        vfails="$vfails $arch-$imagename/$vmconfig_name/test-$tname_pretty"
+
+                    if [ $emits_metrics -eq 0 ]; then
+                        "$runner" ssh --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                            --private-key "$key" --user "$test_user" --known-hosts="$known_hosts" \
+                            "cat $METD/$tname" \
+                            > "$voutd/${tname}${tgroup}artifacts.json" || vfails="$vfails $arch/$imagename/$vmconfig_name/$tname_pretty-artifacts"
+                    fi
+
+                done
+                "$runner" console-log --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
+                    --timeout="${WAIT_CONSOLE_TIMEOUT}" --wait > "$voutd/console.log" ||
+                    vfails="$vfails $arch-$imagename/$vmconfig_name/console-log"
+
+                log "finished testing $arch/$imagename/$vmconfig_name"
+            else
+                # azure reserves resources for 180s after failed VM creation...
+                log "waiting 180s for azure to release resources from failed vm launch"
+                vfails="$vfails $arch-$imagename/$vmconfig_name/launch"
+                sleep 180
+            fi
+            # Terminate VM
+            vr "$runner" terminate --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag"
+        done
+
+        vfails=${vfails# }
+        if [ -z "$vfails" ]; then
+            log "finished $arch/$imagename PASS"
+        else
+            log "finished $arch/$imagename FAIL - $vfails"
+        fi
+        fails="${fails:+$fails }$vfails"
+    done
+
+    if [ -z "$fails" ]; then
+        log "PASS - no failures"
+        return 0
+    fi
+    log "FAIL - $fails"
+    return 1
+}

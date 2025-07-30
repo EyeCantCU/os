@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015
+# To be sourced by test-wolfi-vm
+
+bad_gcp_usage() { gcp_usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+
+gcp_usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] cloud out-dir -- [ gcp options ]
+
+    gcp options:
+      -p|--project PROJECT                    GCP project ID
+      -s|--service-account ACCOUNT            Service account to attach to VMs
+      -z|--zone ZONE                          GCE zone for resources
+      -i|--gcp-inputs PATH                    File or folder containing output of 'gcloud compute images describe' for images to test
+         --gcp-input-filename PATTERN         look for filenames matching this pattern (default publish.*.yaml)
+
+EOF
+}
+
+cleanup_gcp() {
+    runner="$TOP_D/runner/gcp"
+    vr "$runner" teardown
+}
+
+setup_gcp() {
+    runner="$TOP_D/runner/gcp"
+    vr "$runner" setup
+}
+
+test_gcp() {
+    local short_opts="h,p:,s:,z:,i:"
+    local long_opts="help,project:,service-account:,zone:,gcp-inputs:,gcp-input-filename:"
+    local getopt_out=""
+    getopt_out=$(getopt --options "${short_opts}" \
+        --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_gcp_usage; return; }
+
+    local cur="" next=""
+    local project="" service_account="default" zonein="" gcp_inputs="" gcp_input_filename="publish.*.yaml"
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) gcp_usage ; exit 0;;
+            -p|--project) project="$next"; shift;;
+            -s|--service-account) service_account="$next"; shift;;
+            -z|--zone) zonein="$next"; shift;;
+            -i|--gcp-inputs) gcp_inputs="$next"; shift;;
+               --gcp-input-filename) gcp_input_filename="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ -n "$project" ] || { bad_gcp_usage "--project is required"; return 1; }
+
+    local wolfivmd="$1" outd="$2"
+    shift 2
+
+    # Both of these are a noop right now, here as a placeholder
+    setup_gcp || return 1
+    trap "cleanup_gcp" EXIT
+    # Static because setup_gcp is a noop right now
+    vpc_network="default"
+
+    TEMP_D=$(mktemp -d) || return
+    runner="$TOP_D/runner/gcp"
+    rund="$TEMP_D/run"
+    known_hosts="$rund/known_hosts"
+    mkdir "$rund" || return
+
+    local publish_files=""
+    if [ -f "$gcp_inputs" ]; then
+        publish_files="$gcp_inputs"
+    else
+        publish_files=$(find "$gcp_inputs" -type f -name "$gcp_input_filename")
+        [ -n "$publish_files" ] || { stderr "no files matching '$gcp_input_filename' in '$gcp_inputs'"; return 1; }
+    fi
+    log "using publish files '$publish_files'"
+
+    key="$rund/id_rsa"
+    rq ssh-keygen -t rsa -N '' -f "$key" ||
+        { stderr "failed creating ssh key"; return 1; }
+
+    local zone="" publish_file="" vfails="" fails="" image_uri="" arch="" gcp_arch="" imagename="" localname="" testconfig="" vmconfigs="" user="" num_vmconfigs=""
+    for publish_file in $publish_files; do
+        vfails=""
+        image_uri=$(yq -re '.selfLink | sub("https://www.googleapis.com/compute/(v1|beta|alpha)/", "")' "$publish_file") || {
+            vfails="$publish_file/read-image-uri"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        [[ "$image_uri" == *"googleapis.com"* ]] && {
+            stderr "failed to strip prefix from image URI"
+            vfails="$publish_file/trim-image-uri"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        gcp_arch=$(yq -re '.architecture' "$publish_file") || {
+            vfails="$publish_file/read-architecture"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        [ "$gcp_arch" == "X86_64" ] && arch="x86_64" || arch="aarch64"
+        imagename=$(yq -re '.name' "$publish_file") || {
+            vfails="$publish_file/read-image-name"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        localname=$(yq -re '.labels.local-name' "$publish_file") || {
+            vfails="$publish_file/read-local-name"
+            log "finished $publish_file FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        testconfig="$wolfivmd/configs/$localname/test.yaml"
+        [ -f "$testconfig" ] || {
+            vfails="$arch-$imagename/missing-test-config"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        yqassert "1" -re 'explode(.) | .version' "$testconfig" || {
+            vfails="$arch-$imagename/version-mismatch"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        yqassert "gcp" -re 'explode(.) | .cloud' "$testconfig" || {
+            vfails="$arch-$imagename/cloud-mismatch"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        # convert to json because bash mangles yaml
+        vmconfigs=$(yq -o json -re "explode(.) | .vmconfigs.$arch" "$testconfig") || {
+            vfails="$arch-$imagename/read-vmconfigs"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        user=$(yq -re "explode(.) | .data.vmuser" "$testconfig") || {
+            vfails="$arch-$imagename/empty-vmuser"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+        zone="$zonein"
+        if [ -z "$zone" ]; then
+            zone=$(yq -re "explode(.) | .data.zone" "$testconfig") || {
+                vfails="$arch-$imagename/empty-zone"
+                log "finished $arch-$imagename FAIL - $vfails"
+                fails="${fails+$fails }$vfails"
+                continue
+            }
+        fi
+        num_vmconfigs=$(echo "$vmconfigs" | jq 'length') || {
+            vfails="$arch-$imagename/malformed-vmconfigs"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            continue
+        }
+
+        local testconfig_dir=""
+        testconfig_dir=$(dirname "$testconfig") || {
+            vfails="$arch-$imagename/dirname-failed"
+            log "finished $arch-$imagename FAIL - $vfails"
+            fails="${fails+$fails }$vfails"
+            return 1
+        }
+
+        log "setting up $imagename in $zone, detected arch $arch"
+
+        local i="" label="" machine_type="" disk_type="" vmconfig_name="" named_tests="" test_groups="" group="" vm_testd="" voutd="" launcher="" launch_code="" tid="" tgroup="" tname="" tname_pretty="" tfile="" location="" nested_virt="" min_cpu_platform="" metadata="" secondary_disk_name="" secondary_disk_size="" secondary_disk_type="" user_data=""
+        for i in $(seq 0 $((num_vmconfigs-1))); do
+            label="test-wolfi-vm-$RANDOM"
+            machine_type=$(echo "$vmconfigs" | jq -re ".[$i].machine_type") || { vfails="$vfails $arch-$imagename/missing-vm-size"; continue; }
+            disk_type=$(echo "$vmconfigs" | jq -re ".[$i].disk_type") || { vfails="$vfails $arch-$imagename/missing-disk-type"; continue; }
+            disk_size=$(echo "$vmconfigs" | jq -re ".[$i].disk_size") || disk_size="10"
+            metadata=$(echo "$vmconfigs" | jq -re ".[$i].metadata") || metadata=""
+            nested_virt=$(echo "$vmconfigs" | jq -re ".[$i].nested_virt" 2>/dev/null) || nested_virt="false"
+            min_cpu_platform=$(echo "$vmconfigs" | jq -re ".[$i].min_cpu_platform" 2>/dev/null) || min_cpu_platform=""
+            secondary_disk_name=$(echo "$vmconfigs" | jq -re ".[$i].secondary_disk_name" 2>/dev/null) || secondary_disk_name=""
+            secondary_disk_size=$(echo "$vmconfigs" | jq -re ".[$i].secondary_disk_size" 2>/dev/null) || secondary_disk_size="0"
+            secondary_disk_type=$(echo "$vmconfigs" | jq -re ".[$i].secondary_disk_type" 2>/dev/null) || secondary_disk_type=""
+            user_data=$(echo "$vmconfigs" | jq -re ".[$i].user_data" 2>/dev/null) || user_data=""
+            vmconfig_name=$(echo "$vmconfigs" | jq -re ".[$i].name" 2>/dev/null) || vmconfig_name="$machine_type-$disk_type"
+            named_tests=$(echo "$vmconfigs" | jq -re ".[$i].tests[].name | select (. != null)" 2>/dev/null) || named_tests=""
+            test_groups=$(echo "$vmconfigs" | jq -re ".[$i].tests[].group | select (. != null)" 2>/dev/null) || test_groups=""
+            test_user=$(echo "$vmconfigs" | jq -re ".[$i].vmuser" 2>/dev/null) || test_user="$user"
+            for group in $test_groups; do
+                for tname in "$TOP_D/pkg/test/$group/"*; do
+                    named_tests="$named_tests $group/$(basename "$tname")"
+                done
+            done
+            if [ -z "$named_tests" ]; then
+                vfails="$vfails $arch-$imagename/$vmconfig_name/no-tests-defined"
+                continue
+            fi
+
+            vm_testd="$TEMP_D/$arch/$imagename/$vmconfig_name"
+            rq mkdir -p "$vm_testd" || { stderr "failed creating $vm_testd"; return 1; }
+            voutd="$outd/$arch/$imagename/$vmconfig_name"
+            rq mkdir -p "$voutd" || { stderr "failed creating $voutd"; return 1; }
+            if launcher=$(echo "$vmconfigs" | jq -re ".[$i].launch"); then
+                launcher="$testconfig_dir/$launcher"
+            else
+                log "launch option is unspecified for $vmconfig_name, using default runner"
+                launcher=("$runner" "launch")
+            fi
+
+            local user_data_args=()
+            if [[ -n $user_data ]]; then
+                user_data="$testconfig_dir/$user_data"
+                user_data_args=( '--user-data' "$user_data" )
+            fi
+
+            # Start VM
+            vr env RUNNER="$runner" "${launcher[@]}" launch --disk-size="$disk_size" --disk-type="$disk_type" --name="$label" \
+                --label="$label" --machine-type="$machine_type" --project="$project" --public-key="$key.pub" \
+                --service-account="$service_account" --source-image-uri="$image_uri" --ssh-user="$test_user" \
+                --vpc-network="$vpc_network" --zone="$zone" --min-cpu-platform "$min_cpu_platform" --nested-virt "$nested_virt" \
+                --metadata="$metadata" --secondary-disk-name="$secondary_disk_name" --secondary-disk-size="$secondary_disk_size" \
+                --secondary-disk-type="$secondary_disk_type" \
+                "${user_data_args[@]}"
+            launch_code=$?
+            if [ $launch_code -eq 0 ]; then
+                vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh --name="$label" --project "$project" --zone="$zone" >> "$known_hosts"
+                log "started testing $arch/$imagename/$vmconfig_name"
+                # Run tests, collect metrics
+                for tid in $named_tests; do
+                    case "$tid" in
+                        *"/"*)
+                            tname="${tid##*/}"
+                            tgroup="${tid%%/*}"
+                            tname_pretty="$tgroup-$tname"
+                            tfile="$TOP_D/test/$arch/$tgroup/$tname"
+                            ;;
+                        *)
+                            tname="$tid"
+                            tgroup=""
+                            tname_pretty="$tname"
+                            location=$(dirname "$testconfig")"/"$(echo "$vmconfigs" | jq -re ".[$i].tests[] | select(.name==\"$tname\").location") || { vfails="$vfails $arch/$imagename/$vmconfig_name/missing-test-location-$tname"; continue; }
+                            goarch=$(goarch "$arch") || { vfails="$vfails $arch/$imagename/$vmconfig_name/invalid-test-arch-$tname"; continue; }
+                            tfile="$vm_testd/$tname"
+                            rq env GOOS="linux" GOARCH="$goarch" go test -C "$location" -c -o "$tfile" -tags vmtest || { vfails="$vfails $arch/$imagename/$vmconfig_name/compile-test-$tname"; continue; }
+                            ;;
+                    esac
+
+                    test_emits_metrics "$tfile"
+                    local emits_metrics=$? metric_args=()
+                    if [ $emits_metrics -eq 0 ]; then
+                        metric_args=("-metric-tags" "arch:$arch,$METRIC_TAGS" )
+                    fi
+                    vrl "$voutd/test-$tname_pretty" "$runner" run-remote --sudo --name="$label" --file="$tfile" --private-key="$key" \
+                        --project="$project" --user="$test_user" --zone="$zone" -- -test.v "${metric_args[@]}" ||
+                            vfails="$vfails $arch-$imagename/$vmconfig_name/test-$tname_pretty"
+
+                    if [ $emits_metrics -eq 0 ]; then
+                        "$runner" ssh --name="$label" --private-key="$key"  --project="$project" --user="$test_user" --zone="$zone" \
+                            "cat $METD/$tname" > "$voutd/${tname_pretty}artifacts.json" ||
+                                vfails="$vfails $arch/$imagename/$vmconfig_name/$tname_pretty-artifacts"
+                    fi
+
+                done
+                vr "$runner" console-log --name="$label" --project="$project" --zone="$zone" > "$voutd/console.log" ||
+                    vfails="$vfails $arch-$imagename/$vmconfig_name/console-log"
+
+                log "finished testing $arch/$imagename/$vmconfig_name"
+            else
+                vfails="$vfails $arch-$imagename/$vmconfig_name/launch"
+            fi
+            # Terminate VM
+            vr "$runner" terminate --name="$label" --project="$project" --zone="$zone"
+        done
+
+        vfails=${vfails# }
+        if [ -z "$vfails" ]; then
+            log "finished $arch/$imagename PASS"
+        else
+            log "finished $arch/$imagename FAIL - $vfails"
+        fi
+        fails="${fails:+$fails }$vfails"
+    done
+
+    if [ -z "$fails" ]; then
+        log "PASS - no failures"
+        return 0
+    fi
+    log "FAIL - $fails"
+    return 1
+}

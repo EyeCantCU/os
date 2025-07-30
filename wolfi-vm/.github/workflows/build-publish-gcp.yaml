@@ -1,0 +1,158 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Build and push GCP VMs images"
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      with-compliance-scan:
+        type: boolean
+        required: true
+        description: Run CIS Benchmarks compliance scanning and generate a report
+
+permissions: {}
+
+# Allow only one workflow run at a time
+concurrency:
+  group: 'release-gcp'
+  cancel-in-progress: false
+
+jobs:
+  init:
+    if: ${{ github.repository == 'chainguard-dev/wolfi-vm' }}
+
+    runs-on: ubuntu-8-core
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
+
+  gcp-build-push:
+    runs-on: ubuntu-8-core
+    needs:
+      - init
+
+    permissions:
+      id-token: write # federated identity
+      contents: read # read repo
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
+
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_ARCH: ${{ matrix.arch }}
+      VM_CLOUD: "gcp"
+      WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'false' }}
+
+    steps:
+      - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: chainguard-dev/actions/apt-faster@ae2f0393ff2a60c572ff4d3485f406e8f36dfd38 # v1.4.6
+
+      - name: Checkout source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build vms disks
+        uses: './.github/actions/build-disks'
+        with:
+          cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          vm_group: "gcp"
+          arch: '${{ matrix.arch }}'
+
+      - name: Scan disks
+        uses: './.github/actions/scan-disks'
+        with:
+          cloud_provider: "gcp"
+          arch: '${{ matrix.arch }}'
+
+      - name: add HOME/bin to PATH
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - name: "Setup GCP Creds"
+        uses: google-github-actions/auth@140bb5113ffb6b65a7e9b937a81fa96cf5064462 # v2.1.11
+        with:
+          workload_identity_provider: 'projects/674489516262/locations/global/workloadIdentityPools/staging-wolfi-vm/providers/github-provider'
+          service_account: 'staging-vms-post@staging-vms-h8zx.iam.gserviceaccount.com'
+
+      - name: "Install GCP Deps"
+        uses: google-github-actions/setup-gcloud@6a7c903a70c8625ed6700fa299f5ddb4ca6022e9 # v2.1.5
+        with:
+          project_id: staging-vms-h8zx
+
+      - name: "Configure gcloud"
+        run: |
+          gcloud config set storage/parallel_composite_upload_enabled True
+
+      - name: "Publish GCP Images to staging"
+        run: |
+          arch="${{ env.VM_ARCH }}"
+          names=$(make list-gcp)
+          [ -n "$names" ] || { echo "make list-gcp produced empty output"; exit 1; }
+
+          make -j$(nproc) --output-sync=recurse publish-gcp PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
+
+      - name: "Test GCP Images in staging"
+        uses: './.github/actions/vms-test'
+        with:
+          cloud_provider: "gcp"
+          vm_group: "gcp"
+          arch: '${{ matrix.arch }}'
+          opts: |
+            -- --project="staging-vms-h8zx" --service-account="default" \
+            --zone="us-central1-a" \
+            --gcp-inputs="./output" --gcp-input-filename="publish.staging.yaml"
+          with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
+
+      # Setup GCP for the wolfi-vm gcp project (prod)
+      # after testing in staging
+      - name: "Setup GCP Creds"
+        uses: google-github-actions/auth@140bb5113ffb6b65a7e9b937a81fa96cf5064462 # v2.1.11
+        with:
+          workload_identity_provider: 'projects/212178706475/locations/global/workloadIdentityPools/ci-pool/providers/ci-provider'
+          service_account: 'github-ci@wolfi-vm.iam.gserviceaccount.com'
+
+      - name: "Install GCP Deps"
+        uses: google-github-actions/setup-gcloud@6a7c903a70c8625ed6700fa299f5ddb4ca6022e9 # v2.1.5
+        with:
+          project_id: wolfi-vm
+
+      - name: "Configure gcloud"
+        run: |
+          gcloud config set storage/parallel_composite_upload_enabled True
+
+      - name: "Publish GCP Internal and Workstation tested images"
+        run: |
+          arch="${{ env.VM_ARCH }}"
+          names=$(make list-gcp)
+          [ -n "$names" ] || { echo "make list-gcp produced empty output"; exit 1; }
+
+          make -j$(nproc) --output-sync=recurse publish-gcp PREFIX=chainguard PUBLISH_TARGET=production ARCH=$arch
+
+      - name: "Publish GCP Images to eap"
+        run: |
+          arch="${{ env.VM_ARCH }}"
+
+          make -j$(nproc) --output-sync=recurse publish-gcp-docker-dev publish-gcp-agents-docker-dev PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch

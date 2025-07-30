@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043
+VERBOSITY=0
+TEMP_D=""
+TOP_D=$(cd "${0%/*}/.." && pwd)
+WAIT_SSH_TIMEOUT=${WAIT_SSH_TIMEOUT:-5m}
+WAIT_CONSOLE_TIMEOUT=${WAIT_CONSOLE_TIMEOUT:-5m}
+METD="/tmp/chainguard-vmtest-metrics"
+METRIC_TAGS="helper-script:test-wolfi-vm${METRIC_TAGS:+,${METRIC_TAGS}}"
+
+stderr() { echo "$@" 1>&2; }
+failrc() { local rc=$1; shift; stderr "$@"; exit "$rc"; }
+fail() { local r=$?;  [ $r -eq 0 ] && r=1; failrc "$r" "$@"; }
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] cloud out-dir
+
+   cloud is one of 'aws', 'azure', 'gcp', 'qemu'
+
+   options:
+      --test-arch ARCH     install deps needed for testing ARCH
+                           [x86_64, aarch64, ALL] - default ALL
+
+      --wolfi-vm DIR       where is the wolfi-vm top level dir
+                           [required] used for finding output and other things.
+EOF
+}
+
+bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+cleanup() {
+    [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
+}
+
+
+log() {
+    local now=""
+    now=$(date '+%Y/%m/%d %H:%M:%S')
+    echo "$now" "$@" >> "$LOG"
+    echo "$now" "$@"
+}
+
+# vr(cmd) - run cmd, log execution and result. stdout and stderr unmodified.
+vr() {
+    local rc="" sstart=$SECONDS
+    log "execute: $*"
+    "$@"
+    rc=$?
+    log ":: exit $rc [$((SECONDS-sstart))s]"
+    return $rc
+}
+
+# vrl(output, cmd) - verbose run log.
+#   run cmd with output to output.stdout and output.stderr
+vrl() {
+    local output="$1" rc="" sstart=$SECONDS
+    shift
+    log "execute: $*"
+    "$@" >"$output.stdout" 2>"$output.stderr"
+    rc=$?
+    log ":: exit $rc [$((SECONDS-sstart))s]"
+    return $rc
+}
+
+# rq(cmd) - run cmd quietly unless it fails
+rq() {
+    local rc="" out=""
+    out=$("$@" 2>&1) && return 0
+    rc=$?
+    stderr "failed [$rc]: $*"
+    printf "%s\n" "$out" | sed -e 's,^,> ,' 1>&2
+    return $rc
+}
+
+# goarch(arch) - print GOARCH equivalent of arch
+goarch() {
+    local arch="$1" goarch=""
+    shift 1
+    case "$arch" in
+        aarch64|arm64) goarch="arm64";;
+        x86_64|amd64|x64) goarch="amd64";;
+        *) stderr "unknown arch $arch"; return 1;;
+    esac
+    printf "%s" "$goarch"
+    return 0
+}
+
+# Check whether a test binary emits metrics
+test_emits_metrics() {
+    local tfile="$1"
+    # Heuristic: Check whether the binary might call metrics.Log(); one match is sufficient.
+    strings "$tfile" | grep -qm1 "chainguard.dev/wolfi-vm/vm-test/pkg/artifacts[.]\(Log\|File\)"
+}
+
+# yqassert(expected, yq args...)
+yqassert() {
+  local out="" expected="$1"
+  shift
+  out=$(yq "$@") || { stderr "failed [$?] 'yq $*'"; return 1; }
+  [ "$out" = "$expected" ] || return 1
+  return 0
+}
+
+# strContains(string, substring)
+strContains() {
+    local str="$1" substr="$2"
+    #shellcheck disable=SC2295
+    [ "${str#*${substr}}" != "$str" ]
+}
+
+test_qemu() {
+    local wolfivmd="$1" outd="$2" arch="" rund="" key="" vmname
+    local runner="${TOP_D}/runner/qemu"
+    shift 2
+    local arches=""
+    arches=( "$@" )
+
+    TEMP_D=$(mktemp -d) || return
+
+    rund="$TEMP_D/run"
+    mkdir "$rund" || return
+
+    known_hosts="$rund/known_hosts"
+    key="$rund/id_rsa"
+    rq ssh-keygen -t rsa -N '' -f "$key" ||
+        { stderr "failed creating ssh key"; return 1; }
+
+    local vmoutd="" vmname="" vfails="" fails="" testconfig="" vmconfigs="" user="" num_vmconfigs=""
+    for arch in "${arches[@]}"; do
+        for vmoutd in "$wolfivmd/output/$arch/"*; do
+            vmname="${vmoutd##*/}"
+            if ! strContains " ${QEMU_VMS:-${vmname}} " " $vmname "; then
+                continue
+            fi
+            vfails=""
+            testconfig="$wolfivmd/configs/$vmname/test.yaml"
+            [ -f "$testconfig" ] || {
+                vfails="$arch-$vmname/missing-test-config"
+                log "finished $arch-$vmname FAIL - $vfails"
+                fails="${fails+$fails }$vfails"
+                continue
+            }
+            yqassert "1" -re 'explode(.) | .version' "$testconfig" || {
+                vfails="$arch-$vmname/version-mismatch"
+                log "finished $arch-$vmname FAIL - $vfails"
+                fails="${fails+$fails }$vfails"
+                continue
+            }
+            yqassert "qemu" -re 'explode(.) | .cloud' "$testconfig" || {
+                vfails="$arch-$vmname/cloud-mismatch"
+                log "finished $arch-$vmname FAIL - $vfails"
+                fails="${fails+$fails }$vfails"
+                continue
+            }
+            # convert to json because bash mangles yaml
+            vmconfigs=$(yq -o json -re "explode(.) | .vmconfigs.$arch" "$testconfig") || {
+                vfails="$arch-$vmname/read-vmconfigs"
+                log "finished $arch-$vmname FAIL - $vfails"
+                fails="${fails+$fails }$vfails"
+                continue
+            }
+            user=$(yq -re "explode(.) | .data.vmuser" "$testconfig") || { log "using default user 'linky'"; user="linky"; }
+            num_vmconfigs=$(echo "$vmconfigs" | jq 'length') || {
+                vfails="$arch-$vmname/malformed-vmconfigs"
+                log "finished $arch-$vmname FAIL - $vfails"
+                fails="${fails+$fails }$vfails"
+                continue
+            }
+
+            log "starting $vmname with arch $arch"
+
+            local i="" fwcode="" fwcode_relative="" vmconfig_name="" named_tests="" test_groups="" vm_testd="" voutd="" runnerpid="" group="" tname="" vm_testd="" vmd="" launcher="" runnerpid=""
+            for i in $(seq 0 $((num_vmconfigs-1))); do
+
+                fwcode_relative=$(echo "$vmconfigs" | jq -re ".[$i].fwcode") || {
+                    vfails="$vfails $arch-$vmname/no-fwcode-defined"
+                    continue
+                }
+		fwcode=$(dirname "$testconfig")/"$fwcode_relative"
+                [ -f "$fwcode" ] || {
+                    vfails="$vfails $arch-$vmname/missing-fwcode-file"
+                    continue
+                }
+                vmconfig_name=$(echo "$vmconfigs" | jq -re ".[$i].name" 2>/dev/null) || vmconfig_name=$(basename "$fwcode")
+                named_tests=$(echo "$vmconfigs" | jq -re ".[$i].tests[].name | select (. != null)" 2>/dev/null) || named_tests=""
+                test_groups=$(echo "$vmconfigs" | jq -re ".[$i].tests[].group | select (. != null)" 2>/dev/null) || test_groups=""
+                for group in $test_groups; do
+                    for tname in "$TOP_D/pkg/test/$group/"*; do
+                        named_tests="$named_tests $group/$(basename "$tname")"
+                    done
+                done
+                if [ -z "$named_tests" ]; then
+                    vfails="$vfails $arch-$vmname/$vmconfig_name/no-tests-defined"
+                    continue
+                fi
+
+                vm_testd="$TEMP_D/$arch/$vmname/$vmconfig_name"
+                rq mkdir -p "$vm_testd" || {
+                    stderr "failed creating vm test dir $vm_testd"
+                    return 1
+                }
+                vmd="$rund/$arch/$vmname/$vmconfig_name"
+                rq mkdir -p "$vmd" || {
+                    stderr "failed creating vmdir $vmd"
+                    return 1
+                }
+                voutd="$outd/$arch/$vmname/$vmconfig_name"
+                rq mkdir -p "$voutd" || {
+                    stderr "failed creating vm out dir $voutd"
+                    return 1
+                }
+
+                vr "$runner" create --fwcode="$fwcode" \
+                    "$vmd" "$wolfivmd/output/$arch/$vmname/disk.raw" || {
+                        stderr "failed $runner create";
+                        vfails="$arch-$vmname/$vmconfig_name/create"
+                        continue
+                }
+
+                if launcher=$(echo "$vmconfigs" | jq -re ".[$i].launch"); then
+                    local test_config_dir=""
+                    test_config_dir=$(dirname "$testconfig") || {
+                        stderr "failed to get dir of $testconfig"
+                        continue
+                    }
+                    launcher="$test_config_dir/$launcher"
+                else
+                    log "launch option is unspecified for $vmconfig_name, using default runner"
+                    launcher=("$runner" "start")
+                fi
+                # Start VM
+                set -- env RUNNER="$runner" "${launcher[@]}" "--arch=$arch" --public-key="$key.pub" "$vmd"
+                log "starting $*"
+                "$@" > "$voutd/vm-start.log" 2>&1 &
+                runnerpid=$!
+
+                vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh "$vmd" \
+                    >> "$known_hosts" || {
+                    stderr "failed runner wait-for-ssh $arch-$vmname-$vmconfig_name"
+                    vfails="$vfails $arch-$vmname/$vmconfig_name/wait-for-ssh"
+                    if [ ! -f "$vmd/ttyS0.log" ]; then
+                        stderr "[$arch-$vmname-$vmconfig_name] FATAL wait-for-ssh timeout." \
+                            "console log missing."
+                    else
+                        sed -e 's,^,> ,' "$vmd/ttyS0.log" 2>&1
+                        stderr "[$arch-$vmname-$vmconfig_name] FATAL wait-for-ssh timeout." \
+                            "console log above"
+                    fi
+                    kill "$runnerpid"
+                    continue
+                }
+
+                # Run tests
+                for tid in $named_tests; do
+                    case "$tid" in
+                        *"/"*)
+                            tname="${tid##*/}"
+                            tgroup="${tid%%/*}"
+                            tname_pretty="$tgroup-$tname"
+                            tfile="$TOP_D/test/$arch/$tgroup/$tname"
+                            ;;
+                        *)
+                            tname="$tid"
+                            tgroup=""
+                            tname_pretty="$tname"
+                            location=$(dirname "$testconfig")"/"$(echo "$vmconfigs" | jq -re ".[$i].tests[] | select(.name==\"$tname\").location") || {
+                                vfails="$vfails $arch/$vmname/$vmconfig_name/missing-test-location-$tname"
+                                continue
+                            }
+                            goarch=$(goarch "$arch") || {
+                                vfails="$vfails $arch/$vmname/$vmconfig_name/invalid-test-arch-$tname"
+                                continue
+                            }
+                            tfile="$vm_testd/$tname"
+                            rq env GOOS="linux" GOARCH="$goarch" go test -C "$location" -c -o "$tfile" -tags vmtest || {
+                                vfails="$vfails $arch/$vmname/$vmconfig_name/compile-test-$tname"
+                                continue
+                            }
+                            ;;
+                    esac
+
+                    test_emits_metrics "$tfile"
+                    local emits_metrics=$? metric_args=()
+                    if [ $emits_metrics -eq 0 ]; then
+                        metric_args=("-metric-tags" "arch:$arch,$METRIC_TAGS" )
+                    fi
+                    test_user=$(echo "$vmconfigs" | jq -re ".[$i].vmuser" 2>/dev/null) || test_user="$user"
+                    vrl "$voutd/test-$tname_pretty" "$runner" run-remote --sudo --user "$test_user" \
+                        --private-key="$key" --file="$tfile" "$vmd" --known-hosts="$known_hosts" \
+                           -- -test.v "${metric_args[@]}" ||
+                           vfails="$vfails $arch-$vmname/test-$tname_pretty"
+                    if [ $emits_metrics -eq 0 ]; then
+                        "$runner" ssh --user "$test_user" --private-key="$key" --known-hosts="$known_hosts" "$vmd" \
+                            "cat $METD/$tname" >  "$voutd/$tname_pretty-artifacts.json" ||
+                            vfails="$vfails $arch-$vmname/$tname_pretty-artifacts"
+                    fi
+                done
+
+                kill "$runnerpid"
+                wait "$runnerpid"
+
+                if [ ! -f "$vmd/ttyS0.log" ]; then
+                    vfails="$vfails $arch-$vmname/$vmconfig_name/console-log"
+                    stderr "$vmd/ttyS0.log did not exist"
+                elif ! cp "$vmd/ttyS0.log" "$voutd/console.log"; then
+                    vfails="$vfails $arch-$vmname/$vmconfig_name/console-log"
+                    stderr "failed copy of $vmd/ttyS0.log"
+                fi
+
+                vfails=${vfails# }
+                if [ -z "$vfails" ]; then
+                    log "finished $arch/$vmname/$vmconfig_name PASS"
+                else
+                    log "finished $arch/$vmname/$vmconfig_name FAIL - $vfails"
+                fi
+
+            done
+
+        done
+        fails="${fails:+$fails }$vfails"
+    done
+    if [ -z "$fails" ]; then
+        log "PASS - no failures"
+        return 0
+    fi
+    log "FAIL - $fails"
+    return 1
+}
+
+source "$TOP_D/helpers/test-wolfi-vm-aws"
+source "$TOP_D/helpers/test-wolfi-vm-azure"
+source "$TOP_D/helpers/test-wolfi-vm-gcp"
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,test-arch:,wolfi-vm:,verbose"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_Usage; return; }
+
+    local cur="" next="" testarches="" arch="" outd="" cloud="" wolfivmd=""
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+               --wolfi-vm) wolfivmd=$next; shift;;
+               --test-arch) testarches=$next; shift;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ $# -ge 2 ] || { bad_Usage "got $# args [$*], expected min. 2"; return 1; }
+    cloud="$1"
+    outd="$2"
+    shift 2
+    LOG="$outd/test-wolfi-vm.log"
+
+    [ -n "$wolfivmd" ] || { bad_Usage "--wolfi-vm is required"; return 1; }
+    [ -d "$wolfivmd" ] || { stderr "--wolfi-vm '$wolfivmd' is not a dir"; return 1; }
+
+    METRIC_TAGS="cloud:$cloud,wolfi-vm-commit:$(cd "$wolfivmd" && git rev-parse HEAD),vms-test-commit:$(git rev-parse HEAD),$METRIC_TAGS"
+    if [ "$testarches" = "" -o "$testarches" = "ALL" ]; then
+        testarches="x86_64 aarch64"
+    fi
+
+    for arch in $testarches; do
+        case "$arch" in
+            x86_64|aarch64) continue;;
+            *) fail "unknown arch $arch";;
+        esac
+    done
+
+    [ -d "$outd" ] || mkdir -p "$outd" ||
+        fail "could not create $outd"
+
+    #shellcheck disable=SC2086
+    case "$cloud" in
+        aws)  test_aws "$wolfivmd" "$outd" "$@";;
+        qemu)  test_qemu  "$wolfivmd" "$outd" $testarches;;
+        azure) test_azure "$wolfivmd" "$outd" "$@";;
+        gcp)   test_gcp "$wolfivmd" "$outd" "$@";;
+        *)
+           echo "Testing for cloud=$cloud with wolfi-vm dir at $wolfivmd"
+           echo "Does not do anything just yet"
+           ;;
+    esac
+}
+
+main "$@"
+# vi: ts=4 expandtab

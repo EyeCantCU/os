@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# To fetch the last images the CI published to staging, do ./hack/fetch-azure-publish -r vmtesting
+# To fetch the last images you pushed to dev with the Makefile, do ./hack/fetch-azure-publish -r vmtesting_dev -p $(id -un)
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/}
+
+  Fetch azure publish details for latest images published to a gallery.
+
+    options:
+
+           --arch           ARCH    fetch details for ARCH
+           --resource-group GROUP   resource group containing the gallery
+           --gallery-name   GALLERY gallery to search for images
+           --prefix         PREFIX  naming prefix for remote images
+           --images         IMAGES  images to look for
+
+  Fetch latest azure publish details and write them to standard publish.*.json files as if you had just published them yourself.
+
+EOF
+}
+
+stderr() { echo "$@" 1>&2; }
+
+main() {
+    local short_opts="-h,a:,r:,p:,i:"
+    local long_opts="help,arch:,gallery-name:,prefix:,images:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local arch="$(uname -m)" resource_group="chainguard-vms" gallery="" prefix="chainguard" images="$(make list-azure)"
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -a|--arch) arch="$next"; shift;;
+            -g|--resource-group) resource_group="$next"; shift;;
+            -r|--gallery-name) gallery="$next"; shift;;
+            -p|--prefix) prefix="$next"; shift;;
+            -i|--images) images="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ -n "$gallery" ] || { stderr "--gallery is required"; return 1; }
+
+    local azarch=""
+
+    case "$arch" in
+        aarch64|arm64) azarch="arm64";;
+        x86_64|amd64|x64) azarch="x64";;
+        *) stderr "unknown arch $arch"; return 1;;
+    esac
+
+    local output_filename="publish.$gallery.json"
+
+    case "$gallery" in
+        vmtesting_dev) output_filename="publish.dev.json";;
+        vmtesting) output_filename="publish.staging.json";;
+        chainguard_vms_eap) output_filename="publish.eap.json";;
+    esac
+
+    echo "Writing to filename $output_filename"
+    local ok=0
+
+    local remote_image=""
+    for image in $images; do
+        mkdir -p "output/$arch/$image"
+        remote_image="$prefix${image#azure}-$azarch"
+        echo "Looking for $image as $remote_image"
+        az sig image-definition list -r "$gallery" -g "$resource_group" | jq -e ".[] | select(.name==\"$remote_image\")" \
+          > "output/$arch/$image/$output_filename" || { stderr "Could not find image definition for $image"; ok=1; continue; }
+        az sig image-version list -i "$remote_image" -r "$gallery" -g "$resource_group" | jq -e ".[-1]" \
+          >> "output/$arch/$image/$output_filename" || { stderr "Could not find image version for $image"; ok=1; continue; }
+    done
+    return $ok
+}
+main "$@"

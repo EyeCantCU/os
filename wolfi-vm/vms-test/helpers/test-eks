@@ -1,0 +1,534 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043,SC2317
+VERBOSITY=0
+TEMP_D=""
+DEF_VERSION="1.32"
+DEF_CLUSTER_NAME=vmtest-VERSION
+DEF_NODE_TYPE_ARM="t4g.large"
+DEF_NODE_TYPE_X86="t3.large"
+DEF_NGNAME="burrito"
+AWS_REGION=${AWS_REGION:-us-west-1}
+
+TEARDOWN_NODEGROUP=""
+CLUSTER_NAME=""
+
+stderr() { echo "$@" 1>&2; }
+failrc() { local rc=$1; shift; stderr "$@"; exit "$rc"; }
+fail() { local r=$?;  [ "$r" -eq 0 ] && r=1; failrc "$r" "$@"; }
+
+parse_awspubins() {
+    local i="" f="" n=0
+    for i in "$@"; do
+        if [ -d "$i" ]; then
+            for f in "$i"/*.json; do
+                dump_awspubin "$f" || { stderr "failed reading $f in $i"; return 1; }
+                n=$((n+1))
+            done
+        elif [ -f "$i" ]; then
+            dump_awspubin "$i" || { stderr "failed reading $f"; return 1; }
+            n=$((n+1))
+        else
+            stderr "$f: not a file"
+            return 1
+        fi
+    done
+    [ "$n" -ne 0 ] || { stderr "did not process any files"; return 1; }
+    return 0
+}
+
+dump_awspubin() {
+    local f="$1" out="" arch="" localname=""
+    out=$(jq -r '.images | to_entries[] | . as $entry | $entry.value |
+        to_entries[] | "\(.key) \(.value) \($entry.key)"' < "$f")
+    localname="${f##*/}"
+    localname="${localname/.json/}"
+    # shellcheck disable=SC2162
+    echo "$out" |
+        while read region ami name ; do
+            # 'name' looks like chainguard-docker-x86_64-20250501-1545
+            case "$name" in
+                *-arm64-*)
+                    arch=aarch64
+                    family=${name%-arm64-*}
+                    ;;
+                *-x86_64-*)
+                    arch=x86_64
+                    family=${name%-x86_64-*}
+                    ;;
+                *) stderr "could not find arch in $name"; return 1;;
+            esac
+            echo "$region $ami $arch $family $localname"
+        done
+}
+
+get_pubin_region_ami() {
+    local pfile
+    tmpf && pfile="$_RET" || return 1
+    parse_awspubins "$@" > "$pfile" ||
+        { stderr "Failed to parse aws pubins '$*'"; return 1; }
+    local region ami arch family localname found="" fregion=""
+    # shellcheck disable=SC2162
+    while read region ami arch family localname; do
+        case "$family" in
+            # match eks-X.Y-dev
+            *eks-[0-9].[0-9]*-dev)
+                [ -z "$found" ] || {
+                    stderr "found more than one eks-X.Y-dev ami in aws pub input $*"
+                    return 1
+                }
+                found="$ami"
+                fregion="$region"
+                ;;
+        esac
+    done < "$pfile"
+    echo "$fregion $found"
+    return 0
+}
+
+
+Usage_run_test() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] out-dir
+
+   test chainguard-eks image via eksctl.
+
+   options:
+
+      --cluster-name  NAME     the name of the cluster to run on.
+                               Will be create if it does not exist.
+                               default $DEF_CLUSTER_NAME
+      --nodegroup-name NAME    default: $DEF_NGNAME
+
+      --version       VER      the kubernetes version.
+                               default: $DEF_VERSION
+
+      --awspub-inputs DIR      read awspub info from DIR
+      --ami           AMI-ID   ami id. conflicts with awspub-inputs
+
+      --node-type     TYPE     default: $DEF_NODE_TYPE_ARM (aarch64) or $DEF_NODE_TYPE_X86 (x86_64)
+
+      --no-teardown            do not tear down the nodegroup
+
+EOF
+}
+
+bad_Usage() {
+    local n="$1";
+    shift;
+    "Usage_${n}" 1>&2;
+    [ $# -eq 0 ] || stderr "$@";
+    return
+}
+
+cleanup() {
+    if [ -n "$CLUSTER_NAME" ] && [ -n "$TEARDOWN_NODEGROUP" ]; then
+        nodegroup_destroy "$CLUSTER_NAME" "$TEARDOWN_NODEGROUP"
+    fi
+    [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
+}
+
+log() {
+    local now=""
+    now=$(date '+%Y/%m/%d %H:%M:%S')
+    [ -z "$LOG" ] || echo "$now" "$@" >> "$LOG"
+    stderr "$now" "$@"
+}
+
+debug() {
+    [ "$VERBOSITY" -ge 1 ] || return 0
+    log "[DEBUG]" "$@"
+}
+
+# vr(cmd) - run cmd, log execution and result. stdout and stderr unmodified.
+vr() {
+    local rc="" sstart=$SECONDS
+    log "execute: $*"
+    "$@"
+    rc=$?
+    log ":: exit $rc [$((SECONDS-sstart))s]"
+    return "$rc"
+}
+
+# vrl(output, cmd) - verbose run log.
+#   run cmd with output to output.stdout and output.stderr
+vrl() {
+    local output="$1" rc="" sstart=$SECONDS
+    shift
+    log "execute: $*"
+    "$@" >"$output.stdout" 2>"$output.stderr"
+    rc=$?
+    log ":: exit $rc [$((SECONDS-sstart))s]"
+    return "$rc"
+}
+
+# rq(cmd) - run cmd quietly unless it fails
+rq() {
+    local rc="" out=""
+    out=$("$@" 2>&1) && return 0
+    rc=$?
+    stderr "failed [$rc]: $*"
+    printf "%s\n" "$out" | sed -e 's,^,> ,' 1>&2
+    return "$rc"
+}
+
+cluster_list() {
+    local out="" clusters=""
+    out=$(eksctl get cluster --output=json --region="$AWS_REGION") ||
+        { stderr "cluster_list failed $?"; return 1; }
+    clusters=$(echo "$out"  | jq -r '.[].Name') ||
+        { stderr "cluster_list output non-json"; return 1; }
+    # shellcheck disable=SC2086
+    set -- $clusters
+    echo "$@"
+}
+
+cluster_status() {
+    local name="$1" out="" clusters="" status=""
+    [ -n "$name" ] || { stderr "cluster_status got empty name"; return 1; }
+    clusters=$(cluster_list) || return 1
+    case " $clusters " in
+        (*\ $name\ *) :;;
+        (*) echo "NONE"; return;;
+    esac
+    out=$(eksctl get cluster --output=json --region="$AWS_REGION" --name="$name") ||
+        { stderr "cluster_status --name=$name returned $?"; return 1; }
+
+    status=$(echo "$out" | jq -r '.[].Status') ||
+        { stderr "cluster --name=$name returned non-json"; return 1; }
+    echo "$status"
+}
+
+cluster_create() {
+    local name="$1" version="$2"
+    vr eksctl create cluster \
+       --region="$AWS_REGION" \
+       --name="$name" \
+       --version="$version" \
+       --tags="Environment=wolfi-vm-test" \
+       --with-oidc \
+       --without-nodegroup \
+       --vpc-nat-mode=Disable
+}
+
+cluster_create_if_needed() {
+    local name="$1" version="$2" status=""
+    status=$(cluster_status "$name") ||
+        { stderr "Failed to get cluster status"; return 1; }
+    case "$status" in
+        NONE) cluster_create "$name" "$version" ||
+            { stderr "Failed to create cluster $name"; return 1; };;
+        ACTIVE) stderr "Re-using existing cluster $name";;
+        *) stderr "Cluster $name is in status '$status'. Not sure what to do"
+            return 1;;
+    esac
+}
+
+cluster_destroy() {
+    local name="$1"
+    vr eksctl delete cluster --region="$AWS_REGION" --name="$name"
+}
+
+nodegroup_create() {
+    local cluster="$1" name="$2" capacity="$3" nodetype="$4" ami="$5"
+    local pubkey="$6" pubkeydata=""
+    [ $# -eq 5 -o $# -eq 6 ] || {
+        stderr "nodegroup_create got $# params. expect 5 or 6"
+        stderr "   cluster, nodegroup-name, capacity, nodetype, ami, [pubkey]"
+        return 1
+    }
+
+    if [ -n "$pubkey" ]; then
+        pubkeydata="$pubkey"
+        if [ -f "$pubkey" ]; then
+            # shellcheck disable=SC2162
+            read pubkeydata < "$pubkey" ||
+                { stderr "failed reading public key from $pubkey"; }
+        fi
+        case "$pubkeydata" in
+            ssh-ecdsa*|ssh-ed25519*|ssh-rsa*) :;;
+            *) stderr "pubkey $pubkey does not look like public key"
+                return 1;;
+        esac
+    fi
+
+    vr eksctl create nodegroup --region="$AWS_REGION" \
+        --cluster="$cluster" \
+        --name="$name" \
+        --node-labels="nodegroup=$name" \
+        --nodes="$capacity" \
+        --node-ami="$ami" \
+        --node-ami-family="AmazonLinux2023" \
+        --node-type="$nodetype" \
+        ${pubkeydata:+--ssh-public-key="$pubkeydata"}
+}
+
+nodegroup_destroy() {
+    local cluster="$1" ngname="$2"
+    vr eksctl delete nodegroup --region="$AWS_REGION" \
+         --disable-eviction --cluster="$cluster" --name="$ngname"
+}
+
+ami_list() {
+    local match=${1:-'chainguard-eks-[0-9][.][0-9]+-dev'}
+    tmpf && tfile="$_RET" || return 1
+    aws ec2 describe-images --region="$AWS_REGION" --executable-users=self > "$tfile" ||
+        { rm -f "$tfile"; stderr "describe-images returned $?"; return 1; }
+
+    jq -r '.Images[] | select(.Name? | match("'"$match"'")) | "\(.ImageId) \(.Name)"' < "$tfile" | sort -k2 ||
+        { rm -f "$tfile"; stderr "failed jq"; return 1; }
+    rm -f "$tfile"
+}
+
+cluster_kubeconfig() {
+    local cluster="$1" tmpf=""
+    tmpf=$(mktemp) || { stderr "mktemp failed"; return 1; }
+    rq eksctl utils write-kubeconfig \
+       --cluster="$cluster" --region="$AWS_REGION" --kubeconfig="$tmpf" || {
+           rm -f "$tmpf";
+           stderr "eksctl utils write-kubeconfig failed";
+           return 1;
+       }
+    cat "$tmpf"
+    rm -f "$tmpf"
+}
+
+run_test() {
+    local short_opts="hi:I:v"
+    local long_opts="ami-id:,awspub-inputs:,help,cluster-name:,node-type:,nodegroup-name:,no-teardown,verbose,version:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_Usage run_test; return; }
+
+    local cur="" next=""
+    local cluster="${DEF_CLUSTER_NAME}" nodetype=""
+    local version="${DEF_VERSION}" ngname="${DEF_NGNAME}"
+    local amiid="" pubin="" outd="" teardown=true
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage_run_test ; exit 0;;
+               --cluster-name) cluster=$next; shift;;
+               --nodegroup-name) ngname=$next; shift;;
+               --no-teardown) teardown=false;;
+               --version) version=$next; shift;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            -I|--awspub-inputs) pubin="$next"; shift;;
+            -i|--ami-id) amiid="$next"; shift;;
+            --node-type) nodetype="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ $# -eq 1 ] || { bad_Usage run_test "got $# args [$*], expected 1"; return 1; }
+    outd="$1"
+    shift
+
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        { stderr "mktemp failed"; return 1; }
+    trap cleanup EXIT
+    LOG="$outd/test-eks.log"
+
+    if [ -z "$amiid" ] && [ -z "$pubin" ]; then
+        bad_Usage run_test "Must give --ami-id or --awspub-inputs"
+        return 1
+    elif [ -n "$amiid" ] && [ -n "$pubin" ]; then
+        bad_Usage run_test "--ami-id and --awspub-inputs cannot be given together"
+        return 1
+    elif [ -n "$pubin" ]; then
+        local out="" amiregion=""
+        out=$(get_pubin_region_ami "$pubin") ||
+            { stderr "failed to get amiid from $pubin"; return 1; }
+        amiid=${out#* }
+        amiregion=${out% *}
+        [ "$amiregion" = "$AWS_REGION" ] || {
+            stderr "ami '$amiid' from $pubin was in '$amiregion'." \
+               "but AWS_REGION=$AWS_REGION"
+            return 1;
+        }
+    fi
+
+    if [ -z "$nodetype" ]; then
+        local amiarch=
+        amiarch=$(
+            aws ec2 --region "$AWS_REGION" describe-images --image-ids "$amiid" \
+                                                           --query 'Images[0].Architecture' \
+                                                           --output text
+        )
+        case "$amiarch" in
+            arm64)
+               nodetype="$DEF_NODE_TYPE_ARM" ;;
+            x86_64)
+               nodetype="$DEF_NODE_TYPE_X86" ;;
+            *)
+               stderr "no instance type given and architecture '$amiarch' of '$amiid' is unknown"
+               return 1
+               ;;
+        esac
+    fi
+
+    cluster=${cluster//VERSION/${version}}
+
+    [ -d "$outd" ] || mkdir -p "$outd" ||
+        fail "could not create $outd"
+
+    local created=false out="" status=""
+
+    cluster_create_if_needed "$cluster" "$version" ||
+        { stderr "failed to create cluster"; return 1; }
+    created=$_RET
+    CLUSTER_NAME="$cluster"
+
+    if [ "$created" = "true" ]; then
+        debug "Created cluster $cluster"
+    else
+        debug "Re-using cluster $cluster"
+    fi
+
+    export KUBECONFIG="$TEMP_D/kube.config"
+    cluster_kubeconfig "$cluster" > "$KUBECONFIG" ||
+        { stderr "failed getting kubeconfig"; return 1; }
+
+    nodegroup_create "$cluster" "$ngname" 2 "$nodetype" "$amiid" ||
+        { stderr "failed to create nodegroup"; return 1; }
+    if [ "$teardown" = "true" ]; then
+        TEARDOWN_NODEGROUP="$ngname"
+    fi
+
+    local fails="" passes=""
+    passes=()
+    fails=()
+    ## do some test here
+    vr eksctl --region="$AWS_REGION" --cluster="$cluster" get nodegroups
+
+    vr kubectl get pods -o wide
+    vr kubectl get nodes -o wide
+    vr kubectl get namespaces -o wide
+
+    vr kubectl get pods -o wide || return 1
+
+    vr kubectl run "$ngname-nginx0" --image=cgr.dev/chainguard/nginx:latest &&
+        passes+=( nginx0 ) || fails+=( nginx0 )
+
+    test_basepod "$ngname" "$ngname-basepod" &&
+        passes+=( basepod ) || fails+=( basepod )
+
+    local t=""
+    for t in "${passes[@]}"; do
+        log "PASS: $t"
+    done
+    for t in "${fails[@]}"; do
+        log "FAIL: $t"
+    done
+
+    if [ "$teardown" = "true" ]; then
+        nodegroup_destroy "$cluster" "$ngname" || {
+            stderr "failed to destroy nodegroup $ngname in $cluster"
+            return 1
+        }
+        TEARDOWN_NODEGROUP=""
+        stderr "tore down nodegroup $ngname"
+    else
+        stderr "not tearing down $ngname"
+    fi
+
+    if [ ${#fails[@]} -ne 0 ]; then
+        log "FAIL"
+        return 1
+    fi
+    log "PASS"
+}
+
+tmpf() {
+    if [ -z "$TEMP_D" ]; then
+        TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/testeks.XXXXXX") ||
+            { stderr "failed mktemp -d"; return 1; }
+    fi
+    local out=""
+    out=$(mktemp "${TEMP_D}/XXXXXX") || {
+        stderr "failed mktemp"
+        return 1
+    }
+    _RET="$out"
+}
+
+setkubecfg() {
+    local cluster="$1"
+    cluster_kubeconfig "$cluster" > "$KUBECONFIG" ||
+        { stderr "failed getting kubeconfig"; return 1; }
+}
+
+showfile() {
+    {
+    echo "# $1"
+    cat "$1"
+    } 1>&2
+}
+
+test_basepod() {
+    local ngname="$1" podname="$2"
+    [ $# -eq 2 ] ||
+        { stderr "expect 2 args (nodegroup and podname). got $#."; return 1; }
+    [ -n "$KUBECONFIG" ] || { stderr "need to set KUBECONFIG"; return 1; }
+    tmpf && pfile="$_RET" || return 1
+
+    cat > "$pfile" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "$podname"
+spec:
+  containers:
+    - name: nginx0
+      image: cgr.dev/chainguard/nginx
+      ports:
+        - containerPort: 80
+    - name: busybox0
+      image: cgr.dev/chainguard/busybox:latest
+      command: ["/bin/sh"]
+      args: ["-c", "while true; do sleep 3600; done"]
+  nodeSelector:
+    nodegroup: "$ngname"
+EOF
+    showfile "$pfile"
+    vr kubectl apply -f "$pfile" ||
+        { stderr "failed kubectl apply -f $ngname"; return 1; }
+
+    vr kubectl wait --timeout=60s --for=condition=Ready "pod/$podname" ||
+        { stderr "kubectl wait on pod/$podname failed"; return 1; }
+
+    vr kubectl get pod "$podname"
+}
+
+SUBCMDS=(
+    ami-list
+    cluster-create-if-needed
+    cluster-destroy
+    cluster-kubeconfig
+    nodegroup-create
+    nodegroup-destroy
+    get-pubin-region-ami
+    dump-awspubin
+    run-test
+    test-basepod
+)
+
+for _s in "${SUBCMDS[@]}"; do
+    [ "$_s" = "$1" ] || continue
+    VERBOSITY=1
+    name="$1"
+    name=${name//-/_}
+    shift;
+    "$name" "$@"
+    exit
+done
+
+stderr "Bad subcmd '$1'. subcmds:"
+for _s in "${SUBCMDS[@]}"; do
+    stderr "  $_s"
+done
+exit 1
+# vi: ts=4 expandtab
