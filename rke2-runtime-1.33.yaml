@@ -1,0 +1,199 @@
+package:
+  name: rke2-runtime-1.33
+  version: 1.33.3.2.1
+  epoch: 0
+  description: Rancher Kubernetes Engine 2 (RKE2) is a fully conformant Kubernetes distribution with minimal dependencies
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+      - containerd
+      - containerd-shim-runc-v2
+      - crictl
+      - ctr
+      - kubectl
+      - kubelet
+      - runc
+
+# using apk-v2 friendly spec version format for package version string
+# need to transform version (1.33.3.2.1) to match upstream tag: '1.33.3+rke2r1'
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+)$
+    replace: ${1}.${2}.${3}+rke${4}r${5}
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+)$
+    replace: ${1}.${2}.${3}-rke${4}r${5}
+    to: image-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - ca-certificates-bundle
+      - coreutils
+      - curl
+      - gnutar # Needed for build-charts.sh script, as BusyBox tar does not support '--delete' or '--transform' options.
+      - pigz
+      - yq
+  environment:
+    CGO_ENABLED: "1"
+    CGO_CFLAGS: "-DSQLITE_ENABLE_DBSTAT_VTAB=1 -DSQLITE_USE_ALLOCA=1"
+    GOEXPERIMENT: boringcrypto
+    BUILD_TAGS: "selinux,netgo,osusergo,no_stage,static_build,sqlite_omit_load_extension,no_embedded_executor,no_cri_dockerd"
+    # Hardcoded values set by upstream 'version.sh' script
+    # REF: https://github.com/rancher/rke2/blob/master/scripts/version.sh
+    PROG: "rke2"
+    K3S_PKG: "github.com/k3s-io/k3s"
+    RKE2_PKG: "github.com/rancher/rke2"
+    REGISTRY: "docker.io"
+    ETCD_VERSION: "v3.5.21-k3s1-build20250612"
+    PAUSE_VERSION: "3.6"
+    KUBERNETES_IMAGE_TAG: "v1.33.3-rke2r1-build20250716"
+    REPO: "rancher"
+    CCM_VERSION: "v1.33.1-0.20250516163953-99d91538b132-build20250612"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/rancher/rke2
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 4ca66a5fc2eedc38a963f743618b99632fafdd6f
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/pion/interceptor@v0.1.39
+
+  - uses: go/build
+    with:
+      packages: .
+      tags: $BUILD_TAGS
+      output: rke2
+      ldflags: |
+        -X ${K3S_PKG}/pkg/version.GitCommit=$(git rev-parse HEAD)
+        -X ${K3S_PKG}/pkg/version.Program=${PROG}
+        -X ${K3S_PKG}/pkg/version.Version=${{vars.mangled-package-version}}
+        -X ${K3S_PKG}/pkg/version.UpstreamGolang=$(go env GOVERSION)
+        -X ${RKE2_PKG}/pkg/images.DefaultRegistry=${REGISTRY}
+        -X ${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:${ETCD_VERSION}
+        -X ${RKE2_PKG}/pkg/images.DefaultKubernetesImage=rancher/hardened-kubernetes:${KUBERNETES_IMAGE_TAG}
+        -X ${RKE2_PKG}/pkg/images.DefaultPauseImage=rancher/mirrored-pause:${PAUSE_VERSION}
+        -X ${RKE2_PKG}/pkg/images.DefaultRuntimeImage=${REPO}/${PROG}-runtime:v${{vars.image-version}}
+        -X ${RKE2_PKG}/pkg/images.DefaultCloudControllerManagerImage=rancher/rke2-cloud-provider:${CCM_VERSION}
+
+  - name: Generate Charts
+    runs: |
+      bash charts/build-charts.sh
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: compatibility package for rke2-runtime
+    pipeline:
+      - runs: |
+          # Setup compat dirs
+          mkdir -p ${{targets.contextdir}}/charts
+
+          # Copy over generated chart files files
+          cp -r /home/build/charts/*.yaml  ${{targets.contextdir}}/charts
+
+          # cleanup
+          rm ${{targets.contextdir}}/charts/chart_versions.yaml
+
+# Matching upstream tag and transforming it back to apkv2 friendly format
+# EX: '1.33.3+rke2r1' --> '1.33.3.2.1'
+update:
+  enabled: true
+  version-transform:
+    - match: ^(\d+)\.(\d+)\.(\d+)\+([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$
+      replace: "${1}.${2}.${3}.${5}.${7}"
+  ignore-regex-patterns:
+    - '-rc'
+  github:
+    identifier: rancher/rke2
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - docker
+        - kubelet
+        - bash
+  pipeline:
+    - name: Test rke2 binary exists and runs
+      runs: |
+        set -o pipefail
+        rke2 --version | grep -F -e ${{vars.mangled-package-version}}
+        rke2 --help | grep -F -e "Rancher Kubernetes Engine 2"
+    - name: Verify chart files generated
+      runs: |
+        # Verify all helm charts have been generated
+        # REF: https://github.com/rancher/rke2/blob/master/charts/chart_versions.yaml
+        for f in \
+          harvester-cloud-provider \
+          harvester-csi-driver \
+          rancher-vsphere-cpi \
+          rancher-vsphere-csi \
+          rke2-calico-crd \
+          rke2-calico \
+          rke2-canal \
+          rke2-cilium \
+          rke2-coredns \
+          rke2-flannel \
+          rke2-ingress-nginx \
+          rke2-metrics-server \
+          rke2-multus \
+          rke2-runtimeclasses \
+          rke2-snapshot-controller-crd \
+          rke2-snapshot-controller \
+          rke2-snapshot-validation-webhook \
+          rke2-traefik-crd \
+          rke2-traefik; \
+        do \
+          [ -f "/charts/$f.yaml" ] || { echo "[✗] Missing: $f"; exit 1; }; \
+        done
+    - name: Functional test
+      runs: |
+        # Start rke2 server
+        set -o pipefail
+        rke2 server --token token --snapshotter native > /tmp/rke2-server.log 2>&1 &
+        rke2server_pid=$!
+
+        # cleanup for server/agent processes - killing server process also kills agent process
+        trap 'kill -9 ${rke2server_pid}' EXIT
+
+        # Start rke2 agent
+        rke2 agent --server https://10.0.2.15:9345 --token token --snapshotter native \
+        > /tmp/rke2-agent.log 2>&1 &
+
+        # Allow some time for logs to generate
+        TIMEOUT=60
+        while ! grep -q "Server node token is available at" /tmp/rke2-server.log && [ $TIMEOUT -gt 0 ]; do
+          sleep 1
+          TIMEOUT=$((TIMEOUT-1))
+        done
+        if [ $TIMEOUT -eq 0 ]; then
+          echo "Attempted to launch RKE2 in test, but log validation failed."
+          exit 1
+        fi
+
+        # Validate rke2-server logs
+        grep -q "Server node token is available at" /tmp/rke2-server.log
+        grep -q "To join server node to cluster:" /tmp/rke2-server.log
+        grep -q "Agent node token is available at" /tmp/rke2-server.log
+        grep -q "To join agent node to cluster:" /tmp/rke2-server.log
+        grep -q "Wrote kubeconfig" /tmp/rke2-server.log
+        grep -q "Run: rke2 kubectl" /tmp/rke2-server.log
+        grep -q "Running kube-proxy" /tmp/rke2-server.log
+
+        # Validate rke2-agent logs
+        grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-agent.log
+        grep -q "Starting rke2 agent" /tmp/rke2-agent.log
+        grep -q "Updated load balancer rke2-agent-load-balancer" /tmp/rke2-agent.log
+        grep -q "Running load balancer rke2-agent-load-balancer" /tmp/rke2-agent.log
