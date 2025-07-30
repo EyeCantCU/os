@@ -156,12 +156,13 @@ func transition(ctx context.Context, packageName, arch string, extraRepos []stri
 	}
 
 	// Identify packages that need rebuilding
-	packagesToRebuild, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch, extraRepos)
+	packagesToRebuild, completedPackages, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch, extraRepos)
 	if err != nil {
 		return fmt.Errorf("identifying packages to rebuild: %w", err)
 	}
 
 	log.Printf("Identified %d packages that need rebuilding", len(packagesToRebuild))
+	log.Printf("Identified %d packages that are already complete", len(completedPackages))
 
 	// Determine build order based on dependencies
 	buildOrder, err := determineBuildOrder(ctx, packagesToRebuild, arch, extraRepos)
@@ -177,11 +178,17 @@ func transition(ctx context.Context, packageName, arch string, extraRepos []stri
 		SharedLibraryPatterns: sharedLibPatterns,
 		SharedLibraryVersions: sharedLibVersions,
 		PackagesToRebuild:     packagesToRebuild,
+		CompletedPackages:     completedPackages,
 		BuildOrder:            buildOrder,
 	}
 
+	// Create transition directory if it doesn't exist
+	if err := os.MkdirAll("transition", 0755); err != nil {
+		return fmt.Errorf("creating transition directory: %w", err)
+	}
+
 	// Write to JSON file
-	outputFile := fmt.Sprintf("transition-%s.json", packageName)
+	outputFile := fmt.Sprintf("transition/%s.json", packageName)
 	file, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)
@@ -212,6 +219,7 @@ type TransitionPlan struct {
 	SharedLibraryPatterns []string            `json:"shared_library_patterns"`
 	SharedLibraryVersions map[string][]string `json:"shared_library_versions"`
 	PackagesToRebuild     []RebuildCandidate  `json:"packages_to_rebuild"`
+	CompletedPackages     []CompletedPackage  `json:"completed_packages"`
 	BuildOrder            [][]BuildOrderEntry `json:"build_order"`
 }
 
@@ -225,6 +233,13 @@ type RebuildCandidate struct {
 	Repository       string            `json:"repository"`
 	Reason           string            `json:"reason"`
 	MatchedPattern   string            `json:"matched_pattern"`
+	AffectedPackages []AffectedPackage `json:"affected_packages"`
+}
+
+type CompletedPackage struct {
+	Name             string            `json:"name"`
+	Repository       string            `json:"repository"`
+	Reason           string            `json:"reason"`
 	AffectedPackages []AffectedPackage `json:"affected_packages"`
 }
 
@@ -332,17 +347,18 @@ func removeVersionSuffix(libName string) string {
 	return libName
 }
 
-func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string, extraRepos []string) ([]RebuildCandidate, error) {
+func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string, extraRepos []string) ([]RebuildCandidate, []CompletedPackage, error) {
 	log.Printf("Analyzing APK repositories for packages with shared library dependencies")
 
 	rebuilds := make(map[string]*RebuildCandidate)
+	completed := make(map[string]*CompletedPackage)
 
 	// Compile regex patterns
 	compiledPatterns := make([]*regexp.Regexp, len(patterns))
 	for i, pattern := range patterns {
 		regex, err := regexp.Compile(pattern)
 		if err != nil {
-			return nil, fmt.Errorf("compiling pattern %s: %w", pattern, err)
+			return nil, nil, fmt.Errorf("compiling pattern %s: %w", pattern, err)
 		}
 		compiledPatterns[i] = regex
 	}
@@ -422,6 +438,8 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 		originNeedsRebuild := false
 		var firstMatchedPattern, firstReason string
 		affectedPackagesMap := make(map[string]*apk.Package) // packageName -> most recent package
+		completedPackagesMap := make(map[string]*apk.Package) // packageName -> most recent package
+		hasMatchingDeps := false
 
 		// Check each distinct package name from this origin
 		for packageName, packageVersions := range packageMap {
@@ -440,11 +458,31 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 			if needsRebuild {
 				log.Printf("Package %s from origin %s needs rebuild: %s", packageName, origin, reason)
 				originNeedsRebuild = true
+				hasMatchingDeps = true
 				if firstMatchedPattern == "" {
 					firstMatchedPattern = matchedPattern
 					firstReason = reason
 				}
 				affectedPackagesMap[packageName] = mostRecentPkg
+			} else {
+				// Check if package has any dependencies matching our patterns (even if up to date)
+				hasMatch := false
+				for _, dep := range mostRecentPkg.Dependencies {
+					for _, pattern := range compiledPatterns {
+						if pattern.MatchString(dep) {
+							hasMatch = true
+							hasMatchingDeps = true
+							break
+						}
+					}
+					if hasMatch {
+						break
+					}
+				}
+				if hasMatch {
+					log.Printf("Package %s from origin %s already uses current shared library versions", packageName, origin)
+					completedPackagesMap[packageName] = mostRecentPkg
+				}
 			}
 
 		}
@@ -469,18 +507,41 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 				MatchedPattern:   firstMatchedPattern,
 				AffectedPackages: affectedPackages,
 			}
-		} else {
+		} else if hasMatchingDeps {
 			log.Printf("Origin %s already uses current shared library versions", origin)
+
+			// Convert to AffectedPackage slice for completed packages
+			completedAffectedPackages := make([]AffectedPackage, 0, len(completedPackagesMap))
+			for _, pkg := range completedPackagesMap {
+				completedAffectedPackages = append(completedAffectedPackages, AffectedPackage{
+					Name:    pkg.Name,
+					Version: pkg.Version,
+				})
+			}
+
+			if len(completedAffectedPackages) > 0 {
+				completed[originKey] = &CompletedPackage{
+					Name:             origin, // Use origin name (main package)
+					Repository:       repo,
+					Reason:           "already uses current shared library versions",
+					AffectedPackages: completedAffectedPackages,
+				}
+			}
 		}
 	}
 
-	// Convert map to slice
+	// Convert maps to slices
 	result := make([]RebuildCandidate, 0, len(rebuilds))
 	for _, rebuild := range rebuilds {
 		result = append(result, *rebuild)
 	}
 
-	return result, nil
+	completedResult := make([]CompletedPackage, 0, len(completed))
+	for _, comp := range completed {
+		completedResult = append(completedResult, *comp)
+	}
+
+	return result, completedResult, nil
 }
 
 func isMoreRecent(pkg1, pkg2 *apk.Package) bool {
