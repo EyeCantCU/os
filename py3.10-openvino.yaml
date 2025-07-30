@@ -1,0 +1,165 @@
+package:
+  name: py3.10-openvino
+  version: 2025.2.0
+  epoch: 0
+  description: OpenVINO™ is an open source toolkit for optimizing and deploying AI inference
+  resources:
+    cpu: 20
+    memory: 50Gi
+  copyright:
+    # https://src.fedoraproject.org/rpms/openvino/blob/rawhide/f/openvino.spec#_13
+    - license: Apache-2.0 AND MIT AND BSL-1.0 AND HPND AND BSD-3-Clause AND (GPL-2.0-only OR BSD-3-Clause)
+  dependencies:
+    runtime:
+      - openvino
+      - py${{vars.py-version}}-numpy
+      - py${{vars.py-version}}-openvino-telemetry
+      - py${{vars.py-version}}-packaging
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - flatbuffers
+      - flatbuffers-dev
+      - gflags-dev
+      - gtest-dev
+      - level-zero-dev
+      - libtbb-dev
+      - onnx
+      - onnx-dev
+      - opencl-dev
+      - patchelf
+      - protobuf-dev
+      - pugixml-dev
+      - py${{vars.py-version}}-build-base-dev
+      - py${{vars.py-version}}-numpy
+      - py${{vars.py-version}}-openvino-telemetry
+      - py${{vars.py-version}}-packaging
+      - py${{vars.py-version}}-pip
+      - py${{vars.py-version}}-setuptools
+      - py${{vars.py-version}}-wheel
+      - python-${{vars.py-version}}
+      - python-${{vars.py-version}}-dev
+      - scons
+      - snappy-dev
+      - zlib-dev
+  environment:
+    # We dont need any of the frontends as we are building just the python bindings for openvino specifically
+    # JAX frontend seems to be enabled by default and causes libopenvino to depend on the jax frontend (which makes it fail to install)
+    BASE_CMAKE_ARGS: |-
+      -DENABLE_OV_JAX_FRONTEND=OFF \
+      -DENABLE_SYSTEM_FLATBUFFERS=ON \
+      -DENABLE_SYSTEM_LEVEL_ZERO=ON \
+      -DENABLE_SYSTEM_LIBS_DEFAULT=ON \
+      -DENABLE_SYSTEM_OPENCL=ON \
+      -DENABLE_SYSTEM_PROTOBUF=ON \
+      -DENABLE_SYSTEM_PUGIXML=ON \
+      -DENABLE_SYSTEM_SNAPPY=ON \
+      -DENABLE_SYSTEM_TBB=ON \
+      -DProtobuf_INCLUDE_DIRS=/usr/include \
+      -DProtobuf_LIBRARIES=/usr/lib \
+      -DProtobuf_USE_STATIC_LIBS=OFF
+
+vars:
+  pypi-package: openvino
+
+var-transforms:
+  - from: ${{package.name}}
+    match: 'py(\d+\.\d+)-.*'
+    replace: '$1'
+    to: py-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/openvinotoolkit/openvino.git
+      tag: ${{package.version}}
+      expected-commit: c01cd93e24d1cd78bfbb401eed51c08fb93e0816
+      recurse-submodules: true
+
+  - uses: patch
+    with:
+      patches: openvino-allow-wheel-0.46.patch
+
+  - working-directory: thirdparty
+    runs: |
+      rm -r \
+        flatbuffers \
+        gtest \
+        onnx \
+        protobuf \
+        level_zero \
+        snappy
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        ${BASE_CMAKE_ARGS} \
+        -DENABLE_PYTHON=ON \
+        -DENABLE_WHEEL=ON \
+        -DPython3_EXECUTABLE=/usr/bin/python${{vars.py-version}}
+
+  - uses: cmake/build
+    with:
+      output-dir: output
+
+  - runs: |
+      mkdir out
+      DESTDIR="out" cmake --install output
+      mkdir -p "${{targets.destdir}}/usr/lib"
+      mv "out/usr/python" "${{targets.destdir}}/usr/lib/python${{vars.py-version}}"
+      pip${{vars.py-version}} install --no-index --no-build-isolation --no-deps --prefix=/usr "--root=${{targets.destdir}}" output/wheels/*.whl
+
+  - name: move usr/bin executables for -bin
+    runs: |
+      mkdir -p ./cleanup/
+      mv ${{targets.destdir}}/usr/bin/* ./cleanup/
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-bin
+    description: ${{package.name}} executable scripts
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-${{vars.pypi-package}}
+    pipeline:
+      - runs: |
+          install -Dpm0755 -t "${{targets.subpkgdir}}/usr/bin" ./cleanup/*
+    test:
+      pipeline:
+        - runs: |
+            benchmark_app --help | grep -F -e "usage: benchmark_app" -e "CPU"
+            ovc --help | grep -F -e "usage: ovc INPUT_MODEL..."
+
+update:
+  enabled: true
+  github:
+    identifier: openvinotoolkit/openvino
+
+test:
+  environment:
+    contents:
+      packages:
+        - python-${{vars.py-version}}
+  pipeline:
+    - uses: test/tw/pip-check
+      with:
+        python: python${{vars.py-version}}
+    - uses: python/import
+      with:
+        python: python${{vars.py-version}}
+        import: ${{vars.pypi-package}}
+    - uses: test/tw/ldd-check
+    - runs: |
+        python3 <<'EOF' 2>&1 | grep -F -e "CPU"
+        import openvino as op
+        print(op.Core())
+        EOF

@@ -1,0 +1,129 @@
+package:
+  name: pushprox-fips
+  version: "0.2.0"
+  epoch: 0
+  description: Proxy to allow Prometheus to scrape through NAT etc.
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/prometheus-community/PushProx.git
+      tag: v${{package.version}}
+      expected-commit: 83cae523a829b055f26f20baa2201dec67ab6f37
+
+  - uses: go/build
+    with:
+      packages: ./cmd/proxy
+      output: pushprox-proxy
+      ldflags: |
+        -X main.Version=${{package.version}}
+      go-package: go-fips
+
+subpackages:
+  - name: pushprox-client-fips
+    description: pushprox-client binary
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/client/main.go
+          output: pushprox-client
+          ldflags: |
+            -X main.Version=${{package.version}}
+          go-package: go-fips
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - pushprox-client-fips
+        - curl
+        - jq
+        - prometheus-node-exporter-fips
+        - prometheus-fips
+        - wait-for-it
+  pipeline:
+    - name: "Check FIPS"
+      uses: test/go-fips-check
+    - name: "Basic Smoke Test"
+    - runs: |
+        pushprox-client --help
+        pushprox-proxy --help
+    - name: "Functional Test"
+    - runs: |
+        # Start node_exporter
+        node_exporter --web.listen-address="127.0.0.1:9100" > "/tmp/node_exporter.log" 2>&1 &
+        node_exporter_pid=$!
+
+        # Wait for node_exporter
+        wait-for-it -t 10 localhost:9100
+
+        # Start proxy
+        pushprox-proxy --log.level=debug > "/tmp/pushprox_proxy.log" 2>&1 &
+        proxy_pid=$!
+
+        # Wait for proxy to be ready
+        wait-for-it -t 10 localhost:8080
+
+        # Start client and connect to proxy
+        pushprox-client --log.level=debug --fqdn="localhost"  --proxy-url=http://localhost:8080 > "/tmp/pushprox_client.log" 2>&1 &
+        client_pid=$!
+
+        # Wait for client to register
+        attempt=0
+        while [ "$attempt" -lt 10 ]; do
+          target=$(curl -sf http://localhost:8080/clients | jq -r '.[] | .targets []')
+          if [ "$target" = "localhost" ]; then
+            echo "Client successfully registered with proxy."
+            break
+          fi
+          echo "Waiting for client to appear in proxy..."
+          attempt=$((attempt + 1))
+          sleep 2
+        done
+
+        if [ "$target" != "localhost" ]; then
+          echo "Client did not register in time"
+          exit 1
+        fi
+
+        # Setup prometheus config
+        cat << EOF > /tmp/prometheus.yml
+        global:
+          scrape_interval: 1s
+
+        scrape_configs:
+          - job_name: pushprox
+            proxy_url: http://127.0.0.1:8080
+            static_configs:
+            - targets: ['localhost:9100']
+        EOF
+
+        # Start prometheus
+        prometheus --config.file=/tmp/prometheus.yml --log.level=debug > "/tmp/prometheus.log" 2>&1 &
+        prometheus_pid=$!
+        wait-for-it -t 10 localhost:9090
+        curl -s "http://127.0.0.1:9090/-/healthy" | grep -q "Prometheus Server is Healthy."
+
+        # Give prometheus some time to scrape
+        sleep 5
+
+        # Validate pushprox-proxy logs
+        grep -q "Responded to /clients" /tmp/pushprox_proxy.log
+        grep -q "Responded to /poll" /tmp/pushprox_proxy.log
+        grep -q "WaitForScrapeInstruction" /tmp/pushprox_proxy.log
+        grep -q "Got /push" /tmp/pushprox_proxy.log
+        grep -q "ScrapeResult" /tmp/pushprox_proxy.log
+        grep -q "DoScrape" /tmp/pushprox_proxy.log
+        grep -q "ScrapeResult" /tmp/pushprox_proxy.log
+
+        # Validate pushprox-client logs
+        grep -q "Retrieved scrape response" /tmp/pushprox_client.log
+        grep -q "Pushed scrape result" /tmp/pushprox_client.log
+        grep -q "Got scrape request" /tmp/pushprox_client.log

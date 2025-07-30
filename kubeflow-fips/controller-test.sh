@@ -142,3 +142,5 @@ EOF
     echo "No functional test defined for $CONTROLLER"
     ;;
 esac
+
+kubectl delete ns test-ns --force
