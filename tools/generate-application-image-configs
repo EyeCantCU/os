@@ -1,0 +1,124 @@
+#!/bin/bash
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [options] application
+
+  Generate cloud configuration directories for an application.
+  Creates configs for azure, aws, and gcp clouds based on specified styles.
+
+  options:
+    -h | --help           show this help
+    -v | --verbose        be more verbose
+         --clouds CLOUDS  specify clouds (default: azure aws gcp)
+         --styles STYLES  base styles to use (default: base agents)
+
+  Examples:
+    ${0##*/} nginx                      # creates aws-base-nginx, aws-agents-nginx, etc.
+    ${0##*/} --styles "base" nginx      # creates only aws-base-nginx, etc.
+    ${0##*/} --styles "agents" nginx    # creates only aws-agents-nginx, etc.
+
+  Environment:
+    The script expects yq to be available in PATH for YAML manipulation.
+
+EOF
+}
+
+error() { echo "$@" 1>&2; }
+
+bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || error "$@"; return 1; }
+
+main() {
+    if [ "$(uname)" == "Darwin" ]; then
+        if [ "$(which getopt)" == "/usr/bin/getopt" ]; then
+            echo "📎: It looks like you're trying to run this script on macOS!"
+            echo "However you need to install compatible tools."
+            echo "Please install gnu-getopt via 'brew install gnu-getopt'"
+            echo "And add it's path: /opt/homebrew/opt/gnu-getopt/bin before /usr/bin"
+            exit 1
+        fi
+    fi
+
+    local short_opts="hv"
+    local long_opts="help,verbose,clouds:,styles:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        bad_Usage
+
+    local clouds="azure aws gcp"
+    local styles="base agents"
+    local verbosity=0
+
+    while [ $# -ne 0 ]; do
+        cur="$1"; next="$2"
+        case "$cur" in
+            -h|--help) Usage; exit 0;;
+            -v|--verbose) verbosity=$((verbosity+1));;
+               --clouds) clouds="$next"; shift;;
+               --styles) styles="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift
+    done
+
+    [ $# -eq 1 ] || bad_Usage "must provide exactly one application name"
+    
+    local application="$1"
+    
+    if [ -z "$application" ]; then
+        bad_Usage "application name cannot be empty"
+    fi
+
+    command -v yq >/dev/null 2>&1 || {
+        error "yq command not found in PATH"
+        return 1
+    }
+
+    for cloud in $clouds; do
+        for style in $styles; do
+            local config_dir="./configs/$cloud-$style-$application"
+            local base_dir="./configs/$cloud-$style"
+            local base_build="$base_dir/build.yaml"
+            local base_test="$base_dir/test.yaml"
+
+            if [ ! -f "$base_build" ]; then
+                error "base build config not found: $base_build"
+                return 1
+            fi
+
+            if [ ! -f "$base_test" ]; then
+                error "base test config not found: $base_test"
+                return 1
+            fi
+
+            [ $verbosity -ge 1 ] && error "creating config for $cloud-$style: $config_dir"
+
+            mkdir -p "$config_dir" || {
+                error "failed to create directory: $config_dir"
+                return 1
+            }
+
+            yq ".contents.packages += \"$application\"" "$base_build" > "$config_dir/build.yaml" || {
+                error "failed to generate build.yaml for $cloud-$style"
+                return 1
+            }
+
+            yam "$config_dir/build.yaml" || {
+                error "Failed to format build.yaml for $cloud-$style"
+                return 1
+            }
+
+            ln -sf "../$cloud-$style/test.yaml" "$config_dir/test.yaml" || {
+                error "failed to create test.yaml symlink for $cloud-$style"
+                return 1
+            }
+        done
+    done
+
+    [ $verbosity -ge 1 ] && error "generated configs for: $clouds"
+    return 0
+}
+
+main "$@"
