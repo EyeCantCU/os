@@ -16,13 +16,13 @@ import (
 	"chainguard.dev/apko/pkg/apk/auth"
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/apko/pkg/tarfs"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/format/syftjson"
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"chainguard.dev/apko/pkg/tarfs"
 )
 
 var ic types.ImageConfiguration = types.ImageConfiguration{
@@ -30,7 +30,7 @@ var ic types.ImageConfiguration = types.ImageConfiguration{
 		"amd64",
 	},
 	Contents: types.ImageContents{
-		RuntimeRepositories: []string{
+		Repositories: []string{
 			"https://packages.wolfi.dev/os",
 			"https://packages.cgr.dev/extras",
 			"https://apk.cgr.dev/chainguard-private",
