@@ -2,7 +2,7 @@
 
 Usage() {
     cat <<EOF
-Usage: ${0##*/} [options] application
+Usage: ${0##*/} [options] --name NAME package1 [package2 ...]
 
   Generate cloud configuration directories for an application.
   Creates configs for azure, aws, and gcp clouds based on specified styles.
@@ -10,13 +10,17 @@ Usage: ${0##*/} [options] application
   options:
     -h | --help           show this help
     -v | --verbose        be more verbose
+         --name NAME      name for the configuration directories
+         --mode MODE      generation mode: copy or include (default: copy)
+                          copy: copies base config and adds packages
+                          include: uses apko include directive (deprecated)
          --clouds CLOUDS  specify clouds (default: azure aws gcp)
          --styles STYLES  base styles to use (default: base agents)
 
   Examples:
-    ${0##*/} nginx                      # creates aws-base-nginx, aws-agents-nginx, etc.
-    ${0##*/} --styles "base" nginx      # creates only aws-base-nginx, etc.
-    ${0##*/} --styles "agents" nginx    # creates only aws-agents-nginx, etc.
+    ${0##*/} --name webserver nginx                         # creates aws-base-webserver, aws-agents-webserver, etc.
+    ${0##*/} --name database --styles "base" postgres       # creates only aws-base-database, etc.
+    ${0##*/} --name devtools --mode include git vim curl    # uses apko include directive
 
   Environment:
     The script expects yq to be available in PATH for YAML manipulation.
@@ -40,7 +44,7 @@ main() {
     fi
 
     local short_opts="hv"
-    local long_opts="help,verbose,clouds:,styles:"
+    local long_opts="help,verbose,name:,mode:,clouds:,styles:"
     local getopt_out=""
     getopt_out=$(getopt --name "${0##*/}" \
         --options "${short_opts}" --long "${long_opts}" -- "$@") &&
@@ -49,6 +53,8 @@ main() {
 
     local clouds="azure aws gcp"
     local styles="base agents"
+    local name=""
+    local mode="copy"
     local verbosity=0
 
     while [ $# -ne 0 ]; do
@@ -56,6 +62,8 @@ main() {
         case "$cur" in
             -h|--help) Usage; exit 0;;
             -v|--verbose) verbosity=$((verbosity+1));;
+               --name) name="$next"; shift;;
+               --mode) mode="$next"; shift;;
                --clouds) clouds="$next"; shift;;
                --styles) styles="$next"; shift;;
             --) shift; break;;
@@ -63,13 +71,17 @@ main() {
         shift
     done
 
-    [ $# -eq 1 ] || bad_Usage "must provide exactly one application name"
-    
-    local application="$1"
-    
-    if [ -z "$application" ]; then
-        bad_Usage "application name cannot be empty"
+    [ $# -ge 1 ] || bad_Usage "must provide at least one package name"
+
+    if [ -z "$name" ]; then
+        bad_Usage "must provide --name parameter"
     fi
+
+    if [ "$mode" != "copy" ] && [ "$mode" != "include" ]; then
+        bad_Usage "mode must be either 'copy' or 'include'"
+    fi
+
+    local packages=("$@")
 
     command -v yq >/dev/null 2>&1 || {
         error "yq command not found in PATH"
@@ -78,7 +90,7 @@ main() {
 
     for cloud in $clouds; do
         for style in $styles; do
-            local config_dir="./configs/$cloud-$style-$application"
+            local config_dir="./configs/$cloud-$style-$name"
             local base_dir="./configs/$cloud-$style"
             local base_build="$base_dir/build.yaml"
             local base_test="$base_dir/test.yaml"
@@ -100,10 +112,41 @@ main() {
                 return 1
             }
 
-            yq ".contents.packages += \"$application\"" "$base_build" > "$config_dir/build.yaml" || {
-                error "failed to generate build.yaml for $cloud-$style"
-                return 1
-            }
+            if [ "$mode" = "copy" ]; then
+                # Copy mode: Start with the base config and add packages
+                cp "$base_build" "$config_dir/build.yaml" || {
+                    error "failed to copy base build.yaml for $cloud-$style"
+                    return 1
+                }
+
+                # Add each package
+                for package in "${packages[@]}"; do
+                    yq -i ".contents.packages += [\"$package\"]" "$config_dir/build.yaml" || {
+                        error "failed to add package $package to build.yaml for $cloud-$style"
+                        return 1
+                    }
+                done
+            else
+                # Include mode: Create minimal config with include directive
+                # Include path is relative to where apko is run (typically project root)
+                local base_config_path="configs/$cloud-$style/build.yaml"
+
+                # Create the minimal YAML with include directive and new packages
+                cat > "$config_dir/build.yaml" <<EOF
+include: $base_config_path
+
+contents:
+  packages:
+EOF
+
+                # Add each package to the minimal config
+                for package in "${packages[@]}"; do
+                    yq -i ".contents.packages += [\"$package\"]" "$config_dir/build.yaml" || {
+                        error "failed to add package $package to build.yaml for $cloud-$style"
+                        return 1
+                    }
+                done
+            fi
 
             yam "$config_dir/build.yaml" || {
                 error "Failed to format build.yaml for $cloud-$style"
@@ -115,8 +158,8 @@ main() {
                 return 1
             }
             if [ "$cloud" = "aws" ]; then
-                local appdir="$cloud-$style-$application"
-                local appname="$style-$application"
+                local appdir="$cloud-$style-$name"
+                local appname="$style-$name"
                 for arch in x86_64 aarch64
                 do
                     sed "s|{{APPDIR}}|$appdir|g;s|{{APPNAME}}|$appname|g" TEMPLATE/awspub/$arch/TEMPLATE.yaml > awspub/$arch/$appdir.yaml
