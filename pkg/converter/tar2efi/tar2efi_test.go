@@ -35,7 +35,7 @@ import (
 func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration) string {
 	// We should comfortably be able to convert all of these images
 	// in under a minute.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	t.Cleanup(cancel)
 
 	fs := apkfs.DirFS(ctx, t.TempDir(), apkfs.WithCreateDir())

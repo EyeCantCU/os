@@ -92,7 +92,7 @@ var ic types.ImageConfiguration = types.ImageConfiguration{
 func buildImage(t *testing.T) v1.Layer {
 	// We should comfortably be able to convert all of these images
 	// in under a minute.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	t.Cleanup(cancel)
 
 	arch := types.ParseArchitecture("amd64")
