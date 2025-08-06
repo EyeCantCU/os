@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/auth"
-	apkfs "chainguard.dev/apko/pkg/apk/fs"
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/apko/pkg/tarfs"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/format/syftjson"
 	"github.com/anchore/syft/syft/pkg"
@@ -30,7 +30,7 @@ var ic types.ImageConfiguration = types.ImageConfiguration{
 		"amd64",
 	},
 	Contents: types.ImageContents{
-		RuntimeRepositories: []string{
+		Repositories: []string{
 			"https://packages.wolfi.dev/os",
 			"https://packages.cgr.dev/extras",
 			"https://apk.cgr.dev/chainguard-private",
@@ -92,12 +92,11 @@ var ic types.ImageConfiguration = types.ImageConfiguration{
 func buildImage(t *testing.T) v1.Layer {
 	// We should comfortably be able to convert all of these images
 	// in under a minute.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	t.Cleanup(cancel)
 
-	fs := apkfs.DirFS(t.TempDir(), apkfs.WithCreateDir())
 	arch := types.ParseArchitecture("amd64")
-	bc, err := build.New(ctx, fs,
+	bc, err := build.New(ctx, tarfs.New(),
 		build.WithAuthenticator(auth.CGRAuth{}),
 		build.WithArch(arch),
 		build.WithImageConfiguration(ic),

@@ -14,4 +14,7 @@ const (
 	SystemdCriticalChain
 	Proc1Mountinfo
 	NestedQemuConsole
+	ComplianceSCAPSecurityGuide
+	ComplianceHTMLReport
+	ComplianceXMLResults
 )
