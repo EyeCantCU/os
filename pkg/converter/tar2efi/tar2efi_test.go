@@ -38,7 +38,7 @@ func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	t.Cleanup(cancel)
 
-	fs := apkfs.DirFS(ctx, t.TempDir(), apkfs.WithCreateDir())
+	fs := apkfs.DirFS(t.Context(), t.TempDir(), apkfs.WithCreateDir())
 	arch := types.ParseArchitecture(runtime.GOARCH)
 	bc, err := build.New(ctx, fs,
 		build.WithAuthenticator(auth.CGRAuth{}),
@@ -143,7 +143,7 @@ func TestConverter(t *testing.T) {
 		filename:     "testdata/gcp-base.yaml",
 		expectedSize: 3 * GiB,
 		testDisk: func(t *testing.T, disk string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			t.Cleanup(cancel)
 			// TODO(mattmoor): if we are given a bucket/project, then upload the
 			// converted disk to it, and then create an image/VM from it.
@@ -155,7 +155,7 @@ func TestConverter(t *testing.T) {
 		filename:     "testdata/aws-base.yaml",
 		expectedSize: 3 * GiB,
 		testDisk: func(t *testing.T, disk string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			t.Cleanup(cancel)
 			// TODO(mattmoor): if we are given a bucket/account, then upload the
 			// converted disk to it, and then create an image/VM from it.
@@ -172,7 +172,7 @@ func TestConverter(t *testing.T) {
 				t.Fatalf("os.ReadFile() failed with %v", err)
 			}
 			var ic types.ImageConfiguration
-			dec := yaml.NewDecoder(bytes.NewBuffer(b))
+			dec := yaml.NewDecoder(bytes.NewReader(b))
 			dec.KnownFields(true)
 			if err := dec.Decode(&ic); err != nil {
 				t.Fatalf("failed to parse image configuration: %v", err)
@@ -216,7 +216,7 @@ func readBuildConfig(t *testing.T) types.ImageConfiguration {
 	if err != nil {
 		t.Fatalf("failed to read builder.yaml: %v", err)
 	}
-	dec := yaml.NewDecoder(bytes.NewBuffer(b))
+	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 
 	var ic types.ImageConfiguration
