@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -878,10 +879,19 @@ func generateWithdrawnPackagesFiles(candidatesByRepo map[string][]ArchiveCandida
 
 		log.Printf("Writing %d withdrawn packages to %s", len(repoCandidates), withdrawnFile)
 
-		// Write each package with the full APK filename (name-version.apk)
+		// Create sorted list of APK filenames
+		var apkFileNames []string
 		for _, candidate := range repoCandidates {
-			apkFileName := fmt.Sprintf("%s-%s.apk\n", candidate.Name, candidate.Version)
-			if _, err := file.WriteString(apkFileName); err != nil {
+			apkFileName := fmt.Sprintf("%s-%s.apk", candidate.Name, candidate.Version)
+			apkFileNames = append(apkFileNames, apkFileName)
+		}
+
+		// Sort the APK filenames alphabetically
+		sort.Strings(apkFileNames)
+
+		// Write each sorted APK filename
+		for _, apkFileName := range apkFileNames {
+			if _, err := file.WriteString(apkFileName + "\n"); err != nil {
 				return fmt.Errorf("writing to withdrawn-packages.txt file for %s: %w", repo, err)
 			}
 		}

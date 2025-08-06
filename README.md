@@ -81,12 +81,42 @@ Results (including reasons for archival or retention) are written to `archive/` 
 stereo archive --generate-withdrawn --duration 365 --arch x86_64
 ```
 
-When `--generate-withdrawn` is used, the command will also create `withdrawn-packages.txt` files in each repository directory (`os/`, `extra-packages/`, `enterprise-packages/`) containing the full APK filenames (e.g., `firefox-127.0.2-r0.apk`) of packages identified for withdrawal.
+When `--generate-withdrawn` is used, the command will also create `withdrawn-packages.txt` files in each repository directory (`os/`, `extra-packages/`, `enterprise-packages/`) containing the full APK filenames (e.g., `firefox-127.0.2-r0.apk`) of packages identified for withdrawal. The files are sorted alphabetically for consistent output.
 
 **Flags:**
 - `--duration`: Age threshold for archive candidates in days (default: 365 days)
 - `--arch`: Architecture to evaluate (default: x86_64)
 - `--generate-withdrawn`: Generate withdrawn-packages.txt files for each repository
+
+### withdraw
+
+Downloads the latest APKINDEX.tar.gz files from each repository, removes packages listed in withdrawn-packages.txt files, and saves the modified indexes to a local directory.
+
+```bash
+stereo withdraw --arch x86_64 --output-dir withdrawn-indexes --signing-key melange.rsa
+```
+
+This command processes each repository that has a withdrawn-packages.txt file:
+- Downloads the current APKINDEX.tar.gz for the specified architecture
+- Removes all packages listed in the repository's withdrawn-packages.txt file
+- Signs the modified APKINDEX with the specified RSA key
+- Saves the signed APKINDEX.tar.gz to subdirectories organized by repo and architecture
+- Provides detailed logging of the withdrawal process
+
+The modified indexes are saved in a structured directory layout:
+```
+withdrawn-indexes/
+├── os/x86_64/APKINDEX.tar.gz
+├── extra-packages/x86_64/APKINDEX.tar.gz
+└── enterprise-packages/x86_64/APKINDEX.tar.gz
+```
+
+The modified indexes can be used to replace the original indexes in the repositories to actually withdraw the packages.
+
+**Flags:**
+- `--arch`: Architecture to process (default: x86_64)
+- `--output-dir`: Output directory for modified APKINDEX files (default: withdrawn-indexes)
+- `--signing-key`: The signing key to use for signing the modified APKINDEX (default: melange.rsa)
 
 ## Repository Structure
 
