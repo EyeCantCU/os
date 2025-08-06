@@ -16,6 +16,8 @@ This command finds all APKO `build.yaml` configurations under `wolfi-vm/configs/
 
 **Flags:**
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
+- `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
 ### image-dependencies
 
@@ -44,6 +46,8 @@ This command reads Terraform JSON from stdin, parses all apko_build configuratio
 **Flags:**
 - `--private`: Set for images-private (includes enterprise-packages)
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
+- `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
 ### build-dependencies
 
@@ -57,6 +61,8 @@ This command pre-computes and caches the build dependencies for all melange conf
 
 **Flags:**
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
+- `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
 ### archive
 
@@ -118,6 +124,32 @@ The modified indexes can be used to replace the original indexes in the reposito
 - `--output-dir`: Output directory for modified APKINDEX files (default: withdrawn-indexes)
 - `--signing-key`: The signing key to use for signing the modified APKINDEX (default: melange.rsa)
 
+## Testing with Withdrawn Packages
+
+All `*-dependencies` commands support testing with withdrawn package indexes to validate the impact of package withdrawals before deploying changes to production repositories.
+
+### Usage Example
+
+```bash
+# 1. Generate withdrawn package lists
+stereo archive --generate-withdrawn --duration 365 --arch x86_64
+
+# 2. Create modified APKINDEX files with packages removed
+stereo withdraw --arch x86_64 --output-dir withdrawn-indexes --signing-key melange.rsa
+
+# 3. Test impact on build dependencies
+stereo build-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
+
+# 4. Test impact on image dependencies  
+cat public-images.tfplan.json | stereo image-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
+cat private-images.tfplan.json | stereo image-dependencies --private --use-withdrawn --withdrawn-dir withdrawn-indexes
+
+# 5. Test impact on VM dependencies
+stereo vm-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
+```
+
+The `--use-withdrawn` flag makes the commands use local withdrawn APKINDEX files instead of fetching from live repositories, allowing you to test dependency resolution against the modified package sets. When using `--use-withdrawn`, results are written to `withdrawn-test/resolved/` and `withdrawn-test/unresolved/` directories to avoid overwriting normal dependency results.
+
 ## Repository Structure
 
 The tool operates on three main repositories:
@@ -132,5 +164,8 @@ The tool operates on three main repositories:
   - `images/`: Image dependencies (public/private)
   - `vms/`: VM dependencies
 - `unresolved/`: Contains packages that failed to resolve
+- `withdrawn-test/`: Test results when using withdrawn indexes
+  - `resolved/`: Successfully resolved dependencies with withdrawn packages
+  - `unresolved/`: Packages that failed to resolve with withdrawn packages
 - `archive/`: Archive candidates per repository
 - `retain/`: Packages retained from archival per repository

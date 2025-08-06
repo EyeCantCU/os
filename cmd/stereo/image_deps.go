@@ -17,8 +17,10 @@ import (
 
 func imageDependenciesCmd() *cobra.Command {
 	var (
-		private bool
-		arch    string
+		private      bool
+		arch         string
+		useWithdrawn bool
+		withdrawnDir string
 	)
 
 	cmd := &cobra.Command{
@@ -28,38 +30,63 @@ func imageDependenciesCmd() *cobra.Command {
 and resolves them to lists of APK packages used by each image. The results are written
 to JSON files in the resolved/images/ directory.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return imageDependencies(cmd.Context(), private, arch)
+			return imageDependencies(cmd.Context(), private, arch, useWithdrawn, withdrawnDir)
 		},
 	}
 
 	cmd.Flags().BoolVar(&private, "private", false, "Set for images-private (includes enterprise-packages)")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().BoolVar(&useWithdrawn, "use-withdrawn", false, "Use withdrawn APKINDEX files instead of live repositories")
+	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn APKINDEX files")
 
 	return cmd
 }
 
-func imageDependencies(ctx context.Context, private bool, arch string) error {
+func imageDependencies(ctx context.Context, private bool, arch string, useWithdrawn bool, withdrawnDir string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
-	log.Printf("Pre-computing image dependencies for architecture %s...", arch)
-
-	// Create resolved/images and unresolved/images directories if they don't exist
-	resolvedDir := filepath.Join("resolved", "images")
-	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating resolved/images directory: %w", err)
+	if useWithdrawn {
+		log.Printf("Pre-computing image dependencies for architecture %s using withdrawn indexes from %s...", arch, withdrawnDir)
+	} else {
+		log.Printf("Pre-computing image dependencies for architecture %s...", arch)
 	}
 
-	unresolvedDir := filepath.Join("unresolved", "images")
+	// Create output directories - use withdrawn-test prefix when testing with withdrawn indexes
+	var resolvedDir, unresolvedDir string
+	if useWithdrawn {
+		resolvedDir = filepath.Join("withdrawn-test", "resolved", "images")
+		unresolvedDir = filepath.Join("withdrawn-test", "unresolved", "images")
+	} else {
+		resolvedDir = filepath.Join("resolved", "images")
+		unresolvedDir = filepath.Join("unresolved", "images")
+	}
+
+	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
+		return fmt.Errorf("creating resolved images directory: %w", err)
+	}
+
 	if err := os.MkdirAll(unresolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating unresolved/images directory: %w", err)
+		return fmt.Errorf("creating unresolved images directory: %w", err)
 	}
 
 	cache := apk.NewCache(true)
 
-	buildRepos := map[string][]string{
-		"public":  []string{dirToRepo["os"], dirToRepo["extra-packages"]},
-		"private": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
+	var buildRepos map[string][]string
+	if useWithdrawn {
+		// Use local withdrawn indexes instead of remote repositories
+		withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
+		buildRepos = map[string][]string{
+			"public":  []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"]},
+			"private": []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]},
+		}
+		log.Printf("Using withdrawn indexes from %s", withdrawnDir)
+	} else {
+		// Use normal remote repositories
+		buildRepos = map[string][]string{
+			"public":  []string{dirToRepo["os"], dirToRepo["extra-packages"]},
+			"private": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
+		}
 	}
 
 	var imageSet string

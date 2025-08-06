@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -29,6 +30,21 @@ var dirToRepo map[string]string = map[string]string{
 	"os":                  "https://packages.wolfi.dev/os",
 	"extra-packages":      "https://packages.cgr.dev/extras",
 	"enterprise-packages": "https://apk.cgr.dev/chainguard-private",
+}
+
+// dirToWithdrawnRepo creates a mapping from directory names to withdrawn repository paths
+func dirToWithdrawnRepo(withdrawnDir string) map[string]string {
+	absWithdrawnDir, err := filepath.Abs(withdrawnDir)
+	if err != nil {
+		log.Printf("Warning: Could not get absolute path for %s, using relative path", withdrawnDir)
+		absWithdrawnDir = withdrawnDir
+	}
+
+	return map[string]string{
+		"os":                  filepath.Join(absWithdrawnDir, "os"),
+		"extra-packages":      filepath.Join(absWithdrawnDir, "extra-packages"),
+		"enterprise-packages": filepath.Join(absWithdrawnDir, "enterprise-packages"),
+	}
 }
 
 func main() {

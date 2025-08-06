@@ -20,7 +20,9 @@ import (
 
 func vmDependenciesCmd() *cobra.Command {
 	var (
-		arch string
+		arch         string
+		useWithdrawn bool
+		withdrawnDir string
 	)
 
 	cmd := &cobra.Command{
@@ -30,36 +32,58 @@ func vmDependenciesCmd() *cobra.Command {
 and resolves them to lists of APK packages used by each VM. The results are written
 to JSON files in the resolved/vms/ directory.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return vmDependencies(cmd.Context(), arch)
+			return vmDependencies(cmd.Context(), arch, useWithdrawn, withdrawnDir)
 		},
 	}
 
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().BoolVar(&useWithdrawn, "use-withdrawn", false, "Use withdrawn APKINDEX files instead of live repositories")
+	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn APKINDEX files")
 
 	return cmd
 }
 
-func vmDependencies(ctx context.Context, arch string) error {
+func vmDependencies(ctx context.Context, arch string, useWithdrawn bool, withdrawnDir string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
-	log.Printf("Pre-computing VM dependencies for architecture %s...", arch)
-
-	// Create resolved/vms and unresolved/vms directories if they don't exist
-	resolvedDir := filepath.Join("resolved", "vms")
-	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating resolved/vms directory: %w", err)
+	if useWithdrawn {
+		log.Printf("Pre-computing VM dependencies for architecture %s using withdrawn indexes from %s...", arch, withdrawnDir)
+	} else {
+		log.Printf("Pre-computing VM dependencies for architecture %s...", arch)
 	}
 
-	unresolvedDir := filepath.Join("unresolved", "vms")
+	// Create output directories - use withdrawn-test prefix when testing with withdrawn indexes
+	var resolvedDir, unresolvedDir string
+	if useWithdrawn {
+		resolvedDir = filepath.Join("withdrawn-test", "resolved", "vms")
+		unresolvedDir = filepath.Join("withdrawn-test", "unresolved", "vms")
+	} else {
+		resolvedDir = filepath.Join("resolved", "vms")
+		unresolvedDir = filepath.Join("unresolved", "vms")
+	}
+
+	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
+		return fmt.Errorf("creating resolved vms directory: %w", err)
+	}
+
 	if err := os.MkdirAll(unresolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating unresolved/vms directory: %w", err)
+		return fmt.Errorf("creating unresolved vms directory: %w", err)
 	}
 
 	cache := apk.NewCache(true)
 
-	// Use private repos (same as private images - includes enterprise-packages)
-	buildRepos := []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]}
+	// Build repository list for VM dependencies
+	var buildRepos []string
+	if useWithdrawn {
+		// Use local withdrawn indexes instead of remote repositories
+		withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
+		buildRepos = []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]}
+		log.Printf("Using withdrawn indexes from %s", withdrawnDir)
+	} else {
+		// Use private repos (same as private images - includes enterprise-packages)
+		buildRepos = []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]}
+	}
 
 	// Find all build.yaml files under wolfi-vm/configs/
 	log.Printf("Finding VM configurations...")

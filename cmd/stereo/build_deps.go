@@ -17,7 +17,9 @@ import (
 
 func buildDepsCmd() *cobra.Command {
 	var (
-		arch string
+		arch         string
+		useWithdrawn bool
+		withdrawnDir string
 	)
 
 	cmd := &cobra.Command{
@@ -28,30 +30,43 @@ across the three repositories (os, extra-packages, enterprise-packages). The res
 to files in the resolved/build/ directory and can be used by other commands to avoid expensive
 dependency resolution.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return buildDeps(cmd.Context(), arch)
+			return buildDeps(cmd.Context(), arch, useWithdrawn, withdrawnDir)
 		},
 	}
 
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().BoolVar(&useWithdrawn, "use-withdrawn", false, "Use withdrawn APKINDEX files instead of live repositories")
+	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn APKINDEX files")
 
 	return cmd
 }
 
-func buildDeps(ctx context.Context, arch string) error {
+func buildDeps(ctx context.Context, arch string, useWithdrawn bool, withdrawnDir string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
-	log.Printf("Pre-computing build dependencies for architecture %s...", arch)
-
-	// Create resolved/build and unresolved/build directories if they don't exist
-	resolvedDir := filepath.Join("resolved", "build")
-	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating resolved/build directory: %w", err)
+	if useWithdrawn {
+		log.Printf("Pre-computing build dependencies for architecture %s using withdrawn indexes from %s...", arch, withdrawnDir)
+	} else {
+		log.Printf("Pre-computing build dependencies for architecture %s...", arch)
 	}
 
-	unresolvedDir := filepath.Join("unresolved", "build")
+	// Create output directories - use withdrawn-test prefix when testing with withdrawn indexes
+	var resolvedDir, unresolvedDir string
+	if useWithdrawn {
+		resolvedDir = filepath.Join("withdrawn-test", "resolved", "build")
+		unresolvedDir = filepath.Join("withdrawn-test", "unresolved", "build")
+	} else {
+		resolvedDir = filepath.Join("resolved", "build")
+		unresolvedDir = filepath.Join("unresolved", "build")
+	}
+
+	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
+		return fmt.Errorf("creating resolved build directory: %w", err)
+	}
+
 	if err := os.MkdirAll(unresolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating unresolved/build directory: %w", err)
+		return fmt.Errorf("creating unresolved build directory: %w", err)
 	}
 
 	// Get all melange configurations
@@ -64,10 +79,23 @@ func buildDeps(ctx context.Context, arch string) error {
 	cache := apk.NewCache(true)
 
 	// Build repository mapping for each directory
-	buildRepos := map[string][]string{
-		"os":                  []string{dirToRepo["os"]},
-		"extra-packages":      []string{dirToRepo["os"], dirToRepo["extra-packages"]},
-		"enterprise-packages": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
+	var buildRepos map[string][]string
+	if useWithdrawn {
+		// Use local withdrawn indexes instead of remote repositories
+		withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
+		buildRepos = map[string][]string{
+			"os":                  []string{withdrawnRepos["os"]},
+			"extra-packages":      []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"]},
+			"enterprise-packages": []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]},
+		}
+		log.Printf("Using withdrawn indexes from %s", withdrawnDir)
+	} else {
+		// Use normal remote repositories
+		buildRepos = map[string][]string{
+			"os":                  []string{dirToRepo["os"]},
+			"extra-packages":      []string{dirToRepo["os"], dirToRepo["extra-packages"]},
+			"enterprise-packages": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
+		}
 	}
 
 	// Process each repository directory
