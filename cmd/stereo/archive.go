@@ -19,8 +19,9 @@ import (
 
 func archiveCmd() *cobra.Command {
 	var (
-		durationDays int
-		arch         string
+		durationDays      int
+		arch              string
+		generateWithdrawn bool
 	)
 
 	cmd := &cobra.Command{
@@ -34,13 +35,14 @@ based on the following criteria:
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or other seeds`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			duration := time.Duration(durationDays * 24) * time.Hour
-			return archive(cmd.Context(), duration, arch)
+			duration := time.Duration(durationDays*24) * time.Hour
+			return archive(cmd.Context(), duration, arch, generateWithdrawn)
 		},
 	}
 
 	cmd.Flags().IntVar(&durationDays, "duration", 365, "Age threshold for archive candidates in days (default: 365)")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().BoolVar(&generateWithdrawn, "generate-withdrawn", false, "Generate withdrawn-packages.txt files for each repository")
 
 	return cmd
 }
@@ -72,7 +74,7 @@ type ArchiveContext struct {
 	Architecture    string                           // target architecture
 }
 
-func archive(ctx context.Context, duration time.Duration, arch string) error {
+func archive(ctx context.Context, duration time.Duration, arch string, generateWithdrawn bool) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -283,6 +285,13 @@ func archive(ctx context.Context, duration time.Duration, arch string) error {
 				log.Printf("Successfully wrote retained candidates for %s to %s", repo, retainFile)
 			}
 			file.Close()
+		}
+	}
+
+	// Generate withdrawn-packages.txt files if requested
+	if generateWithdrawn {
+		if err := generateWithdrawnPackagesFiles(candidatesByRepo); err != nil {
+			log.Printf("Warning: Error generating withdrawn-packages.txt files: %v", err)
 		}
 	}
 
@@ -847,4 +856,38 @@ func filterByVMDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, 
 	}
 
 	return filtered, retained, nil
+}
+
+func generateWithdrawnPackagesFiles(candidatesByRepo map[string][]ArchiveCandidate) error {
+	log.Printf("Generating withdrawn-packages.txt files for each repository...")
+
+	for repo, repoCandidates := range candidatesByRepo {
+		if len(repoCandidates) == 0 {
+			log.Printf("No archive candidates for %s, skipping withdrawn-packages.txt generation", repo)
+			continue
+		}
+
+		// Create the withdrawn-packages.txt file in the repository directory
+		withdrawnFile := filepath.Join(repo, "withdrawn-packages.txt")
+
+		file, err := os.Create(withdrawnFile)
+		if err != nil {
+			return fmt.Errorf("creating withdrawn-packages.txt file for %s: %w", repo, err)
+		}
+		defer file.Close()
+
+		log.Printf("Writing %d withdrawn packages to %s", len(repoCandidates), withdrawnFile)
+
+		// Write each package with the full APK filename (name-version.apk)
+		for _, candidate := range repoCandidates {
+			apkFileName := fmt.Sprintf("%s-%s.apk\n", candidate.Name, candidate.Version)
+			if _, err := file.WriteString(apkFileName); err != nil {
+				return fmt.Errorf("writing to withdrawn-packages.txt file for %s: %w", repo, err)
+			}
+		}
+
+		log.Printf("Successfully wrote withdrawn-packages.txt for %s with %d packages", repo, len(repoCandidates))
+	}
+
+	return nil
 }

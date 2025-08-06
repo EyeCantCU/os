@@ -75,9 +75,18 @@ The archive command analyzes packages across repositories and identifies candida
 
 Results (including reasons for archival or retention) are written to `archive/` and `retain/` directories as JSON files per repository.
 
+**Optional withdrawn-packages.txt generation:**
+
+```bash
+stereo archive --generate-withdrawn --duration 365 --arch x86_64
+```
+
+When `--generate-withdrawn` is used, the command will also create `withdrawn-packages.txt` files in each repository directory (`os/`, `extra-packages/`, `enterprise-packages/`) containing the full APK filenames (e.g., `firefox-127.0.2-r0.apk`) of packages identified for withdrawal.
+
 **Flags:**
 - `--duration`: Age threshold for archive candidates in days (default: 365 days)
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--generate-withdrawn`: Generate withdrawn-packages.txt files for each repository
 
 ## Repository Structure
 
