@@ -3,7 +3,7 @@
 # We can't use Chainguard Librarires here as the build fails with it
 vars:
   java-version: 21
-  bc-version: 1.80
+  bc-version: 1.81
 
 var-transforms:
   - from: ${{package.version}}
@@ -14,7 +14,7 @@ var-transforms:
 package:
   name: keycloak-operator-fips
   version: "26.3.2"
-  epoch: 0
+  epoch: 1
   description: A Kubernetes Operator based on the Operator SDK for installing and managing Keycloak.
   copyright:
     - license: Apache-2.0
@@ -52,8 +52,24 @@ pipeline:
       mkdir -p "${{targets.destdir}}"/usr/share/java
       cp -r target/quarkus-app "${{targets.destdir}}"/usr/share/java/
 
-      # Remove non-FIPS BouncyCastle JARs to ensure compliance and jar hell is not encountered
+  - name: Symlink BCFIPS JAR into the application classpath
+    runs: |
+      # Get bcprov-version from the files available in the quarkus-app/lib/main directory
+      bc_version=$(find "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main" -name 'org.bouncycastle.bcprov-jdk18on-*.jar' | sed -E 's/.*-(.*)\.jar/\1/')
+
+      if [ -z "${bc_version}" ]; then
+        echo "ERROR: Could not determine BouncyCastle version from the JARs in quarkus-app/lib/main"
+        exit 1
+      elif [ "${{vars.bc-version}}" != "${bc_version}" ]; then
+        echo "ERROR: BouncyCastle version mismatch: expected ${{vars.bc-version}}, found ${bc_version}"
+        exit 1
+      fi
+
+      echo "Found BouncyCastle version: ${bc_version}"
+
+      # Remove existing BouncyCastle JARs
       find "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main" -type f -name 'org.bouncycastle.bc*jdk*.jar' -delete
+
       # Symlink BCFIPS JAR into the application classpath
       # Please note that we can't get rid of this symlink as that is how the Keycloak Operator is built.
       ln -s /usr/share/java/bouncycastle-fips/bc-fips.jar "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main/org.bouncycastle.bcprov-jdk18on-${{vars.bc-version}}.jar"
@@ -69,10 +85,9 @@ subpackages:
 
 test:
   pipeline:
-    # it is unclear how to reliably test the operator without a full cluster deployment (which we do in the image test)
-    # so for now only verify that the JAR contains some key classes, like the kubernetes ones
     - runs: |
-        java -Xlog -jar /usr/share/java/quarkus-app/quarkus-run.jar | grep -q "End class verification for: io.quarkus.kubernetes.client.runtime.internal.KubernetesClientBuildConfig"
+        # This only runs in k8s with bcfks keystore creation and module getting loaded, hence covered in image tests but make sure it errors correctly
+        java -Djava.util.logging.manager=org.jboss.logmanager.LogManager -jar /usr/share/java/quarkus-app/quarkus-run.jar 2>&1 | grep "PKIX TrustManagerFactory not available"
 
 update:
   # The upstream repos releases contains a 'nightly' release. Which we want to
