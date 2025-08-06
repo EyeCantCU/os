@@ -24,6 +24,7 @@ ifeq ($(UNAME_M),arm64)
 UNAME_M = aarch64
 endif
 
+BUILDER ?= builder
 BUILDER_ARCH ?= $(UNAME_M)
 ARCH ?= $(BUILDER_ARCH)
 
@@ -130,9 +131,9 @@ builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
 	$(TOP_D)/apkoaas --log-level=debug make-builder --arch=$* iac/builder-debug.yaml $@
 
-builder/initrd-%: apkoaas iac/builder.yaml
+builder/initrd-%: apkoaas iac/$(BUILDER).yaml
 	@mkdir -p $(dir $@)
-	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder.yaml $@
+	$(TOP_D)/apkoaas make-builder --arch=$* iac/$(BUILDER).yaml $@
 
 builder/ovmf-%.fd: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* ovmf $@

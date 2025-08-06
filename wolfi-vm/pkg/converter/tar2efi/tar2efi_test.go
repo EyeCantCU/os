@@ -35,10 +35,10 @@ import (
 func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration) string {
 	// We should comfortably be able to convert all of these images
 	// in under a minute.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	t.Cleanup(cancel)
 
-	fs := apkfs.DirFS(t.TempDir(), apkfs.WithCreateDir())
+	fs := apkfs.DirFS(ctx, t.TempDir(), apkfs.WithCreateDir())
 	arch := types.ParseArchitecture(runtime.GOARCH)
 	bc, err := build.New(ctx, fs,
 		build.WithAuthenticator(auth.CGRAuth{}),

@@ -1,0 +1,175 @@
+#!/bin/bash
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [options] --name NAME package1 [package2 ...]
+
+  Generate cloud configuration directories for an application.
+  Creates configs for azure, aws, and gcp clouds based on specified styles.
+
+  options:
+    -h | --help           show this help
+    -v | --verbose        be more verbose
+         --name NAME      name for the configuration directories
+         --mode MODE      generation mode: copy or include (default: copy)
+                          copy: copies base config and adds packages
+                          include: uses apko include directive (deprecated)
+         --clouds CLOUDS  specify clouds (default: azure aws gcp)
+         --styles STYLES  base styles to use (default: base agents)
+
+  Examples:
+    ${0##*/} --name webserver nginx                         # creates aws-base-webserver, aws-agents-webserver, etc.
+    ${0##*/} --name database --styles "base" postgres       # creates only aws-base-database, etc.
+    ${0##*/} --name devtools --mode include git vim curl    # uses apko include directive
+
+  Environment:
+    The script expects yq to be available in PATH for YAML manipulation.
+
+EOF
+}
+
+error() { echo "$@" 1>&2; }
+
+bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || error "$@"; return 1; }
+
+main() {
+    if [ "$(uname)" == "Darwin" ]; then
+        if [ "$(which getopt)" == "/usr/bin/getopt" ]; then
+            echo "📎: It looks like you're trying to run this script on macOS!"
+            echo "However you need to install compatible tools."
+            echo "Please install gnu-getopt via 'brew install gnu-getopt'"
+            echo "And add it's path: /opt/homebrew/opt/gnu-getopt/bin before /usr/bin"
+            exit 1
+        fi
+    fi
+
+    local short_opts="hv"
+    local long_opts="help,verbose,name:,mode:,clouds:,styles:"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        bad_Usage
+
+    local clouds="azure aws gcp"
+    local styles="base agents"
+    local name=""
+    local mode="copy"
+    local verbosity=0
+
+    while [ $# -ne 0 ]; do
+        cur="$1"; next="$2"
+        case "$cur" in
+            -h|--help) Usage; exit 0;;
+            -v|--verbose) verbosity=$((verbosity+1));;
+               --name) name="$next"; shift;;
+               --mode) mode="$next"; shift;;
+               --clouds) clouds="$next"; shift;;
+               --styles) styles="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift
+    done
+
+    [ $# -ge 1 ] || bad_Usage "must provide at least one package name"
+
+    if [ -z "$name" ]; then
+        bad_Usage "must provide --name parameter"
+    fi
+
+    if [ "$mode" != "copy" ] && [ "$mode" != "include" ]; then
+        bad_Usage "mode must be either 'copy' or 'include'"
+    fi
+
+    local packages=("$@")
+
+    command -v yq >/dev/null 2>&1 || {
+        error "yq command not found in PATH"
+        return 1
+    }
+
+    for cloud in $clouds; do
+        for style in $styles; do
+            local config_dir="./configs/$cloud-$style-$name"
+            local base_dir="./configs/$cloud-$style"
+            local base_build="$base_dir/build.yaml"
+            local base_test="$base_dir/test.yaml"
+
+            if [ ! -f "$base_build" ]; then
+                error "base build config not found: $base_build"
+                return 1
+            fi
+
+            if [ ! -f "$base_test" ]; then
+                error "base test config not found: $base_test"
+                return 1
+            fi
+
+            [ $verbosity -ge 1 ] && error "creating config for $cloud-$style: $config_dir"
+
+            mkdir -p "$config_dir" || {
+                error "failed to create directory: $config_dir"
+                return 1
+            }
+
+            if [ "$mode" = "copy" ]; then
+                # Copy mode: Start with the base config and add packages
+                cp "$base_build" "$config_dir/build.yaml" || {
+                    error "failed to copy base build.yaml for $cloud-$style"
+                    return 1
+                }
+
+                # Add each package
+                for package in "${packages[@]}"; do
+                    yq -i ".contents.packages += [\"$package\"]" "$config_dir/build.yaml" || {
+                        error "failed to add package $package to build.yaml for $cloud-$style"
+                        return 1
+                    }
+                done
+            else
+                # Include mode: Create minimal config with include directive
+                # Include path is relative to where apko is run (typically project root)
+                local base_config_path="configs/$cloud-$style/build.yaml"
+
+                # Create the minimal YAML with include directive and new packages
+                cat > "$config_dir/build.yaml" <<EOF
+include: $base_config_path
+
+contents:
+  packages:
+EOF
+
+                # Add each package to the minimal config
+                for package in "${packages[@]}"; do
+                    yq -i ".contents.packages += [\"$package\"]" "$config_dir/build.yaml" || {
+                        error "failed to add package $package to build.yaml for $cloud-$style"
+                        return 1
+                    }
+                done
+            fi
+
+            yam "$config_dir/build.yaml" || {
+                error "Failed to format build.yaml for $cloud-$style"
+                return 1
+            }
+
+            ln -sf "../$cloud-$style/test.yaml" "$config_dir/test.yaml" || {
+                error "failed to create test.yaml symlink for $cloud-$style"
+                return 1
+            }
+            if [ "$cloud" = "aws" ]; then
+                local appdir="$cloud-$style-$name"
+                local appname="$style-$name"
+                for arch in x86_64 aarch64
+                do
+                    sed "s|{{APPDIR}}|$appdir|g;s|{{APPNAME}}|$appname|g" TEMPLATE/awspub/$arch/TEMPLATE.yaml > awspub/$arch/$appdir.yaml
+                done
+            fi
+        done
+    done
+
+    [ $verbosity -ge 1 ] && error "generated configs for: $clouds"
+    return 0
+}
+
+main "$@"

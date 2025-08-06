@@ -25,6 +25,7 @@ $(warning ****************************** WARNING ******************************)
 endif
 
 MELANGE_OPTS += --runner=${MELANGE_RUNNER}
+MELANGE_TEST_OPTS += --runner=${MELANGE_RUNNER}
 
 QEMU_KERNEL_IMAGE ?= kernel/$(ARCH)/vmlinuz
 ifeq (${MELANGE_RUNNER},qemu)
