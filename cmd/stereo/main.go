@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/apk"
+	"chainguard.dev/apko/pkg/apk/auth"
 	apko_build "chainguard.dev/apko/pkg/build"
 	apko_types "chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/build"
@@ -280,4 +282,31 @@ func formatDurationInDays(d time.Duration) string {
 		return fmt.Sprintf("%.0f days", days)
 	}
 	return d.String() // fallback for sub-day durations
+}
+
+// fetchAPKIndex downloads and parses an APKINDEX.tar.gz file from a repository
+func fetchAPKIndex(ctx context.Context, baseURL, arch string) (*apk.APKIndex, error) {
+	indexURL := fmt.Sprintf("%s/%s/APKINDEX.tar.gz", baseURL, arch)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	// Add authentication if needed
+	if err := auth.DefaultAuthenticators.AddAuth(ctx, req); err != nil {
+		return nil, fmt.Errorf("adding auth: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching index: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	return apk.IndexFromArchive(resp.Body)
 }

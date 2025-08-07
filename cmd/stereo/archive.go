@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/apk"
-	"chainguard.dev/apko/pkg/apk/auth"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
 )
@@ -336,32 +334,6 @@ func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]
 	}
 
 	return candidates, nil
-}
-
-func fetchAPKIndex(ctx context.Context, baseURL, arch string) (*apk.APKIndex, error) {
-	indexURL := fmt.Sprintf("%s/%s/APKINDEX.tar.gz", baseURL, arch)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	// Add authentication if needed
-	if err := auth.DefaultAuthenticators.AddAuth(ctx, req); err != nil {
-		return nil, fmt.Errorf("adding auth: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching index: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	return apk.IndexFromArchive(resp.Body)
 }
 
 func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arch string) (*ArchiveContext, error) {

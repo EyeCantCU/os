@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"chainguard.dev/apko/pkg/apk/apk"
-	"chainguard.dev/apko/pkg/apk/auth"
 	"chainguard.dev/melange/pkg/sign"
 	"github.com/spf13/cobra"
 	"golang.org/x/exp/slices"
@@ -79,7 +77,7 @@ func withdraw(ctx context.Context, arch, outDir, signingKey string) error {
 		log.Printf("Found %d packages to withdraw from %s", len(withdrawnPackages), repo)
 
 		// Download APKINDEX
-		index, err := downloadAPKIndex(ctx, repoURL, arch)
+		index, err := fetchAPKIndex(ctx, repoURL, arch)
 		if err != nil {
 			return fmt.Errorf("downloading APKINDEX for %s: %w", repo, err)
 		}
@@ -148,32 +146,6 @@ func loadWithdrawnPackages(filename string) (map[string]bool, error) {
 	}
 
 	return withdrawnPackages, nil
-}
-
-func downloadAPKIndex(ctx context.Context, baseURL, arch string) (*apk.APKIndex, error) {
-	indexURL := fmt.Sprintf("%s/%s/APKINDEX.tar.gz", baseURL, arch)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	// Add authentication if needed
-	if err := auth.DefaultAuthenticators.AddAuth(ctx, req); err != nil {
-		return nil, fmt.Errorf("adding auth: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("downloading index: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	return apk.IndexFromArchive(resp.Body)
 }
 
 func saveAPKIndex(ctx context.Context, index *apk.APKIndex, outputFile, signingKey string) error {
