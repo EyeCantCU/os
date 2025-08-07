@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
@@ -169,6 +170,7 @@ func imageDependencies(ctx context.Context, private bool, arch string, useWithdr
 	for pkg := range allPackages {
 		packageList = append(packageList, pkg)
 	}
+	sort.Strings(packageList)
 
 	// Create JSON structure
 	data := struct {

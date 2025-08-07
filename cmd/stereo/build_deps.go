@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
@@ -165,6 +166,9 @@ func buildDeps(ctx context.Context, arch string, useWithdrawn bool, withdrawnDir
 		if err := g.Wait(); err != nil {
 			return fmt.Errorf("error processing build dependencies for %s: %w", dir, err)
 		}
+
+		// Sort build dependencies for consistent output
+		sort.Strings(buildDependencies)
 
 		// Create JSON structure
 		data := struct {

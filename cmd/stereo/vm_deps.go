@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
@@ -153,11 +154,12 @@ func vmDependencies(ctx context.Context, arch string, useWithdrawn bool, withdra
 		return fmt.Errorf("error processing VM dependencies: %w", err)
 	}
 
-	// Convert set to slice
+	// Convert set to sorted slice
 	packageList := make([]string, 0, len(allPackages))
 	for pkg := range allPackages {
 		packageList = append(packageList, pkg)
 	}
+	sort.Strings(packageList)
 
 	// Create JSON structure
 	data := struct {
