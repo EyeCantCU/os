@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
@@ -115,6 +116,13 @@ func imageDependencies(ctx context.Context, private bool, arch string, useWithdr
 		Address string `json:"address"`
 		Error   string `json:"error"`
 	}, 0)
+
+	// Create subdirectory for detailed image info
+	detailDir := filepath.Join(resolvedDir, imageSet)
+	if err := os.MkdirAll(detailDir, 0755); err != nil {
+		return fmt.Errorf("creating detail directory %s: %w", detailDir, err)
+	}
+
 	var mu sync.Mutex
 
 	log.Printf("Resolving image dependencies for %s images...", imageSet)
@@ -148,6 +156,40 @@ func imageDependencies(ctx context.Context, private bool, arch string, useWithdr
 				mu.Unlock()
 
 				return nil // Don't fail the entire operation for one image
+			}
+
+			// Save individual image dependencies to detailed JSON file
+			sortedPkgs := make([]string, len(packages))
+			copy(sortedPkgs, packages)
+			sort.Strings(sortedPkgs)
+
+			// Clean the address to create a safe filename
+			safeAddr := strings.ReplaceAll(strings.ReplaceAll(currentAddr, "/", "_"), ":", "_")
+			imageDetailFile := filepath.Join(detailDir, fmt.Sprintf("%s.json", safeAddr))
+			imageData := struct {
+				Address       string   `json:"address"`
+				RepositorySet string   `json:"repository_set"`
+				Architecture  string   `json:"architecture"`
+				Dependencies  []string `json:"dependencies"`
+			}{
+				Address:       currentAddr,
+				RepositorySet: imageSet,
+				Architecture:  arch,
+				Dependencies:  sortedPkgs,
+			}
+
+			if err := func() error {
+				file, err := os.Create(imageDetailFile)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+
+				encoder := json.NewEncoder(file)
+				encoder.SetIndent("", "  ")
+				return encoder.Encode(imageData)
+			}(); err != nil {
+				log.Printf("Warning: failed to write detailed dependencies for %s: %v", currentAddr, err)
 			}
 
 			// Add all packages to the set (with mutex protection)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
@@ -104,6 +105,13 @@ func vmDependencies(ctx context.Context, arch string, useWithdrawn bool, withdra
 		ConfigPath string `json:"config_path"`
 		Error      string `json:"error"`
 	}, 0)
+
+	// Create subdirectory for detailed VM info
+	detailDir := filepath.Join(resolvedDir, "vms")
+	if err := os.MkdirAll(detailDir, 0755); err != nil {
+		return fmt.Errorf("creating detail directory %s: %w", detailDir, err)
+	}
+
 	var mu sync.Mutex
 
 	log.Printf("Resolving VM dependencies...")
@@ -137,6 +145,38 @@ func vmDependencies(ctx context.Context, arch string, useWithdrawn bool, withdra
 				mu.Unlock()
 
 				return nil // Don't fail the entire operation for one VM
+			}
+
+			// Save individual VM dependencies to detailed JSON file
+			sortedPkgs := make([]string, len(packages))
+			copy(sortedPkgs, packages)
+			sort.Strings(sortedPkgs)
+
+			// Clean the path to create a safe filename
+			safePath := strings.ReplaceAll(strings.ReplaceAll(currentPath, "/", "_"), ":", "_")
+			vmDetailFile := filepath.Join(detailDir, fmt.Sprintf("%s.json", safePath))
+			vmData := struct {
+				ConfigPath   string   `json:"config_path"`
+				Architecture string   `json:"architecture"`
+				Dependencies []string `json:"dependencies"`
+			}{
+				ConfigPath:   currentPath,
+				Architecture: arch,
+				Dependencies: sortedPkgs,
+			}
+
+			if err := func() error {
+				file, err := os.Create(vmDetailFile)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+
+				encoder := json.NewEncoder(file)
+				encoder.SetIndent("", "  ")
+				return encoder.Encode(vmData)
+			}(); err != nil {
+				log.Printf("Warning: failed to write detailed dependencies for %s: %v", currentPath, err)
 			}
 
 			// Add all packages to the set (with mutex protection)

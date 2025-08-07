@@ -113,6 +113,13 @@ func buildDeps(ctx context.Context, arch string, useWithdrawn bool, withdrawnDir
 			Package string `json:"package"`
 			Error   string `json:"error"`
 		}, 0)
+
+		// Create subdirectory for detailed package info
+		detailDir := filepath.Join(resolvedDir, dir)
+		if err := os.MkdirAll(detailDir, 0755); err != nil {
+			return fmt.Errorf("creating detail directory %s: %w", detailDir, err)
+		}
+
 		var mu sync.Mutex
 
 		// Process melange configurations in parallel
@@ -147,6 +154,38 @@ func buildDeps(ctx context.Context, arch string, useWithdrawn bool, withdrawnDir
 					mu.Unlock()
 
 					return nil // Don't fail the entire operation for one config
+				}
+
+				// Save individual package dependencies to detailed JSON file
+				sortedDeps := make([]string, len(buildDeps))
+				copy(sortedDeps, buildDeps)
+				sort.Strings(sortedDeps)
+
+				packageDetailFile := filepath.Join(detailDir, fmt.Sprintf("%s.json", currentPkgName))
+				packageData := struct {
+					Package      string   `json:"package"`
+					Repository   string   `json:"repository"`
+					Architecture string   `json:"architecture"`
+					Dependencies []string `json:"dependencies"`
+				}{
+					Package:      currentPkgName,
+					Repository:   dir,
+					Architecture: arch,
+					Dependencies: sortedDeps,
+				}
+
+				if err := func() error {
+					file, err := os.Create(packageDetailFile)
+					if err != nil {
+						return err
+					}
+					defer file.Close()
+
+					encoder := json.NewEncoder(file)
+					encoder.SetIndent("", "  ")
+					return encoder.Encode(packageData)
+				}(); err != nil {
+					log.Printf("Warning: failed to write detailed dependencies for %s: %v", currentPkgName, err)
 				}
 
 				// Add all build dependencies to our set (with mutex protection)
