@@ -5,22 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/apk"
-	"chainguard.dev/apko/pkg/apk/auth"
 	"chainguard.dev/melange/pkg/config"
 	"github.com/spf13/cobra"
 )
 
 func archiveCmd() *cobra.Command {
 	var (
-		durationDays int
-		arch         string
+		durationDays      int
+		arch              string
+		generateWithdrawn bool
 	)
 
 	cmd := &cobra.Command{
@@ -34,13 +34,14 @@ based on the following criteria:
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or other seeds`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			duration := time.Duration(durationDays * 24) * time.Hour
-			return archive(cmd.Context(), duration, arch)
+			duration := time.Duration(durationDays*24) * time.Hour
+			return archive(cmd.Context(), duration, arch, generateWithdrawn)
 		},
 	}
 
 	cmd.Flags().IntVar(&durationDays, "duration", 365, "Age threshold for archive candidates in days (default: 365)")
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().BoolVar(&generateWithdrawn, "generate-withdrawn", false, "Generate withdrawn-packages.txt files for each repository")
 
 	return cmd
 }
@@ -72,7 +73,7 @@ type ArchiveContext struct {
 	Architecture    string                           // target architecture
 }
 
-func archive(ctx context.Context, duration time.Duration, arch string) error {
+func archive(ctx context.Context, duration time.Duration, arch string, generateWithdrawn bool) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -286,6 +287,13 @@ func archive(ctx context.Context, duration time.Duration, arch string) error {
 		}
 	}
 
+	// Generate withdrawn-packages.txt files if requested
+	if generateWithdrawn {
+		if err := generateWithdrawnPackagesFiles(candidatesByRepo); err != nil {
+			log.Printf("Warning: Error generating withdrawn-packages.txt files: %v", err)
+		}
+	}
+
 	log.Printf("Archive analysis complete. Results written to %s/, retained packages written to %s/", archiveDir, retainDir)
 	return nil
 }
@@ -326,32 +334,6 @@ func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]
 	}
 
 	return candidates, nil
-}
-
-func fetchAPKIndex(ctx context.Context, baseURL, arch string) (*apk.APKIndex, error) {
-	indexURL := fmt.Sprintf("%s/%s/APKINDEX.tar.gz", baseURL, arch)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	// Add authentication if needed
-	if err := auth.DefaultAuthenticators.AddAuth(ctx, req); err != nil {
-		return nil, fmt.Errorf("adding auth: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching index: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	return apk.IndexFromArchive(resp.Body)
 }
 
 func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arch string) (*ArchiveContext, error) {
@@ -847,4 +829,47 @@ func filterByVMDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, 
 	}
 
 	return filtered, retained, nil
+}
+
+func generateWithdrawnPackagesFiles(candidatesByRepo map[string][]ArchiveCandidate) error {
+	log.Printf("Generating withdrawn-packages.txt files for each repository...")
+
+	for repo, repoCandidates := range candidatesByRepo {
+		if len(repoCandidates) == 0 {
+			log.Printf("No archive candidates for %s, skipping withdrawn-packages.txt generation", repo)
+			continue
+		}
+
+		// Create the withdrawn-packages.txt file in the repository directory
+		withdrawnFile := filepath.Join(repo, "withdrawn-packages.txt")
+
+		file, err := os.Create(withdrawnFile)
+		if err != nil {
+			return fmt.Errorf("creating withdrawn-packages.txt file for %s: %w", repo, err)
+		}
+		defer file.Close()
+
+		log.Printf("Writing %d withdrawn packages to %s", len(repoCandidates), withdrawnFile)
+
+		// Create sorted list of APK filenames
+		var apkFileNames []string
+		for _, candidate := range repoCandidates {
+			apkFileName := fmt.Sprintf("%s-%s.apk", candidate.Name, candidate.Version)
+			apkFileNames = append(apkFileNames, apkFileName)
+		}
+
+		// Sort the APK filenames alphabetically
+		sort.Strings(apkFileNames)
+
+		// Write each sorted APK filename
+		for _, apkFileName := range apkFileNames {
+			if _, err := file.WriteString(apkFileName + "\n"); err != nil {
+				return fmt.Errorf("writing to withdrawn-packages.txt file for %s: %w", repo, err)
+			}
+		}
+
+		log.Printf("Successfully wrote withdrawn-packages.txt for %s with %d packages", repo, len(repoCandidates))
+	}
+
+	return nil
 }

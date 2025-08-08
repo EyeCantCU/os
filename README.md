@@ -16,6 +16,8 @@ This command finds all APKO `build.yaml` configurations under `wolfi-vm/configs/
 
 **Flags:**
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
+- `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
 ### image-dependencies
 
@@ -44,6 +46,8 @@ This command reads Terraform JSON from stdin, parses all apko_build configuratio
 **Flags:**
 - `--private`: Set for images-private (includes enterprise-packages)
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
+- `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
 ### build-dependencies
 
@@ -57,6 +61,8 @@ This command pre-computes and caches the build dependencies for all melange conf
 
 **Flags:**
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
+- `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
 ### archive
 
@@ -75,9 +81,74 @@ The archive command analyzes packages across repositories and identifies candida
 
 Results (including reasons for archival or retention) are written to `archive/` and `retain/` directories as JSON files per repository.
 
+**Optional withdrawn-packages.txt generation:**
+
+```bash
+stereo archive --generate-withdrawn --duration 365 --arch x86_64
+```
+
+When `--generate-withdrawn` is used, the command will also create `withdrawn-packages.txt` files in each repository directory (`os/`, `extra-packages/`, `enterprise-packages/`) containing the full APK filenames (e.g., `firefox-127.0.2-r0.apk`) of packages identified for withdrawal. The files are sorted alphabetically for consistent output.
+
 **Flags:**
 - `--duration`: Age threshold for archive candidates in days (default: 365 days)
 - `--arch`: Architecture to evaluate (default: x86_64)
+- `--generate-withdrawn`: Generate withdrawn-packages.txt files for each repository
+
+### withdraw
+
+Downloads the latest APKINDEX.tar.gz files from each repository, removes packages listed in withdrawn-packages.txt files, and saves the modified indexes to a local directory.
+
+```bash
+stereo withdraw --arch x86_64 --output-dir withdrawn-indexes --signing-key melange.rsa
+```
+
+This command processes each repository that has a withdrawn-packages.txt file:
+- Downloads the current APKINDEX.tar.gz for the specified architecture
+- Removes all packages listed in the repository's withdrawn-packages.txt file
+- Signs the modified APKINDEX with the specified RSA key
+- Saves the signed APKINDEX.tar.gz to subdirectories organized by repo and architecture
+- Provides detailed logging of the withdrawal process
+
+The modified indexes are saved in a structured directory layout:
+```
+withdrawn-indexes/
+├── os/x86_64/APKINDEX.tar.gz
+├── extra-packages/x86_64/APKINDEX.tar.gz
+└── enterprise-packages/x86_64/APKINDEX.tar.gz
+```
+
+The modified indexes can be used to replace the original indexes in the repositories to actually withdraw the packages.
+
+**Flags:**
+- `--arch`: Architecture to process (default: x86_64)
+- `--output-dir`: Output directory for modified APKINDEX files (default: withdrawn-indexes)
+- `--signing-key`: The signing key to use for signing the modified APKINDEX (default: melange.rsa)
+
+## Testing with Withdrawn Packages
+
+All `*-dependencies` commands support testing with withdrawn package indexes to validate the impact of package withdrawals before deploying changes to production repositories.
+
+### Usage Example
+
+```bash
+# 1. Generate withdrawn package lists
+stereo archive --generate-withdrawn --duration 365 --arch x86_64
+
+# 2. Create modified APKINDEX files with packages removed
+stereo withdraw --arch x86_64 --output-dir withdrawn-indexes --signing-key melange.rsa
+
+# 3. Test impact on build dependencies
+stereo build-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
+
+# 4. Test impact on image dependencies  
+cat public-images.tfplan.json | stereo image-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
+cat private-images.tfplan.json | stereo image-dependencies --private --use-withdrawn --withdrawn-dir withdrawn-indexes
+
+# 5. Test impact on VM dependencies
+stereo vm-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
+```
+
+The `--use-withdrawn` flag makes the commands use local withdrawn APKINDEX files instead of fetching from live repositories, allowing you to test dependency resolution against the modified package sets. When using `--use-withdrawn`, results are written to `withdrawn-test/resolved/` and `withdrawn-test/unresolved/` directories to avoid overwriting normal dependency results.
 
 ## Repository Structure
 
@@ -93,5 +164,8 @@ The tool operates on three main repositories:
   - `images/`: Image dependencies (public/private)
   - `vms/`: VM dependencies
 - `unresolved/`: Contains packages that failed to resolve
+- `withdrawn-test/`: Test results when using withdrawn indexes
+  - `resolved/`: Successfully resolved dependencies with withdrawn packages
+  - `unresolved/`: Packages that failed to resolve with withdrawn packages
 - `archive/`: Archive candidates per repository
 - `retain/`: Packages retained from archival per repository
