@@ -9,10 +9,10 @@
 package:
   name: elasticsearch-fips-9
   version: "9.1.0"
-  epoch: 0
+  epoch: 1
   description:
   copyright:
-    - license: SSPL-1.0 AND Elastic-2.0
+    - license: AGPL-3.0-or-later OR SSPL-1.0 OR Elastic-2.0
   resources:
     cpu: 6
     memory: 30Gi
@@ -40,7 +40,7 @@ environment:
     JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8"
   contents:
     packages:
-      - bouncycastle-fips~2.0
+      - bouncycastle-fips
       - build-base
       - busybox
       - libudev
@@ -62,7 +62,14 @@ pipeline:
 
   - uses: patch
     with:
-      patches: update-reactor-netty.patch
+      patches: |
+        update-reactor-netty.patch
+        0001-entitlements-Grant-entitlements-for-bc-fips-2.1-comp.patch
+        0002-tls-fips-hardening.patch
+        0003-x-pack-add-bcmail-fips-entitlement.patch
+        0004-Fix-entitlements-for-cacerts.patch
+        0005-Make-xpack-settings-default-to-FIPS.patch
+        0006-Provide-correct-FIPS-140-3-approved-service-indicato.patch
 
   - uses: auth/gradle
 
@@ -265,15 +272,16 @@ test:
 
         chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
 
+        JAVA_TOOL_OPTIONS='--module-path=/usr/share/java/bouncycastle-fips' \
         keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
         -alias "localhost" \
         -genkeypair \
-        -keyalg DSA \
+        -keyalg RSA \
         -dname CN="localhost" \
+        -ext ku:c=dig,keyEncipherment \
+        -ext san=dns:localhost,ip:127.0.0.1,ip:0:0:0:0:0:0:0:1 \
         -storetype bcfks \
-        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD \
-        -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
-        -providerpath /usr/share/java/bouncycastle-fips/bc-fips.jar
+        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
 
         cat >>/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
         cluster.name: "docker-cluster"
@@ -317,32 +325,21 @@ test:
 
         kill $(cat /tmp/elasticsearch.pid)
 
-        # Check for unexpected WARN messages: ignoring, respectively,
-        # entitlement-related warnings, warnings emitted when auth fails,
-        # clustering failure (due to not coming up), and stat retrieval failure
-        # (ibid), and some unknown SLF4J failures
+        # Filter out known warnings
         unexpected_warns="$(grep WARN /usr/share/elasticsearch/logs/docker-cluster.log \
-          | grep -Ev "(Not entitled|Skipped default trust store)" \
-          | grep -v "exception caught on transport layer" \
-          | grep -v "master not discovered" \
-          | grep -v "failed to retrieve stats for node" \
           | grep -v "SLF4J: No SLF4J providers were found" \
           | grep -v "SLF4J: Defaulting to no-operation (NOP) logger implementation" \
           | grep -v "SLF4J: See https://www.slf4j.org/codes.html#noProviders for further details" \
           | wc -l)"
         [ ${unexpected_warns} = "0" ]
 
-        # Check for unexpected ERROR messages: these are all caused by the
-        # cluster never properly coming up
+        # There should be no errors
         unexpected_errors="$(grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log \
-          | grep -Ev "error adding (lifecycle|ingest)" \
-          | grep -v "unsupported ciphers" \
-          | grep -v "unable to install token metadata" \
-          | grep -v "failed to create geoip downloader task" \
           | wc -l)"
         [ ${unexpected_errors} = "0" ]
 
-        exit 0  # TODO: execute the rest of the test if we can get an entitlement figured out
+        # although the below should start working with trial license and enabling xpack security
+        exit 0
 
         # Reset the password
         ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b << EOF | grep 'New value' | awk '{print $3}'
