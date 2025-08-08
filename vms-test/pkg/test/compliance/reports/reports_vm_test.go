@@ -83,6 +83,9 @@ func TestGenerateCISBenchmarkComplianceReport(t *testing.T) {
 
 	// Ensure OpenSCAP is installed
 	if _, err := exec.LookPath("oscap"); err != nil {
+		if _, err := exec.LookPath("apk"); err != nil {
+			t.Skip("OpenSCAP not installed and apk not available to install it")
+		}
 		t.Log("OpenSCAP not found, installing...")
 		installCmd := exec.CommandContext(ctx, "apk", "add", "openscap")
 		if output, err := installCmd.CombinedOutput(); err != nil {
