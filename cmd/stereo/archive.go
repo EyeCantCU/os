@@ -32,7 +32,7 @@ based on the following criteria:
 - No reverse dependencies across any archive
 - Not the most recent version if still built from origin melange configuration
 - Not a reverse build dependency for any current melange configurations
-- Not still in use in images, VMs, or other seeds`,
+- Not still in use in images, VMs, or manual seed dependencies`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			duration := time.Duration(durationDays*24) * time.Hour
 			return archive(cmd.Context(), duration, arch, generateWithdrawn)
@@ -144,6 +144,16 @@ func archive(ctx context.Context, duration time.Duration, arch string, generateW
 	retainedPackages = append(retainedPackages, retained...)
 
 	log.Printf("After filtering VM dependencies: %d packages remain", len(filtered))
+	candidates = filtered
+
+	// Step 8: Filter out packages that are manual seed dependencies
+	filtered, retained, err = filterBySeedDependencies(candidates)
+	if err != nil {
+		return fmt.Errorf("filtering by seed dependencies: %w", err)
+	}
+	retainedPackages = append(retainedPackages, retained...)
+
+	log.Printf("After filtering seed dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
 	// Create archive and retain directories if they don't exist
@@ -827,6 +837,67 @@ func filterByVMDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, 
 		candidate.Reasons = append(candidate.Reasons, "not used by VMs")
 		filtered = append(filtered, candidate)
 	}
+
+	return filtered, retained, nil
+}
+
+func filterBySeedDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
+	log.Println("Checking for seed dependencies...")
+
+	// Load cached seed dependencies from resolved/seeds/ directory
+	seedDependencies := make(map[string]bool) // package=version -> true if it's a seed dependency
+
+	seedDepsFile := filepath.Join("resolved", "seeds.json")
+
+	if _, err := os.Stat(seedDepsFile); os.IsNotExist(err) {
+		log.Printf("Warning: Seed dependencies file not found: %s. Run 'stereo seed-dependencies' first if using manual seeds.", seedDepsFile)
+	} else {
+		file, err := os.Open(seedDepsFile)
+		if err != nil {
+			log.Printf("Warning: Could not open seed dependencies file %s: %v", seedDepsFile, err)
+		} else {
+			defer file.Close()
+
+			var data struct {
+				Architecture     string   `json:"architecture"`
+				SeedDependencies []string `json:"seed_dependencies"`
+			}
+
+			if err := json.NewDecoder(file).Decode(&data); err != nil {
+				log.Printf("Warning: Could not decode seed dependencies file %s: %v", seedDepsFile, err)
+			} else {
+				log.Printf("Loaded %d seed dependencies", len(data.SeedDependencies))
+				for _, dep := range data.SeedDependencies {
+					seedDependencies[dep] = true
+				}
+			}
+		}
+	}
+
+	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
+
+	for _, candidate := range candidates {
+		packageKey := fmt.Sprintf("%s=%s", candidate.Name, candidate.Version)
+
+		if seedDependencies[packageKey] {
+			// This package is a seed dependency, retain it
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "used by manual seeds",
+			})
+		} else {
+			// Not a seed dependency, continue filtering
+			candidate.Reasons = append(candidate.Reasons, "not used by seeds")
+			filtered = append(filtered, candidate)
+		}
+	}
+
+	log.Printf("Filtered out %d candidates that are seed dependencies", len(retained))
+	log.Printf("Remaining candidates after seed filtering: %d", len(filtered))
 
 	return filtered, retained, nil
 }

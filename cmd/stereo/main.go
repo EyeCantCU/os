@@ -62,6 +62,7 @@ func main() {
 	root.AddCommand(buildDepsCmd())
 	root.AddCommand(imageDependenciesCmd())
 	root.AddCommand(vmDependenciesCmd())
+	root.AddCommand(seedDependenciesCmd())
 	root.AddCommand(withdrawCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
