@@ -23,6 +23,9 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
+// the const in godbus is outdated (refers to /var/run
+const defaultSystemBusAddress = "unix:path=/run/dbus/system_bus_socket"
+
 // Wrapper to add helper methods that render native types in a simpler way.
 type Variant struct {
 	v *dbus.Variant
@@ -51,7 +54,7 @@ func (va Variant) AsInt() (int, error) {
 }
 
 func Connect(ctx context.Context) (*Conn, error) {
-	conn, err := dbus.SystemBusPrivate(dbus.WithContext(ctx))
+	conn, err := dbus.Dial(defaultSystemBusAddress, dbus.WithContext(ctx))
 	if err != nil {
 		return nil, err
 	}

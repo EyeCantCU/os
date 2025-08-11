@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# To fetch the last test results from CI, do ./hack/fetch-test-result -c aws
+# To fetch test results for a specific architecture, do ./hack/fetch-test-result -c azure -a x86_64
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/}
+
+  Fetch test results for latest VM tests from GitHub Actions.
+
+    options:
+
+           -c|--cloud           CLOUD   cloud provider (aws, azure, gcp, qemu)
+           -a|--arch            ARCH    fetch results for ARCH (x86_64, aarch64) (default: uname -m)
+           -r|--run-id          RUN_ID  specific workflow run ID to fetch
+           -o|--output-dir      DIR     output directory (default: test-results)
+
+  Fetch latest test results from GitHub Actions and extract them locally.
+
+EOF
+}
+
+stderr() { echo "$@" 1>&2; }
+
+main() {
+    local short_opts="-h,c:,a:,r:,o:"
+    local long_opts="help,cloud:,arch:,run-id:,output-dir:"
+    local getopt_out=""
+    # shellcheck disable=SC2015
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { Usage 1>&2; return 1; }
+
+    local cloud="" arch="" run_id="" output_dir="test-results"
+    arch="$(uname -m)"
+
+    while [ $# -ne 0 ]; do
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -c|--cloud) cloud="$next"; shift;;
+            -a|--arch) arch="$next"; shift;;
+            -r|--run-id) run_id="$next"; shift;;
+            -o|--output-dir) output_dir="$next"; shift;;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ -n "$cloud" ] || { stderr "--cloud is required"; return 1; }
+
+    case "$cloud" in
+        aws|azure|gcp|qemu) ;;
+        *) stderr "unsupported cloud '$cloud'. Use: aws, azure, gcp, qemu"; return 1;;
+    esac
+
+    case "$arch" in
+        x86_64|aarch64) ;;
+        *) stderr "unsupported arch '$arch'. Use: x86_64, aarch64"; return 1;;
+    esac
+
+    # Check if gh CLI is available
+    if ! command -v gh >/dev/null 2>&1; then
+        stderr "gh CLI is required but not installed."
+        return 1
+    fi
+
+    local repo="chainguard-dev/wolfi-vm"
+    local workflow_file="build-publish-$cloud.yaml"
+
+    echo "Fetching test results for $cloud cloud provider..."
+
+    if [ -n "$run_id" ]; then
+        echo "Using specific run ID: $run_id"
+    else
+        echo "Finding latest successful workflow run with artifacts for $workflow_file..."
+        local candidate_runs=""
+        candidate_runs=$(gh run list \
+            --repo "$repo" \
+            --workflow "$workflow_file" \
+            --limit 10 \
+            --json databaseId \
+            --jq '.[].databaseId')
+
+        if [ -z "$candidate_runs" ]; then
+            stderr "No successful workflow runs found for $workflow_file"
+            return 1
+        fi
+
+        # Find the first run that has artifacts
+        for candidate_run in $candidate_runs; do
+            local artifact_count=""
+            artifact_count=$(gh api repos/$repo/actions/runs/"$candidate_run"/artifacts --jq '.artifacts | length' 2>/dev/null)
+            if [ "$artifact_count" -gt 0 ] 2>/dev/null; then
+                run_id="$candidate_run"
+                echo "Found latest run with artifacts: $run_id"
+                break
+            fi
+        done
+
+        if [ -z "$run_id" ]; then
+            stderr "No successful workflow runs with artifacts found for $workflow_file"
+            return 1
+        fi
+    fi
+
+    # Create output directory
+    mkdir -p "$output_dir"
+
+    # List and download artifacts
+    echo "Listing artifacts for run $run_id..."
+    local artifacts=""
+    artifacts=$(gh api "repos/$repo/actions/runs/$run_id/artifacts" --jq '.artifacts[].name' 2>/dev/null)
+
+    if [ -z "$artifacts" ]; then
+        stderr "No artifacts found for run $run_id"
+        return 1
+    fi
+
+    local downloaded=0
+    local artifact_name=""
+    for artifact_name in $artifacts; do
+        # Check if this artifact matches our criteria
+        if [[ "$artifact_name" == test-results-* ]]; then
+            # Filter by architecture
+            if [[ "$artifact_name" != *"$arch"* ]]; then
+                continue
+            fi
+
+            echo "Downloading artifact: $artifact_name"
+
+            # Check if artifact is a zip file and handle accordingly
+            local temp_dir=""
+            temp_dir=$(mktemp -d)
+            gh run download "$run_id" \
+                --repo "$repo" \
+                --name "$artifact_name" \
+                --dir "$temp_dir" || {
+                stderr "Failed to download artifact $artifact_name"
+                rm -rf "$temp_dir"
+                continue
+            }
+
+            mkdir -p "$output_dir"
+            mv "$temp_dir"/* "$output_dir/"
+            rmdir "$temp_dir"
+            downloaded=$((downloaded + 1))
+        fi
+    done
+
+    if [ $downloaded -eq 0 ]; then
+        stderr "No test result artifacts found matching criteria"
+        return 1
+    fi
+
+    echo "Successfully downloaded $downloaded test result artifact(s) to $output_dir/"
+    echo "Test results are now available in: $output_dir/"
+
+    return 0
+}
+
+main "$@"
