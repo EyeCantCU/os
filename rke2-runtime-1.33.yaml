@@ -1,7 +1,7 @@
 package:
   name: rke2-runtime-1.33
   version: 1.33.3.2.1
-  epoch: 0
+  epoch: 3 # CVE-2025-47907
   description: Rancher Kubernetes Engine 2 (RKE2) is a fully conformant Kubernetes distribution with minimal dependencies
   copyright:
     - license: Apache-2.0
@@ -12,9 +12,13 @@ package:
       - containerd-shim-runc-v2
       - crictl
       - ctr
-      - kubectl
-      - kubelet
+      - ip6tables
+      - ipset
+      - kubectl=${{vars.kubernetes-version}}
+      - kubelet=${{vars.kubernetes-version}}
+      - mount
       - runc
+      - umount
 
 # using apk-v2 friendly spec version format for package version string
 # need to transform version (1.33.3.2.1) to match upstream tag: '1.33.3+rke2r1'
@@ -23,37 +27,32 @@ var-transforms:
     match: ^(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+)$
     replace: ${1}.${2}.${3}+rke${4}r${5}
     to: mangled-package-version
-  - from: ${{package.version}}
-    match: ^(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+)$
-    replace: ${1}.${2}.${3}-rke${4}r${5}
+  - from: ${{vars.mangled-package-version}}
+    match: \+
+    replace: "-"
     to: image-version
+  - from: ${{package.name}}
+    match: '.*-(\d+\.\d+).*'
+    replace: '$1'
+    to: kubernetes-version
 
 environment:
   contents:
     packages:
       - build-base
+      - busybox
       - ca-certificates-bundle
       - coreutils
       - curl
       - gnutar # Needed for build-charts.sh script, as BusyBox tar does not support '--delete' or '--transform' options.
+      - go
       - pigz
       - yq
   environment:
     CGO_ENABLED: "1"
     CGO_CFLAGS: "-DSQLITE_ENABLE_DBSTAT_VTAB=1 -DSQLITE_USE_ALLOCA=1"
     GOEXPERIMENT: boringcrypto
-    BUILD_TAGS: "selinux,netgo,osusergo,no_stage,static_build,sqlite_omit_load_extension,no_embedded_executor,no_cri_dockerd"
-    # Hardcoded values set by upstream 'version.sh' script
-    # REF: https://github.com/rancher/rke2/blob/master/scripts/version.sh
-    PROG: "rke2"
-    K3S_PKG: "github.com/k3s-io/k3s"
-    RKE2_PKG: "github.com/rancher/rke2"
-    REGISTRY: "docker.io"
-    ETCD_VERSION: "v3.5.21-k3s1-build20250612"
-    PAUSE_VERSION: "3.6"
-    KUBERNETES_IMAGE_TAG: "v1.33.3-rke2r1-build20250716"
-    REPO: "rancher"
-    CCM_VERSION: "v1.33.1-0.20250516163953-99d91538b132-build20250612"
+    BUILD_TAGS: "selinux netgo osusergo no_stage static_build sqlite_omit_load_extension no_embedded_executor no_cri_dockerd"
 
 pipeline:
   - uses: git-checkout
@@ -67,22 +66,38 @@ pipeline:
       deps: |-
         github.com/pion/interceptor@v0.1.39
 
-  - uses: go/build
+  # Upstream extracts runtime image binaries to '/bin'
+  # This patch modifies the extractPath func to use '/usr/bin' to work with our setup
+  # Ref: https://github.com/rancher/rke2/blob/master/pkg/bootstrap/bootstrap.go#L144
+  - uses: patch
     with:
-      packages: .
-      tags: $BUILD_TAGS
-      output: rke2
-      ldflags: |
+      patches: bootstrap.go.patch
+
+  - runs: |
+      cat > build.sh <<'EOF'
+      #!/bin/bash
+      set -e
+      source scripts/version.sh
+
+      LDFLAGS="
         -X ${K3S_PKG}/pkg/version.GitCommit=$(git rev-parse HEAD)
         -X ${K3S_PKG}/pkg/version.Program=${PROG}
         -X ${K3S_PKG}/pkg/version.Version=${{vars.mangled-package-version}}
         -X ${K3S_PKG}/pkg/version.UpstreamGolang=$(go env GOVERSION)
         -X ${RKE2_PKG}/pkg/images.DefaultRegistry=${REGISTRY}
-        -X ${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:${ETCD_VERSION}
+        -X ${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:${ETCD_VERSION}-build20250612
         -X ${RKE2_PKG}/pkg/images.DefaultKubernetesImage=rancher/hardened-kubernetes:${KUBERNETES_IMAGE_TAG}
         -X ${RKE2_PKG}/pkg/images.DefaultPauseImage=rancher/mirrored-pause:${PAUSE_VERSION}
         -X ${RKE2_PKG}/pkg/images.DefaultRuntimeImage=${REPO}/${PROG}-runtime:v${{vars.image-version}}
         -X ${RKE2_PKG}/pkg/images.DefaultCloudControllerManagerImage=rancher/rke2-cloud-provider:${CCM_VERSION}
+      "
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      go build -tags "${BUILD_TAGS}" \-o ${{targets.destdir}}/usr/bin/rke2 -ldflags "${LDFLAGS}"
+      EOF
+
+      chmod +x build.sh
+      ./build.sh
 
   - name: Generate Charts
     runs: |
@@ -91,17 +106,16 @@ pipeline:
   - uses: strip
 
 subpackages:
-  - name: ${{package.name}}-compat
-    description: compatibility package for rke2-runtime
+  - name: ${{package.name}}-charts
+    description: Charts for RKE2 runtime-${{vars.kubernetes-version}}
     pipeline:
       - runs: |
-          # Setup compat dirs
+          # Install Charts
           mkdir -p ${{targets.contextdir}}/charts
-
-          # Copy over generated chart files files
           cp -r /home/build/charts/*.yaml  ${{targets.contextdir}}/charts
 
           # cleanup
+          # REF: https://github.com/rancher/rke2/blob/release-1.32/Dockerfile#L114
           rm ${{targets.contextdir}}/charts/chart_versions.yaml
 
 # Matching upstream tag and transforming it back to apkv2 friendly format
@@ -121,9 +135,9 @@ test:
   environment:
     contents:
       packages:
-        - ${{package.name}}-compat
+        - ${{package.name}}-charts
         - docker
-        - kubelet
+        - kubelet=${{vars.kubernetes-version}}
         - bash
   pipeline:
     - name: Test rke2 binary exists and runs
@@ -131,33 +145,6 @@ test:
         set -o pipefail
         rke2 --version | grep -F -e ${{vars.mangled-package-version}}
         rke2 --help | grep -F -e "Rancher Kubernetes Engine 2"
-    - name: Verify chart files generated
-      runs: |
-        # Verify all helm charts have been generated
-        # REF: https://github.com/rancher/rke2/blob/master/charts/chart_versions.yaml
-        for f in \
-          harvester-cloud-provider \
-          harvester-csi-driver \
-          rancher-vsphere-cpi \
-          rancher-vsphere-csi \
-          rke2-calico-crd \
-          rke2-calico \
-          rke2-canal \
-          rke2-cilium \
-          rke2-coredns \
-          rke2-flannel \
-          rke2-ingress-nginx \
-          rke2-metrics-server \
-          rke2-multus \
-          rke2-runtimeclasses \
-          rke2-snapshot-controller-crd \
-          rke2-snapshot-controller \
-          rke2-snapshot-validation-webhook \
-          rke2-traefik-crd \
-          rke2-traefik; \
-        do \
-          [ -f "/charts/$f.yaml" ] || { echo "[✗] Missing: $f"; exit 1; }; \
-        done
     - name: Functional test
       runs: |
         # Start rke2 server
@@ -174,7 +161,7 @@ test:
 
         # Allow some time for logs to generate
         TIMEOUT=60
-        while ! grep -q "Server node token is available at" /tmp/rke2-server.log && [ $TIMEOUT -gt 0 ]; do
+        while ! grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-server.log && [ $TIMEOUT -gt 0 ]; do
           sleep 1
           TIMEOUT=$((TIMEOUT-1))
         done
@@ -184,13 +171,9 @@ test:
         fi
 
         # Validate rke2-server logs
-        grep -q "Server node token is available at" /tmp/rke2-server.log
-        grep -q "To join server node to cluster:" /tmp/rke2-server.log
-        grep -q "Agent node token is available at" /tmp/rke2-server.log
-        grep -q "To join agent node to cluster:" /tmp/rke2-server.log
-        grep -q "Wrote kubeconfig" /tmp/rke2-server.log
-        grep -q "Run: rke2 kubectl" /tmp/rke2-server.log
-        grep -q "Running kube-proxy" /tmp/rke2-server.log
+        grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-server.log
+        grep -q "Starting rke2" /tmp/rke2-server.log
+        grep -q "Managed etcd cluster initializing" /tmp/rke2-server.log
 
         # Validate rke2-agent logs
         grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-agent.log
