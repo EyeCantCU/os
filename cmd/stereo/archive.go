@@ -35,7 +35,8 @@ based on the following criteria:
 - Not still in use in images, VMs, or other seeds
 
 When no --arch is specified, analysis is performed across both x86_64 and aarch64 architectures,
-considering a package for archival only if it meets criteria on ALL supported architectures.`,
+consolidating age-based candidates from all architectures and considering a package for archival 
+only if it meets dependency criteria on ALL supported architectures.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var architectures []string
 			if arch != "" {
@@ -88,9 +89,8 @@ func archive(ctx context.Context, duration time.Duration, architectures []string
 
 	log.Printf("Searching for APK archive candidates older than %v for architectures %v...", duration, architectures)
 
-	// Step 1: Identify older APKs (use first architecture for finding age-based candidates)
-	firstArch := architectures[0]
-	candidates, err := findOlderAPKs(ctx, duration, firstArch)
+	// Step 1: Identify older APKs across all architectures
+	candidates, err := findOlderAPKs(ctx, duration, architectures)
 	if err != nil {
 		return fmt.Errorf("finding older APKs: %w", err)
 	}
@@ -308,41 +308,59 @@ func archive(ctx context.Context, duration time.Duration, architectures []string
 	return nil
 }
 
-func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]ArchiveCandidate, error) {
-	var candidates []ArchiveCandidate
+func findOlderAPKs(ctx context.Context, duration time.Duration, architectures []string) ([]ArchiveCandidate, error) {
+	// Use a map to consolidate packages across architectures
+	// Key: repo-name-version, Value: ArchiveCandidate
+	packageMap := make(map[string]ArchiveCandidate)
 	cutoffTime := time.Now().Add(-duration)
 
-	// Check each repository
-	for dir, repoURL := range dirToRepo {
-		log.Printf("Checking repository: %s", dir)
+	// Process each architecture
+	for _, arch := range architectures {
+		log.Printf("Checking packages for architecture: %s", arch)
 
-		// Fetch the APK index for specified architecture
-		index, err := fetchAPKIndex(ctx, repoURL, arch)
-		if err != nil {
-			log.Printf("Error fetching index for %s: %v", repoURL, err)
-			continue
-		}
+		// Check each repository for this architecture
+		for dir, repoURL := range dirToRepo {
+			log.Printf("Checking repository: %s (architecture: %s)", dir, arch)
+			// Fetch the APK index for this architecture
+			index, err := fetchAPKIndex(ctx, repoURL, arch)
+			if err != nil {
+				log.Printf("Error fetching index for %s/%s: %v", repoURL, arch, err)
+				continue
+			}
+			log.Printf("Processing %d packages from %s (architecture: %s)", len(index.Packages), dir, arch)
 
-		log.Printf("Processing %d packages from %s", len(index.Packages), dir)
-		// Check each package in the index
-		for _, pkg := range index.Packages {
-			// Use the build timestamp directly
-			buildTime := pkg.BuildTime
+			// Check each package in the index
+			for _, pkg := range index.Packages {
+				// Use the build timestamp directly
+				buildTime := pkg.BuildTime
+				// Check if it's older than the cutoff
+				if buildTime.Before(cutoffTime) {
+					// Create unique key for this package across architectures
+					packageKey := fmt.Sprintf("%s-%s-%s", dir, pkg.Name, pkg.Version)
 
-			// Check if it's older than the cutoff
-			if buildTime.Before(cutoffTime) {
-				candidate := ArchiveCandidate{
-					Name:       pkg.Name,
-					Version:    pkg.Version,
-					Repository: dir,
-					Age:        time.Since(buildTime),
-					Reasons:    []string{"older than duration"},
+					// If we haven't seen this package before, or if this one is older (more significant age), use it
+					if existing, exists := packageMap[packageKey]; !exists || time.Since(buildTime) > existing.Age {
+						candidate := ArchiveCandidate{
+							Name:       pkg.Name,
+							Version:    pkg.Version,
+							Repository: dir,
+							Age:        time.Since(buildTime),
+							Reasons:    []string{"older than duration"},
+						}
+						packageMap[packageKey] = candidate
+					}
 				}
-				candidates = append(candidates, candidate)
 			}
 		}
 	}
 
+	// Convert map back to slice
+	var candidates []ArchiveCandidate
+	for _, candidate := range packageMap {
+		candidates = append(candidates, candidate)
+	}
+
+	log.Printf("Found %d unique packages older than %v across all architectures", len(candidates), duration)
 	return candidates, nil
 }
 
