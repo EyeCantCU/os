@@ -108,8 +108,8 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 			// Use local withdrawn indexes instead of remote repositories
 			withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
 			buildRepos = map[string][]string{
-				"public":  []string{filepath.Join(withdrawnRepos["os"], arch), filepath.Join(withdrawnRepos["extra-packages"], arch)},
-				"private": []string{filepath.Join(withdrawnRepos["os"], arch), filepath.Join(withdrawnRepos["extra-packages"], arch), filepath.Join(withdrawnRepos["enterprise-packages"], arch)},
+				"public":  []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"]},
+				"private": []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]},
 			}
 		} else {
 			// Use normal remote repositories

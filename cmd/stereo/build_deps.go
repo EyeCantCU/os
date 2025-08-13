@@ -115,9 +115,9 @@ func buildDeps(ctx context.Context, architectures []string, useWithdrawn bool, w
 			// Use local withdrawn indexes instead of remote repositories
 			withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
 			buildRepos = map[string][]string{
-				"os":                  []string{filepath.Join(withdrawnRepos["os"], arch)},
-				"extra-packages":      []string{filepath.Join(withdrawnRepos["os"], arch), filepath.Join(withdrawnRepos["extra-packages"], arch)},
-				"enterprise-packages": []string{filepath.Join(withdrawnRepos["os"], arch), filepath.Join(withdrawnRepos["extra-packages"], arch), filepath.Join(withdrawnRepos["enterprise-packages"], arch)},
+				"os":                  []string{withdrawnRepos["os"]},
+				"extra-packages":      []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"]},
+				"enterprise-packages": []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]},
 			}
 		} else {
 			// Use normal remote repositories

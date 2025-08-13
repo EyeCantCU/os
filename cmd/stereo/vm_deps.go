@@ -102,7 +102,7 @@ func vmDependencies(ctx context.Context, architectures []string, useWithdrawn bo
 		if useWithdrawn {
 			// Use local withdrawn indexes instead of remote repositories
 			withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
-			buildRepos = []string{filepath.Join(withdrawnRepos["os"], arch), filepath.Join(withdrawnRepos["extra-packages"], arch), filepath.Join(withdrawnRepos["enterprise-packages"], arch)}
+			buildRepos = []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]}
 		} else {
 			// Use private repos (same as private images - includes enterprise-packages)
 			buildRepos = []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]}
