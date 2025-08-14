@@ -4,7 +4,7 @@ go 1.24.5
 
 require (
 	chainguard.dev/apko v0.30.4
-	github.com/anchore/syft v1.30.0
+	github.com/anchore/syft v1.31.0
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/charmbracelet/log v0.4.2
 	github.com/google/go-cmp v0.7.0
