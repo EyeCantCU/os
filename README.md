@@ -2,6 +2,14 @@
 
 Stereo provides a command-line tool for managing APK package archives and analyzing dependencies across Wolfi and Chainguard repositories. It provides commands to identify archival candidates, analyze build dependencies, and track package usage across images and VMs.
 
+## Multi-Architecture Support
+
+All commands support multi-architecture processing for both x86_64 and aarch64 architectures:
+- **Default behavior**: When no `--arch` flag is specified, commands process both x86_64 and aarch64 architectures
+- **Single architecture**: Use `--arch x86_64` or `--arch aarch64` to process only one architecture
+- **Architecture constraints**: Respects melange `target-architecture` and apko `archs` configuration limits
+- **Cross-architecture analysis**: Archive analysis considers packages safe for withdrawal only if criteria are met across ALL supported architectures
+
 ## Commands
 
 ### vm-dependencies
@@ -12,10 +20,10 @@ Pre-computes VM dependencies from wolfi-vm APKO configurations.
 stereo vm-dependencies
 ```
 
-This command finds all APKO `build.yaml` configurations under `wolfi-vm/configs/**/build.yaml` and resolves them to lists of APK packages used by each VM. Results are written to JSON files in the `resolved/vms/` directory.
+This command finds all APKO `build.yaml` configurations under `wolfi-vm/configs/**/build.yaml` and resolves them to lists of APK packages used by each VM. When no `--arch` is specified, dependencies are computed for both x86_64 and aarch64 architectures, respecting any `archs` constraints in VM configurations. Results are written to architecture-specific JSON files in the `resolved/vms/{arch}/` directory.
 
 **Flags:**
-- `--arch`: Architecture to evaluate (default: x86_64)
+- `--arch`: Architecture to evaluate (default: both x86_64 and aarch64)
 - `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
 - `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
@@ -41,11 +49,11 @@ cat private-images.tfplan.json | stereo image-dependencies --private
 cat public-images.tfplan.json | stereo image-dependencies
 ```
 
-This command reads Terraform JSON from stdin, parses all apko_build configurations, and resolves them to lists of APK packages used across all images. Results are written to JSON files in the `resolved/images/` directory.
+This command reads Terraform JSON from stdin, parses all apko_build configurations, and resolves them to lists of APK packages used across all images. When no `--arch` is specified, dependencies are computed for both x86_64 and aarch64 architectures, respecting any `archs` constraints in apko configurations. Results are written to architecture-specific JSON files in the `resolved/images/{arch}/` directory.
 
 **Flags:**
 - `--private`: Set for images-private (includes enterprise-packages)
-- `--arch`: Architecture to evaluate (default: x86_64)
+- `--arch`: Architecture to evaluate (default: both x86_64 and aarch64)
 - `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
 - `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
@@ -57,10 +65,10 @@ Pre-computes build dependencies for all melange configurations.
 stereo build-dependencies
 ```
 
-This command pre-computes and caches the build dependencies for all melange configurations across the three repositories (os, extra-packages, enterprise-packages). Results are written to files in the `resolved/build/` directory and can be used by other commands to avoid expensive dependency resolution.
+This command pre-computes and caches the build dependencies for all melange configurations across the three repositories (os, extra-packages, enterprise-packages). When no `--arch` is specified, dependencies are computed for both x86_64 and aarch64 architectures, respecting any `target-architecture` constraints in melange configurations. Results are written to architecture-specific files in the `resolved/build/{arch}/` directory and can be used by other commands to avoid expensive dependency resolution.
 
 **Flags:**
-- `--arch`: Architecture to evaluate (default: x86_64)
+- `--arch`: Architecture to evaluate (default: both x86_64 and aarch64)
 - `--use-withdrawn`: Use withdrawn APKINDEX files instead of live repositories
 - `--withdrawn-dir`: Directory containing withdrawn APKINDEX files (default: withdrawn-indexes)
 
@@ -69,21 +77,31 @@ This command pre-computes and caches the build dependencies for all melange conf
 Identifies APK packages that can be archived based on age and dependency criteria and should be run after all of the *-dependencies commands have been executed.
 
 ```bash
+# Multi-architecture analysis (default)
+stereo archive --duration 365
+
+# Single architecture analysis
 stereo archive --duration 365 --arch x86_64
 ```
 
 The archive command analyzes packages across repositories and identifies candidates for archival based on:
-- Age threshold (default: 1 year)
-- No blocking reverse dependencies
+- Age threshold (default: 1 year) - consolidated across all architectures
+- No blocking reverse dependencies on ANY supported architecture
 - Not the most recent version if still built from melange configuration
-- Not a reverse build dependency for current melange configurations
-- Not in use by active images or VMs
+- Not a reverse build dependency for current melange configurations on ANY architecture
+- Not in use by active images or VMs on ANY architecture
+
+When analyzing multiple architectures, packages are only considered safe for archival if they meet ALL criteria across ALL supported architectures.
 
 Results (including reasons for archival or retention) are written to `archive/` and `retain/` directories as JSON files per repository.
 
 **Optional withdrawn-packages.txt generation:**
 
 ```bash
+# Multi-architecture analysis with withdrawn package generation (default)
+stereo archive --generate-withdrawn --duration 365
+
+# Single architecture analysis with withdrawn package generation
 stereo archive --generate-withdrawn --duration 365 --arch x86_64
 ```
 
@@ -91,7 +109,7 @@ When `--generate-withdrawn` is used, the command will also create `withdrawn-pac
 
 **Flags:**
 - `--duration`: Age threshold for archive candidates in days (default: 365 days)
-- `--arch`: Architecture to evaluate (default: x86_64)
+- `--arch`: Architecture to evaluate (default: both x86_64 and aarch64)
 - `--generate-withdrawn`: Generate withdrawn-packages.txt files for each repository
 
 ### withdraw
@@ -99,11 +117,15 @@ When `--generate-withdrawn` is used, the command will also create `withdrawn-pac
 Downloads the latest APKINDEX.tar.gz files from each repository, removes packages listed in withdrawn-packages.txt files, and saves the modified indexes to a local directory.
 
 ```bash
+# Multi-architecture withdrawal (default)
+stereo withdraw --output-dir withdrawn-indexes --signing-key melange.rsa
+
+# Single architecture withdrawal
 stereo withdraw --arch x86_64 --output-dir withdrawn-indexes --signing-key melange.rsa
 ```
 
 This command processes each repository that has a withdrawn-packages.txt file:
-- Downloads the current APKINDEX.tar.gz for the specified architecture
+- Downloads the current APKINDEX.tar.gz for each specified architecture
 - Removes all packages listed in the repository's withdrawn-packages.txt file
 - Signs the modified APKINDEX with the specified RSA key
 - Saves the signed APKINDEX.tar.gz to subdirectories organized by repo and architecture
@@ -112,15 +134,21 @@ This command processes each repository that has a withdrawn-packages.txt file:
 The modified indexes are saved in a structured directory layout:
 ```
 withdrawn-indexes/
-├── os/x86_64/APKINDEX.tar.gz
-├── extra-packages/x86_64/APKINDEX.tar.gz
-└── enterprise-packages/x86_64/APKINDEX.tar.gz
+├── os/
+│   ├── x86_64/APKINDEX.tar.gz
+│   └── aarch64/APKINDEX.tar.gz
+├── extra-packages/
+│   ├── x86_64/APKINDEX.tar.gz
+│   └── aarch64/APKINDEX.tar.gz
+└── enterprise-packages/
+    ├── x86_64/APKINDEX.tar.gz
+    └── aarch64/APKINDEX.tar.gz
 ```
 
 The modified indexes can be used to replace the original indexes in the repositories to actually withdraw the packages.
 
 **Flags:**
-- `--arch`: Architecture to process (default: x86_64)
+- `--arch`: Architecture to process (default: both x86_64 and aarch64)
 - `--output-dir`: Output directory for modified APKINDEX files (default: withdrawn-indexes)
 - `--signing-key`: The signing key to use for signing the modified APKINDEX (default: melange.rsa)
 
@@ -128,23 +156,23 @@ The modified indexes can be used to replace the original indexes in the reposito
 
 All `*-dependencies` commands support testing with withdrawn package indexes to validate the impact of package withdrawals before deploying changes to production repositories.
 
-### Usage Example
+### Multi-Architecture Usage Example
 
 ```bash
-# 1. Generate withdrawn package lists
-stereo archive --generate-withdrawn --duration 365 --arch x86_64
+# 1. Generate withdrawn package lists (multi-architecture analysis)
+stereo archive --generate-withdrawn --duration 365
 
-# 2. Create modified APKINDEX files with packages removed
-stereo withdraw --arch x86_64 --output-dir withdrawn-indexes --signing-key melange.rsa
+# 2. Create modified APKINDEX files with packages removed (both architectures)
+stereo withdraw --output-dir withdrawn-indexes --signing-key melange.rsa
 
-# 3. Test impact on build dependencies
+# 3. Test impact on build dependencies (both architectures)
 stereo build-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
 
-# 4. Test impact on image dependencies  
+# 4. Test impact on image dependencies (both architectures)
 cat public-images.tfplan.json | stereo image-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
 cat private-images.tfplan.json | stereo image-dependencies --private --use-withdrawn --withdrawn-dir withdrawn-indexes
 
-# 5. Test impact on VM dependencies
+# 5. Test impact on VM dependencies (both architectures)
 stereo vm-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
 ```
 
@@ -159,13 +187,36 @@ The tool operates on three main repositories:
 
 ## Output Directories
 
-- `resolved/`: Contains successfully resolved dependencies
-  - `build/`: Build dependencies per repository
-  - `images/`: Image dependencies (public/private)
-  - `vms/`: VM dependencies
-- `unresolved/`: Contains packages that failed to resolve
-- `withdrawn-test/`: Test results when using withdrawn indexes
-  - `resolved/`: Successfully resolved dependencies with withdrawn packages
-  - `unresolved/`: Packages that failed to resolve with withdrawn packages
-- `archive/`: Archive candidates per repository
-- `retain/`: Packages retained from archival per repository
+- `resolved/`: Contains successfully resolved dependencies organized by architecture
+  - `build/{arch}/`: Build dependencies per repository and architecture
+  - `images/{arch}/`: Image dependencies (public/private) per architecture
+  - `vms/{arch}/`: VM dependencies per architecture
+  - `seeds/{arch}/`: Manual seed dependencies per architecture (when using seed-dependencies)
+- `unresolved/`: Contains packages that failed to resolve, organized by architecture
+  - `build/{arch}/`: Failed build dependency resolutions per architecture
+  - `images/{arch}/`: Failed image dependency resolutions per architecture
+  - `vms/{arch}/`: Failed VM dependency resolutions per architecture
+- `withdrawn-test/`: Test results when using withdrawn indexes, organized by architecture
+  - `resolved/{command}/{arch}/`: Successfully resolved dependencies with withdrawn packages
+  - `unresolved/{command}/{arch}/`: Packages that failed to resolve with withdrawn packages
+- `archive/`: Archive candidates per repository (consolidated across architectures)
+- `retain/`: Packages retained from archival per repository (consolidated across architectures)
+
+## Architecture-Specific Behavior
+
+### Melange Configurations
+- Respects `target-architecture` lists in package configurations
+- Skips packages that don't support the target architecture
+- Only processes architectures listed in the package's `target-architecture` field
+
+### Apko/VM Configurations  
+- Respects `archs` lists in image/VM configurations
+- Maps architecture names: x86_64 ↔ amd64, aarch64 ↔ arm64
+- Skips configurations that don't support the target architecture
+- Only processes architectures listed in the configuration's `archs` field
+
+### Cross-Architecture Analysis
+- Archive analysis consolidates age-based candidates from all architectures
+- Dependency analysis is performed per-architecture with cross-architecture safety checks
+- Packages are only considered safe for archival if criteria are met on ALL supported architectures
+- Withdrawal affects all architectures simultaneously using the same withdrawn-packages.txt files

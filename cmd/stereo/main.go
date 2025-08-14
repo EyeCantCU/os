@@ -26,6 +26,35 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// archToApkoArch maps melange architecture names to apko architecture names
+func archToApkoArch(arch string) string {
+	switch arch {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	default:
+		return arch
+	}
+}
+
+// supportsApkoArchitecture checks if an apko configuration supports the given architecture
+func supportsApkoArchitecture(cfg *apko_types.ImageConfiguration, arch string) bool {
+	// If no archs is specified, configuration supports all architectures
+	if len(cfg.Archs) == 0 {
+		return true
+	}
+
+	apkoArch := archToApkoArch(arch)
+	// Check if the architecture is in the archs list
+	for _, targetArch := range cfg.Archs {
+		if string(targetArch) == apkoArch {
+			return true
+		}
+	}
+	return false
+}
+
 var dirToRepo map[string]string = map[string]string{
 	// TODO: These aren't all apk.cgr.dev because there is a
 	// meaningful diff for build dependencies of some packages.
