@@ -24,6 +24,7 @@ ifeq ($(UNAME_M),arm64)
 UNAME_M = aarch64
 endif
 
+BUILDER ?= builder
 BUILDER_ARCH ?= $(UNAME_M)
 ARCH ?= $(BUILDER_ARCH)
 
@@ -130,9 +131,9 @@ builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
 	$(TOP_D)/apkoaas --log-level=debug make-builder --arch=$* iac/builder-debug.yaml $@
 
-builder/initrd-%: apkoaas iac/builder.yaml
+builder/initrd-%: apkoaas iac/$(BUILDER).yaml
 	@mkdir -p $(dir $@)
-	$(TOP_D)/apkoaas make-builder --arch=$* iac/builder.yaml $@
+	$(TOP_D)/apkoaas make-builder --arch=$* iac/$(BUILDER).yaml $@
 
 builder/ovmf-%.fd: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* ovmf $@
@@ -269,7 +270,12 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 	gcs_qcow2_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
 	echo "Uploading $(dir $@)disk.qcow2 to $$gcs_qcow2_path"; \
 	gcloud storage cp "$(dir $@)disk.qcow2" "$$gcs_qcow2_path"
-	@$(call capture_stdout,$@, echo "{ \"raw\": \"$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).raw\", \"qcow2\": \"$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).qcow2\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	@echo "Generating signed URLs for uploaded artifacts"; \
+	gcs_raw_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).raw"; \
+	gcs_qcow2_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).qcow2"; \
+	raw_signed_url=$$(gcloud storage sign-url "$$gcs_raw_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
+	qcow2_signed_url=$$(gcloud storage sign-url "$$gcs_qcow2_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
+	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"qcow2\": \"$$gcs_qcow2_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"qcow2_signed_url\": \"$$qcow2_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json

@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"maps"
-	"net/http"
 	"os"
 	"runtime"
 	"slices"
@@ -16,7 +15,6 @@ import (
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
-	"chainguard.dev/apko/pkg/apk/auth"
 	apko_build "chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
 	apko_types "chainguard.dev/apko/pkg/build/types"
@@ -240,25 +238,6 @@ func buckets(ctx context.Context, dirs []string) error {
 	}
 
 	return nil
-}
-
-func fetchIndex(ctx context.Context, base, arch string) (*apk.APKIndex, error) {
-	href := fmt.Sprintf("%s/%s/APKINDEX.tar.gz", base, arch)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, href, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := auth.DefaultAuthenticators.AddAuth(ctx, req); err != nil {
-		return nil, err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	return apk.IndexFromArchive(resp.Body)
 }
 
 func lock(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string) ([]string, error) {

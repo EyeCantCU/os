@@ -27,7 +27,7 @@ func transitionCmd() *cobra.Command {
 		Long: `This command analyzes a melange configuration with -dev package to identify
 packages that need to be rebuilt during a shared library transition. It generates
 regex patterns for shared libraries and determines build ordering based on dependencies.`,
-		Args:  cobra.ExactArgs(1),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return transition(cmd.Context(), args[0], arch, extraRepos)
 		},
@@ -437,7 +437,7 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 		// Track if any package from this origin needs rebuilding
 		originNeedsRebuild := false
 		var firstMatchedPattern, firstReason string
-		affectedPackagesMap := make(map[string]*apk.Package) // packageName -> most recent package
+		affectedPackagesMap := make(map[string]*apk.Package)  // packageName -> most recent package
 		completedPackagesMap := make(map[string]*apk.Package) // packageName -> most recent package
 		hasMatchingDeps := false
 

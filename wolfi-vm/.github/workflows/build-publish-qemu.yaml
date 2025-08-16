@@ -8,10 +8,21 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
+      notify-slack:
+        type: boolean
+        required: false
+        default: false
+        description: Notify slack when the workflow finishes.
+      notify-slack-success:
+        type: boolean
+        required: false
+        default: true
+        description: Send notifications on success as well as failure.
       with-compliance-scan:
         type: boolean
         required: true
         description: Run CIS Benchmarks compliance scanning and generate a report
+  # Only build when main is updated, we won't publish the artifacts out
   push:
     branches:
       - main
@@ -62,7 +73,7 @@ jobs:
         with:
           egress-policy: audit
 
-      - uses: chainguard-dev/actions/apt-faster@ae2f0393ff2a60c572ff4d3485f406e8f36dfd38 # v1.4.6
+      - uses: chainguard-dev/actions/apt-faster@df684a72f67ce7eecd78098365cb5057f16be3b1 # v1.4.8
 
       - name: Checkout source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -102,29 +113,33 @@ jobs:
         run: |
           names=$(make list-qemu)
           [ -n "$names" ] || { echo "make list-qemu produced empty output"; exit 1; }
-          
+
           echo "Creating qcow2 images for: $names"
           for name in $names; do
             echo "Creating qcow2 for $name"
             make "qcow-$name"
-          done 
+          done
 
       - name: "Setup GCP Creds for GCS Publishing"
-        uses: google-github-actions/auth@140bb5113ffb6b65a7e9b937a81fa96cf5064462 # v2.1.11
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/auth@b7593ed2efd1c1617e1b0254da33b86225adb2a5 # v2.1.12
         with:
           workload_identity_provider: 'projects/212178706475/locations/global/workloadIdentityPools/ci-pool/providers/ci-provider'
           service_account: 'github-ci@wolfi-vm.iam.gserviceaccount.com'
 
       - name: "Install GCP Deps"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: google-github-actions/setup-gcloud@6a7c903a70c8625ed6700fa299f5ddb4ca6022e9 # v2.1.5
         with:
           project_id: wolfi-vm
 
       - name: "Configure gcloud"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           gcloud config set storage/parallel_composite_upload_enabled True
 
       - name: "Publish QEMU Images to GCS"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           arch="${{ env.VM_ARCH }}"
           names=$(make list-qemu)
@@ -138,3 +153,14 @@ jobs:
           vm_group: "qemu"
           arch: '${{ matrix.arch }}'
           with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
+
+      - uses: './.github/actions/notify-slack'
+        if: ${{ (inputs.notify-slack-success || failure()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
+          title: ${{ github.workflow }} (${{ matrix.arch }}) ${{ job.status }}
+          message-color: ${{ job.status == 'success' && '#3fb950' || '#f85149'}}
+          text: |
+            For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Or run ./hack/fetch-test-result -c ${{ env.VM_CLOUD }} -r ${{ github.run_id }}
+          unfurl-links: true

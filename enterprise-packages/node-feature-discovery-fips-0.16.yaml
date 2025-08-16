@@ -1,0 +1,173 @@
+package:
+  name: node-feature-discovery-fips-0.16
+  version: "0.16.8"
+  epoch: 2 # CVE-2025-47907
+  description: Node feature discovery for Kubernetes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - node-feature-discovery-fips=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes-sigs/node-feature-discovery
+      tag: v${{package.version}}
+      expected-commit: 34264759652bc005415b9e8f6c790eafd65880fd
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+
+  - name: copy conf
+    runs: |
+      mkdir -p ${{targets.contextdir}}/etc/kubernetes/node-feature-discovery/
+      cp ./deployment/components/worker-config/nfd-worker.conf.example ${{targets.contextdir}}/etc/kubernetes/node-feature-discovery/nfd-worker.conf
+
+subpackages:
+  - name: ${{package.name}}-kubectl-nfd
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/kubectl-nfd
+          output: kubectl-nfd
+          ldflags: |
+            -X sigs.k8s.io/node-feature-discovery/pkg/version.version=${{package.version}}
+            -X sigs.k8s.io/node-feature-discovery/pkg/utils/hostpath.pathPrefix=/host-
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - runs: |
+            kubectl-nfd -h
+            kubectl-nfd --help
+
+  - name: ${{package.name}}-gc
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/nfd-gc
+          output: nfd-gc
+          ldflags: |
+            -X sigs.k8s.io/node-feature-discovery/pkg/version.version=${{package.version}}
+            -X sigs.k8s.io/node-feature-discovery/pkg/utils/hostpath.pathPrefix=/host-
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - runs: |
+            nfd-gc -version | grep ${{package.version}}
+            nfd-gc --help
+
+  - name: ${{package.name}}-master
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/nfd-master
+          output: nfd-master
+          ldflags: |
+            -X sigs.k8s.io/node-feature-discovery/pkg/version.version=${{package.version}}
+            -X sigs.k8s.io/node-feature-discovery/pkg/utils/hostpath.pathPrefix=/host-
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - runs: |
+            nfd-master -version | grep ${{package.version}}
+            nfd-master --help
+
+  - name: ${{package.name}}-topology-updater
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/nfd-topology-updater
+          output: nfd-topology-updater
+          ldflags: |
+            -X sigs.k8s.io/node-feature-discovery/pkg/version.version=${{package.version}}
+            -X sigs.k8s.io/node-feature-discovery/pkg/utils/hostpath.pathPrefix=/host-
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - runs: |
+            nfd-topology-updater -version | grep ${{package.version}}
+            nfd-topology-updater --help
+
+  - name: ${{package.name}}-worker
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/nfd-worker
+          output: nfd-worker
+          ldflags: |
+            -X sigs.k8s.io/node-feature-discovery/pkg/version.version=${{package.version}}
+            -X sigs.k8s.io/node-feature-discovery/pkg/utils/hostpath.pathPrefix=/host-
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - runs: |
+            nfd-worker -version | grep ${{package.version}}
+            nfd-worker --help
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes-sigs/node-feature-discovery
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v0.16.
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-master
+        - ${{package.name}}-worker
+        - ${{package.name}}-gc
+        - ${{package.name}}-topology-updater
+        - ${{package.name}}-kubectl-nfd
+  pipeline:
+    - uses: test/kwok/cluster
+    - name: "Test nfd-master startup"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create minimal config file
+          mkdir -p /etc/kubernetes/node-feature-discovery
+          cat > /etc/kubernetes/node-feature-discovery/nfd-master.conf <<EOF
+          {
+            "noPublish": true,
+            "instance": "test",
+            "enableLeaderElection": false,
+            "nfdApiParallelism": 1,
+            "resyncPeriod": "1s",
+            "inClusterConfig": true,
+            "verifyServiceAccount": false
+          }
+          EOF
+
+          # Create minimal service account directory
+          mkdir -p /var/run/secrets/kubernetes.io/serviceaccount/
+          echo "fake-token" > /var/run/secrets/kubernetes.io/serviceaccount/token
+          echo "fake-ca" > /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          echo "default" > /var/run/secrets/kubernetes.io/serviceaccount/namespace
+        start: env KUBERNETES_SERVICE_HOST=localhost KUBERNETES_SERVICE_PORT=8080 nfd-master --config=/etc/kubernetes/node-feature-discovery/nfd-master.conf
+        timeout: 30
+        expected_output: |
+          Node Feature Discovery Master
+          configuration file parsed
+          configuration successfully updated
+          starting the nfd api controller
+        error_strings: |
+          panic
+          fatal
+          FATAL
+        post: |
+          # Verify clean shutdown
+          ps aux | grep nfd-master | grep -v grep || true
+    - name: Validation test
+      runs: |
+        test -f /etc/kubernetes/node-feature-discovery/nfd-worker.conf || (echo "Config file missing"; exit 1)

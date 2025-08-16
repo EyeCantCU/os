@@ -5,11 +5,7 @@ set -eux -o pipefail
 cd "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../"
 
 EXTRA_REPOS=(
-    "https://packages.cgr.dev/extras" # contains "mattmoor-chainit-init"
-)
-
-EXTRA_KEYRINGS=(
-    "https://packages.cgr.dev/extras/chainguard-extras.rsa.pub"
+    "https://apk.cgr.dev/extra-packages" # contains "mattmoor-chainit-init"
 )
 
 EXTRA_PKGS=(
@@ -30,9 +26,6 @@ for entry in $(grep -v '\#' convert.txt); do
     yq -P -i '.payload | @base64d | fromjson | .predicate' att.tmp
     for i in "${EXTRA_REPOS[@]}"; do \
         yq -i ".contents.repositories += [\"$i\"]" att.tmp; \
-    done
-    for i in "${EXTRA_KEYRINGS[@]}"; do \
-        yq -i ".contents.keyring += [\"$i\"]" att.tmp; \
     done
     for i in "${EXTRA_PKGS[@]}"; do \
         yq -i ".contents.packages += [\"$i\"]" att.tmp; \

@@ -19,6 +19,24 @@ For example, the following command will build a raw disk image from the `configs
 make disk-generic
 ```
 
+## Build RPi images
+
+Build using:
+
+```
+make ARCH=aarch64 BUILDER=builder-rpi disk-rpi-generic-base
+make ARCH=aarch64 BUILDER=builder-rpi disk-rpi-generic-docker
+```
+
+Flash them to sdcard using:
+
+```
+dd if=output/aarch64/rpi-generic-base/disk.raw of=/dev/sdX conv=fsync status=progress
+dd if=output/aarch64/rpi-generic-docker/disk.raw of=/dev/sdX conv=fsync status=progress
+```
+
+Or the official RPi imager that can be found [here](https://www.raspberrypi.com/software/)
+
 ## Running your VM
 Images built for a cloud have a kernel and packages built for that platform.  They aren't necessarily of any use inside qemu.
 
