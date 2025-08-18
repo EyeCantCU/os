@@ -9,10 +9,15 @@
 package:
   name: elasticsearch-fips-9
   version: "9.1.2"
-  epoch: 0
+  epoch: 2
   description:
   copyright:
-    - license: AGPL-3.0-or-later OR SSPL-1.0 OR Elastic-2.0
+    - license: AGPL-3.0 AND SSPL-1.0 AND Elastic-2.0
+      license-path: licenses/AGPL-3.0+SSPL-1.0+ELASTIC-LICENSE-2.0.txt
+    - license: Apache-2.0
+      license-path: licenses/APACHE-LICENSE-2.0.txt
+    - license: Elastic-2.0
+      license-path: licenses/ELASTIC-LICENSE-2.0.txt
   resources:
     cpu: 6
     memory: 30Gi
@@ -33,7 +38,6 @@ package:
       - wolfi-baselayout
     provides:
       - elasticsearch-fips=${{package.full-version}}
-      - ${{package.name}}-policy-140-3=${{package.full-version}}
 
 environment:
   environment:
@@ -67,11 +71,12 @@ pipeline:
         update-reactor-netty.patch
         0001-modules-add-slf4j-nop-where-it-is-missing.patch
         0001-entitlements-Grant-entitlements-for-bc-fips-2.1-comp.patch
-        0002-tls-fips-hardening.patch
+        0002-tls-apply-TLS-FIPS-hardening.patch
         0003-x-pack-add-bcmail-fips-entitlement.patch
         0004-Fix-entitlements-for-cacerts.patch
         0005-Make-xpack-settings-default-to-FIPS.patch
-        0006-Provide-correct-FIPS-140-3-approved-service-indicato.patch
+        0006-CertificateTool-port-from-PKCS-12-to-BCFKS.patch
+        0007-docker-entrypoint-always-set-node-keystore-password.patch
 
   - uses: auth/gradle
 
@@ -102,17 +107,18 @@ pipeline:
       mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
       mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
 
-      # Use custom entrypoint with KeyStore password fix for FIPS
-      mv ./docker-entrypoint.sh ${{targets.destdir}}/usr/share/elasticsearch/bin
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
       mkdir -p ${{targets.destdir}}/usr/local/bin
-      ln -sf /usr/share/elasticsearch/bin/docker-entrypoint ${{targets.destdir}}/usr/local/bin/
+      ln -sf ../../share/elasticsearch/bin/docker-entrypoint.sh ${{targets.destdir}}/usr/local/bin/
 
       # Set permissions to read/write the config dir
       chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
       mkdir -p ${{targets.destdir}}/usr/bin
       for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
         name=$(basename $i)
-        ln -sf /usr/share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+        ln -sf ../share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
       done
 
       # We get this from elasticsearch-fips-9-config
@@ -124,6 +130,7 @@ pipeline:
       # To remove problematic/unnecessary jar files
       rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bc-fips-*.jar
       rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bcpg-fips-*.jar
+      rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/security-cli/bc*-jdk18on-*.jar
 
       mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/lib
 
@@ -253,7 +260,6 @@ test:
     contents:
       packages:
         - curl
-        - openssl
         - sudo
         - wait-for-it
     environment:
@@ -275,64 +281,8 @@ test:
 
         chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
 
-        # Generate self-signed cert
-        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
-        -alias "localhost" \
-        -genkeypair \
-        -sigalg SHA512withRSA -keyalg RSA \
-        -dname CN="localhost" \
-        -ext ku:c=dig,keyEncipherment \
-        -ext san=dns:localhost,ip:127.0.0.1,ip:0:0:0:0:0:0:0:1 \
-        -storetype bcfks \
-        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
-
-        # Export public cert in DER format
-        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
-        -alias "localhost" \
-        -exportcert -file localhost.der \
-        -storetype bcfks \
-        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
-
-        # Import public cert into truststore
-        keytool -v -keystore /usr/share/elasticsearch/config/server.truststore \
-        -alias "localhost" \
-        -import -file localhost.der \
-        -noprompt \
-        -storetype bcfks \
-        -storepass $KEYSTORE_PASSWORD
-
-        # Also convert public cert to PEM format
-        openssl x509 -in localhost.der -out localhost.pem
-
-        # Node network.host & node.name should match one san on the cert
-        cat >>/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
-        cluster.name: "docker-cluster"
-        discovery.type: single-node
-        network.host: localhost
-        node.store.allow_mmap: false
-        node.name: localhost
-        EOF
-
         # Create keystore for elasticsearch settings
         sudo -E -u $ES_USER elasticsearch-keystore create -p <<EOF
-        ${KEYSTORE_PASSWORD}
-        ${KEYSTORE_PASSWORD}
-        EOF
-
-        # Add password for transport keystore
-        sudo -E -u $ES_USER elasticsearch-keystore add xpack.security.transport.ssl.keystore.secure_password  <<EOF
-        ${KEYSTORE_PASSWORD}
-        ${KEYSTORE_PASSWORD}
-        EOF
-
-        # Add password for transport truststore
-        sudo -E -u $ES_USER elasticsearch-keystore add xpack.security.transport.ssl.truststore.secure_password  <<EOF
-        ${KEYSTORE_PASSWORD}
-        ${KEYSTORE_PASSWORD}
-        EOF
-
-        # Add password for server keystore
-        sudo -E -u $ES_USER elasticsearch-keystore add xpack.security.http.ssl.keystore.secure_password  <<EOF
         ${KEYSTORE_PASSWORD}
         ${KEYSTORE_PASSWORD}
         EOF
@@ -360,18 +310,18 @@ test:
         )
 
         # Dump health status
-        curl --cacert localhost.pem -s https://localhost:9200/_cluster/health?pretty -u "elastic:${ELASTIC_PASSWORD}"
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s https://localhost:9200/_cluster/health?pretty -u "elastic:${ELASTIC_PASSWORD}"
         # Check health status is green
-        curl --cacert localhost.pem -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}" | grep '"status":"green"'
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}" | grep '"status":"green"'
         # Can change values
-        curl --cacert localhost.pem -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
             {
               "name": "John Doe",
               "age": 30,
               "about": "I love to go rock climbing"
             }' || exit 1
         # Can get values
-        curl --cacert localhost.pem -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
 
         kill $(cat /tmp/elasticsearch.pid)
 
