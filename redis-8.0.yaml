@@ -31,29 +31,16 @@ environment:
       - busybox
       - ca-certificates-bundle
       - clang
-      - cmake
-      - curl
-      - gcc
-      - git
+      - cmake-3
       - jemalloc
       - libffi-dev
       - libtool
       - linux-headers
-      - llvm-dev
-      - ncurses-dev
-      - openssh
       - openssl-dev
-      - py3-cryptography
       - py3-pip
       - py3-virtualenv
       - python3
-      - python3-dev
-      - rsync
       - rust
-      - unzip
-      - wget
-      - xsimd
-      - xz
 
 pipeline:
   - uses: git-checkout
@@ -72,7 +59,6 @@ pipeline:
       export BUILD_TLS=yes
       export BUILD_WITH_MODULES=yes
       export INSTALL_RUST_TOOLCHAIN=no
-      export DISABLE_WERRORS=yes
       export CFLAGS="$CFLAGS -DUSE_MALLOC_USABLE_SIZE"
         make \
         all -j$(nproc)
@@ -364,22 +350,51 @@ test:
     contents:
       packages:
         - redis-cli
+        - wait-for-port
   pipeline:
     - runs: |
+        set -euo pipefail
         cat <<EOF >> /tmp/redis.conf
+        enable-module-command local
         dbfilename dump.rdb
         pidfile /tmp/redis_6379.pid
         dir /tmp/
         EOF
 
         redis-server /tmp/redis.conf > /dev/null 2>&1 &
-        sleep 2 # wait for redis to start
-        redis-cli SET bike:1 "Process 134" || exit 1
-        redis-cli GET bike:1 | grep 'Process 134' || exit 1
-        redis-cli exists bike:1 | grep 1 || exit 1
-        redis-cli exists bike:2 | grep 0 || exit 1
+        wait-for-port 6379 -t 10
+        redis-cli SET bike:1 "Process 134"
+        redis-cli GET bike:1 | grep 'Process 134'
+        redis-cli exists bike:1 | grep 1
+        redis-cli exists bike:2 | grep 0
+
+        # Redisearch
+        redis-cli MODULE LOAD /usr/lib/redis/modules/redisearch.so
+        redis-cli FT.CREATE idx ON HASH PREFIX 1 "bike:" SCHEMA name TEXT
+        redis-cli HSET bike:1 name "Process 134"
+        redis-cli FT.SEARCH idx "Process" RETURN 0
+
+        # RedisJSON (safe to overwrite on each run)
+        redis-cli MODULE LOAD /usr/lib/redis/modules/rejson.so
+        redis-cli JSON.SET json:bike:1 . '{"name":"Process 134"}'
+        redis-cli JSON.GET json:bike:1 .name | grep 'Process 134'
+        redis-cli JSON.GET json:bike:1 . | grep '"name":"Process 134"'
+
+        # RedisBloom
+        redis-cli MODULE LOAD /usr/lib/redis/modules/redisbloom.so
+        redis-cli BF.ADD bloom:bikes "Process 134"
+        redis-cli BF.EXISTS bloom:bikes "Process 134" | grep -E '(^1$|\(integer\) 1)'
+        redis-cli BF.EXISTS bloom:bikes "Process 135" | grep -E '(^0$|\(integer\) 0)'
+
+        # RedisTimeSeries
+        redis-cli MODULE LOAD /usr/lib/redis/modules/redistimeseries.so
+        redis-cli TS.CREATE timeseries:1
+        redis-cli TS.ADD timeseries:1 0 100 ON_DUPLICATE last
+        redis-cli --raw TS.RANGE timeseries:1 0 0 | tail -n1 | grep -E '^100(\.0+)?$'
+
+        echo "All module checks passed."
     - runs: |
-        redis-server --version | grep "jemalloc" || exit 1
+        redis-server --version | grep "jemalloc"
     - uses: test/virtualpackage
       with:
         virtual-pkg-name: redis
