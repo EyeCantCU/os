@@ -27,10 +27,39 @@ subpackages:
           output: linkerd-cni-repair-controller
     test:
       pipeline:
-        - uses: test/tw/ldd-check
-        - name: version check
+        - name: smoke test
           runs: |
+            # Test version output
             linkerd-cni-repair-controller --version
+
+            # Test help output
+            linkerd-cni-repair-controller --help
+
+  - name: ${{package.name}}-compat
+    pipeline:
+      - runs: |
+          mkdir -p -m 0755 ${{targets.contextdir}}/linkerd
+          install -Dm755 LICENSE ${{targets.contextdir}}/linkerd/LICENSE
+          install -Dm755 cni-plugin/deployment/scripts/filter.jq ${{targets.contextdir}}/linkerd/filter.jq
+          install -Dm755 cni-plugin/deployment/scripts/install-cni.sh ${{targets.contextdir}}/linkerd/install-cni.sh
+    test:
+      pipeline:
+        - name: Verify compat installations
+          runs: |
+            test -f /linkerd/install-cni.sh
+            test -f /linkerd/filter.jq
+            test -f /linkerd/LICENSE
+
+  - name: linkerd2-cni-repair-controller-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/linkerd
+          ln -sf /usr/bin/linkerd-cni-repair-controller ${{targets.contextdir}}/usr/lib/linkerd/linkerd-cni-repair-controller
+    test:
+      pipeline:
+        - name: verify installation
+          runs: |
+            test "$(readlink /usr/lib/linkerd/linkerd-cni-repair-controller)" = "/usr/bin/linkerd-cni-repair-controller"
 
 update:
   enabled: true
@@ -40,8 +69,30 @@ update:
     strip-prefix: cni-plugin v
 
 test:
+  environment:
+    contents:
+      packages:
+        - jq
+        - ${{package.name}}-compat
   pipeline:
     - uses: test/tw/ldd-check
-    - name: version test
+    - name: CNI plugin functionality test
       runs: |
-        linkerd-cni-plugin --help
+        # Test CNI plugin recognizes proper CNI environment
+        echo '{}' | CNI_COMMAND=VERSION linkerd-cni-plugin 2>&1 | grep -q '"cniVersion"'
+
+        # Test CNI plugin fails appropriately without env vars
+        linkerd-cni-plugin --help 2>&1 | grep -q "required env variables.*CNI_COMMAND.*missing"
+    - name: Script and filter functionality test
+      runs: |
+        # Test jq filter script can be executed
+        echo '{"plugins": []}' | jq -f /linkerd/filter.jq --argjson CNI_TMP_CONF_DATA '{"type": "linkerd-cni"}' > /dev/null
+
+        # Test install script exists and has expected functions
+        grep -q "install_cni_bin" /linkerd/install-cni.sh
+        grep -q "create_kubeconfig" /linkerd/install-cni.sh
+        grep -q "monitor_cni_config" /linkerd/install-cni.sh
+
+        # Test filter.jq exists and install script is executable
+        grep -q "linkerd-cni" /linkerd/filter.jq
+        test -x /linkerd/install-cni.sh
