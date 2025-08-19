@@ -1,0 +1,2551 @@
+From 9d9feed35f07ce0d6e37b56e999a683fa292b90e Mon Sep 17 00:00:00 2001
+From: Victor Tan <victortan@chromium.org>
+Date: Fri, 23 Jun 2023 15:04:33 +0000
+Subject: [PATCH 10/10] Add support for the new ALPS codepoint
+
+Old version Chrome with the existing ALPS codepoint can potentially cause network error due to an arithmetic overflow bug in Chrome ALPS decoder (We already fixed the issues starting from M100 in Chrome).
+
+This CL add a new codepoint for ALPS extension in a way that can be enabled on individual connections., To support multiple versions of Chrome, we need to support both codepoints in BoringSSL.
+
+For details: https://docs.google.com/document/d/16pysbV_ym_qAau_DBYnrw2A4h5ve2212wfcoYASt52U
+
+Change-Id: Iea7822e757d23009648febc8eaff1c91b0f06e18
+Reviewed-on: https://boringssl-review.googlesource.com/c/boringssl/+/61125
+Commit-Queue: David Benjamin <davidben@google.com>
+Reviewed-by: David Benjamin <davidben@google.com>
+(cherry picked from commit 558960d1e1fabfdb508e4da7940185c58985c961)
+Conflicts:
+	include/openssl/base.h
+Do not bump BORINGSSL_API_VERSION as Envoy/Quiche stopped checking it
+---
+ include/openssl/ssl.h                 |    4 +
+ include/openssl/tls1.h                |    3 +-
+ ssl/extensions.cc                     |   91 +-
+ ssl/handoff.cc                        |   27 +-
+ ssl/internal.h                        |    4 +
+ ssl/ssl_lib.cc                        |   10 +-
+ ssl/ssl_test.cc                       |  135 +++
+ ssl/test/runner/common.go             |   97 +-
+ ssl/test/runner/conn.go               |   68 +-
+ ssl/test/runner/handshake_client.go   |   42 +-
+ ssl/test/runner/handshake_messages.go |   52 +-
+ ssl/test/runner/handshake_server.go   |   64 +-
+ ssl/test/runner/runner.go             | 1193 +++++++++++++++----------
+ ssl/test/runner/ticket.go             |   50 +-
+ ssl/test/test_config.cc               |    5 +
+ ssl/test/test_config.h                |    1 +
+ ssl/tls13_client.cc                   |    6 +-
+ ssl/tls13_server.cc                   |    6 +-
+ 18 files changed, 1269 insertions(+), 589 deletions(-)
+
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 7aac131b1..17e82104c 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -3034,6 +3034,10 @@ OPENSSL_EXPORT void SSL_get0_peer_application_settings(const SSL *ssl,
+ // connection and zero otherwise.
+ OPENSSL_EXPORT int SSL_has_application_settings(const SSL *ssl);
+ 
++// SSL_set_alps_use_new_codepoint configures whether to use the new ALPS
++// codepoint. By default, the old codepoint is used.
++OPENSSL_EXPORT void SSL_set_alps_use_new_codepoint(SSL *ssl, int use_new);
++
+ 
+ // Certificate compression.
+ //
+diff --git a/include/openssl/tls1.h b/include/openssl/tls1.h
+index 724d58025..cb90bb62b 100644
+--- a/include/openssl/tls1.h
++++ b/include/openssl/tls1.h
+@@ -244,7 +244,8 @@ extern "C" {
+ 
+ // ExtensionType value from draft-vvv-tls-alps. This is not an IANA defined
+ // extension number.
+-#define TLSEXT_TYPE_application_settings 17513
++#define TLSEXT_TYPE_application_settings_old 17513
++#define TLSEXT_TYPE_application_settings 17613
+ 
+ // ExtensionType values from draft-ietf-tls-esni-13. This is not an IANA defined
+ // extension number.
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index c5b1ed143..aeeb3334f 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -2906,9 +2906,10 @@ bool ssl_get_local_application_settings(const SSL_HANDSHAKE *hs,
+   return false;
+ }
+ 
+-static bool ext_alps_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+-                                     CBB *out_compressible,
+-                                     ssl_client_hello_type_t type) {
++static bool ext_alps_add_clienthello_impl(const SSL_HANDSHAKE *hs, CBB *out,
++                                          CBB *out_compressible,
++                                          ssl_client_hello_type_t type,
++                                          bool use_new_codepoint) {
+   const SSL *const ssl = hs->ssl;
+   if (// ALPS requires TLS 1.3.
+       hs->max_version < TLS1_3_VERSION ||
+@@ -2921,8 +2922,18 @@ static bool ext_alps_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+     return true;
+   }
+ 
++  if (use_new_codepoint != hs->config->alps_use_new_codepoint) {
++    // Do nothing, we'll send the other codepoint.
++    return true;
++  }
++
++  uint16_t extension_type = TLSEXT_TYPE_application_settings_old;
++  if (hs->config->alps_use_new_codepoint) {
++    extension_type = TLSEXT_TYPE_application_settings;
++  }
++
+   CBB contents, proto_list, proto;
+-  if (!CBB_add_u16(out_compressible, TLSEXT_TYPE_application_settings) ||
++  if (!CBB_add_u16(out_compressible, extension_type) ||
+       !CBB_add_u16_length_prefixed(out_compressible, &contents) ||
+       !CBB_add_u16_length_prefixed(&contents, &proto_list)) {
+     return false;
+@@ -2939,8 +2950,24 @@ static bool ext_alps_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+   return CBB_flush(out_compressible);
+ }
+ 
+-static bool ext_alps_parse_serverhello(SSL_HANDSHAKE *hs, uint8_t *out_alert,
+-                                       CBS *contents) {
++static bool ext_alps_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
++                                     CBB *out_compressible,
++                                     ssl_client_hello_type_t type) {
++  return ext_alps_add_clienthello_impl(hs, out, out_compressible, type,
++                                       /*use_new_codepoint=*/true);
++}
++
++static bool ext_alps_add_clienthello_old(const SSL_HANDSHAKE *hs, CBB *out,
++                                         CBB *out_compressible,
++                                         ssl_client_hello_type_t type) {
++  return ext_alps_add_clienthello_impl(hs, out, out_compressible, type,
++                                       /*use_new_codepoint=*/false);
++}
++
++static bool ext_alps_parse_serverhello_impl(SSL_HANDSHAKE *hs,
++                                            uint8_t *out_alert,
++                                            CBS *contents,
++                                            bool use_new_codepoint) {
+   SSL *const ssl = hs->ssl;
+   if (contents == nullptr) {
+     return true;
+@@ -2949,6 +2976,7 @@ static bool ext_alps_parse_serverhello(SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   assert(!ssl->s3->initial_handshake_complete);
+   assert(!hs->config->alpn_client_proto_list.empty());
+   assert(!hs->config->alps_configs.empty());
++  assert(use_new_codepoint == hs->config->alps_use_new_codepoint);
+ 
+   // ALPS requires TLS 1.3.
+   if (ssl_protocol_version(ssl) < TLS1_3_VERSION) {
+@@ -2968,7 +2996,22 @@ static bool ext_alps_parse_serverhello(SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   return true;
+ }
+ 
+-static bool ext_alps_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
++static bool ext_alps_parse_serverhello(SSL_HANDSHAKE *hs,
++                                       uint8_t *out_alert,
++                                       CBS *contents) {
++  return ext_alps_parse_serverhello_impl(hs, out_alert, contents,
++                                         /*use_new_codepoint=*/true);
++}
++
++static bool ext_alps_parse_serverhello_old(SSL_HANDSHAKE *hs,
++                                           uint8_t *out_alert,
++                                           CBS *contents) {
++  return ext_alps_parse_serverhello_impl(hs, out_alert, contents,
++                                         /*use_new_codepoint=*/false);
++}
++
++static bool ext_alps_add_serverhello_impl(SSL_HANDSHAKE *hs, CBB *out,
++                                          bool use_new_codepoint) {
+   SSL *const ssl = hs->ssl;
+   // If early data is accepted, we omit the ALPS extension. It is implicitly
+   // carried over from the previous connection.
+@@ -2978,8 +3021,18 @@ static bool ext_alps_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
+     return true;
+   }
+ 
++   if (use_new_codepoint != hs->config->alps_use_new_codepoint) {
++    // Do nothing, we'll send the other codepoint.
++    return true;
++  }
++
++  uint16_t extension_type = TLSEXT_TYPE_application_settings_old;
++  if (hs->config->alps_use_new_codepoint) {
++    extension_type = TLSEXT_TYPE_application_settings;
++  }
++
+   CBB contents;
+-  if (!CBB_add_u16(out, TLSEXT_TYPE_application_settings) ||
++  if (!CBB_add_u16(out, extension_type) ||
+       !CBB_add_u16_length_prefixed(out, &contents) ||
+       !CBB_add_bytes(&contents,
+                      hs->new_session->local_application_settings.data(),
+@@ -2991,6 +3044,14 @@ static bool ext_alps_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
+   return true;
+ }
+ 
++static bool ext_alps_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
++  return ext_alps_add_serverhello_impl(hs, out, /*use_new_codepoint=*/true);
++}
++
++static bool ext_alps_add_serverhello_old(SSL_HANDSHAKE *hs, CBB *out) {
++  return ext_alps_add_serverhello_impl(hs, out, /*use_new_codepoint=*/false);
++}
++
+ bool ssl_negotiate_alps(SSL_HANDSHAKE *hs, uint8_t *out_alert,
+                         const SSL_CLIENT_HELLO *client_hello) {
+   SSL *const ssl = hs->ssl;
+@@ -3001,11 +3062,15 @@ bool ssl_negotiate_alps(SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   // If we negotiate ALPN over TLS 1.3, try to negotiate ALPS.
+   CBS alps_contents;
+   Span<const uint8_t> settings;
++  uint16_t extension_type = TLSEXT_TYPE_application_settings_old;
++  if (hs->config->alps_use_new_codepoint) {
++    extension_type = TLSEXT_TYPE_application_settings;
++  }
+   if (ssl_protocol_version(ssl) >= TLS1_3_VERSION &&
+       ssl_get_local_application_settings(hs, &settings,
+                                          ssl->s3->alpn_selected) &&
+       ssl_client_hello_get_extension(client_hello, &alps_contents,
+-                                     TLSEXT_TYPE_application_settings)) {
++                                     extension_type)) {
+     // Check if the client supports ALPS with the selected ALPN.
+     bool found = false;
+     CBS alps_list;
+@@ -3216,6 +3281,14 @@ static const struct tls_extension kExtensions[] = {
+     ignore_parse_clienthello,
+     ext_alps_add_serverhello,
+   },
++  {
++    TLSEXT_TYPE_application_settings_old,
++    ext_alps_add_clienthello_old,
++    ext_alps_parse_serverhello_old,
++    // ALPS is negotiated late in |ssl_negotiate_alpn|.
++    ignore_parse_clienthello,
++    ext_alps_add_serverhello_old,
++  },
+ };
+ 
+ #define kNumExtensions (sizeof(kExtensions) / sizeof(struct tls_extension))
+diff --git a/ssl/handoff.cc b/ssl/handoff.cc
+index a4563c7eb..037e070eb 100644
+--- a/ssl/handoff.cc
++++ b/ssl/handoff.cc
+@@ -41,7 +41,7 @@ enum early_data_t {
+ 
+ // serialize_features adds a description of features supported by this binary to
+ // |out|.  Returns true on success and false on error.
+-static bool serialize_features(CBB *out) {
++static bool serialize_features(CBB *out, uint16_t alps_extension_type) {
+   CBB ciphers;
+   if (!CBB_add_asn1(out, &ciphers, CBS_ASN1_OCTETSTRING)) {
+     return false;
+@@ -68,7 +68,7 @@ static bool serialize_features(CBB *out) {
+   // removed.
+   CBB alps;
+   if (!CBB_add_asn1(out, &alps, kHandoffTagALPS) ||
+-      !CBB_add_u16(&alps, TLSEXT_TYPE_application_settings)) {
++      !CBB_add_u16(&alps, alps_extension_type)) {
+     return false;
+   }
+   return CBB_flush(out);
+@@ -86,13 +86,18 @@ bool SSL_serialize_handoff(const SSL *ssl, CBB *out,
+   CBB seq;
+   SSLMessage msg;
+   Span<const uint8_t> transcript = s3->hs->transcript.buffer();
++
++  uint16_t alps_extension_type = TLSEXT_TYPE_application_settings_old;
++  if (s3->hs->config->alps_use_new_codepoint) {
++    alps_extension_type = TLSEXT_TYPE_application_settings;
++  }
+   if (!CBB_add_asn1(out, &seq, CBS_ASN1_SEQUENCE) ||
+       !CBB_add_asn1_uint64(&seq, kHandoffVersion) ||
+       !CBB_add_asn1_octet_string(&seq, transcript.data(), transcript.size()) ||
+       !CBB_add_asn1_octet_string(&seq,
+                                  reinterpret_cast<uint8_t *>(s3->hs_buf->data),
+                                  s3->hs_buf->length) ||
+-      !serialize_features(&seq) ||
++      !serialize_features(&seq, alps_extension_type) ||
+       !CBB_flush(out) ||
+       !ssl->method->get_message(ssl, &msg) ||
+       !ssl_client_hello_init(ssl, out_hello, msg.body)) {
+@@ -222,9 +227,12 @@ static bool apply_remote_features(SSL *ssl, CBS *in) {
+     if (!CBS_get_u16(&alps, &id)) {
+       return false;
+     }
+-    // For now, we only support one ALPS code point, so we only need to extract
+-    // a boolean signal from the feature list.
+-    if (id == TLSEXT_TYPE_application_settings) {
++    // For now, we support two ALPS codepoints, so we need to extract both
++    // codepoints, and then filter what the handshaker might try to send.
++    if ((id == TLSEXT_TYPE_application_settings &&
++         ssl->config->alps_use_new_codepoint) ||
++        (id == TLSEXT_TYPE_application_settings_old &&
++         !ssl->config->alps_use_new_codepoint)) {
+       supports_alps = true;
+       break;
+     }
+@@ -742,8 +750,13 @@ using namespace bssl;
+ 
+ int SSL_serialize_capabilities(const SSL *ssl, CBB *out) {
+   CBB seq;
++  const SSL_HANDSHAKE *hs = ssl->s3->hs.get();
++  uint16_t alps_extension_type = TLSEXT_TYPE_application_settings_old;
++  if (hs->config->alps_use_new_codepoint) {
++    alps_extension_type = TLSEXT_TYPE_application_settings;
++  }
+   if (!CBB_add_asn1(out, &seq, CBS_ASN1_SEQUENCE) ||
+-      !serialize_features(&seq) ||  //
++      !serialize_features(&seq, alps_extension_type) ||  //
+       !CBB_flush(out)) {
+     return 0;
+   }
+diff --git a/ssl/internal.h b/ssl/internal.h
+index a462c97ad..a9730c5db 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3149,6 +3149,10 @@ struct SSL_CONFIG {
+   // of support for AES hw. The value is only considered if |aes_hw_override| is
+   // true.
+   bool aes_hw_override_value : 1;
++
++  // alps_use_new_codepoint if set indicates we use new ALPS extension codepoint
++  // to negotiate and convey application settings.
++  bool alps_use_new_codepoint : 1;
+ };
+ 
+ // From RFC 8446, used in determining PSK modes.
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index d7b5be3dd..3644e0fa9 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -707,7 +707,8 @@ SSL_CONFIG::SSL_CONFIG(SSL *ssl_arg)
+       shed_handshake_config(false),
+       jdk11_workaround(false),
+       quic_use_legacy_codepoint(false),
+-      permute_extensions(false) {
++      permute_extensions(false),
++      alps_use_new_codepoint(false) {
+   assert(ssl);
+ }
+ 
+@@ -2400,6 +2401,13 @@ int SSL_has_application_settings(const SSL *ssl) {
+   return session && session->has_application_settings;
+ }
+ 
++void SSL_set_alps_use_new_codepoint(SSL *ssl, int use_new) {
++  if (!ssl->config) {
++    return;
++  }
++  ssl->config->alps_use_new_codepoint = !!use_new;
++}
++
+ int SSL_CTX_add_cert_compression_alg(SSL_CTX *ctx, uint16_t alg_id,
+                                      ssl_cert_compression_func_t compress,
+                                      ssl_cert_decompression_func_t decompress) {
+diff --git a/ssl/ssl_test.cc b/ssl/ssl_test.cc
+index f184614cc..087400a99 100644
+--- a/ssl/ssl_test.cc
++++ b/ssl/ssl_test.cc
+@@ -7815,6 +7815,141 @@ TEST(SSLTest, ALPNConfig) {
+   check_alpn_proto({});
+ }
+ 
++// This is a basic unit-test class to verify completing handshake successfully,
++// sending the correct codepoint extension and having correct application
++// setting on different combination of ALPS codepoint settings. More integration
++// tests on runner.go.
++class AlpsNewCodepointTest : public testing::Test {
++ protected:
++  void SetUp() override {
++    client_ctx_.reset(SSL_CTX_new(TLS_method()));
++    server_ctx_ = CreateContextWithTestCertificate(TLS_method());
++    ASSERT_TRUE(client_ctx_);
++    ASSERT_TRUE(server_ctx_);
++  }
++
++  void SetUpExpectedNewCodePoint() {
++    SSL_CTX_set_select_certificate_cb(
++      server_ctx_.get(),
++      [](const SSL_CLIENT_HELLO *client_hello) -> ssl_select_cert_result_t {
++        const uint8_t *data;
++        size_t len;
++        if (!SSL_early_callback_ctx_extension_get(
++                client_hello, TLSEXT_TYPE_application_settings, &data,
++                &len)) {
++          ADD_FAILURE() << "Could not find alps new codpoint.";
++          return ssl_select_cert_error;
++        }
++        return ssl_select_cert_success;
++      });
++  }
++
++  void SetUpExpectedOldCodePoint() {
++    SSL_CTX_set_select_certificate_cb(
++      server_ctx_.get(),
++      [](const SSL_CLIENT_HELLO *client_hello) -> ssl_select_cert_result_t {
++        const uint8_t *data;
++        size_t len;
++        if (!SSL_early_callback_ctx_extension_get(
++                client_hello, TLSEXT_TYPE_application_settings_old, &data,
++                &len)) {
++          ADD_FAILURE() << "Could not find alps old codpoint.";
++          return ssl_select_cert_error;
++        }
++        return ssl_select_cert_success;
++      });
++  }
++
++  void SetUpApplicationSetting() {
++    static const uint8_t alpn[] = {0x03, 'f', 'o', 'o'};
++    static const uint8_t proto[] = {'f', 'o', 'o'};
++    static const uint8_t alps[] = {0x04, 'a', 'l', 'p', 's'};
++    // SSL_set_alpn_protos's return value is backwards. It returns zero on
++    // success and one on failure.
++    ASSERT_FALSE(SSL_set_alpn_protos(client_.get(), alpn, sizeof(alpn)));
++    SSL_CTX_set_alpn_select_cb(
++      server_ctx_.get(),
++      [](SSL *ssl, const uint8_t **out, uint8_t *out_len, const uint8_t *in,
++          unsigned in_len, void *arg) -> int {
++        return SSL_select_next_proto(
++                    const_cast<uint8_t **>(out), out_len, in, in_len,
++                    alpn, sizeof(alpn)) == OPENSSL_NPN_NEGOTIATED
++                    ? SSL_TLSEXT_ERR_OK
++                    : SSL_TLSEXT_ERR_NOACK;
++      },
++      nullptr);
++    ASSERT_TRUE(SSL_add_application_settings(client_.get(), proto,
++                                            sizeof(proto), nullptr, 0));
++    ASSERT_TRUE(SSL_add_application_settings(server_.get(), proto,
++                                            sizeof(proto), alps, sizeof(alps)));
++  }
++
++  bssl::UniquePtr<SSL_CTX> client_ctx_;
++  bssl::UniquePtr<SSL_CTX> server_ctx_;
++
++  bssl::UniquePtr<SSL> client_;
++  bssl::UniquePtr<SSL> server_;
++};
++
++TEST_F(AlpsNewCodepointTest, Enabled) {
++  SetUpExpectedNewCodePoint();
++
++  ASSERT_TRUE(CreateClientAndServer(&client_, &server_, client_ctx_.get(),
++                                    server_ctx_.get()));
++
++  SSL_set_alps_use_new_codepoint(client_.get(), 1);
++  SSL_set_alps_use_new_codepoint(server_.get(), 1);
++
++  SetUpApplicationSetting();
++  ASSERT_TRUE(CompleteHandshakes(client_.get(), server_.get()));
++  ASSERT_TRUE(SSL_has_application_settings(client_.get()));
++}
++
++TEST_F(AlpsNewCodepointTest, Disabled) {
++  // Both client and server disable alps new codepoint.
++  SetUpExpectedOldCodePoint();
++
++  ASSERT_TRUE(CreateClientAndServer(&client_, &server_, client_ctx_.get(),
++                                    server_ctx_.get()));
++
++  SSL_set_alps_use_new_codepoint(client_.get(), 0);
++  SSL_set_alps_use_new_codepoint(server_.get(), 0);
++
++  SetUpApplicationSetting();
++  ASSERT_TRUE(CompleteHandshakes(client_.get(), server_.get()));
++  ASSERT_TRUE(SSL_has_application_settings(client_.get()));
++}
++
++TEST_F(AlpsNewCodepointTest, ClientOnly) {
++  // If client set new codepoint but server doesn't set, server ignores it.
++  SetUpExpectedNewCodePoint();
++
++  ASSERT_TRUE(CreateClientAndServer(&client_, &server_, client_ctx_.get(),
++                                    server_ctx_.get()));
++
++  SSL_set_alps_use_new_codepoint(client_.get(), 1);
++  SSL_set_alps_use_new_codepoint(server_.get(), 0);
++
++  SetUpApplicationSetting();
++  ASSERT_TRUE(CompleteHandshakes(client_.get(), server_.get()));
++  ASSERT_FALSE(SSL_has_application_settings(client_.get()));
++}
++
++TEST_F(AlpsNewCodepointTest, ServerOnly) {
++  // If client doesn't set new codepoint, while server set.
++  SetUpExpectedOldCodePoint();
++
++  ASSERT_TRUE(CreateClientAndServer(&client_, &server_, client_ctx_.get(),
++                                    server_ctx_.get()));
++
++  SSL_set_alps_use_new_codepoint(client_.get(), 0);
++  SSL_set_alps_use_new_codepoint(server_.get(), 1);
++
++  SetUpApplicationSetting();
++  ASSERT_TRUE(CompleteHandshakes(client_.get(), server_.get()));
++  ASSERT_FALSE(SSL_has_application_settings(client_.get()));
++}
++
+ // Test that the key usage checker can correctly handle issuerUID and
+ // subjectUID. See https://crbug.com/1199744.
+ TEST(SSLTest, KeyUsageWithUIDs) {
+diff --git a/ssl/test/runner/common.go b/ssl/test/runner/common.go
+index cb974989a..d31cc1e4d 100644
+--- a/ssl/test/runner/common.go
++++ b/ssl/test/runner/common.go
+@@ -122,7 +122,8 @@ const (
+ 	extensionQUICTransportParams        uint16 = 57
+ 	extensionCustom                     uint16 = 1234  // not IANA assigned
+ 	extensionNextProtoNeg               uint16 = 13172 // not IANA assigned
+-	extensionApplicationSettings        uint16 = 17513 // not IANA assigned
++	extensionApplicationSettingsOld     uint16 = 17513 // not IANA assigned
++	extensionApplicationSettings        uint16 = 17613 // not IANA assigned
+ 	extensionRenegotiationInfo          uint16 = 0xff01
+ 	extensionQUICTransportParamsLegacy  uint16 = 0xffa5 // draft-ietf-quic-tls-32 and earlier
+ 	extensionChannelID                  uint16 = 30032  // not IANA assigned
+@@ -277,6 +278,8 @@ type ConnectionState struct {
+ 	QUICTransportParamsLegacy  []byte                // the legacy QUIC transport params received from the peer
+ 	HasApplicationSettings     bool                  // whether ALPS was negotiated
+ 	PeerApplicationSettings    []byte                // application settings received from the peer
++	HasApplicationSettingsOld  bool                  // whether ALPS old codepoint was negotiated
++	PeerApplicationSettingsOld []byte                // the old application settings received from the peer
+ 	ECHAccepted                bool                  // whether ECH was accepted on this connection
+ }
+ 
+@@ -295,25 +298,28 @@ const (
+ // ClientSessionState contains the state needed by clients to resume TLS
+ // sessions.
+ type ClientSessionState struct {
+-	sessionID                []uint8             // Session ID supplied by the server. nil if the session has a ticket.
+-	sessionTicket            []uint8             // Encrypted ticket used for session resumption with server
+-	vers                     uint16              // SSL/TLS version negotiated for the session
+-	wireVersion              uint16              // Wire SSL/TLS version negotiated for the session
+-	cipherSuite              *cipherSuite        // Ciphersuite negotiated for the session
+-	secret                   []byte              // Secret associated with the session
+-	handshakeHash            []byte              // Handshake hash for Channel ID purposes.
+-	serverCertificates       []*x509.Certificate // Certificate chain presented by the server
+-	extendedMasterSecret     bool                // Whether an extended master secret was used to generate the session
+-	sctList                  []byte
+-	ocspResponse             []byte
+-	earlyALPN                string
+-	ticketCreationTime       time.Time
+-	ticketExpiration         time.Time
+-	ticketAgeAdd             uint32
+-	maxEarlyDataSize         uint32
+-	hasApplicationSettings   bool
+-	localApplicationSettings []byte
+-	peerApplicationSettings  []byte
++	sessionID                   []uint8             // Session ID supplied by the server. nil if the session has a ticket.
++	sessionTicket               []uint8             // Encrypted ticket used for session resumption with server
++	vers                        uint16              // SSL/TLS version negotiated for the session
++	wireVersion                 uint16              // Wire SSL/TLS version negotiated for the session
++	cipherSuite                 *cipherSuite        // Ciphersuite negotiated for the session
++	secret                      []byte              // Secret associated with the session
++	handshakeHash               []byte              // Handshake hash for Channel ID purposes.
++	serverCertificates          []*x509.Certificate // Certificate chain presented by the server
++	extendedMasterSecret        bool                // Whether an extended master secret was used to generate the session
++	sctList                     []byte
++	ocspResponse                []byte
++	earlyALPN                   string
++	ticketCreationTime          time.Time
++	ticketExpiration            time.Time
++	ticketAgeAdd                uint32
++	maxEarlyDataSize            uint32
++	hasApplicationSettings      bool
++	localApplicationSettings    []byte
++	peerApplicationSettings     []byte
++	hasApplicationSettingsOld   bool
++	localApplicationSettingsOld []byte
++	peerApplicationSettingsOld  []byte
+ }
+ 
+ // ClientSessionCache is a cache of ClientSessionState objects that can be used
+@@ -389,6 +395,35 @@ func (c QUICUseCodepoint) String() string {
+ 	panic("unknown value")
+ }
+ 
++// ALPSUseCodepoint controls which TLS extension codepoint is used to convey the
++// ApplicationSettings. ALPSUseCodepointNew means use 17613,
++// ALPSUseCodepointOld means use old value 17513.
++type ALPSUseCodepoint int
++
++const (
++	ALPSUseCodepointNew ALPSUseCodepoint = iota
++	ALPSUseCodepointOld
++	NumALPSUseCodepoints
++)
++
++func (c ALPSUseCodepoint) IncludeNew() bool {
++	return c == ALPSUseCodepointNew
++}
++
++func (c ALPSUseCodepoint) IncludeOld() bool {
++	return c == ALPSUseCodepointOld
++}
++
++func (c ALPSUseCodepoint) String() string {
++	switch c {
++	case ALPSUseCodepointNew:
++		return "New"
++	case ALPSUseCodepointOld:
++		return "Old"
++	}
++	panic("unknown value")
++}
++
+ // A Config structure is used to configure a TLS client or server.
+ // After one has been passed to a TLS function it must not be
+ // modified. A Config may be reused; the tls package will also not
+@@ -429,6 +464,10 @@ type Config struct {
+ 	// application protocol.
+ 	ApplicationSettings map[string][]byte
+ 
++	// ALPSUseNewCodepoint controls which TLS extension codepoint is used to
++	// convey the ApplicationSettings.
++	ALPSUseNewCodepoint ALPSUseCodepoint
++
+ 	// ServerName is used to verify the hostname on the returned
+ 	// certificates unless InsecureSkipVerify is given. It is also included
+ 	// in the client's handshake to support virtual hosting.
+@@ -996,10 +1035,20 @@ type ProtocolBugs struct {
+ 	// return.
+ 	ALPNProtocol *string
+ 
+-	// AlwaysNegotiateApplicationSettings, if true, causes the server to
+-	// negotiate ALPS for a protocol even if the client did not support it or
+-	// the version is wrong.
+-	AlwaysNegotiateApplicationSettings bool
++	// AlwaysNegotiateApplicationSettingsBoth, if true, causes the server to
++	// negotiate ALPS using both codepoint for a protocol even if the client did
++	// not support it or the version is wrong.
++	AlwaysNegotiateApplicationSettingsBoth bool
++
++	// AlwaysNegotiateApplicationSettingsNew, if true, causes the server to
++	// negotiate ALPS using new codepoint for a protocol even if the client did
++	// not support it or the version is wrong.
++	AlwaysNegotiateApplicationSettingsNew bool
++
++	// AlwaysNegotiateApplicationSettingsOld, if true, causes the server to
++	// negotiate ALPS using old codepoint for a protocol even if the client did
++	// not support it or the version is wrong.
++	AlwaysNegotiateApplicationSettingsOld bool
+ 
+ 	// SendApplicationSettingsWithEarlyData, if true, causes the client and
+ 	// server to send the application_settings extension with early data,
+diff --git a/ssl/test/runner/conn.go b/ssl/test/runner/conn.go
+index ad77b665d..15fe92dd5 100644
+--- a/ssl/test/runner/conn.go
++++ b/ssl/test/runner/conn.go
+@@ -74,8 +74,10 @@ type Conn struct {
+ 	clientProtocolFallback bool
+ 	usedALPN               bool
+ 
+-	localApplicationSettings, peerApplicationSettings []byte
+-	hasApplicationSettings                            bool
++	localApplicationSettings, peerApplicationSettings       []byte
++	hasApplicationSettings                                  bool
++	localApplicationSettingsOld, peerApplicationSettingsOld []byte
++	hasApplicationSettingsOld                               bool
+ 
+ 	// verify_data values for the renegotiation extension.
+ 	clientVerify []byte
+@@ -1581,22 +1583,25 @@ func (c *Conn) processTLS13NewSessionTicket(newSessionTicket *newSessionTicketMs
+ 	}
+ 
+ 	session := &ClientSessionState{
+-		sessionTicket:            newSessionTicket.ticket,
+-		vers:                     c.vers,
+-		wireVersion:              c.wireVersion,
+-		cipherSuite:              cipherSuite,
+-		secret:                   deriveSessionPSK(cipherSuite, c.wireVersion, c.resumptionSecret, newSessionTicket.ticketNonce),
+-		serverCertificates:       c.peerCertificates,
+-		sctList:                  c.sctList,
+-		ocspResponse:             c.ocspResponse,
+-		ticketCreationTime:       c.config.time(),
+-		ticketExpiration:         c.config.time().Add(time.Duration(newSessionTicket.ticketLifetime) * time.Second),
+-		ticketAgeAdd:             newSessionTicket.ticketAgeAdd,
+-		maxEarlyDataSize:         newSessionTicket.maxEarlyDataSize,
+-		earlyALPN:                c.clientProtocol,
+-		hasApplicationSettings:   c.hasApplicationSettings,
+-		localApplicationSettings: c.localApplicationSettings,
+-		peerApplicationSettings:  c.peerApplicationSettings,
++		sessionTicket:               newSessionTicket.ticket,
++		vers:                        c.vers,
++		wireVersion:                 c.wireVersion,
++		cipherSuite:                 cipherSuite,
++		secret:                      deriveSessionPSK(cipherSuite, c.wireVersion, c.resumptionSecret, newSessionTicket.ticketNonce),
++		serverCertificates:          c.peerCertificates,
++		sctList:                     c.sctList,
++		ocspResponse:                c.ocspResponse,
++		ticketCreationTime:          c.config.time(),
++		ticketExpiration:            c.config.time().Add(time.Duration(newSessionTicket.ticketLifetime) * time.Second),
++		ticketAgeAdd:                newSessionTicket.ticketAgeAdd,
++		maxEarlyDataSize:            newSessionTicket.maxEarlyDataSize,
++		earlyALPN:                   c.clientProtocol,
++		hasApplicationSettings:      c.hasApplicationSettings,
++		localApplicationSettings:    c.localApplicationSettings,
++		peerApplicationSettings:     c.peerApplicationSettings,
++		hasApplicationSettingsOld:   c.hasApplicationSettingsOld,
++		localApplicationSettingsOld: c.localApplicationSettingsOld,
++		peerApplicationSettingsOld:  c.peerApplicationSettingsOld,
+ 	}
+ 
+ 	cacheKey := clientSessionCacheKey(c.conn.RemoteAddr(), c.config)
+@@ -1858,6 +1863,8 @@ func (c *Conn) ConnectionState() ConnectionState {
+ 		state.QUICTransportParamsLegacy = c.quicTransportParamsLegacy
+ 		state.HasApplicationSettings = c.hasApplicationSettings
+ 		state.PeerApplicationSettings = c.peerApplicationSettings
++		state.HasApplicationSettingsOld = c.hasApplicationSettingsOld
++		state.PeerApplicationSettingsOld = c.peerApplicationSettingsOld
+ 		state.ECHAccepted = c.echAccepted
+ 	}
+ 
+@@ -1983,17 +1990,20 @@ func (c *Conn) SendNewSessionTicket(nonce []byte) error {
+ 	}
+ 
+ 	state := sessionState{
+-		vers:                     c.vers,
+-		cipherSuite:              c.cipherSuite.id,
+-		secret:                   deriveSessionPSK(c.cipherSuite, c.wireVersion, c.resumptionSecret, nonce),
+-		certificates:             peerCertificatesRaw,
+-		ticketCreationTime:       c.config.time(),
+-		ticketExpiration:         c.config.time().Add(time.Duration(m.ticketLifetime) * time.Second),
+-		ticketAgeAdd:             uint32(addBuffer[3])<<24 | uint32(addBuffer[2])<<16 | uint32(addBuffer[1])<<8 | uint32(addBuffer[0]),
+-		earlyALPN:                []byte(c.clientProtocol),
+-		hasApplicationSettings:   c.hasApplicationSettings,
+-		localApplicationSettings: c.localApplicationSettings,
+-		peerApplicationSettings:  c.peerApplicationSettings,
++		vers:                        c.vers,
++		cipherSuite:                 c.cipherSuite.id,
++		secret:                      deriveSessionPSK(c.cipherSuite, c.wireVersion, c.resumptionSecret, nonce),
++		certificates:                peerCertificatesRaw,
++		ticketCreationTime:          c.config.time(),
++		ticketExpiration:            c.config.time().Add(time.Duration(m.ticketLifetime) * time.Second),
++		ticketAgeAdd:                uint32(addBuffer[3])<<24 | uint32(addBuffer[2])<<16 | uint32(addBuffer[1])<<8 | uint32(addBuffer[0]),
++		earlyALPN:                   []byte(c.clientProtocol),
++		hasApplicationSettings:      c.hasApplicationSettings,
++		localApplicationSettings:    c.localApplicationSettings,
++		peerApplicationSettings:     c.peerApplicationSettings,
++		hasApplicationSettingsOld:   c.hasApplicationSettingsOld,
++		localApplicationSettingsOld: c.localApplicationSettingsOld,
++		peerApplicationSettingsOld:  c.peerApplicationSettingsOld,
+ 	}
+ 
+ 	if !c.config.Bugs.SendEmptySessionTicket {
+diff --git a/ssl/test/runner/handshake_client.go b/ssl/test/runner/handshake_client.go
+index e231981f4..f2ab96626 100644
+--- a/ssl/test/runner/handshake_client.go
++++ b/ssl/test/runner/handshake_client.go
+@@ -630,8 +630,15 @@ func (hs *clientHandshakeState) createClientHello(innerHello *clientHelloMsg, ec
+ 		hello.secureRenegotiation = nil
+ 	}
+ 
+-	for protocol := range c.config.ApplicationSettings {
+-		hello.alpsProtocols = append(hello.alpsProtocols, protocol)
++	if c.config.ALPSUseNewCodepoint.IncludeNew() {
++		for protocol := range c.config.ApplicationSettings {
++			hello.alpsProtocols = append(hello.alpsProtocols, protocol)
++		}
++	}
++	if c.config.ALPSUseNewCodepoint.IncludeOld() {
++		for protocol := range c.config.ApplicationSettings {
++			hello.alpsProtocolsOld = append(hello.alpsProtocolsOld, protocol)
++		}
+ 	}
+ 
+ 	if maxVersion >= VersionTLS13 {
+@@ -1402,6 +1409,13 @@ func (hs *clientHandshakeState) doTLS13Handshake(msg interface{}) error {
+ 			clientEncryptedExtensions.applicationSettings = c.localApplicationSettings
+ 		}
+ 	}
++	if encryptedExtensions.extensions.hasApplicationSettingsOld || (c.config.Bugs.SendApplicationSettingsWithEarlyData && c.hasApplicationSettingsOld) {
++		hasEncryptedExtensions = true
++		if !c.config.Bugs.OmitClientApplicationSettings {
++			clientEncryptedExtensions.hasApplicationSettingsOld = true
++			clientEncryptedExtensions.applicationSettingsOld = c.localApplicationSettingsOld
++		}
++	}
+ 	if c.config.Bugs.SendExtraClientEncryptedExtension {
+ 		hasEncryptedExtensions = true
+ 		clientEncryptedExtensions.customExtension = []byte{0}
+@@ -2054,7 +2068,11 @@ func (hs *clientHandshakeState) processServerExtensions(serverExtensions *server
+ 		c.quicTransportParamsLegacy = serverExtensions.quicTransportParamsLegacy
+ 	}
+ 
+-	if serverExtensions.hasApplicationSettings {
++	if serverExtensions.hasApplicationSettings && serverExtensions.hasApplicationSettingsOld {
++		return errors.New("tls: server negotiated both old and new application settings together")
++	}
++
++	if serverExtensions.hasApplicationSettings || serverExtensions.hasApplicationSettingsOld {
+ 		if c.vers < VersionTLS13 {
+ 			return errors.New("tls: server sent application settings at invalid version")
+ 		}
+@@ -2068,14 +2086,26 @@ func (hs *clientHandshakeState) processServerExtensions(serverExtensions *server
+ 		if !ok {
+ 			return errors.New("tls: server sent application settings for invalid protocol")
+ 		}
+-		c.hasApplicationSettings = true
+-		c.localApplicationSettings = settings
+-		c.peerApplicationSettings = serverExtensions.applicationSettings
++
++		if serverExtensions.hasApplicationSettings {
++			c.hasApplicationSettings = true
++			c.localApplicationSettings = settings
++			c.peerApplicationSettings = serverExtensions.applicationSettings
++		}
++
++		if serverExtensions.hasApplicationSettingsOld {
++			c.hasApplicationSettingsOld = true
++			c.localApplicationSettingsOld = settings
++			c.peerApplicationSettingsOld = serverExtensions.applicationSettingsOld
++		}
+ 	} else if serverExtensions.hasEarlyData {
+ 		// 0-RTT connections inherit application settings from the session.
+ 		c.hasApplicationSettings = hs.session.hasApplicationSettings
+ 		c.localApplicationSettings = hs.session.localApplicationSettings
+ 		c.peerApplicationSettings = hs.session.peerApplicationSettings
++		c.hasApplicationSettingsOld = hs.session.hasApplicationSettingsOld
++		c.localApplicationSettingsOld = hs.session.localApplicationSettingsOld
++		c.peerApplicationSettingsOld = hs.session.peerApplicationSettingsOld
+ 	}
+ 
+ 	return nil
+diff --git a/ssl/test/runner/handshake_messages.go b/ssl/test/runner/handshake_messages.go
+index 6ea7faaa8..991f08a2e 100644
+--- a/ssl/test/runner/handshake_messages.go
++++ b/ssl/test/runner/handshake_messages.go
+@@ -196,6 +196,7 @@ type clientHelloMsg struct {
+ 	compressedCertAlgs                       []uint16
+ 	delegatedCredentials                     bool
+ 	alpsProtocols                            []string
++	alpsProtocolsOld                         []string
+ 	outerExtensions                          []uint16
+ 	reorderOuterExtensionsWithoutCompressing bool
+ 	prefixExtensions                         []uint16
+@@ -524,6 +525,18 @@ func (m *clientHelloMsg) marshalBody(hello *cryptobyte.Builder, typ clientHelloT
+ 			body: body.BytesOrPanic(),
+ 		})
+ 	}
++	if len(m.alpsProtocolsOld) > 0 {
++		body := cryptobyte.NewBuilder(nil)
++		body.AddUint16LengthPrefixed(func(protocolNameList *cryptobyte.Builder) {
++			for _, s := range m.alpsProtocolsOld {
++				addUint8LengthPrefixedBytes(protocolNameList, []byte(s))
++			}
++		})
++		extensions = append(extensions, extension{
++			id:   extensionApplicationSettingsOld,
++			body: body.BytesOrPanic(),
++		})
++	}
+ 
+ 	// The PSK extension must be last. See https://tools.ietf.org/html/rfc8446#section-4.2.11
+ 	if len(m.pskIdentities) > 0 {
+@@ -745,6 +758,7 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
+ 	m.customExtension = ""
+ 	m.delegatedCredentials = false
+ 	m.alpsProtocols = nil
++	m.alpsProtocolsOld = nil
+ 
+ 	if len(reader) == 0 {
+ 		// ClientHello is optionally followed by extension data
+@@ -1032,6 +1046,18 @@ func (m *clientHelloMsg) unmarshal(data []byte) bool {
+ 				}
+ 				m.alpsProtocols = append(m.alpsProtocols, string(protocol))
+ 			}
++		case extensionApplicationSettingsOld:
++			var protocols cryptobyte.String
++			if !body.ReadUint16LengthPrefixed(&protocols) || len(body) != 0 {
++				return false
++			}
++			for len(protocols) > 0 {
++				var protocol []byte
++				if !readUint8LengthPrefixedBytes(&protocols, &protocol) || len(protocol) == 0 {
++					return false
++				}
++				m.alpsProtocolsOld = append(m.alpsProtocolsOld, string(protocol))
++			}
+ 		}
+ 
+ 		if isGREASEValue(extension) {
+@@ -1412,6 +1438,8 @@ type serverExtensions struct {
+ 	serverNameAck             bool
+ 	applicationSettings       []byte
+ 	hasApplicationSettings    bool
++	applicationSettingsOld    []byte
++	hasApplicationSettingsOld bool
+ 	echRetryConfigs           []byte
+ }
+ 
+@@ -1539,6 +1567,10 @@ func (m *serverExtensions) marshal(extensions *cryptobyte.Builder) {
+ 		extensions.AddUint16(extensionApplicationSettings)
+ 		addUint16LengthPrefixedBytes(extensions, m.applicationSettings)
+ 	}
++	if m.hasApplicationSettingsOld {
++		extensions.AddUint16(extensionApplicationSettingsOld)
++		addUint16LengthPrefixedBytes(extensions, m.applicationSettingsOld)
++	}
+ 	if len(m.echRetryConfigs) > 0 {
+ 		extensions.AddUint16(extensionEncryptedClientHello)
+ 		addUint16LengthPrefixedBytes(extensions, m.echRetryConfigs)
+@@ -1649,6 +1681,9 @@ func (m *serverExtensions) unmarshal(data cryptobyte.String, version uint16) boo
+ 		case extensionApplicationSettings:
+ 			m.hasApplicationSettings = true
+ 			m.applicationSettings = body
++		case extensionApplicationSettingsOld:
++			m.hasApplicationSettingsOld = true
++			m.applicationSettingsOld = body
+ 		case extensionEncryptedClientHello:
+ 			if version < VersionTLS13 {
+ 				return false
+@@ -1681,10 +1716,12 @@ func (m *serverExtensions) unmarshal(data cryptobyte.String, version uint16) boo
+ }
+ 
+ type clientEncryptedExtensionsMsg struct {
+-	raw                    []byte
+-	applicationSettings    []byte
+-	hasApplicationSettings bool
+-	customExtension        []byte
++	raw                       []byte
++	applicationSettings       []byte
++	hasApplicationSettings    bool
++	applicationSettingsOld    []byte
++	hasApplicationSettingsOld bool
++	customExtension           []byte
+ }
+ 
+ func (m *clientEncryptedExtensionsMsg) marshal() (x []byte) {
+@@ -1700,6 +1737,10 @@ func (m *clientEncryptedExtensionsMsg) marshal() (x []byte) {
+ 				extensions.AddUint16(extensionApplicationSettings)
+ 				addUint16LengthPrefixedBytes(extensions, m.applicationSettings)
+ 			}
++			if m.hasApplicationSettingsOld {
++				extensions.AddUint16(extensionApplicationSettingsOld)
++				addUint16LengthPrefixedBytes(extensions, m.applicationSettingsOld)
++			}
+ 			if len(m.customExtension) > 0 {
+ 				extensions.AddUint16(extensionCustom)
+ 				addUint16LengthPrefixedBytes(extensions, m.customExtension)
+@@ -1736,6 +1777,9 @@ func (m *clientEncryptedExtensionsMsg) unmarshal(data []byte) bool {
+ 		case extensionApplicationSettings:
+ 			m.hasApplicationSettings = true
+ 			m.applicationSettings = body
++		case extensionApplicationSettingsOld:
++			m.hasApplicationSettingsOld = true
++			m.applicationSettingsOld = body
+ 		default:
+ 			// Unknown extensions are illegal in EncryptedExtensions.
+ 			return false
+diff --git a/ssl/test/runner/handshake_server.go b/ssl/test/runner/handshake_server.go
+index 57a3e081d..e408e2421 100644
+--- a/ssl/test/runner/handshake_server.go
++++ b/ssl/test/runner/handshake_server.go
+@@ -911,7 +911,9 @@ ResendHelloRetryRequest:
+ 			if hs.sessionState.cipherSuite == hs.suite.id &&
+ 				c.clientProtocol == string(hs.sessionState.earlyALPN) &&
+ 				c.hasApplicationSettings == hs.sessionState.hasApplicationSettings &&
+-				bytes.Equal(c.localApplicationSettings, hs.sessionState.localApplicationSettings) {
++				bytes.Equal(c.localApplicationSettings, hs.sessionState.localApplicationSettings) &&
++				c.hasApplicationSettingsOld == hs.sessionState.hasApplicationSettingsOld &&
++				bytes.Equal(c.localApplicationSettingsOld, hs.sessionState.localApplicationSettingsOld) {
+ 				encryptedExtensions.extensions.hasEarlyData = true
+ 			}
+ 			if config.Bugs.AlwaysAcceptEarlyData {
+@@ -926,6 +928,8 @@ ResendHelloRetryRequest:
+ 			if !config.Bugs.SendApplicationSettingsWithEarlyData {
+ 				encryptedExtensions.extensions.hasApplicationSettings = false
+ 				encryptedExtensions.extensions.applicationSettings = nil
++				encryptedExtensions.extensions.hasApplicationSettingsOld = false
++				encryptedExtensions.extensions.applicationSettingsOld = nil
+ 			}
+ 
+ 			sessionCipher := cipherSuiteFromID(hs.sessionState.cipherSuite)
+@@ -1262,8 +1266,8 @@ ResendHelloRetryRequest:
+ 		return err
+ 	}
+ 
+-	// If we sent an ALPS extension, the client must respond with one.
+-	if encryptedExtensions.extensions.hasApplicationSettings {
++	// If we sent an ALPS extension, the client must respond with a single EncryptedExtensions.
++	if encryptedExtensions.extensions.hasApplicationSettings || encryptedExtensions.extensions.hasApplicationSettingsOld {
+ 		msg, err := c.readHandshake()
+ 		if err != nil {
+ 			return err
+@@ -1275,14 +1279,35 @@ ResendHelloRetryRequest:
+ 		}
+ 		hs.writeClientHash(clientEncryptedExtensions.marshal())
+ 
+-		if !clientEncryptedExtensions.hasApplicationSettings {
+-			c.sendAlert(alertMissingExtension)
+-			return errors.New("tls: client didn't provide application settings")
++		// Expect client send new application settings not old.
++		if encryptedExtensions.extensions.hasApplicationSettings {
++			if !clientEncryptedExtensions.hasApplicationSettings {
++				c.sendAlert(alertMissingExtension)
++				return errors.New("tls: client didn't provide new application settings")
++			}
++			if clientEncryptedExtensions.hasApplicationSettingsOld {
++				c.sendAlert(alertUnsupportedExtension)
++				return errors.New("tls: client shouldn't provide old application settings")
++			}
++			c.peerApplicationSettings = clientEncryptedExtensions.applicationSettings
++		}
++
++		// Expect client send old application settings not new.
++		if encryptedExtensions.extensions.hasApplicationSettingsOld {
++			if !clientEncryptedExtensions.hasApplicationSettingsOld {
++				c.sendAlert(alertMissingExtension)
++				return errors.New("tls: client didn't provide old application settings")
++			}
++			if clientEncryptedExtensions.hasApplicationSettings {
++				c.sendAlert(alertUnsupportedExtension)
++				return errors.New("tls: client shouldn't provide new application settings")
++			}
++			c.peerApplicationSettingsOld = clientEncryptedExtensions.applicationSettingsOld
+ 		}
+-		c.peerApplicationSettings = clientEncryptedExtensions.applicationSettings
+ 	} else if encryptedExtensions.extensions.hasEarlyData {
+ 		// 0-RTT sessions carry application settings over.
+ 		c.peerApplicationSettings = hs.sessionState.peerApplicationSettings
++		c.peerApplicationSettingsOld = hs.sessionState.peerApplicationSettingsOld
+ 	}
+ 
+ 	// If we requested a client certificate, then the client must send a
+@@ -1595,7 +1620,7 @@ func (hs *serverHandshakeState) processClientExtensions(serverExtensions *server
+ 			c.usedALPN = true
+ 		}
+ 
+-		var alpsAllowed bool
++		var alpsAllowed, alpsAllowedOld bool
+ 		if c.vers >= VersionTLS13 {
+ 			for _, proto := range hs.clientHello.alpsProtocols {
+ 				if proto == c.clientProtocol {
+@@ -1603,10 +1628,24 @@ func (hs *serverHandshakeState) processClientExtensions(serverExtensions *server
+ 					break
+ 				}
+ 			}
++			for _, proto := range hs.clientHello.alpsProtocolsOld {
++				if proto == c.clientProtocol {
++					alpsAllowedOld = true
++					break
++				}
++			}
++		}
++
++		if c.config.Bugs.AlwaysNegotiateApplicationSettingsBoth {
++			alpsAllowed = true
++			alpsAllowedOld = true
+ 		}
+-		if c.config.Bugs.AlwaysNegotiateApplicationSettings {
++		if c.config.Bugs.AlwaysNegotiateApplicationSettingsNew {
+ 			alpsAllowed = true
+ 		}
++		if c.config.Bugs.AlwaysNegotiateApplicationSettingsOld {
++			alpsAllowedOld = true
++		}
+ 		if settings, ok := c.config.ApplicationSettings[c.clientProtocol]; ok && alpsAllowed {
+ 			c.hasApplicationSettings = true
+ 			c.localApplicationSettings = settings
+@@ -1614,6 +1653,13 @@ func (hs *serverHandshakeState) processClientExtensions(serverExtensions *server
+ 			serverExtensions.hasApplicationSettings = true
+ 			serverExtensions.applicationSettings = settings
+ 		}
++		if settings, ok := c.config.ApplicationSettings[c.clientProtocol]; ok && alpsAllowedOld {
++			c.hasApplicationSettingsOld = true
++			c.localApplicationSettingsOld = settings
++			// Note these fields may later be cleared we accept 0-RTT.
++			serverExtensions.hasApplicationSettingsOld = true
++			serverExtensions.applicationSettingsOld = settings
++		}
+ 	}
+ 
+ 	if len(c.config.Bugs.SendALPN) > 0 {
+diff --git a/ssl/test/runner/runner.go b/ssl/test/runner/runner.go
+index 4770dfc77..e1c779b1a 100644
+--- a/ssl/test/runner/runner.go
++++ b/ssl/test/runner/runner.go
+@@ -554,6 +554,10 @@ type connectionExpectations struct {
+ 	// peerApplicationSettings are the expected application settings for the
+ 	// connection. If nil, no application settings are expected.
+ 	peerApplicationSettings []byte
++	// peerApplicationSettingsOld are the expected application settings for
++	// the connection that are to be sent by the peer using old codepoint.
++	// If nil, no application settings are expected.
++	peerApplicationSettingsOld []byte
+ 	// echAccepted is whether ECH should have been accepted on this connection.
+ 	echAccepted bool
+ }
+@@ -938,6 +942,17 @@ func doExchange(test *testCase, config *Config, conn net.Conn, isResume bool, tr
+ 		return errors.New("application settings unexpectedly negotiated")
+ 	}
+ 
++	if expectations.peerApplicationSettingsOld != nil {
++		if !connState.HasApplicationSettingsOld {
++			return errors.New("old application settings should have been negotiated")
++		}
++		if !bytes.Equal(connState.PeerApplicationSettingsOld, expectations.peerApplicationSettingsOld) {
++			return fmt.Errorf("old peer application settings mismatch: got %q, wanted %q", connState.PeerApplicationSettingsOld, expectations.peerApplicationSettingsOld)
++		}
++	} else if connState.HasApplicationSettingsOld {
++		return errors.New("old application settings unexpectedly negotiated")
++	}
++
+ 	if p := connState.SRTPProtectionProfile; p != expectations.srtpProtectionProfile {
+ 		return fmt.Errorf("SRTP profile mismatch: got %d, wanted %d", p, expectations.srtpProtectionProfile)
+ 	}
+@@ -7179,598 +7194,809 @@ func addExtensionTests() {
+ 
+ 			// Test ALPS.
+ 			if ver.version >= VersionTLS13 {
+-				// Test that client and server can negotiate ALPS, including
+-				// different values on resumption.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           clientTest,
+-					name:               "ALPS-Basic-Client-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner1")},
+-					},
+-					resumeConfig: &Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner2")},
+-					},
+-					resumeSession: true,
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte("shim1"),
+-					},
+-					resumeExpectations: &connectionExpectations{
+-						peerApplicationSettings: []byte("shim2"),
+-					},
+-					flags: []string{
++				// Test basic client with different ALPS codepoint.
++				for _, alpsCodePoint := range []ALPSUseCodepoint{ALPSUseCodepointNew, ALPSUseCodepointOld} {
++					flags := []string{}
++					expectations := connectionExpectations{
++						peerApplicationSettingsOld: []byte("shim1"),
++					}
++					resumeExpectations := &connectionExpectations{
++						peerApplicationSettingsOld: []byte("shim2"),
++					}
++
++					if alpsCodePoint == ALPSUseCodepointNew {
++						flags = append(flags, "-alps-use-new-codepoint")
++						expectations = connectionExpectations{
++							peerApplicationSettings: []byte("shim1"),
++						}
++						resumeExpectations = &connectionExpectations{
++							peerApplicationSettings: []byte("shim2"),
++						}
++					}
++
++					flags = append(flags,
+ 						"-advertise-alpn", "\x05proto",
+ 						"-expect-alpn", "proto",
+ 						"-on-initial-application-settings", "proto,shim1",
+ 						"-on-initial-expect-peer-application-settings", "runner1",
+ 						"-on-resume-application-settings", "proto,shim2",
+-						"-on-resume-expect-peer-application-settings", "runner2",
+-					},
+-				})
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ALPS-Basic-Server-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner1")},
+-					},
+-					resumeConfig: &Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner2")},
+-					},
+-					resumeSession: true,
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte("shim1"),
+-					},
+-					resumeExpectations: &connectionExpectations{
+-						peerApplicationSettings: []byte("shim2"),
+-					},
+-					flags: []string{
+-						"-select-alpn", "proto",
+-						"-on-initial-application-settings", "proto,shim1",
+-						"-on-initial-expect-peer-application-settings", "runner1",
+-						"-on-resume-application-settings", "proto,shim2",
+-						"-on-resume-expect-peer-application-settings", "runner2",
+-					},
+-				})
+-
+-				// Test that the server can defer its ALPS configuration to the ALPN
+-				// selection callback.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ALPS-Basic-Server-Defer-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner1")},
+-					},
+-					resumeConfig: &Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner2")},
+-					},
+-					resumeSession: true,
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte("shim1"),
+-					},
+-					resumeExpectations: &connectionExpectations{
+-						peerApplicationSettings: []byte("shim2"),
+-					},
+-					flags: []string{
+-						"-select-alpn", "proto",
+-						"-defer-alps",
+-						"-on-initial-application-settings", "proto,shim1",
+-						"-on-initial-expect-peer-application-settings", "runner1",
+-						"-on-resume-application-settings", "proto,shim2",
+-						"-on-resume-expect-peer-application-settings", "runner2",
+-					},
+-				})
+-
+-				// Test the client and server correctly handle empty settings.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           clientTest,
+-					name:               "ALPS-Empty-Client-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte{}},
+-					},
+-					resumeSession: true,
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte{},
+-					},
+-					flags: []string{
+-						"-advertise-alpn", "\x05proto",
+-						"-expect-alpn", "proto",
+-						"-application-settings", "proto,",
+-						"-expect-peer-application-settings", "",
+-					},
+-				})
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ALPS-Empty-Server-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte{}},
+-					},
+-					resumeSession: true,
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte{},
+-					},
+-					flags: []string{
+-						"-select-alpn", "proto",
+-						"-application-settings", "proto,",
+-						"-expect-peer-application-settings", "",
+-					},
+-				})
++						"-on-resume-expect-peer-application-settings", "runner2")
+ 
+-				// Test the client rejects application settings from the server on
+-				// protocols it doesn't have them.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           clientTest,
+-					name:               "ALPS-UnsupportedProtocol-Client-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto1"},
+-						ApplicationSettings: map[string][]byte{"proto1": []byte("runner")},
+-						Bugs: ProtocolBugs{
+-							AlwaysNegotiateApplicationSettings: true,
++					// Test that server can negotiate ALPS, including different values
++					// on resumption.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           clientTest,
++						name:               fmt.Sprintf("ALPS-Basic-Client-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner1")},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-					},
+-					// The client supports ALPS with "proto2", but not "proto1".
+-					flags: []string{
+-						"-advertise-alpn", "\x06proto1\x06proto2",
+-						"-application-settings", "proto2,shim",
+-						"-expect-alpn", "proto1",
+-					},
+-					// The server sends ALPS with "proto1", which is invalid.
+-					shouldFail:         true,
+-					expectedError:      ":INVALID_ALPN_PROTOCOL:",
+-					expectedLocalError: "remote error: illegal parameter",
+-				})
+-
+-				// Test the server declines ALPS if it doesn't support it for the
+-				// specified protocol.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ALPS-UnsupportedProtocol-Server-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto1"},
+-						ApplicationSettings: map[string][]byte{"proto1": []byte("runner")},
+-					},
+-					// The server supports ALPS with "proto2", but not "proto1".
+-					flags: []string{
+-						"-select-alpn", "proto1",
+-						"-application-settings", "proto2,shim",
+-					},
+-				})
+-
+-				// Test that the server rejects a missing application_settings extension.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ALPS-OmitClientApplicationSettings-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
+-						Bugs: ProtocolBugs{
+-							OmitClientApplicationSettings: true,
++						resumeConfig: &Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner2")},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-					},
+-					flags: []string{
+-						"-select-alpn", "proto",
+-						"-application-settings", "proto,shim",
+-					},
+-					// The runner is a client, so it only processes the shim's alert
+-					// after checking connection state.
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte("shim"),
+-					},
+-					shouldFail:         true,
+-					expectedError:      ":MISSING_EXTENSION:",
+-					expectedLocalError: "remote error: missing extension",
+-				})
++						resumeSession:      true,
++						expectations:       expectations,
++						resumeExpectations: resumeExpectations,
++						flags:              flags,
++					})
+ 
+-				// Test that the server rejects a missing EncryptedExtensions message.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ALPS-OmitClientEncryptedExtensions-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
+-						Bugs: ProtocolBugs{
+-							OmitClientEncryptedExtensions: true,
+-						},
+-					},
+-					flags: []string{
+-						"-select-alpn", "proto",
+-						"-application-settings", "proto,shim",
+-					},
+-					// The runner is a client, so it only processes the shim's alert
+-					// after checking connection state.
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte("shim"),
+-					},
+-					shouldFail:         true,
+-					expectedError:      ":UNEXPECTED_MESSAGE:",
+-					expectedLocalError: "remote error: unexpected message",
+-				})
++					// Test basic server with different ALPS codepoint.
++					flags = []string{}
++					expectations = connectionExpectations{
++						peerApplicationSettingsOld: []byte("shim1"),
++					}
++					resumeExpectations = &connectionExpectations{
++						peerApplicationSettingsOld: []byte("shim2"),
++					}
+ 
+-				// Test that the server rejects an unexpected EncryptedExtensions message.
+-				testCases = append(testCases, testCase{
+-					protocol: protocol,
+-					testType: serverTest,
+-					name:     "UnexpectedClientEncryptedExtensions-" + suffix,
+-					config: Config{
+-						MaxVersion: ver.version,
+-						Bugs: ProtocolBugs{
+-							AlwaysSendClientEncryptedExtensions: true,
+-						},
+-					},
+-					shouldFail:         true,
+-					expectedError:      ":UNEXPECTED_MESSAGE:",
+-					expectedLocalError: "remote error: unexpected message",
+-				})
++					if alpsCodePoint == ALPSUseCodepointNew {
++						flags = append(flags, "-alps-use-new-codepoint")
++						expectations = connectionExpectations{
++							peerApplicationSettings: []byte("shim1"),
++						}
++						resumeExpectations = &connectionExpectations{
++							peerApplicationSettings: []byte("shim2"),
++						}
++					}
+ 
+-				// Test that the server rejects an unexpected extension in an
+-				// expected EncryptedExtensions message.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ExtraClientEncryptedExtension-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"proto"},
+-						ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
+-						Bugs: ProtocolBugs{
+-							SendExtraClientEncryptedExtension: true,
+-						},
+-					},
+-					flags: []string{
++					flags = append(flags,
+ 						"-select-alpn", "proto",
+-						"-application-settings", "proto,shim",
+-					},
+-					// The runner is a client, so it only processes the shim's alert
+-					// after checking connection state.
+-					expectations: connectionExpectations{
+-						peerApplicationSettings: []byte("shim"),
+-					},
+-					shouldFail:         true,
+-					expectedError:      ":UNEXPECTED_EXTENSION:",
+-					expectedLocalError: "remote error: unsupported extension",
+-				})
+-
+-				// Test that ALPS is carried over on 0-RTT.
+-				for _, empty := range []bool{false, true} {
+-					maybeEmpty := ""
+-					runnerSettings := "runner"
+-					shimSettings := "shim"
+-					if empty {
+-						maybeEmpty = "Empty-"
+-						runnerSettings = ""
+-						shimSettings = ""
+-					}
++						"-on-initial-application-settings", "proto,shim1",
++						"-on-initial-expect-peer-application-settings", "runner1",
++						"-on-resume-application-settings", "proto,shim2",
++						"-on-resume-expect-peer-application-settings", "runner2")
+ 
++					// Test that server can negotiate ALPS, including different values
++					// on resumption.
+ 					testCases = append(testCases, testCase{
+ 						protocol:           protocol,
+-						testType:           clientTest,
+-						name:               "ALPS-EarlyData-Client-" + maybeEmpty + suffix,
++						testType:           serverTest,
++						name:               fmt.Sprintf("ALPS-Basic-Server-%s-%s", alpsCodePoint, suffix),
+ 						skipQUICALPNConfig: true,
+ 						config: Config{
+ 							MaxVersion:          ver.version,
+ 							NextProtos:          []string{"proto"},
+-							ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
+-						},
+-						resumeSession: true,
+-						earlyData:     true,
+-						flags: []string{
+-							"-advertise-alpn", "\x05proto",
+-							"-expect-alpn", "proto",
+-							"-application-settings", "proto," + shimSettings,
+-							"-expect-peer-application-settings", runnerSettings,
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner1")},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-						expectations: connectionExpectations{
+-							peerApplicationSettings: []byte(shimSettings),
++						resumeConfig: &Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner2")},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
++						resumeSession:      true,
++						expectations:       expectations,
++						resumeExpectations: resumeExpectations,
++						flags:              flags,
+ 					})
++
++					// Try different ALPS codepoint for all the existing tests.
++					alpsFlags := []string{}
++					expectations = connectionExpectations{
++						peerApplicationSettingsOld: []byte("shim1"),
++					}
++					resumeExpectations = &connectionExpectations{
++						peerApplicationSettingsOld: []byte("shim2"),
++					}
++					if alpsCodePoint == ALPSUseCodepointNew {
++						alpsFlags = append(alpsFlags, "-alps-use-new-codepoint")
++						expectations = connectionExpectations{
++							peerApplicationSettings: []byte("shim1"),
++						}
++						resumeExpectations = &connectionExpectations{
++							peerApplicationSettings: []byte("shim2"),
++						}
++					}
++
++					// Test that the server can defer its ALPS configuration to the ALPN
++					// selection callback.
+ 					testCases = append(testCases, testCase{
+ 						protocol:           protocol,
+ 						testType:           serverTest,
+-						name:               "ALPS-EarlyData-Server-" + maybeEmpty + suffix,
++						name:               fmt.Sprintf("ALPS-Basic-Server-Defer-%s-%s", alpsCodePoint, suffix),
+ 						skipQUICALPNConfig: true,
+ 						config: Config{
+ 							MaxVersion:          ver.version,
+ 							NextProtos:          []string{"proto"},
+-							ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
+-						},
+-						resumeSession: true,
+-						earlyData:     true,
+-						flags: []string{
+-							"-select-alpn", "proto",
+-							"-application-settings", "proto," + shimSettings,
+-							"-expect-peer-application-settings", runnerSettings,
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner1")},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-						expectations: connectionExpectations{
+-							peerApplicationSettings: []byte(shimSettings),
++						resumeConfig: &Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner2")},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
++						resumeSession:      true,
++						expectations:       expectations,
++						resumeExpectations: resumeExpectations,
++						flags: append([]string{
++							"-select-alpn", "proto",
++							"-defer-alps",
++							"-on-initial-application-settings", "proto,shim1",
++							"-on-initial-expect-peer-application-settings", "runner1",
++							"-on-resume-application-settings", "proto,shim2",
++							"-on-resume-expect-peer-application-settings", "runner2",
++						}, alpsFlags...),
+ 					})
+ 
+-					// Sending application settings in 0-RTT handshakes is forbidden.
++					expectations = connectionExpectations{
++						peerApplicationSettingsOld: []byte{},
++					}
++					if alpsCodePoint == ALPSUseCodepointNew {
++						expectations = connectionExpectations{
++							peerApplicationSettings: []byte{},
++						}
++					}
++					// Test the client and server correctly handle empty settings.
+ 					testCases = append(testCases, testCase{
+ 						protocol:           protocol,
+ 						testType:           clientTest,
+-						name:               "ALPS-EarlyData-SendApplicationSettingsWithEarlyData-Client-" + maybeEmpty + suffix,
++						name:               fmt.Sprintf("ALPS-Empty-Client-%s-%s", alpsCodePoint, suffix),
+ 						skipQUICALPNConfig: true,
+ 						config: Config{
+ 							MaxVersion:          ver.version,
+ 							NextProtos:          []string{"proto"},
+-							ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
+-							Bugs: ProtocolBugs{
+-								SendApplicationSettingsWithEarlyData: true,
+-							},
++							ApplicationSettings: map[string][]byte{"proto": []byte{}},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+ 						resumeSession: true,
+-						earlyData:     true,
+-						flags: []string{
++						expectations:  expectations,
++						flags: append([]string{
+ 							"-advertise-alpn", "\x05proto",
+ 							"-expect-alpn", "proto",
+-							"-application-settings", "proto," + shimSettings,
+-							"-expect-peer-application-settings", runnerSettings,
+-						},
+-						expectations: connectionExpectations{
+-							peerApplicationSettings: []byte(shimSettings),
+-						},
++							"-application-settings", "proto,",
++							"-expect-peer-application-settings", "",
++						}, alpsFlags...),
++					})
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           serverTest,
++						name:               fmt.Sprintf("ALPS-Empty-Server-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte{}},
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						resumeSession: true,
++						expectations:  expectations,
++						flags: append([]string{
++							"-select-alpn", "proto",
++							"-application-settings", "proto,",
++							"-expect-peer-application-settings", "",
++						}, alpsFlags...),
++					})
++
++					bugs := ProtocolBugs{
++						AlwaysNegotiateApplicationSettingsOld: true,
++					}
++					if alpsCodePoint == ALPSUseCodepointNew {
++						bugs = ProtocolBugs{
++							AlwaysNegotiateApplicationSettingsNew: true,
++						}
++					}
++					// Test the client rejects application settings from the server on
++					// protocols it doesn't have them.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           clientTest,
++						name:               fmt.Sprintf("ALPS-UnsupportedProtocol-Client-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto1"},
++							ApplicationSettings: map[string][]byte{"proto1": []byte("runner")},
++							Bugs:                bugs,
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						// The client supports ALPS with "proto2", but not "proto1".
++						flags: append([]string{
++							"-advertise-alpn", "\x06proto1\x06proto2",
++							"-application-settings", "proto2,shim",
++							"-expect-alpn", "proto1",
++						}, alpsFlags...),
++						// The server sends ALPS with "proto1", which is invalid.
+ 						shouldFail:         true,
+-						expectedError:      ":UNEXPECTED_EXTENSION_ON_EARLY_DATA:",
++						expectedError:      ":INVALID_ALPN_PROTOCOL:",
+ 						expectedLocalError: "remote error: illegal parameter",
+ 					})
++
++					// Test client rejects application settings from the server when
++					// server sends the wrong ALPS codepoint.
++					bugs = ProtocolBugs{
++						AlwaysNegotiateApplicationSettingsOld: true,
++					}
++					if alpsCodePoint == ALPSUseCodepointOld {
++						bugs = ProtocolBugs{
++							AlwaysNegotiateApplicationSettingsNew: true,
++						}
++					}
++
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           clientTest,
++						name:               fmt.Sprintf("ALPS-WrongServerCodepoint-Client-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte{}},
++							Bugs:                bugs,
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						flags: append([]string{
++							"-advertise-alpn", "\x05proto",
++							"-expect-alpn", "proto",
++							"-application-settings", "proto,",
++							"-expect-peer-application-settings", "",
++						}, alpsFlags...),
++						shouldFail:         true,
++						expectedError:      ":UNEXPECTED_EXTENSION:",
++						expectedLocalError: "remote error: unsupported extension",
++					})
++
++					// Test server ignore wrong codepoint from client.
++					clientSends := ALPSUseCodepointNew
++					if alpsCodePoint == ALPSUseCodepointNew {
++						clientSends = ALPSUseCodepointOld
++					}
++
+ 					testCases = append(testCases, testCase{
+ 						protocol:           protocol,
+ 						testType:           serverTest,
+-						name:               "ALPS-EarlyData-SendApplicationSettingsWithEarlyData-Server-" + maybeEmpty + suffix,
++						name:               fmt.Sprintf("ALPS-IgnoreClientWrongCodepoint-Server-%s-%s", alpsCodePoint, suffix),
+ 						skipQUICALPNConfig: true,
+ 						config: Config{
+ 							MaxVersion:          ver.version,
+ 							NextProtos:          []string{"proto"},
+-							ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner1")},
++							ALPSUseNewCodepoint: clientSends,
++						},
++						resumeConfig: &Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner2")},
++							ALPSUseNewCodepoint: clientSends,
++						},
++						resumeSession:      true,
++						flags: append([]string{
++							"-select-alpn", "proto",
++							"-on-initial-application-settings", "proto,shim1",
++							"-on-resume-application-settings", "proto,shim2",
++						}, alpsFlags...),
++					})
++
++					// Test the server declines ALPS if it doesn't support it for the
++					// specified protocol.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           serverTest,
++						name:               fmt.Sprintf("ALPS-UnsupportedProtocol-Server-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto1"},
++							ApplicationSettings: map[string][]byte{"proto1": []byte("runner")},
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						// The server supports ALPS with "proto2", but not "proto1".
++						flags: append([]string{
++							"-select-alpn", "proto1",
++							"-application-settings", "proto2,shim",
++						}, alpsFlags...),
++					})
++
++					// Test the client rejects application settings from the server when
++					// it always negotiate both codepoint.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           clientTest,
++						name:               fmt.Sprintf("ALPS-UnsupportedProtocol-Client-ServerBoth-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto1"},
++							ApplicationSettings: map[string][]byte{"proto1": []byte("runner")},
+ 							Bugs: ProtocolBugs{
+-								SendApplicationSettingsWithEarlyData: true,
++								AlwaysNegotiateApplicationSettingsBoth: true,
+ 							},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-						resumeSession: true,
+-						earlyData:     true,
+-						flags: []string{
++						flags: append([]string{
++							"-advertise-alpn", "\x06proto1\x06proto2",
++							"-application-settings", "proto1,shim",
++							"-expect-alpn", "proto1",
++						}, alpsFlags...),
++						// The server sends ALPS with both application settings, which is invalid.
++						shouldFail:         true,
++						expectedError:      ":UNEXPECTED_EXTENSION:",
++						expectedLocalError: "remote error: unsupported extension",
++					})
++
++					expectations = connectionExpectations{
++						peerApplicationSettingsOld: []byte("shim"),
++					}
++					if alpsCodePoint == ALPSUseCodepointNew {
++						expectations = connectionExpectations{
++							peerApplicationSettings: []byte("shim"),
++						}
++					}
++
++					// Test that the server rejects a missing application_settings extension.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           serverTest,
++						name:               fmt.Sprintf("ALPS-OmitClientApplicationSettings-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
++							Bugs: ProtocolBugs{
++								OmitClientApplicationSettings: true,
++							},
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						flags: append([]string{
+ 							"-select-alpn", "proto",
+-							"-application-settings", "proto," + shimSettings,
+-							"-expect-peer-application-settings", runnerSettings,
++							"-application-settings", "proto,shim",
++						}, alpsFlags...),
++						// The runner is a client, so it only processes the shim's alert
++						// after checking connection state.
++						expectations:       expectations,
++						shouldFail:         true,
++						expectedError:      ":MISSING_EXTENSION:",
++						expectedLocalError: "remote error: missing extension",
++					})
++
++					// Test that the server rejects a missing EncryptedExtensions message.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           serverTest,
++						name:               fmt.Sprintf("ALPS-OmitClientEncryptedExtensions-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
++							Bugs: ProtocolBugs{
++								OmitClientEncryptedExtensions: true,
++							},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-						expectations: connectionExpectations{
+-							peerApplicationSettings: []byte(shimSettings),
++						flags: append([]string{
++							"-select-alpn", "proto",
++							"-application-settings", "proto,shim",
++						}, alpsFlags...),
++						// The runner is a client, so it only processes the shim's alert
++						// after checking connection state.
++						expectations:       expectations,
++						shouldFail:         true,
++						expectedError:      ":UNEXPECTED_MESSAGE:",
++						expectedLocalError: "remote error: unexpected message",
++					})
++
++					// Test that the server rejects an unexpected EncryptedExtensions message.
++					testCases = append(testCases, testCase{
++						protocol: protocol,
++						testType: serverTest,
++						name:     fmt.Sprintf("UnexpectedClientEncryptedExtensions-%s-%s", alpsCodePoint, suffix),
++						config: Config{
++							MaxVersion: ver.version,
++							Bugs: ProtocolBugs{
++								AlwaysSendClientEncryptedExtensions: true,
++							},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+ 						shouldFail:         true,
+ 						expectedError:      ":UNEXPECTED_MESSAGE:",
+ 						expectedLocalError: "remote error: unexpected message",
+ 					})
+-				}
+ 
+-				// Test that the client and server each decline early data if local
+-				// ALPS preferences has changed for the current connection.
+-				alpsMismatchTests := []struct {
+-					name                            string
+-					initialSettings, resumeSettings []byte
+-				}{
+-					{"DifferentValues", []byte("settings1"), []byte("settings2")},
+-					{"OnOff", []byte("settings"), nil},
+-					{"OffOn", nil, []byte("settings")},
+-					// The empty settings value should not be mistaken for ALPS not
+-					// being negotiated.
+-					{"OnEmpty", []byte("settings"), []byte{}},
+-					{"EmptyOn", []byte{}, []byte("settings")},
+-					{"EmptyOff", []byte{}, nil},
+-					{"OffEmpty", nil, []byte{}},
+-				}
+-				for _, test := range alpsMismatchTests {
+-					flags := []string{"-on-resume-expect-early-data-reason", "alps_mismatch"}
+-					if test.initialSettings != nil {
+-						flags = append(flags, "-on-initial-application-settings", "proto,"+string(test.initialSettings))
+-						flags = append(flags, "-on-initial-expect-peer-application-settings", "runner")
+-					}
+-					if test.resumeSettings != nil {
+-						flags = append(flags, "-on-resume-application-settings", "proto,"+string(test.resumeSettings))
+-						flags = append(flags, "-on-resume-expect-peer-application-settings", "runner")
+-					}
++					// Test that the server rejects an unexpected extension in an
++					// expected EncryptedExtensions message.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           serverTest,
++						name:               fmt.Sprintf("ExtraClientEncryptedExtension-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
++							Bugs: ProtocolBugs{
++								SendExtraClientEncryptedExtension: true,
++							},
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						flags: append([]string{
++							"-select-alpn", "proto",
++							"-application-settings", "proto,shim",
++						}, alpsFlags...),
++						// The runner is a client, so it only processes the shim's alert
++						// after checking connection state.
++						expectations:       expectations,
++						shouldFail:         true,
++						expectedError:      ":UNEXPECTED_EXTENSION:",
++						expectedLocalError: "remote error: unsupported extension",
++					})
+ 
+-					// The client should not offer early data if the session is
+-					// inconsistent with the new configuration. Note that if
+-					// the session did not negotiate ALPS (test.initialSettings
+-					// is nil), the client always offers early data.
+-					if test.initialSettings != nil {
++					// Test that ALPS is carried over on 0-RTT.
++					for _, empty := range []bool{false, true} {
++						maybeEmpty := ""
++						runnerSettings := "runner"
++						shimSettings := "shim"
++						if empty {
++							maybeEmpty = "Empty-"
++							runnerSettings = ""
++							shimSettings = ""
++						}
++
++						expectations = connectionExpectations{
++							peerApplicationSettingsOld: []byte(shimSettings),
++						}
++						if alpsCodePoint == ALPSUseCodepointNew {
++							expectations = connectionExpectations{
++								peerApplicationSettings: []byte(shimSettings),
++							}
++						}
+ 						testCases = append(testCases, testCase{
+ 							protocol:           protocol,
+ 							testType:           clientTest,
+-							name:               fmt.Sprintf("ALPS-EarlyData-Mismatch-%s-Client-%s", test.name, suffix),
++							name:               fmt.Sprintf("ALPS-EarlyData-Client-%s-%s-%s", alpsCodePoint, maybeEmpty, suffix),
+ 							skipQUICALPNConfig: true,
+ 							config: Config{
+ 								MaxVersion:          ver.version,
+-								MaxEarlyDataSize:    16384,
+ 								NextProtos:          []string{"proto"},
+-								ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
++								ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
++								ALPSUseNewCodepoint: alpsCodePoint,
+ 							},
+ 							resumeSession: true,
++							earlyData:     true,
+ 							flags: append([]string{
+-								"-enable-early-data",
+-								"-expect-ticket-supports-early-data",
+-								"-expect-no-offer-early-data",
+ 								"-advertise-alpn", "\x05proto",
+ 								"-expect-alpn", "proto",
+-							}, flags...),
+-							expectations: connectionExpectations{
+-								peerApplicationSettings: test.initialSettings,
++								"-application-settings", "proto," + shimSettings,
++								"-expect-peer-application-settings", runnerSettings,
++							}, alpsFlags...),
++							expectations: expectations,
++						})
++						testCases = append(testCases, testCase{
++							protocol:           protocol,
++							testType:           serverTest,
++							name:               fmt.Sprintf("ALPS-EarlyData-Server-%s-%s-%s", alpsCodePoint, maybeEmpty, suffix),
++							skipQUICALPNConfig: true,
++							config: Config{
++								MaxVersion:          ver.version,
++								NextProtos:          []string{"proto"},
++								ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
++								ALPSUseNewCodepoint: alpsCodePoint,
++							},
++							resumeSession: true,
++							earlyData:     true,
++							flags: append([]string{
++								"-select-alpn", "proto",
++								"-application-settings", "proto," + shimSettings,
++								"-expect-peer-application-settings", runnerSettings,
++							}, alpsFlags...),
++							expectations: expectations,
++						})
++
++						// Sending application settings in 0-RTT handshakes is forbidden.
++						testCases = append(testCases, testCase{
++							protocol:           protocol,
++							testType:           clientTest,
++							name:               fmt.Sprintf("ALPS-EarlyData-SendApplicationSettingsWithEarlyData-Client-%s-%s-%s", alpsCodePoint, maybeEmpty, suffix),
++							skipQUICALPNConfig: true,
++							config: Config{
++								MaxVersion:          ver.version,
++								NextProtos:          []string{"proto"},
++								ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
++								Bugs: ProtocolBugs{
++									SendApplicationSettingsWithEarlyData: true,
++								},
++								ALPSUseNewCodepoint: alpsCodePoint,
+ 							},
+-							resumeExpectations: &connectionExpectations{
++							resumeSession: true,
++							earlyData:     true,
++							flags: append([]string{
++								"-advertise-alpn", "\x05proto",
++								"-expect-alpn", "proto",
++								"-application-settings", "proto," + shimSettings,
++								"-expect-peer-application-settings", runnerSettings,
++							}, alpsFlags...),
++							expectations:       expectations,
++							shouldFail:         true,
++							expectedError:      ":UNEXPECTED_EXTENSION_ON_EARLY_DATA:",
++							expectedLocalError: "remote error: illegal parameter",
++						})
++						testCases = append(testCases, testCase{
++							protocol:           protocol,
++							testType:           serverTest,
++							name:               fmt.Sprintf("ALPS-EarlyData-SendApplicationSettingsWithEarlyData-Server-%s-%s-%s", alpsCodePoint, maybeEmpty, suffix),
++							skipQUICALPNConfig: true,
++							config: Config{
++								MaxVersion:          ver.version,
++								NextProtos:          []string{"proto"},
++								ApplicationSettings: map[string][]byte{"proto": []byte(runnerSettings)},
++								Bugs: ProtocolBugs{
++									SendApplicationSettingsWithEarlyData: true,
++								},
++								ALPSUseNewCodepoint: alpsCodePoint,
++							},
++							resumeSession: true,
++							earlyData:     true,
++							flags: append([]string{
++								"-select-alpn", "proto",
++								"-application-settings", "proto," + shimSettings,
++								"-expect-peer-application-settings", runnerSettings,
++							}, alpsFlags...),
++							expectations:       expectations,
++							shouldFail:         true,
++							expectedError:      ":UNEXPECTED_MESSAGE:",
++							expectedLocalError: "remote error: unexpected message",
++						})
++					}
++
++					// Test that the client and server each decline early data if local
++					// ALPS preferences has changed for the current connection.
++					alpsMismatchTests := []struct {
++						name                            string
++						initialSettings, resumeSettings []byte
++					}{
++						{"DifferentValues", []byte("settings1"), []byte("settings2")},
++						{"OnOff", []byte("settings"), nil},
++						{"OffOn", nil, []byte("settings")},
++						// The empty settings value should not be mistaken for ALPS not
++						// being negotiated.
++						{"OnEmpty", []byte("settings"), []byte{}},
++						{"EmptyOn", []byte{}, []byte("settings")},
++						{"EmptyOff", []byte{}, nil},
++						{"OffEmpty", nil, []byte{}},
++					}
++					for _, test := range alpsMismatchTests {
++						flags := []string{"-on-resume-expect-early-data-reason", "alps_mismatch"}
++						flags = append(flags, alpsFlags...)
++						if test.initialSettings != nil {
++							flags = append(flags, "-on-initial-application-settings", "proto,"+string(test.initialSettings))
++							flags = append(flags, "-on-initial-expect-peer-application-settings", "runner")
++						}
++						if test.resumeSettings != nil {
++							flags = append(flags, "-on-resume-application-settings", "proto,"+string(test.resumeSettings))
++							flags = append(flags, "-on-resume-expect-peer-application-settings", "runner")
++						}
++
++						expectations = connectionExpectations{
++							peerApplicationSettingsOld: test.initialSettings,
++						}
++						resumeExpectations = &connectionExpectations{
++							peerApplicationSettingsOld: test.resumeSettings,
++						}
++						if alpsCodePoint == ALPSUseCodepointNew {
++							expectations = connectionExpectations{
++								peerApplicationSettings: test.initialSettings,
++							}
++							resumeExpectations = &connectionExpectations{
+ 								peerApplicationSettings: test.resumeSettings,
++							}
++						}
++						// The client should not offer early data if the session is
++						// inconsistent with the new configuration. Note that if
++						// the session did not negotiate ALPS (test.initialSettings
++						// is nil), the client always offers early data.
++						if test.initialSettings != nil {
++							testCases = append(testCases, testCase{
++								protocol:           protocol,
++								testType:           clientTest,
++								name:               fmt.Sprintf("ALPS-EarlyData-Mismatch-%s-Client-%s-%s", test.name, alpsCodePoint, suffix),
++								skipQUICALPNConfig: true,
++								config: Config{
++									MaxVersion:          ver.version,
++									MaxEarlyDataSize:    16384,
++									NextProtos:          []string{"proto"},
++									ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
++									ALPSUseNewCodepoint: alpsCodePoint,
++								},
++								resumeSession: true,
++								flags: append([]string{
++									"-enable-early-data",
++									"-expect-ticket-supports-early-data",
++									"-expect-no-offer-early-data",
++									"-advertise-alpn", "\x05proto",
++									"-expect-alpn", "proto",
++								}, flags...),
++								expectations:       expectations,
++								resumeExpectations: resumeExpectations,
++							})
++						}
++
++						// The server should reject early data if the session is
++						// inconsistent with the new selection.
++						testCases = append(testCases, testCase{
++							protocol:           protocol,
++							testType:           serverTest,
++							name:               fmt.Sprintf("ALPS-EarlyData-Mismatch-%s-Server-%s-%s", test.name, alpsCodePoint, suffix),
++							skipQUICALPNConfig: true,
++							config: Config{
++								MaxVersion:          ver.version,
++								NextProtos:          []string{"proto"},
++								ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
++								ALPSUseNewCodepoint: alpsCodePoint,
+ 							},
++							resumeSession:           true,
++							earlyData:               true,
++							expectEarlyDataRejected: true,
++							flags: append([]string{
++								"-select-alpn", "proto",
++							}, flags...),
++							expectations:       expectations,
++							resumeExpectations: resumeExpectations,
+ 						})
+ 					}
+ 
+-					// The server should reject early data if the session is
+-					// inconsistent with the new selection.
++					// Test that 0-RTT continues working when the shim configures
++					// ALPS but the peer does not.
++					testCases = append(testCases, testCase{
++						protocol:           protocol,
++						testType:           clientTest,
++						name:               fmt.Sprintf("ALPS-EarlyData-Client-ServerDecline-%s-%s", alpsCodePoint, suffix),
++						skipQUICALPNConfig: true,
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"proto"},
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						resumeSession: true,
++						earlyData:     true,
++						flags: append([]string{
++							"-advertise-alpn", "\x05proto",
++							"-expect-alpn", "proto",
++							"-application-settings", "proto,shim",
++						}, alpsFlags...),
++					})
+ 					testCases = append(testCases, testCase{
+ 						protocol:           protocol,
+ 						testType:           serverTest,
+-						name:               fmt.Sprintf("ALPS-EarlyData-Mismatch-%s-Server-%s", test.name, suffix),
++						name:               fmt.Sprintf("ALPS-EarlyData-Server-ClientNoOffe-%s-%s", alpsCodePoint, suffix),
+ 						skipQUICALPNConfig: true,
+ 						config: Config{
+ 							MaxVersion:          ver.version,
+ 							NextProtos:          []string{"proto"},
+-							ApplicationSettings: map[string][]byte{"proto": []byte("runner")},
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-						resumeSession:           true,
+-						earlyData:               true,
+-						expectEarlyDataRejected: true,
++						resumeSession: true,
++						earlyData:     true,
+ 						flags: append([]string{
+ 							"-select-alpn", "proto",
+-						}, flags...),
+-						expectations: connectionExpectations{
+-							peerApplicationSettings: test.initialSettings,
+-						},
+-						resumeExpectations: &connectionExpectations{
+-							peerApplicationSettings: test.resumeSettings,
+-						},
++							"-application-settings", "proto,shim",
++						}, alpsFlags...),
+ 					})
+ 				}
+-
+-				// Test that 0-RTT continues working when the shim configures
+-				// ALPS but the peer does not.
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           clientTest,
+-					name:               "ALPS-EarlyData-Client-ServerDecline-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion: ver.version,
+-						NextProtos: []string{"proto"},
+-					},
+-					resumeSession: true,
+-					earlyData:     true,
+-					flags: []string{
+-						"-advertise-alpn", "\x05proto",
+-						"-expect-alpn", "proto",
+-						"-application-settings", "proto,shim",
+-					},
+-				})
+-				testCases = append(testCases, testCase{
+-					protocol:           protocol,
+-					testType:           serverTest,
+-					name:               "ALPS-EarlyData-Server-ClientNoOffer-" + suffix,
+-					skipQUICALPNConfig: true,
+-					config: Config{
+-						MaxVersion: ver.version,
+-						NextProtos: []string{"proto"},
+-					},
+-					resumeSession: true,
+-					earlyData:     true,
+-					flags: []string{
+-						"-select-alpn", "proto",
+-						"-application-settings", "proto,shim",
+-					},
+-				})
+ 			} else {
+ 				// Test the client rejects the ALPS extension if the server
+ 				// negotiated TLS 1.2 or below.
+-				testCases = append(testCases, testCase{
+-					protocol: protocol,
+-					testType: clientTest,
+-					name:     "ALPS-Reject-Client-" + suffix,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"foo"},
+-						ApplicationSettings: map[string][]byte{"foo": []byte("runner")},
+-						Bugs: ProtocolBugs{
+-							AlwaysNegotiateApplicationSettings: true,
+-						},
+-					},
+-					flags: []string{
++				for _, alpsCodePoint := range []ALPSUseCodepoint{ALPSUseCodepointNew, ALPSUseCodepointOld} {
++					flags := []string{
+ 						"-advertise-alpn", "\x03foo",
+ 						"-expect-alpn", "foo",
+ 						"-application-settings", "foo,shim",
+-					},
+-					shouldFail:         true,
+-					expectedError:      ":UNEXPECTED_EXTENSION:",
+-					expectedLocalError: "remote error: unsupported extension",
+-				})
+-				testCases = append(testCases, testCase{
+-					protocol: protocol,
+-					testType: clientTest,
+-					name:     "ALPS-Reject-Client-Resume-" + suffix,
+-					config: Config{
+-						MaxVersion: ver.version,
+-					},
+-					resumeConfig: &Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"foo"},
+-						ApplicationSettings: map[string][]byte{"foo": []byte("runner")},
+-						Bugs: ProtocolBugs{
+-							AlwaysNegotiateApplicationSettings: true,
++					}
++					bugs := ProtocolBugs{
++						AlwaysNegotiateApplicationSettingsOld: true,
++					}
++					if alpsCodePoint == ALPSUseCodepointNew {
++						flags = append(flags, "-alps-use-new-codepoint")
++						bugs = ProtocolBugs{
++							AlwaysNegotiateApplicationSettingsNew: true,
++						}
++					}
++					testCases = append(testCases, testCase{
++						protocol: protocol,
++						testType: clientTest,
++						name:     fmt.Sprintf("ALPS-Reject-Client-%s-%s", alpsCodePoint, suffix),
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"foo"},
++							ApplicationSettings: map[string][]byte{"foo": []byte("runner")},
++							Bugs:                bugs,
++							ALPSUseNewCodepoint: alpsCodePoint,
+ 						},
+-					},
+-					resumeSession: true,
+-					flags: []string{
++						flags:              flags,
++						shouldFail:         true,
++						expectedError:      ":UNEXPECTED_EXTENSION:",
++						expectedLocalError: "remote error: unsupported extension",
++					})
++
++					flags = []string{
+ 						"-on-resume-advertise-alpn", "\x03foo",
+ 						"-on-resume-expect-alpn", "foo",
+ 						"-on-resume-application-settings", "foo,shim",
+-					},
+-					shouldFail:         true,
+-					expectedError:      ":UNEXPECTED_EXTENSION:",
+-					expectedLocalError: "remote error: unsupported extension",
+-				})
++					}
++					bugs = ProtocolBugs{
++						AlwaysNegotiateApplicationSettingsOld: true,
++					}
++					if alpsCodePoint == ALPSUseCodepointNew {
++						flags = append(flags, "-alps-use-new-codepoint")
++						bugs = ProtocolBugs{
++							AlwaysNegotiateApplicationSettingsNew: true,
++						}
++					}
++					testCases = append(testCases, testCase{
++						protocol: protocol,
++						testType: clientTest,
++						name:     fmt.Sprintf("ALPS-Reject-Client-Resume-%s-%s", alpsCodePoint, suffix),
++						config: Config{
++							MaxVersion: ver.version,
++						},
++						resumeConfig: &Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"foo"},
++							ApplicationSettings: map[string][]byte{"foo": []byte("runner")},
++							Bugs:                bugs,
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						resumeSession:      true,
++						flags:              flags,
++						shouldFail:         true,
++						expectedError:      ":UNEXPECTED_EXTENSION:",
++						expectedLocalError: "remote error: unsupported extension",
++					})
+ 
+-				// Test the server declines ALPS if it negotiates TLS 1.2 or below.
+-				testCases = append(testCases, testCase{
+-					protocol: protocol,
+-					testType: serverTest,
+-					name:     "ALPS-Decline-Server-" + suffix,
+-					config: Config{
+-						MaxVersion:          ver.version,
+-						NextProtos:          []string{"foo"},
+-						ApplicationSettings: map[string][]byte{"foo": []byte("runner")},
+-					},
+-					// Test both TLS 1.2 full and resumption handshakes.
+-					resumeSession: true,
+-					flags: []string{
++					// Test the server declines ALPS if it negotiates TLS 1.2 or below.
++					flags = []string{
+ 						"-select-alpn", "foo",
+ 						"-application-settings", "foo,shim",
+-					},
+-					// If not specified, runner and shim both implicitly expect ALPS
+-					// is not negotiated.
+-				})
++					}
++					if alpsCodePoint == ALPSUseCodepointNew {
++						flags = append(flags, "-alps-use-new-codepoint")
++					}
++					testCases = append(testCases, testCase{
++						protocol: protocol,
++						testType: serverTest,
++						name:     fmt.Sprintf("ALPS-Decline-Server-%s-%s", alpsCodePoint, suffix),
++						config: Config{
++							MaxVersion:          ver.version,
++							NextProtos:          []string{"foo"},
++							ApplicationSettings: map[string][]byte{"foo": []byte("runner")},
++							ALPSUseNewCodepoint: alpsCodePoint,
++						},
++						// Test both TLS 1.2 full and resumption handshakes.
++						resumeSession: true,
++						flags:         flags,
++						// If not specified, runner and shim both implicitly expect ALPS
++						// is not negotiated.
++					})
++				}
+ 			}
+ 
+ 			// Test QUIC transport params
+@@ -8362,6 +8588,7 @@ func addExtensionTests() {
+ 					test.config.ApplicationSettings = map[string][]byte{"proto": []byte("runner")}
+ 					test.flags = append(test.flags,
+ 						"-application-settings", "proto,shim",
++						"-alps-use-new-codepoint",
+ 						"-expect-peer-application-settings", "runner")
+ 					test.expectations.peerApplicationSettings = []byte("shim")
+ 				}
+diff --git a/ssl/test/runner/ticket.go b/ssl/test/runner/ticket.go
+index f0a8bf18a..51842d100 100644
+--- a/ssl/test/runner/ticket.go
++++ b/ssl/test/runner/ticket.go
+@@ -20,20 +20,23 @@ import (
+ // sessionState contains the information that is serialized into a session
+ // ticket in order to later resume a connection.
+ type sessionState struct {
+-	vers                     uint16
+-	cipherSuite              uint16
+-	secret                   []byte
+-	handshakeHash            []byte
+-	certificates             [][]byte
+-	extendedMasterSecret     bool
+-	earlyALPN                []byte
+-	ticketCreationTime       time.Time
+-	ticketExpiration         time.Time
+-	ticketFlags              uint32
+-	ticketAgeAdd             uint32
+-	hasApplicationSettings   bool
+-	localApplicationSettings []byte
+-	peerApplicationSettings  []byte
++	vers                        uint16
++	cipherSuite                 uint16
++	secret                      []byte
++	handshakeHash               []byte
++	certificates                [][]byte
++	extendedMasterSecret        bool
++	earlyALPN                   []byte
++	ticketCreationTime          time.Time
++	ticketExpiration            time.Time
++	ticketFlags                 uint32
++	ticketAgeAdd                uint32
++	hasApplicationSettings      bool
++	localApplicationSettings    []byte
++	peerApplicationSettings     []byte
++	hasApplicationSettingsOld   bool
++	localApplicationSettingsOld []byte
++	peerApplicationSettingsOld  []byte
+ }
+ 
+ func (s *sessionState) marshal() []byte {
+@@ -70,6 +73,14 @@ func (s *sessionState) marshal() []byte {
+ 		msg.AddUint8(0)
+ 	}
+ 
++	if s.hasApplicationSettingsOld {
++		msg.AddUint8(1)
++		addUint16LengthPrefixedBytes(msg, s.localApplicationSettingsOld)
++		addUint16LengthPrefixedBytes(msg, s.peerApplicationSettingsOld)
++	} else {
++		msg.AddUint8(0)
++	}
++
+ 	return msg.BytesOrPanic()
+ }
+ 
+@@ -135,6 +146,17 @@ func (s *sessionState) unmarshal(data []byte) bool {
+ 		}
+ 	}
+ 
++	if !readBool(&reader, &s.hasApplicationSettingsOld) {
++		return false
++	}
++
++	if s.hasApplicationSettingsOld {
++		if !readUint16LengthPrefixedBytes(&reader, &s.localApplicationSettingsOld) ||
++			!readUint16LengthPrefixedBytes(&reader, &s.peerApplicationSettingsOld) {
++			return false
++		}
++	}
++
+ 	if len(reader) > 0 {
+ 		return false
+ 	}
+diff --git a/ssl/test/test_config.cc b/ssl/test/test_config.cc
+index 48122ad6e..0b79f9236 100644
+--- a/ssl/test/test_config.cc
++++ b/ssl/test/test_config.cc
+@@ -244,6 +244,8 @@ std::vector<Flag> SortedFlags() {
+                            &TestConfig::application_settings),
+       OptionalStringFlag("-expect-peer-application-settings",
+                          &TestConfig::expect_peer_application_settings),
++      BoolFlag("-alps-use-new-codepoint",
++               &TestConfig::alps_use_new_codepoint),
+       Base64Flag("-quic-transport-params", &TestConfig::quic_transport_params),
+       Base64Flag("-expect-quic-transport-params",
+                  &TestConfig::expect_quic_transport_params),
+@@ -1911,6 +1913,9 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
+   if (max_send_fragment > 0) {
+     SSL_set_max_send_fragment(ssl.get(), max_send_fragment);
+   }
++  if (alps_use_new_codepoint) {
++    SSL_set_alps_use_new_codepoint(ssl.get(), 1);
++  }
+   if (quic_use_legacy_codepoint != -1) {
+     SSL_set_quic_use_legacy_codepoint(ssl.get(), quic_use_legacy_codepoint);
+   }
+diff --git a/ssl/test/test_config.h b/ssl/test/test_config.h
+index e5c605799..cc2206ddc 100644
+--- a/ssl/test/test_config.h
++++ b/ssl/test/test_config.h
+@@ -80,6 +80,7 @@ struct TestConfig {
+   bool defer_alps = false;
+   std::vector<std::pair<std::string, std::string>> application_settings;
+   std::unique_ptr<std::string> expect_peer_application_settings;
++  bool alps_use_new_codepoint = false;
+   std::string quic_transport_params;
+   std::string expect_quic_transport_params;
+   // Set quic_use_legacy_codepoint to 0 or 1 to configure, -1 uses default.
+diff --git a/ssl/tls13_client.cc b/ssl/tls13_client.cc
+index 7f84241bf..82ed7a84b 100644
+--- a/ssl/tls13_client.cc
++++ b/ssl/tls13_client.cc
+@@ -811,10 +811,14 @@ static enum ssl_hs_wait_t do_send_client_encrypted_extensions(
+       !ssl->s3->early_data_accepted) {
+     ScopedCBB cbb;
+     CBB body, extensions, extension;
++    uint16_t extension_type = TLSEXT_TYPE_application_settings_old;
++    if (hs->config->alps_use_new_codepoint) {
++      extension_type = TLSEXT_TYPE_application_settings;
++    }
+     if (!ssl->method->init_message(ssl, cbb.get(), &body,
+                                    SSL3_MT_ENCRYPTED_EXTENSIONS) ||
+         !CBB_add_u16_length_prefixed(&body, &extensions) ||
+-        !CBB_add_u16(&extensions, TLSEXT_TYPE_application_settings) ||
++        !CBB_add_u16(&extensions, extension_type) ||
+         !CBB_add_u16_length_prefixed(&extensions, &extension) ||
+         !CBB_add_bytes(&extension,
+                        hs->new_session->local_application_settings.data(),
+diff --git a/ssl/tls13_server.cc b/ssl/tls13_server.cc
+index 9d26f4e00..707cf846b 100644
+--- a/ssl/tls13_server.cc
++++ b/ssl/tls13_server.cc
+@@ -1051,7 +1051,11 @@ static enum ssl_hs_wait_t do_read_client_encrypted_extensions(
+       return ssl_hs_error;
+     }
+ 
+-    SSLExtension application_settings(TLSEXT_TYPE_application_settings);
++    uint16_t extension_type = TLSEXT_TYPE_application_settings_old;
++    if (hs->config->alps_use_new_codepoint) {
++      extension_type = TLSEXT_TYPE_application_settings;
++    }
++    SSLExtension application_settings(extension_type);
+     uint8_t alert = SSL_AD_DECODE_ERROR;
+     if (!ssl_parse_extensions(&extensions, &alert, {&application_settings},
+                               /*ignore_unknown=*/false)) {
+-- 
+2.48.1
+
