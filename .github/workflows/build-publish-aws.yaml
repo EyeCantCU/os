@@ -217,18 +217,37 @@ jobs:
       - name: "Publish AWS Images to marketplace"
         run: |
           if [ "$PUBLISH_TO_MP" = 'on-schedule' ]; then
-            if ! weekday=$(date +%A); then
-              echo 'Trying to publish once a week only, but failed to determine the weekday. Bailing!'
-              exit 1
+            # If this is a scheduled run, limit how often the images get published to the AWS Marketplace
+            # as there is a limit of 100 version per product (and reducing the number of versions requires
+            # coordination with AWS Support). Hand off the decision whether to publish to a helper script
+            # (so the script can be tested in isolation). The intention is to publish once on Monday, or
+            # whenever the next scheduled build after that succeeds and passes testing (i.e. whenever the
+            # last published build is older than 7 days).
+            #
+            # It is sufficient to look at a single product from this job as all products from the same
+            # (group, architecture) tuple are published at the same time. While a publish request for a
+            # single product from the group could fail asynchronously, historically that failure is likely
+            # to be persistent and need manual intervention. Republishing the entire group when only one
+            # of the products needs publishing will quickly exhaust the version limit.
+
+            variant=$(make list-$VM_GROUP | head -n1)
+            product_id=$(yq .awspub.images[].marketplace.entity_id awspub/$VM_ARCH/$variant.yaml | head -n1)
+            echo "Evaluating $variant ($product_id) for whether the group needs to be published..."
+            if ! should_publish=$(./tools/aws-should-ci-publish "$product_id"); then
+              echo 'Failed to decide whether to publish.'
             fi
-            echo "The automated job is publishing to the AWS Marketplace once a week on Mondays only. Today is $weekday."
-            if [ "$weekday" = 'Monday' ]; then
-              echo 'Will publish.'
-              PUBLISH_TO_MP=true
-            else
-              echo 'Will not publish.'
-              PUBLISH_TO_MP=false
-            fi
+
+            case "$should_publish" in
+              yes)
+                PUBLISH_TO_MP=true
+                ;;
+              no)
+                PUBLISH_TO_MP=false
+                ;;
+              *)
+                echo "Unexpected verdict '$should_publish'."
+                exit 1
+            esac
           fi
 
           case "$PUBLISH_TO_MP" in
