@@ -32,15 +32,25 @@ based on the following criteria:
 - No reverse dependencies across any archive
 - Not the most recent version if still built from origin melange configuration
 - Not a reverse build dependency for any current melange configurations
-- Not still in use in images, VMs, or manual seed dependencies`,
+- Not still in use in images, VMs, or manual seed dependencies
+
+When no --arch is specified, analysis is performed across both x86_64 and aarch64 architectures,
+consolidating age-based candidates from all architectures and considering a package for archival 
+only if it meets dependency criteria on ALL supported architectures.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var architectures []string
+			if arch != "" {
+				architectures = []string{arch}
+			} else {
+				architectures = []string{"x86_64", "aarch64"}
+			}
 			duration := time.Duration(durationDays*24) * time.Hour
-			return archive(cmd.Context(), duration, arch, generateWithdrawn)
+			return archive(cmd.Context(), duration, architectures, generateWithdrawn)
 		},
 	}
 
 	cmd.Flags().IntVar(&durationDays, "duration", 365, "Age threshold for archive candidates in days (default: 365)")
-	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().StringVar(&arch, "arch", "", "Architecture to evaluate (default: both x86_64 and aarch64)")
 	cmd.Flags().BoolVar(&generateWithdrawn, "generate-withdrawn", false, "Generate withdrawn-packages.txt files for each repository")
 
 	return cmd
@@ -63,32 +73,32 @@ type RetainCandidate struct {
 }
 
 type ArchiveContext struct {
-	DependencyMap   map[string][]Dependency          // package -> list of dependencies on it
-	AllPackages     map[string][]string              // package name -> list of available versions
-	PackageToOrigin map[string]string                // package name -> melange origin
-	ActivePackages  map[string]*config.Configuration // packages still being built from melange
-	Cache           *apk.Cache                       // APK cache for build dependency resolution
-	BuildRepos      map[string][]string              // dir -> list of repo URLs for build dependencies
-	ConfigToDir     map[*config.Configuration]string // config -> directory mapping
-	Architecture    string                           // target architecture
+	DependencyMaps  map[string]map[string][]Dependency // arch -> (package -> list of dependencies on it)
+	AllPackages     map[string]map[string][]string     // arch -> (package name -> list of available versions)
+	PackageToOrigin map[string]string                  // package name -> melange origin
+	ActivePackages  map[string]*config.Configuration   // packages still being built from melange
+	Cache           *apk.Cache                         // APK cache for build dependency resolution
+	BuildRepos      map[string][]string                // dir -> list of repo URLs for build dependencies
+	ConfigToDir     map[*config.Configuration]string   // config -> directory mapping
+	Architectures   []string                           // all architectures being analyzed
 }
 
-func archive(ctx context.Context, duration time.Duration, arch string, generateWithdrawn bool) error {
+func archive(ctx context.Context, duration time.Duration, architectures []string, generateWithdrawn bool) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
-	log.Printf("Searching for APK archive candidates older than %v for architecture %s...", duration, arch)
+	log.Printf("Searching for APK archive candidates older than %v for architectures %v...", duration, architectures)
 
-	// Step 1: Identify older APKs
-	candidates, err := findOlderAPKs(ctx, duration, arch)
+	// Step 1: Identify older APKs across all architectures
+	candidates, err := findOlderAPKs(ctx, duration, architectures)
 	if err != nil {
 		return fmt.Errorf("finding older APKs: %w", err)
 	}
 
 	log.Printf("Found %d packages older than %v", len(candidates), duration)
 
-	// Step 2: Build archive context (fetch indexes, build dependency maps, etc.)
-	archiveCtx, err := buildArchiveContext(ctx, candidates, arch)
+	// Step 2: Build archive context for all architectures
+	archiveCtx, err := buildArchiveContext(ctx, candidates, architectures)
 	if err != nil {
 		return fmt.Errorf("building archive context: %w", err)
 	}
@@ -179,9 +189,9 @@ func archive(ctx context.Context, duration time.Duration, arch string, generateW
 
 		// Create JSON structure
 		archiveData := struct {
-			Repository        string `json:"repository"`
-			Architecture      string `json:"architecture"`
-			Duration          string `json:"duration"`
+			Repository        string   `json:"repository"`
+			Architectures     []string `json:"architectures"`
+			Duration          string   `json:"duration"`
 			ArchiveCandidates []struct {
 				Name    string   `json:"name"`
 				Version string   `json:"version"`
@@ -189,9 +199,9 @@ func archive(ctx context.Context, duration time.Duration, arch string, generateW
 				Reasons []string `json:"reasons"`
 			} `json:"archive_candidates"`
 		}{
-			Repository:   repo,
-			Architecture: arch,
-			Duration:     formatDurationInDays(duration),
+			Repository:    repo,
+			Architectures: architectures,
+			Duration:      formatDurationInDays(duration),
 			ArchiveCandidates: make([]struct {
 				Name    string   `json:"name"`
 				Version string   `json:"version"`
@@ -244,9 +254,9 @@ func archive(ctx context.Context, duration time.Duration, arch string, generateW
 
 		// Create JSON structure
 		retainData := struct {
-			Repository         string `json:"repository"`
-			Architecture       string `json:"architecture"`
-			Duration           string `json:"duration"`
+			Repository         string   `json:"repository"`
+			Architectures      []string `json:"architectures"`
+			Duration           string   `json:"duration"`
 			RetainedCandidates []struct {
 				Name    string `json:"name"`
 				Version string `json:"version"`
@@ -254,9 +264,9 @@ func archive(ctx context.Context, duration time.Duration, arch string, generateW
 				Reason  string `json:"reason"`
 			} `json:"retained_candidates"`
 		}{
-			Repository:   repo,
-			Architecture: arch,
-			Duration:     formatDurationInDays(duration),
+			Repository:    repo,
+			Architectures: architectures,
+			Duration:      formatDurationInDays(duration),
 			RetainedCandidates: make([]struct {
 				Name    string `json:"name"`
 				Version string `json:"version"`
@@ -308,50 +318,68 @@ func archive(ctx context.Context, duration time.Duration, arch string, generateW
 	return nil
 }
 
-func findOlderAPKs(ctx context.Context, duration time.Duration, arch string) ([]ArchiveCandidate, error) {
-	var candidates []ArchiveCandidate
+func findOlderAPKs(ctx context.Context, duration time.Duration, architectures []string) ([]ArchiveCandidate, error) {
+	// Use a map to consolidate packages across architectures
+	// Key: repo-name-version, Value: ArchiveCandidate
+	packageMap := make(map[string]ArchiveCandidate)
 	cutoffTime := time.Now().Add(-duration)
 
-	// Check each repository
-	for dir, repoURL := range dirToRepo {
-		log.Printf("Checking repository: %s", dir)
+	// Process each architecture
+	for _, arch := range architectures {
+		log.Printf("Checking packages for architecture: %s", arch)
 
-		// Fetch the APK index for specified architecture
-		index, err := fetchAPKIndex(ctx, repoURL, arch)
-		if err != nil {
-			log.Printf("Error fetching index for %s: %v", repoURL, err)
-			continue
-		}
+		// Check each repository for this architecture
+		for dir, repoURL := range dirToRepo {
+			log.Printf("Checking repository: %s (architecture: %s)", dir, arch)
+			// Fetch the APK index for this architecture
+			index, err := fetchAPKIndex(ctx, repoURL, arch)
+			if err != nil {
+				log.Printf("Error fetching index for %s/%s: %v", repoURL, arch, err)
+				continue
+			}
+			log.Printf("Processing %d packages from %s (architecture: %s)", len(index.Packages), dir, arch)
 
-		log.Printf("Processing %d packages from %s", len(index.Packages), dir)
-		// Check each package in the index
-		for _, pkg := range index.Packages {
-			// Use the build timestamp directly
-			buildTime := pkg.BuildTime
+			// Check each package in the index
+			for _, pkg := range index.Packages {
+				// Use the build timestamp directly
+				buildTime := pkg.BuildTime
+				// Check if it's older than the cutoff
+				if buildTime.Before(cutoffTime) {
+					// Create unique key for this package across architectures
+					packageKey := fmt.Sprintf("%s-%s-%s", dir, pkg.Name, pkg.Version)
 
-			// Check if it's older than the cutoff
-			if buildTime.Before(cutoffTime) {
-				candidate := ArchiveCandidate{
-					Name:       pkg.Name,
-					Version:    pkg.Version,
-					Repository: dir,
-					Age:        time.Since(buildTime),
-					Reasons:    []string{"older than duration"},
+					// If we haven't seen this package before, or if this one is older (more significant age), use it
+					if existing, exists := packageMap[packageKey]; !exists || time.Since(buildTime) > existing.Age {
+						candidate := ArchiveCandidate{
+							Name:       pkg.Name,
+							Version:    pkg.Version,
+							Repository: dir,
+							Age:        time.Since(buildTime),
+							Reasons:    []string{"older than duration"},
+						}
+						packageMap[packageKey] = candidate
+					}
 				}
-				candidates = append(candidates, candidate)
 			}
 		}
 	}
 
+	// Convert map back to slice
+	var candidates []ArchiveCandidate
+	for _, candidate := range packageMap {
+		candidates = append(candidates, candidate)
+	}
+
+	log.Printf("Found %d unique packages older than %v across all architectures", len(candidates), duration)
 	return candidates, nil
 }
 
-func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arch string) (*ArchiveContext, error) {
-	log.Printf("Building archive context for architecture %s...", arch)
+func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, architectures []string) (*ArchiveContext, error) {
+	log.Printf("Building archive context for architectures %v...", architectures)
 
 	archiveCtx := &ArchiveContext{
-		DependencyMap:   make(map[string][]Dependency),
-		AllPackages:     make(map[string][]string),
+		DependencyMaps:  make(map[string]map[string][]Dependency),
+		AllPackages:     make(map[string]map[string][]string),
 		PackageToOrigin: make(map[string]string),
 		ActivePackages:  make(map[string]*config.Configuration),
 		Cache:           apk.NewCache(true),
@@ -360,8 +388,8 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arc
 			"extra-packages":      []string{dirToRepo["os"], dirToRepo["extra-packages"]},
 			"enterprise-packages": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
 		},
-		ConfigToDir:  make(map[*config.Configuration]string),
-		Architecture: arch,
+		ConfigToDir:   make(map[*config.Configuration]string),
+		Architectures: architectures,
 	}
 
 	// Create a set of candidate packages for quick lookup
@@ -385,26 +413,31 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arc
 		}
 	}
 
-	// Fetch all package indexes to build dependency graph and available packages list
-	for _, repoURL := range dirToRepo {
-		index, err := fetchAPKIndex(ctx, repoURL, archiveCtx.Architecture)
-		if err != nil {
-			log.Printf("Error fetching index for %s: %v", repoURL, err)
-			continue
-		}
+	// Fetch package indexes for all architectures to build dependency graph and available packages list
+	for _, arch := range architectures {
+		archiveCtx.DependencyMaps[arch] = make(map[string][]Dependency)
+		archiveCtx.AllPackages[arch] = make(map[string][]string)
 
-		// For each package, track all available versions and dependencies
-		for _, pkg := range index.Packages {
-			// Track all available versions
-			archiveCtx.AllPackages[pkg.Name] = append(archiveCtx.AllPackages[pkg.Name], pkg.Version)
+		for _, repoURL := range dirToRepo {
+			index, err := fetchAPKIndex(ctx, repoURL, arch)
+			if err != nil {
+				log.Printf("Error fetching index for %s (arch: %s): %v", repoURL, arch, err)
+				continue
+			}
 
-			// Build dependency map
-			for _, dep := range pkg.Dependencies {
-				parsedDep := parseDependency(dep)
-				if parsedDep.Name != "" {
-					parsedDep.DependentPackage = pkg.Name
-					parsedDep.DependentPackageVersion = pkg.Version
-					archiveCtx.DependencyMap[parsedDep.Name] = append(archiveCtx.DependencyMap[parsedDep.Name], parsedDep)
+			// For each package, track all available versions and dependencies
+			for _, pkg := range index.Packages {
+				// Track all available versions
+				archiveCtx.AllPackages[arch][pkg.Name] = append(archiveCtx.AllPackages[arch][pkg.Name], pkg.Version)
+
+				// Build dependency map
+				for _, dep := range pkg.Dependencies {
+					parsedDep := parseDependency(dep)
+					if parsedDep.Name != "" {
+						parsedDep.DependentPackage = pkg.Name
+						parsedDep.DependentPackageVersion = pkg.Version
+						archiveCtx.DependencyMaps[arch][parsedDep.Name] = append(archiveCtx.DependencyMaps[arch][parsedDep.Name], parsedDep)
+					}
 				}
 			}
 		}
@@ -414,7 +447,7 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arc
 }
 
 func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, []RetainCandidate, error) {
-	log.Println("Checking for reverse dependencies...")
+	log.Println("Checking for reverse dependencies across all architectures...")
 
 	// Create a set of candidate packages for quick lookup
 	candidateSet := make(map[string]bool)
@@ -422,81 +455,93 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 		candidateSet[candidate.Name+"="+candidate.Version] = true
 	}
 
-	// Filter candidates by checking if their dependencies can be satisfied by non-candidate packages
+	// Filter candidates by checking if their dependencies can be satisfied by non-candidate packages across ALL architectures
 	var filtered []ArchiveCandidate
 	var retained []RetainCandidate
 	for _, candidate := range candidates {
-		reverseDeps := archiveCtx.DependencyMap[candidate.Name]
-		hasBlockingReverseDependency := false
+		hasBlockingReverseDependencyInAnyArch := false
+		blockingArch := ""
 
-		for _, dep := range reverseDeps {
-			if versionSatisfiesDependency(candidate.Version, dep) {
-				// Check if this dependency is from the same melange origin and exact version match
-				candidateOrigin := archiveCtx.PackageToOrigin[candidate.Name]
-				dependentOrigin := archiveCtx.PackageToOrigin[dep.DependentPackage]
+		// Check reverse dependencies across all architectures
+		for _, arch := range archiveCtx.Architectures {
+			reverseDeps := archiveCtx.DependencyMaps[arch][candidate.Name]
+			hasBlockingReverseDependency := false
 
-				// If both packages come from the same melange origin and it's an exact version match,
-				// this is an internal dependency within the same build - don't block archiving
-				if candidateOrigin != "" && candidateOrigin == dependentOrigin &&
-					dep.Constraint != "" && strings.HasPrefix(dep.Constraint, "=") {
-					requiredVersion := dep.Constraint[1:]
-					if candidate.Version == requiredVersion {
-						continue
-					}
-				}
+			for _, dep := range reverseDeps {
+				if versionSatisfiesDependency(candidate.Version, dep) {
+					// Check if this dependency is from the same melange origin and exact version match
+					candidateOrigin := archiveCtx.PackageToOrigin[candidate.Name]
+					dependentOrigin := archiveCtx.PackageToOrigin[dep.DependentPackage]
 
-				// Check if this dependency can be satisfied by a non-candidate package
-				canBeSatisfiedByNonCandidate := false
-				availableVersions := archiveCtx.AllPackages[candidate.Name]
-				for _, version := range availableVersions {
-					// Skip if this version is a candidate for archiving
-					if candidateSet[candidate.Name+"="+version] {
-						continue
+					// If both packages come from the same melange origin and it's an exact version match,
+					// this is an internal dependency within the same build - don't block archiving
+					if candidateOrigin != "" && candidateOrigin == dependentOrigin &&
+						dep.Constraint != "" && strings.HasPrefix(dep.Constraint, "=") {
+						requiredVersion := dep.Constraint[1:]
+						if candidate.Version == requiredVersion {
+							continue
+						}
 					}
 
-					// Check if this non-candidate version satisfies the dependency
-					if versionSatisfiesDependency(version, dep) {
-						canBeSatisfiedByNonCandidate = true
-						break
-					}
-				}
-
-				if !canBeSatisfiedByNonCandidate {
-					// Check if multiple candidate versions can satisfy this dependency
-					satisfyingCandidates := []string{}
+					// Check if this dependency can be satisfied by a non-candidate package
+					canBeSatisfiedByNonCandidate := false
+					availableVersions := archiveCtx.AllPackages[arch][candidate.Name]
 					for _, version := range availableVersions {
-						// Only consider candidate versions
-						if !candidateSet[candidate.Name+"="+version] {
+						// Skip if this version is a candidate for archiving
+						if candidateSet[candidate.Name+"="+version] {
 							continue
 						}
 
-						// Check if this candidate version satisfies the dependency
+						// Check if this non-candidate version satisfies the dependency
 						if versionSatisfiesDependency(version, dep) {
-							satisfyingCandidates = append(satisfyingCandidates, version)
+							canBeSatisfiedByNonCandidate = true
+							break
 						}
 					}
 
-					if len(satisfyingCandidates) > 1 {
-						// Multiple candidates can satisfy this dependency
-						// Find the most recent version to keep
-						mostRecentVersion := findMostRecentVersion(satisfyingCandidates)
+					if !canBeSatisfiedByNonCandidate {
+						// Check if multiple candidate versions can satisfy this dependency
+						satisfyingCandidates := []string{}
+						for _, version := range availableVersions {
+							// Only consider candidate versions
+							if !candidateSet[candidate.Name+"="+version] {
+								continue
+							}
 
-						if candidate.Version != mostRecentVersion {
-							continue // This candidate can be archived
+							// Check if this candidate version satisfies the dependency
+							if versionSatisfiesDependency(version, dep) {
+								satisfyingCandidates = append(satisfyingCandidates, version)
+							}
+						}
+
+						if len(satisfyingCandidates) > 1 {
+							// Multiple candidates can satisfy this dependency
+							// Find the most recent version to keep
+							mostRecentVersion := findMostRecentVersion(satisfyingCandidates)
+
+							if candidate.Version != mostRecentVersion {
+								continue // This candidate can be archived
+							} else {
+								hasBlockingReverseDependency = true
+								break
+							}
 						} else {
 							hasBlockingReverseDependency = true
 							break
 						}
-					} else {
-						hasBlockingReverseDependency = true
-						break
 					}
 				}
 			}
+
+			if hasBlockingReverseDependency {
+				hasBlockingReverseDependencyInAnyArch = true
+				blockingArch = arch
+				break
+			}
 		}
 
-		if !hasBlockingReverseDependency {
-			candidate.Reasons = append(candidate.Reasons, "no blocking reverse dependencies")
+		if !hasBlockingReverseDependencyInAnyArch {
+			candidate.Reasons = append(candidate.Reasons, "no blocking reverse dependencies across all architectures")
 			filtered = append(filtered, candidate)
 		} else {
 			retained = append(retained, RetainCandidate{
@@ -504,7 +549,7 @@ func filterByReverseDependencies(candidates []ArchiveCandidate, archiveCtx *Arch
 				Version:    candidate.Version,
 				Repository: candidate.Repository,
 				Age:        candidate.Age,
-				Reason:     "has blocking reverse dependencies",
+				Reason:     fmt.Sprintf("has blocking reverse dependencies on architecture %s", blockingArch),
 			})
 		}
 	}
@@ -613,7 +658,7 @@ func findMostRecentVersion(versions []string) string {
 }
 
 func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *ArchiveContext) ([]ArchiveCandidate, []RetainCandidate, error) {
-	log.Println("Checking for most recent versions still built from melange...")
+	log.Println("Checking for most recent versions still built from melange across all architectures...")
 
 	var filtered []ArchiveCandidate
 	var retained []RetainCandidate
@@ -627,32 +672,39 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 			continue
 		}
 
-		// Package is still being built, check if this is the most recent version
-		allVersions := archiveCtx.AllPackages[candidate.Name]
-		if len(allVersions) <= 1 {
-			// Only one version available, don't archive it
+		// Package is still being built, check if this is the most recent version on ANY architecture
+		isMostRecentOnAnyArch := false
+		retainReason := ""
+
+		for _, arch := range archiveCtx.Architectures {
+			allVersions := archiveCtx.AllPackages[arch][candidate.Name]
+			if len(allVersions) <= 1 {
+				// Only one version available on this architecture, don't archive it
+				isMostRecentOnAnyArch = true
+				retainReason = fmt.Sprintf("only version of package still built from melange on architecture %s", arch)
+				break
+			}
+
+			mostRecentVersion := findMostRecentVersion(allVersions)
+			if candidate.Version == mostRecentVersion {
+				isMostRecentOnAnyArch = true
+				retainReason = fmt.Sprintf("most recent version of package still built from melange on architecture %s", arch)
+				break
+			}
+		}
+
+		if isMostRecentOnAnyArch {
 			retained = append(retained, RetainCandidate{
 				Name:       candidate.Name,
 				Version:    candidate.Version,
 				Repository: candidate.Repository,
 				Age:        candidate.Age,
-				Reason:     "only version of package still built from melange",
+				Reason:     retainReason,
 			})
 			continue
 		}
 
-		mostRecentVersion := findMostRecentVersion(allVersions)
-		if candidate.Version == mostRecentVersion {
-			retained = append(retained, RetainCandidate{
-				Name:       candidate.Name,
-				Version:    candidate.Version,
-				Repository: candidate.Repository,
-				Age:        candidate.Age,
-				Reason:     "most recent version of package still built from melange",
-			})
-			continue
-		}
-		candidate.Reasons = append(candidate.Reasons, "not the most recent version")
+		candidate.Reasons = append(candidate.Reasons, "not the most recent version on any architecture")
 		filtered = append(filtered, candidate)
 	}
 
@@ -660,45 +712,48 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 }
 
 func filterByReverseBuildDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
-	log.Println("Checking for reverse build dependencies...")
+	log.Println("Checking for reverse build dependencies across all architectures...")
 
-	// Load cached build dependencies from resolved/build/ directory
+	// Load cached build dependencies from resolved/build/ directory for all architectures
 	buildDependencies := make(map[string]bool) // package=version -> true if it's a build dependency
 
-	for dir := range dirToRepo {
-		buildDepsFile := filepath.Join("resolved", "build", fmt.Sprintf("%s.json", dir))
+	architectures := []string{"x86_64", "aarch64"}
+	for _, arch := range architectures {
+		for dir := range dirToRepo {
+			buildDepsFile := filepath.Join("resolved", "build", arch, fmt.Sprintf("%s.json", dir))
 
-		if _, err := os.Stat(buildDepsFile); os.IsNotExist(err) {
-			log.Printf("Warning: Build dependencies file not found: %s. Run 'stereo build-dependencies' first.", buildDepsFile)
-			continue
-		}
+			if _, err := os.Stat(buildDepsFile); os.IsNotExist(err) {
+				log.Printf("Warning: Build dependencies file not found: %s. Run 'stereo build-dependencies' first.", buildDepsFile)
+				continue
+			}
 
-		file, err := os.Open(buildDepsFile)
-		if err != nil {
-			log.Printf("Warning: Could not open build dependencies file %s: %v", buildDepsFile, err)
-			continue
-		}
-		defer file.Close()
+			file, err := os.Open(buildDepsFile)
+			if err != nil {
+				log.Printf("Warning: Could not open build dependencies file %s: %v", buildDepsFile, err)
+				continue
+			}
+			defer file.Close()
 
-		var data struct {
-			Repository        string   `json:"repository"`
-			Architecture      string   `json:"architecture"`
-			BuildDependencies []string `json:"build_dependencies"`
-		}
+			var data struct {
+				Repository        string   `json:"repository"`
+				Architecture      string   `json:"architecture"`
+				BuildDependencies []string `json:"build_dependencies"`
+			}
 
-		if err := json.NewDecoder(file).Decode(&data); err != nil {
-			log.Printf("Warning: Error decoding JSON from %s: %v", buildDepsFile, err)
-			continue
-		}
+			if err := json.NewDecoder(file).Decode(&data); err != nil {
+				log.Printf("Warning: Error decoding JSON from %s: %v", buildDepsFile, err)
+				continue
+			}
 
-		for _, dep := range data.BuildDependencies {
-			buildDependencies[dep] = true
+			for _, dep := range data.BuildDependencies {
+				buildDependencies[dep] = true
+			}
 		}
 	}
 
-	log.Printf("Loaded %d build dependencies from cache", len(buildDependencies))
+	log.Printf("Loaded %d build dependencies from cache across all architectures", len(buildDependencies))
 
-	// Filter out candidates that are build dependencies
+	// Filter out candidates that are build dependencies on any architecture
 	var filtered []ArchiveCandidate
 	var retained []RetainCandidate
 	for _, candidate := range candidates {
@@ -709,12 +764,12 @@ func filterByReverseBuildDependencies(candidates []ArchiveCandidate) ([]ArchiveC
 				Version:    candidate.Version,
 				Repository: candidate.Repository,
 				Age:        candidate.Age,
-				Reason:     "is a build dependency for active melange configuration",
+				Reason:     "is a build dependency for active melange configuration on at least one architecture",
 			})
 			continue
 		}
 
-		candidate.Reasons = append(candidate.Reasons, "not a build dependency")
+		candidate.Reasons = append(candidate.Reasons, "not a build dependency on any architecture")
 		filtered = append(filtered, candidate)
 	}
 
@@ -722,46 +777,49 @@ func filterByReverseBuildDependencies(candidates []ArchiveCandidate) ([]ArchiveC
 }
 
 func filterByImageDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
-	log.Println("Checking for image dependencies...")
+	log.Println("Checking for image dependencies across all architectures...")
 
-	// Load cached image dependencies from resolved/images/ directory
+	// Load cached image dependencies from resolved/images/ directory for all architectures
 	imageDependencies := make(map[string]bool) // package=version -> true if it's used by images
 
-	// Check both public and private image dependency files
-	for _, imageSet := range []string{"public", "private"} {
-		imageDepsFile := filepath.Join("resolved", "images", fmt.Sprintf("%s.json", imageSet))
+	architectures := []string{"x86_64", "aarch64"}
+	for _, arch := range architectures {
+		// Check both public and private image dependency files
+		for _, imageSet := range []string{"public", "private"} {
+			imageDepsFile := filepath.Join("resolved", "images", arch, fmt.Sprintf("%s.json", imageSet))
 
-		if _, err := os.Stat(imageDepsFile); os.IsNotExist(err) {
-			log.Printf("Warning: Image dependencies file not found: %s. Run 'stereo image-dependencies' first.", imageDepsFile)
-			continue
-		}
+			if _, err := os.Stat(imageDepsFile); os.IsNotExist(err) {
+				log.Printf("Warning: Image dependencies file not found: %s. Run 'stereo image-dependencies' first.", imageDepsFile)
+				continue
+			}
 
-		file, err := os.Open(imageDepsFile)
-		if err != nil {
-			log.Printf("Warning: Could not open image dependencies file %s: %v", imageDepsFile, err)
-			continue
-		}
-		defer file.Close()
+			file, err := os.Open(imageDepsFile)
+			if err != nil {
+				log.Printf("Warning: Could not open image dependencies file %s: %v", imageDepsFile, err)
+				continue
+			}
+			defer file.Close()
 
-		var data struct {
-			RepositorySet     string   `json:"repository_set"`
-			Architecture      string   `json:"architecture"`
-			ImageDependencies []string `json:"image_dependencies"`
-		}
+			var data struct {
+				RepositorySet     string   `json:"repository_set"`
+				Architecture      string   `json:"architecture"`
+				ImageDependencies []string `json:"image_dependencies"`
+			}
 
-		if err := json.NewDecoder(file).Decode(&data); err != nil {
-			log.Printf("Warning: Error decoding JSON from %s: %v", imageDepsFile, err)
-			continue
-		}
+			if err := json.NewDecoder(file).Decode(&data); err != nil {
+				log.Printf("Warning: Error decoding JSON from %s: %v", imageDepsFile, err)
+				continue
+			}
 
-		for _, dep := range data.ImageDependencies {
-			imageDependencies[dep] = true
+			for _, dep := range data.ImageDependencies {
+				imageDependencies[dep] = true
+			}
 		}
 	}
 
-	log.Printf("Loaded %d image dependencies from cache", len(imageDependencies))
+	log.Printf("Loaded %d image dependencies from cache across all architectures", len(imageDependencies))
 
-	// Filter out candidates that are used by images
+	// Filter out candidates that are used by images on any architecture
 	var filtered []ArchiveCandidate
 	var retained []RetainCandidate
 	for _, candidate := range candidates {
@@ -772,12 +830,12 @@ func filterByImageDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidat
 				Version:    candidate.Version,
 				Repository: candidate.Repository,
 				Age:        candidate.Age,
-				Reason:     "is used by active images",
+				Reason:     "is used by active images on at least one architecture",
 			})
 			continue
 		}
 
-		candidate.Reasons = append(candidate.Reasons, "not used by images")
+		candidate.Reasons = append(candidate.Reasons, "not used by images on any architecture")
 		filtered = append(filtered, candidate)
 	}
 
@@ -785,40 +843,45 @@ func filterByImageDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidat
 }
 
 func filterByVMDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
-	log.Println("Checking for VM dependencies...")
+	log.Println("Checking for VM dependencies across all architectures...")
 
-	// Load cached VM dependencies from resolved/vms/ directory
+	// Load cached VM dependencies from resolved/vms/ directory for all architectures
 	vmDependencies := make(map[string]bool) // package=version -> true if it's used by VMs
 
-	vmDepsFile := filepath.Join("resolved", "vms", "vms.json")
+	architectures := []string{"x86_64", "aarch64"}
+	for _, arch := range architectures {
+		vmDepsFile := filepath.Join("resolved", "vms", arch, "vms.json")
 
-	if _, err := os.Stat(vmDepsFile); os.IsNotExist(err) {
-		log.Printf("Warning: VM dependencies file not found: %s. Run 'stereo vm-dependencies' first.", vmDepsFile)
-	} else {
+		if _, err := os.Stat(vmDepsFile); os.IsNotExist(err) {
+			log.Printf("Warning: VM dependencies file not found: %s. Run 'stereo vm-dependencies' first.", vmDepsFile)
+			continue
+		}
+
 		file, err := os.Open(vmDepsFile)
 		if err != nil {
 			log.Printf("Warning: Could not open VM dependencies file %s: %v", vmDepsFile, err)
-		} else {
-			defer file.Close()
+			continue
+		}
+		defer file.Close()
 
-			var data struct {
-				Architecture   string   `json:"architecture"`
-				VMDependencies []string `json:"vm_dependencies"`
-			}
+		var data struct {
+			Architecture   string   `json:"architecture"`
+			VMDependencies []string `json:"vm_dependencies"`
+		}
 
-			if err := json.NewDecoder(file).Decode(&data); err != nil {
-				log.Printf("Warning: Error decoding JSON from %s: %v", vmDepsFile, err)
-			} else {
-				for _, dep := range data.VMDependencies {
-					vmDependencies[dep] = true
-				}
-			}
+		if err := json.NewDecoder(file).Decode(&data); err != nil {
+			log.Printf("Warning: Error decoding JSON from %s: %v", vmDepsFile, err)
+			continue
+		}
+
+		for _, dep := range data.VMDependencies {
+			vmDependencies[dep] = true
 		}
 	}
 
-	log.Printf("Loaded %d VM dependencies from cache", len(vmDependencies))
+	log.Printf("Loaded %d VM dependencies from cache across all architectures", len(vmDependencies))
 
-	// Filter out candidates that are used by VMs
+	// Filter out candidates that are used by VMs on any architecture
 	var filtered []ArchiveCandidate
 	var retained []RetainCandidate
 	for _, candidate := range candidates {
@@ -829,12 +892,12 @@ func filterByVMDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, 
 				Version:    candidate.Version,
 				Repository: candidate.Repository,
 				Age:        candidate.Age,
-				Reason:     "is used by active VMs",
+				Reason:     "is used by active VMs on at least one architecture",
 			})
 			continue
 		}
 
-		candidate.Reasons = append(candidate.Reasons, "not used by VMs")
+		candidate.Reasons = append(candidate.Reasons, "not used by VMs on any architecture")
 		filtered = append(filtered, candidate)
 	}
 

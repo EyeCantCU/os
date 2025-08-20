@@ -32,59 +32,36 @@ func vmDependenciesCmd() *cobra.Command {
 		Short: "Pre-compute VM dependencies from wolfi-vm APKO configurations",
 		Long: `This command finds all APKO build.yaml configurations under wolfi-vm/configs/**/build.yaml
 and resolves them to lists of APK packages used by each VM. The results are written
-to JSON files in the resolved/vms/ directory.`,
+to JSON files in the resolved/vms/ directory.
+
+When no --arch is specified, dependencies are computed for both x86_64 and aarch64 architectures,
+respecting any archs constraints in VM configurations.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return vmDependencies(cmd.Context(), arch, useWithdrawn, withdrawnDir)
+			var architectures []string
+			if arch != "" {
+				architectures = []string{arch}
+			} else {
+				architectures = []string{"x86_64", "aarch64"}
+			}
+			return vmDependencies(cmd.Context(), architectures, useWithdrawn, withdrawnDir)
 		},
 	}
 
-	cmd.Flags().StringVar(&arch, "arch", "x86_64", "Architecture to evaluate (default: x86_64)")
+	cmd.Flags().StringVar(&arch, "arch", "", "Architecture to evaluate (default: both x86_64 and aarch64)")
 	cmd.Flags().BoolVar(&useWithdrawn, "use-withdrawn", false, "Use withdrawn APKINDEX files instead of live repositories")
 	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn APKINDEX files")
 
 	return cmd
 }
 
-func vmDependencies(ctx context.Context, arch string, useWithdrawn bool, withdrawnDir string) error {
+func vmDependencies(ctx context.Context, architectures []string, useWithdrawn bool, withdrawnDir string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
 	if useWithdrawn {
-		log.Printf("Pre-computing VM dependencies for architecture %s using withdrawn indexes from %s...", arch, withdrawnDir)
+		log.Printf("Pre-computing VM dependencies for architectures %v using withdrawn indexes from %s...", architectures, withdrawnDir)
 	} else {
-		log.Printf("Pre-computing VM dependencies for architecture %s...", arch)
-	}
-
-	// Create output directories - use withdrawn-test prefix when testing with withdrawn indexes
-	var resolvedDir, unresolvedDir string
-	if useWithdrawn {
-		resolvedDir = filepath.Join("withdrawn-test", "resolved", "vms")
-		unresolvedDir = filepath.Join("withdrawn-test", "unresolved", "vms")
-	} else {
-		resolvedDir = filepath.Join("resolved", "vms")
-		unresolvedDir = filepath.Join("unresolved", "vms")
-	}
-
-	if err := os.MkdirAll(resolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating resolved vms directory: %w", err)
-	}
-
-	if err := os.MkdirAll(unresolvedDir, 0755); err != nil {
-		return fmt.Errorf("creating unresolved vms directory: %w", err)
-	}
-
-	cache := apk.NewCache(true)
-
-	// Build repository list for VM dependencies
-	var buildRepos []string
-	if useWithdrawn {
-		// Use local withdrawn indexes instead of remote repositories
-		withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
-		buildRepos = []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]}
-		log.Printf("Using withdrawn indexes from %s", withdrawnDir)
-	} else {
-		// Use private repos (same as private images - includes enterprise-packages)
-		buildRepos = []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]}
+		log.Printf("Pre-computing VM dependencies for architectures %v...", architectures)
 	}
 
 	// Find all build.yaml files under wolfi-vm/configs/
@@ -96,168 +73,214 @@ func vmDependencies(ctx context.Context, arch string, useWithdrawn bool, withdra
 
 	log.Printf("Found %d VM configurations", len(vmConfigs))
 
-	outputFile := filepath.Join(resolvedDir, "vms.json")
-	unresolvedFile := filepath.Join(unresolvedDir, "vms.json")
+	// Process each architecture
+	for _, arch := range architectures {
+		log.Printf("Processing architecture: %s", arch)
 
-	// Collect all unique APK packages across all VMs
-	allPackages := make(map[string]bool) // package -> true if used
-	unresolvedVMs := make([]struct {
-		ConfigPath string `json:"config_path"`
-		Error      string `json:"error"`
-	}, 0)
+		// Create output directories - use withdrawn-test prefix when testing with withdrawn indexes
+		var resolvedDir, unresolvedDir string
+		if useWithdrawn {
+			resolvedDir = filepath.Join("withdrawn-test", "resolved", "vms", arch)
+			unresolvedDir = filepath.Join("withdrawn-test", "unresolved", "vms", arch)
+		} else {
+			resolvedDir = filepath.Join("resolved", "vms", arch)
+			unresolvedDir = filepath.Join("unresolved", "vms", arch)
+		}
 
-	// Create subdirectory for detailed VM info
-	detailDir := filepath.Join(resolvedDir, "vms")
-	if err := os.MkdirAll(detailDir, 0755); err != nil {
-		return fmt.Errorf("creating detail directory %s: %w", detailDir, err)
-	}
+		if err := os.MkdirAll(resolvedDir, 0755); err != nil {
+			return fmt.Errorf("creating resolved vms directory: %w", err)
+		}
 
-	var mu sync.Mutex
+		if err := os.MkdirAll(unresolvedDir, 0755); err != nil {
+			return fmt.Errorf("creating unresolved vms directory: %w", err)
+		}
 
-	log.Printf("Resolving VM dependencies...")
+		cache := apk.NewCache(true)
 
-	// Process VMs in parallel
-	var g errgroup.Group
-	g.SetLimit(runtime.GOMAXPROCS(0))
+		// Build repository list for VM dependencies
+		var buildRepos []string
+		if useWithdrawn {
+			// Use local withdrawn indexes instead of remote repositories
+			withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
+			buildRepos = []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]}
+		} else {
+			// Use private repos (same as private images - includes enterprise-packages)
+			buildRepos = []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]}
+		}
 
-	for configPath, cfg := range vmConfigs {
-		g.Go(func() error {
-			// Capture variables for closure
-			currentPath := configPath
-			currentCfg := cfg
+		outputFile := filepath.Join(resolvedDir, "vms.json")
+		unresolvedFile := filepath.Join(unresolvedDir, "vms.json")
 
-			log.Printf("Resolving dependencies for VM: %s", currentPath)
+		// Collect all unique APK packages across all VMs
+		allPackages := make(map[string]bool) // package -> true if used
+		unresolvedVMs := make([]struct {
+			ConfigPath string `json:"config_path"`
+			Error      string `json:"error"`
+		}, 0)
 
-			// Resolve VM to APK packages
-			packages, err := lockImageDependencies(ctx, currentCfg, cache, buildRepos, arch)
-			if err != nil {
-				log.Printf("Error resolving VM dependencies for %s: %v", currentPath, err)
+		// Create subdirectory for detailed VM info
+		detailDir := filepath.Join(resolvedDir, "vms")
+		if err := os.MkdirAll(detailDir, 0755); err != nil {
+			return fmt.Errorf("creating detail directory %s: %w", detailDir, err)
+		}
 
-				// Add to unresolved VMs list
-				mu.Lock()
-				unresolvedVMs = append(unresolvedVMs, struct {
-					ConfigPath string `json:"config_path"`
-					Error      string `json:"error"`
+		var mu sync.Mutex
+
+		log.Printf("Resolving VM dependencies for architecture: %s...", arch)
+
+		// Process VMs in parallel
+		var g errgroup.Group
+		g.SetLimit(runtime.GOMAXPROCS(0))
+
+		for configPath, cfg := range vmConfigs {
+			g.Go(func() error {
+				// Capture variables for closure
+				currentPath := configPath
+				currentCfg := cfg
+				currentArch := arch
+
+				// Check if this VM supports the current architecture
+				if !supportsApkoArchitecture(currentCfg, currentArch) {
+					log.Printf("Skipping %s: does not support architecture %s", currentPath, currentArch)
+					return nil
+				}
+
+				log.Printf("Resolving dependencies for VM: %s (architecture: %s)", currentPath, currentArch)
+
+				// Create a copy of the configuration to avoid mutation by lockImageDependencies
+				cfgCopy := *currentCfg
+
+				// Resolve VM to APK packages
+				packages, err := lockImageDependencies(ctx, &cfgCopy, cache, buildRepos, currentArch)
+				if err != nil {
+					log.Printf("Error resolving VM dependencies for %s (architecture: %s): %v", currentPath, currentArch, err)
+
+					// Add to unresolved VMs list
+					mu.Lock()
+					unresolvedVMs = append(unresolvedVMs, struct {
+						ConfigPath string `json:"config_path"`
+						Error      string `json:"error"`
+					}{
+						ConfigPath: currentPath,
+						Error:      err.Error(),
+					})
+					mu.Unlock()
+
+					return nil // Don't fail the entire operation for one VM
+				}
+
+				// Save individual VM dependencies to detailed JSON file
+				sortedPkgs := make([]string, len(packages))
+				copy(sortedPkgs, packages)
+				sort.Strings(sortedPkgs)
+
+				// Clean the path to create a safe filename
+				safePath := strings.ReplaceAll(strings.ReplaceAll(currentPath, "/", "_"), ":", "_")
+				vmDetailFile := filepath.Join(detailDir, fmt.Sprintf("%s.json", safePath))
+				vmData := struct {
+					ConfigPath   string   `json:"config_path"`
+					Architecture string   `json:"architecture"`
+					Dependencies []string `json:"dependencies"`
 				}{
-					ConfigPath: currentPath,
-					Error:      err.Error(),
-				})
+					ConfigPath:   currentPath,
+					Architecture: currentArch,
+					Dependencies: sortedPkgs,
+				}
+
+				if err := func() error {
+					file, err := os.Create(vmDetailFile)
+					if err != nil {
+						return err
+					}
+					defer file.Close()
+
+					encoder := json.NewEncoder(file)
+					encoder.SetIndent("", "  ")
+					return encoder.Encode(vmData)
+				}(); err != nil {
+					log.Printf("Warning: failed to write detailed dependencies for %s: %v", currentPath, err)
+				}
+
+				// Add all packages to the set (with mutex protection)
+				mu.Lock()
+				for _, pkg := range packages {
+					allPackages[pkg] = true
+				}
 				mu.Unlock()
 
-				return nil // Don't fail the entire operation for one VM
-			}
+				return nil
+			})
+		}
 
-			// Save individual VM dependencies to detailed JSON file
-			sortedPkgs := make([]string, len(packages))
-			copy(sortedPkgs, packages)
-			sort.Strings(sortedPkgs)
+		if err := g.Wait(); err != nil {
+			return fmt.Errorf("error processing VM dependencies (architecture: %s): %w", arch, err)
+		}
 
-			// Clean the path to create a safe filename
-			safePath := strings.ReplaceAll(strings.ReplaceAll(currentPath, "/", "_"), ":", "_")
-			vmDetailFile := filepath.Join(detailDir, fmt.Sprintf("%s.json", safePath))
-			vmData := struct {
-				ConfigPath   string   `json:"config_path"`
-				Architecture string   `json:"architecture"`
-				Dependencies []string `json:"dependencies"`
-			}{
-				ConfigPath:   currentPath,
-				Architecture: arch,
-				Dependencies: sortedPkgs,
-			}
+		// Convert set to sorted slice
+		packageList := make([]string, 0, len(allPackages))
+		for pkg := range allPackages {
+			packageList = append(packageList, pkg)
+		}
+		sort.Strings(packageList)
 
-			if err := func() error {
-				file, err := os.Create(vmDetailFile)
-				if err != nil {
-					return err
-				}
-				defer file.Close()
-
-				encoder := json.NewEncoder(file)
-				encoder.SetIndent("", "  ")
-				return encoder.Encode(vmData)
-			}(); err != nil {
-				log.Printf("Warning: failed to write detailed dependencies for %s: %v", currentPath, err)
-			}
-
-			// Add all packages to the set (with mutex protection)
-			mu.Lock()
-			for _, pkg := range packages {
-				allPackages[pkg] = true
-			}
-			mu.Unlock()
-
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		return fmt.Errorf("error processing VM dependencies: %w", err)
-	}
-
-	// Convert set to sorted slice
-	packageList := make([]string, 0, len(allPackages))
-	for pkg := range allPackages {
-		packageList = append(packageList, pkg)
-	}
-	sort.Strings(packageList)
-
-	// Create JSON structure
-	data := struct {
-		Architecture   string   `json:"architecture"`
-		VMDependencies []string `json:"vm_dependencies"`
-	}{
-		Architecture:   arch,
-		VMDependencies: packageList,
-	}
-
-	// Write to JSON file
-	file, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("creating output file %s: %w", outputFile, err)
-	}
-	defer file.Close()
-
-	log.Printf("Writing %d VM dependencies to %s", len(packageList), outputFile)
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(data); err != nil {
-		return fmt.Errorf("encoding JSON to %s: %w", outputFile, err)
-	}
-
-	log.Printf("Successfully wrote VM dependencies to %s", outputFile)
-
-	// Write unresolved VMs to JSON file if there are any
-	if len(unresolvedVMs) > 0 {
-		unresolvedData := struct {
-			Architecture  string `json:"architecture"`
-			UnresolvedVMs []struct {
-				ConfigPath string `json:"config_path"`
-				Error      string `json:"error"`
-			} `json:"unresolved_vms"`
+		// Create JSON structure
+		data := struct {
+			Architecture   string   `json:"architecture"`
+			VMDependencies []string `json:"vm_dependencies"`
 		}{
-			Architecture:  arch,
-			UnresolvedVMs: unresolvedVMs,
+			Architecture:   arch,
+			VMDependencies: packageList,
 		}
 
-		unresolvedFileHandle, err := os.Create(unresolvedFile)
+		// Write to JSON file
+		file, err := os.Create(outputFile)
 		if err != nil {
-			log.Printf("Warning: Could not create unresolved VMs file %s: %v", unresolvedFile, err)
-		} else {
-			log.Printf("Writing %d unresolved VMs to %s", len(unresolvedVMs), unresolvedFile)
+			return fmt.Errorf("creating output file %s: %w", outputFile, err)
+		}
+		defer file.Close()
 
-			encoder := json.NewEncoder(unresolvedFileHandle)
-			encoder.SetIndent("", "  ")
-			if err := encoder.Encode(unresolvedData); err != nil {
-				log.Printf("Warning: Error encoding unresolved VMs JSON to %s: %v", unresolvedFile, err)
-			} else {
-				log.Printf("Successfully wrote unresolved VMs to %s", unresolvedFile)
+		log.Printf("Writing %d VM dependencies to %s", len(packageList), outputFile)
+
+		encoder := json.NewEncoder(file)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(data); err != nil {
+			return fmt.Errorf("encoding JSON to %s: %w", outputFile, err)
+		}
+
+		log.Printf("Successfully wrote VM dependencies for architecture %s to %s", arch, outputFile)
+
+		// Write unresolved VMs to JSON file if there are any
+		if len(unresolvedVMs) > 0 {
+			unresolvedData := struct {
+				Architecture  string `json:"architecture"`
+				UnresolvedVMs []struct {
+					ConfigPath string `json:"config_path"`
+					Error      string `json:"error"`
+				} `json:"unresolved_vms"`
+			}{
+				Architecture:  arch,
+				UnresolvedVMs: unresolvedVMs,
 			}
-			unresolvedFileHandle.Close()
+
+			unresolvedFileHandle, err := os.Create(unresolvedFile)
+			if err != nil {
+				log.Printf("Warning: Could not create unresolved VMs file %s: %v", unresolvedFile, err)
+			} else {
+				log.Printf("Writing %d unresolved VMs to %s", len(unresolvedVMs), unresolvedFile)
+
+				encoder := json.NewEncoder(unresolvedFileHandle)
+				encoder.SetIndent("", "  ")
+				if err := encoder.Encode(unresolvedData); err != nil {
+					log.Printf("Warning: Error encoding unresolved VMs JSON to %s: %v", unresolvedFile, err)
+				} else {
+					log.Printf("Successfully wrote unresolved VMs for architecture %s to %s", arch, unresolvedFile)
+				}
+				unresolvedFileHandle.Close()
+			}
 		}
 	}
 
-	log.Printf("VM dependency pre-computation complete. Results written to %s/", resolvedDir)
+	log.Printf("VM dependency pre-computation complete for architectures %v", architectures)
 	return nil
 }
 
