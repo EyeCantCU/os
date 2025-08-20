@@ -905,33 +905,36 @@ func filterByVMDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, 
 }
 
 func filterBySeedDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
-	log.Println("Checking for seed dependencies...")
+	log.Println("Checking for seed dependencies across all architectures...")
 
 	// Load cached seed dependencies from resolved/seeds/ directory
 	seedDependencies := make(map[string]bool) // package=version -> true if it's a seed dependency
 
-	seedDepsFile := filepath.Join("resolved", "seeds.json")
+	architectures := []string{"x86_64", "aarch64"}
+	for _, arch := range architectures {
+		seedDepsFile := filepath.Join("resolved", arch, "seeds.json")
 
-	if _, err := os.Stat(seedDepsFile); os.IsNotExist(err) {
-		log.Printf("Warning: Seed dependencies file not found: %s. Run 'stereo seed-dependencies' first if using manual seeds.", seedDepsFile)
-	} else {
-		file, err := os.Open(seedDepsFile)
-		if err != nil {
-			log.Printf("Warning: Could not open seed dependencies file %s: %v", seedDepsFile, err)
+		if _, err := os.Stat(seedDepsFile); os.IsNotExist(err) {
+			log.Printf("Warning: Seed dependencies file not found: %s. Run 'stereo seed-dependencies' first if using manual seeds.", seedDepsFile)
 		} else {
-			defer file.Close()
-
-			var data struct {
-				Architecture     string   `json:"architecture"`
-				SeedDependencies []string `json:"seed_dependencies"`
-			}
-
-			if err := json.NewDecoder(file).Decode(&data); err != nil {
-				log.Printf("Warning: Could not decode seed dependencies file %s: %v", seedDepsFile, err)
+			file, err := os.Open(seedDepsFile)
+			if err != nil {
+				log.Printf("Warning: Could not open seed dependencies file %s: %v", seedDepsFile, err)
 			} else {
-				log.Printf("Loaded %d seed dependencies", len(data.SeedDependencies))
-				for _, dep := range data.SeedDependencies {
-					seedDependencies[dep] = true
+				defer file.Close()
+
+				var data struct {
+					Architecture     string   `json:"architecture"`
+					SeedDependencies []string `json:"seed_dependencies"`
+				}
+
+				if err := json.NewDecoder(file).Decode(&data); err != nil {
+					log.Printf("Warning: Could not decode seed dependencies file %s: %v", seedDepsFile, err)
+				} else {
+					log.Printf("Loaded %d seed dependencies", len(data.SeedDependencies))
+					for _, dep := range data.SeedDependencies {
+						seedDependencies[dep] = true
+					}
 				}
 			}
 		}
