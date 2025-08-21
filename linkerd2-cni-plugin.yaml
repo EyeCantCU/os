@@ -6,13 +6,6 @@ package:
   copyright:
     - license: Apache-2.0
 
-environment:
-  contents:
-    packages:
-      - cargo-auditable
-  environment:
-    GO111MODULE: "on"
-
 pipeline:
   - uses: git-checkout
     with:
@@ -29,6 +22,7 @@ pipeline:
 
 subpackages:
   - name: linkerd2-cni-repair-controller
+    description: Linkerd2 utility to scan & evict pods that failed to aquire a network configuration
     pipeline:
       - uses: cargo/build
         with:
@@ -45,30 +39,44 @@ subpackages:
             linkerd-cni-repair-controller --help
 
   - name: ${{package.name}}-compat
+    description: Compatibility files for ${{package.name}}
     pipeline:
       - runs: |
-          mkdir -p -m 0755 ${{targets.contextdir}}/linkerd
-          install -Dm755 LICENSE ${{targets.contextdir}}/linkerd/LICENSE
-          install -Dm755 cni-plugin/deployment/scripts/filter.jq ${{targets.contextdir}}/linkerd/filter.jq
-          install -Dm755 cni-plugin/deployment/scripts/install-cni.sh ${{targets.contextdir}}/linkerd/install-cni.sh
+          mkdir -p -m 0755 ${{targets.subpkgdir}}/linkerd
+          mkdir -p -m 0755 ${{targets.subpkgdir}}/opt/cni/bin
+          mkdir -p -m 0755 ${{targets.subpkgdir}}/host/opt/cni/bin
+          install -Dm755 LICENSE ${{targets.subpkgdir}}/linkerd/LICENSE
+          install -Dm755 cni-plugin/deployment/scripts/filter.jq ${{targets.subpkgdir}}/linkerd/filter.jq
+          install -Dm755 cni-plugin/deployment/scripts/install-cni.sh ${{targets.subpkgdir}}/linkerd/install-cni.sh
+          ln -s /usr/bin/linkerd-cni-plugin ${{targets.subpkgdir}}/opt/cni/bin/linkerd-cni
     test:
       pipeline:
-        - name: Verify compat installations
+        - name: Verify files are present
           runs: |
-            test -f /linkerd/install-cni.sh
-            test -f /linkerd/filter.jq
-            test -f /linkerd/LICENSE
+            stat /linkerd/filter.jq
+            stat /linkerd/install-cni.sh
+            stat /linkerd/LICENSE
+        - name: Verify successful symlink creation
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
 
   - name: linkerd2-cni-repair-controller-compat
+    description: Compatibility files for linkerd2-cni-repair-controller
     pipeline:
       - runs: |
-          mkdir -p ${{targets.contextdir}}/usr/lib/linkerd
-          ln -sf /usr/bin/linkerd-cni-repair-controller ${{targets.contextdir}}/usr/lib/linkerd/linkerd-cni-repair-controller
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/linkerd
+          ln -s /usr/bin/linkerd-cni-repair-controller ${{targets.subpkgdir}}/usr/lib/linkerd/linkerd-cni-repair-controller
     test:
+      environment:
+        contents:
+          packages:
+            - linkerd2-cni-repair-controller
       pipeline:
-        - name: verify installation
-          runs: |
-            test "$(readlink /usr/lib/linkerd/linkerd-cni-repair-controller)" = "/usr/bin/linkerd-cni-repair-controller"
+        - name: Verify successful symlink creation
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
 
 update:
   enabled: true
@@ -81,6 +89,7 @@ test:
   environment:
     contents:
       packages:
+        - busybox
         - jq
         - ${{package.name}}-compat
   pipeline:
@@ -88,20 +97,18 @@ test:
     - name: CNI plugin functionality test
       runs: |
         # Test CNI plugin recognizes proper CNI environment
-        echo '{}' | CNI_COMMAND=VERSION linkerd-cni-plugin 2>&1 | grep -q '"cniVersion"'
+        CNI_COMMAND=VERSION linkerd-cni-plugin 2>&1 | grep '"cniVersion"'
 
         # Test CNI plugin fails appropriately without env vars
         linkerd-cni-plugin --help 2>&1 | grep -q "required env variables.*CNI_COMMAND.*missing"
     - name: Script and filter functionality test
       runs: |
         # Test jq filter script can be executed
-        echo '{"plugins": []}' | jq -f /linkerd/filter.jq --argjson CNI_TMP_CONF_DATA '{"type": "linkerd-cni"}' > /dev/null
+        echo '{"plugins": []}' | jq -f /linkerd/filter.jq --argjson CNI_TMP_CONF_DATA '{"type": "linkerd-cni"}' | grep "linkerd-cni"
 
-        # Test install script exists and has expected functions
-        grep -q "install_cni_bin" /linkerd/install-cni.sh
-        grep -q "create_kubeconfig" /linkerd/install-cni.sh
-        grep -q "monitor_cni_config" /linkerd/install-cni.sh
+        # Test install script exists and has expected output
+        exec /linkerd/install-cni.sh
 
         # Test filter.jq exists and install script is executable
-        grep -q "linkerd-cni" /linkerd/filter.jq
+        stat /linkerd/filter.jq
         test -x /linkerd/install-cni.sh
