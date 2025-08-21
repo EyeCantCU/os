@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+
+# tools/convert-image - Generic image format conversion tool for wolfi-vm
+#
+# Converts VM disk images between formats using qemu-img with appropriate
+# format-specific optimizations.
+
+set -euo pipefail
+
+# Print usage information
+usage() {
+    local myname="${0##*/}"
+    cat <<EOF
+Usage: $myname [OPTIONS] <source> <destination>
+
+Converts VM disk images between formats using qemu-img.
+
+Options:
+    --resize SIZE       Resize image before conversion (e.g. 10G, 30G)
+    --format-source FMT Override source format detection
+    --format-dest FMT   Override destination format detection  
+    --help              Show this help message
+
+Supported conversions:
+    Supports any format combination that qemu-img can handle. Common cases:
+    raw → qcow2         QEMU/local use, always compressed
+    raw → vmdk          AWS EC2, streamOptimized format
+    raw → vhd           Azure VMs, aka vpc
+    <same> → <same>     In-place resize operations
+
+Examples:
+    # Format conversions
+    $myname disk.raw disk.qcow2
+    $myname disk.raw disk.vmdk
+    $myname disk.raw disk.vhd
+    
+    # In-place resize (no conversion)
+    $myname --resize 30G disk.raw disk.raw
+    
+    # Combined resize and convert
+    $myname --resize 30G disk.raw disk.vhd
+
+EOF
+}
+
+# Print error message to stderr
+stderr() { 
+    echo "$@" >&2
+}
+
+# Detect format from file extension
+detect_format() {
+    local file="$1"
+    case "${file##*.}" in
+        raw) echo "raw" ;;
+        qcow2) echo "qcow2" ;;
+        vmdk) echo "vmdk" ;;
+        vpc|vhd) echo "vpc" ;;
+        *) stderr "Unknown format for file: $file"; return 1 ;;
+    esac
+}
+
+# Resize disk image
+resize_disk() {
+    local file="$1"
+    local format="$2"
+    local size="$3"
+    
+    stderr "Resizing $file to $size"
+    qemu-img resize -f "$format" "$file" "$size" || {
+        stderr "Failed to resize $file to $size"
+        return 1
+    }
+}
+
+
+# Main conversion function
+convert_image() {
+    local source_file="$1"
+    local dest_file="$2"
+    local resize_size="$3"
+    local format_from_override="$4"
+    local format_to_override="$5"
+
+    local source_format
+    local dest_format
+
+    source_format="${format_from_override:-$(detect_format "$source_file")}"
+    dest_format="${format_to_override:-$(detect_format "$dest_file")}"
+    
+    # Validate source file exists
+    if [ ! -f "$source_file" ]; then
+        stderr "Source file does not exist: $source_file"
+        return 1
+    fi
+    
+    # Handle resize first (before conversion, as some formats can't be resized)
+    if [ -n "$resize_size" ]; then
+        resize_disk "$source_file" "$source_format" "$resize_size"
+    fi
+    
+    # Only convert if source and destination are different files
+    if [ "$source_file" != "$dest_file" ]; then
+        # Get format-specific options as array
+        local format_opts=()
+        case "$dest_format" in
+            qcow2)
+                format_opts=(-c -o compression_type=zlib)
+                ;;
+            vmdk)
+                format_opts=(-o subformat=streamOptimized)
+                ;;
+            vpc|vhd)
+                format_opts=(-o "subformat=fixed,force_size")
+                ;;
+        esac
+        
+        # Execute conversion
+        stderr "Converting $source_file ($source_format) to $dest_file ($dest_format)"
+        qemu-img convert -f "$source_format" -O "$dest_format" ${format_opts[@]+"${format_opts[@]}"} "$source_file" "$dest_file" || {
+            stderr "Failed to convert $source_file to $dest_file"
+            return 1
+        }
+        stderr "Successfully created $dest_file"
+    fi
+}
+
+main() {
+    local resize=""
+    local format_source=""
+    local format_dest=""
+    
+    # Parse command line arguments
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --resize)
+                resize="$2"
+                shift 2
+                ;;
+            --format-source)
+                format_source="$2"
+                shift 2
+                ;;
+            --format-dest)
+                format_dest="$2"
+                shift 2
+                ;;
+            --help)
+                usage
+                exit 0
+                ;;
+            -*)
+                stderr "Unknown option: $1"
+                usage >&2
+                exit 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    # Validate arguments
+    if [ $# -ne 2 ]; then
+        stderr "Error: Expected exactly 2 arguments (source and destination files)"
+        usage >&2
+        exit 1
+    fi
+
+    local source_file="$1"
+    local dest_file="$2"
+
+    # Ensure qemu-img is available
+    if ! command -v qemu-img >/dev/null 2>&1; then
+        stderr "Error: qemu-img is not installed or not in PATH"
+        exit 1
+    fi
+
+    # Run the conversion
+    convert_image "$source_file" "$dest_file" "$resize" "$format_source" "$format_dest"
+}
+
+main "$@"

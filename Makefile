@@ -86,8 +86,22 @@ qcow_targets = $(foreach name,$(names),qcow-$(name))
 .PHONY: $(qcow_targets)
 $(qcow_targets): qcow-%: $(ARCH_OUT_D)/%/disk.qcow2
 
+vmdk_targets = $(foreach name,$(names),vmdk-$(name))
+.PHONY: $(vmdk_targets)
+$(vmdk_targets): vmdk-%: $(ARCH_OUT_D)/%/disk.vmdk
+
+vhd_targets = $(foreach name,$(names),vhd-$(name))
+.PHONY: $(vhd_targets)
+$(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
+
 %.qcow2: %.raw
-	qemu-img convert -f raw -O qcow2 -c -o compression_type=zlib $< $@
+	./tools/convert-image $< $@
+
+%.vmdk: %.raw
+	./tools/convert-image $< $@
+
+%.vhd: %.raw
+	./tools/convert-image $< $@
 
 disk_debug_targets = $(foreach name,$(names),disk-debug-$(name))
 .PHONY: $(disk_debug_targets)
@@ -140,9 +154,6 @@ builder/ovmf-%.fd: apkoaas
 
 builder/kernel-%: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* kernel $@
-
-%.vmdk: %.raw
-	./tools/aws-image-upload create-vmdk $< $@
 
 PUBLISH_TARGET ?= dev
 COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
@@ -325,9 +336,8 @@ show-vars:
 	@echo ALL_DISKS=$(ALL_DISKS)
 	@echo names=$(names)
 
-.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
+.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%/build.yaml builder/ovmf-%.fd
-.PRECIOUS: %.vmdk
 
 arches = aarch64 x86_64
 ifneq ($(filter-out $(arches),$(BUILDER_ARCH)),)
