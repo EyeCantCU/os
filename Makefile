@@ -218,7 +218,7 @@ endif
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
 awspub-%: AWSSSM=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)
-awspub-%: $(ARCH_OUT_D)/%/disk.vmdk-aws
+awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
 	./tools/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
 
 .PHONY: aws-create aws-create-% aws-publish aws-publish-%
@@ -246,7 +246,7 @@ capture_stdout = rm -f "$(1)" && mkdir -p "$(dir $(1))" && \
   echo "== $(1) ==" && cat "$(1)" && echo
 
 # we use the json output of awspub to indicate the thing was published.
-$(ARCH_OUT_D)/awspub/create/%.json: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk-aws
+$(ARCH_OUT_D)/awspub/create/%.json: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
 	@$(call capture_stdout,$@,\
 	awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
 
