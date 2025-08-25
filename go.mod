@@ -3,14 +3,14 @@ module chainguard.dev/apkoaas
 go 1.24.5
 
 require (
-	chainguard.dev/apko v0.30.4
+	chainguard.dev/apko v0.30.5
 	github.com/anchore/syft v1.31.0
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/charmbracelet/log v0.4.2
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-containerregistry v0.20.6
 	github.com/spf13/cobra v1.9.1
-	github.com/wolfi-dev/wolfictl v0.38.10
+	github.com/wolfi-dev/wolfictl v0.38.11
 	golang.org/x/crypto v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -281,7 +281,7 @@ require (
 	golang.org/x/term v0.34.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
-	golang.org/x/tools v0.35.0 // indirect
+	golang.org/x/tools v0.36.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/api v0.246.0 // indirect
 	google.golang.org/genproto v0.0.0-20250728155136-f173205681a0 // indirect
