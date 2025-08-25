@@ -8,11 +8,16 @@
 # Elasticsearch with the correct configuration parameters.
 package:
   name: elasticsearch-fips-9
-  version: "9.1.1"
-  epoch: 0
+  version: "9.1.2"
+  epoch: 2
   description:
   copyright:
-    - license: AGPL-3.0-or-later OR SSPL-1.0 OR Elastic-2.0
+    - license: AGPL-3.0 AND SSPL-1.0 AND Elastic-2.0
+      license-path: licenses/AGPL-3.0+SSPL-1.0+ELASTIC-LICENSE-2.0.txt
+    - license: Apache-2.0
+      license-path: licenses/APACHE-LICENSE-2.0.txt
+    - license: Elastic-2.0
+      license-path: licenses/ELASTIC-LICENSE-2.0.txt
   resources:
     cpu: 6
     memory: 30Gi
@@ -25,6 +30,7 @@ package:
       - elasticsearch-fips-9-config
       - grep
       - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+      - libsystemd # fixes native usage
       - merged-usrsbin
       - openjdk-21-default-jdk
       - openssl-config-fipshardened
@@ -32,7 +38,6 @@ package:
       - wolfi-baselayout
     provides:
       - elasticsearch-fips=${{package.full-version}}
-      - ${{package.name}}-policy-140-3=${{package.full-version}}
 
 environment:
   environment:
@@ -58,24 +63,25 @@ pipeline:
     with:
       repository: https://github.com/elastic/elasticsearch
       tag: v${{package.version}}
-      expected-commit: 5e94055934defa56e454868b7783b2a3b683785e
+      expected-commit: ca1a70216fbdefbef3c65b1dff04903ea5964ef5
 
   - uses: patch
     with:
       patches: |
         update-reactor-netty.patch
+        0001-modules-add-slf4j-nop-where-it-is-missing.patch
         0001-entitlements-Grant-entitlements-for-bc-fips-2.1-comp.patch
-        0002-tls-fips-hardening.patch
+        0002-tls-apply-TLS-FIPS-hardening.patch
         0003-x-pack-add-bcmail-fips-entitlement.patch
         0004-Fix-entitlements-for-cacerts.patch
         0005-Make-xpack-settings-default-to-FIPS.patch
-        0006-Provide-correct-FIPS-140-3-approved-service-indicato.patch
+        0006-CertificateTool-port-from-PKCS-12-to-BCFKS.patch
+        0007-docker-entrypoint-always-set-node-keystore-password.patch
 
   - uses: auth/gradle
 
   - runs: |
       # Regenerate verification metadata for updated dependencies
-      export LANG=en_US.UTF-8
       rm -rf gradle/verification-metadata.xml
       ./gradlew clean
       ./gradlew --write-verification-metadata sha256
@@ -101,17 +107,18 @@ pipeline:
       mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
       mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
 
-      # Use custom entrypoint with KeyStore password fix for FIPS
-      mv ./docker-entrypoint.sh ${{targets.destdir}}/usr/share/elasticsearch/bin
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
       mkdir -p ${{targets.destdir}}/usr/local/bin
-      ln -sf /usr/share/elasticsearch/bin/docker-entrypoint ${{targets.destdir}}/usr/local/bin/
+      ln -sf ../../share/elasticsearch/bin/docker-entrypoint.sh ${{targets.destdir}}/usr/local/bin/
 
       # Set permissions to read/write the config dir
       chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
       mkdir -p ${{targets.destdir}}/usr/bin
       for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
         name=$(basename $i)
-        ln -sf /usr/share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+        ln -sf ../share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
       done
 
       # We get this from elasticsearch-fips-9-config
@@ -123,6 +130,7 @@ pipeline:
       # To remove problematic/unnecessary jar files
       rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bc-fips-*.jar
       rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bcpg-fips-*.jar
+      rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/security-cli/bc*-jdk18on-*.jar
 
       mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/lib
 
@@ -260,6 +268,7 @@ test:
       ES_USER: elasticsearch
       KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
       JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
   pipeline:
     - name: "Check for LICENSE.txt"
       runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
@@ -272,32 +281,8 @@ test:
 
         chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
 
-        JAVA_TOOL_OPTIONS='--module-path=/usr/share/java/bouncycastle-fips' \
-        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
-        -alias "localhost" \
-        -genkeypair \
-        -keyalg RSA \
-        -dname CN="localhost" \
-        -ext ku:c=dig,keyEncipherment \
-        -ext san=dns:localhost,ip:127.0.0.1,ip:0:0:0:0:0:0:0:1 \
-        -storetype bcfks \
-        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
-
-        cat >>/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
-        cluster.name: "docker-cluster"
-        network.host: 0.0.0.0
-        node.store.allow_mmap: false
-        node.name: es
-        cluster.initial_master_nodes:
-          - es
-        EOF
-
+        # Create keystore for elasticsearch settings
         sudo -E -u $ES_USER elasticsearch-keystore create -p <<EOF
-        ${KEYSTORE_PASSWORD}
-        ${KEYSTORE_PASSWORD}
-        EOF
-
-        sudo -E -u $ES_USER elasticsearch-keystore add xpack.security.transport.ssl.keystore.secure_password  <<EOF
         ${KEYSTORE_PASSWORD}
         ${KEYSTORE_PASSWORD}
         EOF
@@ -318,42 +303,43 @@ test:
 
         wait-for-it -t 60 localhost:9200
 
-        # At this point, Elastic is coming up but we don't have an entitlement
-        # to use FIPS, so it won't come up fully: it won't serve SSL, and it
-        # won't allow any authentication.  We check that it is at least up.
-        curl -s http://localhost:9200/_cluster/health | grep "missing authentication credentials"
-
-        kill $(cat /tmp/elasticsearch.pid)
-
-        # Filter out known warnings
-        unexpected_warns="$(grep WARN /usr/share/elasticsearch/logs/docker-cluster.log \
-          | grep -v "SLF4J: No SLF4J providers were found" \
-          | grep -v "SLF4J: Defaulting to no-operation (NOP) logger implementation" \
-          | grep -v "SLF4J: See https://www.slf4j.org/codes.html#noProviders for further details" \
-          | wc -l)"
-        [ ${unexpected_warns} = "0" ]
-
-        # There should be no errors
-        unexpected_errors="$(grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log \
-          | wc -l)"
-        [ ${unexpected_errors} = "0" ]
-
-        # although the below should start working with trial license and enabling xpack security
-        exit 0
-
         # Reset the password
         ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b << EOF | grep 'New value' | awk '{print $3}'
         ${KEYSTORE_PASSWORD}
         EOF
         )
-        curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
-        curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+
+        # Dump health status
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s https://localhost:9200/_cluster/health?pretty -u "elastic:${ELASTIC_PASSWORD}"
+        # Check health status is green
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}" | grep '"status":"green"'
+        # Can change values
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
             {
               "name": "John Doe",
               "age": 30,
               "about": "I love to go rock climbing"
             }' || exit 1
-        curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+        # Can get values
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+
+        kill $(cat /tmp/elasticsearch.pid)
+
+        # Filter out known warnings
+        unexpected_warns="$(grep WARN /usr/share/elasticsearch/logs/docker-cluster.log \
+          | wc -l)"
+        if ! [ ${unexpected_warns} = "0" ]; then
+          grep WARN /usr/share/elasticsearch/logs/docker-cluster.log
+          exit 1
+        fi
+
+        # There should be no errors
+        unexpected_errors="$(grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log \
+          | wc -l)"
+        if ! [ ${unexpected_errors} = "0" ]; then
+          grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log
+          exit 1
+        fi
     - uses: java-fips/algorithms
       with:
         java-version: 21

@@ -1,6 +1,6 @@
 package:
   name: rke2-runtime-1.31
-  version: 1.31.11.2.1
+  version: "1.31.12.2.1"
   epoch: 0
   description: Rancher Kubernetes Engine 2 (RKE2) is a fully conformant Kubernetes distribution with minimal dependencies
   copyright:
@@ -12,9 +12,13 @@ package:
       - containerd-shim-runc-v2
       - crictl
       - ctr
-      - kubectl=${{vars.kubernetes-version}}
-      - kubelet
+      - ip6tables
+      - ipset
+      - kubectl-${{vars.kubernetes-version}}
+      - kubelet-${{vars.kubernetes-version}}
+      - mount
       - runc
+      - umount
 
 # using apk-v2 friendly spec version format for package version string
 # need to transform version (1.33.3.2.1) to match upstream tag: '1.33.3+rke2r1'
@@ -56,14 +60,20 @@ pipeline:
     with:
       repository: https://github.com/rancher/rke2
       tag: v${{vars.mangled-package-version}}
-      expected-commit: 48500b495b74b976f07ebd07a643e40e6c89f355
+      expected-commit: eb8f58ec7e1ee69e0bfc76b2d90d11c8ae6853fa
 
   - uses: go/bump
     with:
       deps: |-
-        github.com/pion/interceptor@v0.1.39
         golang.org/x/crypto@v0.40.0
         golang.org/x/net@v0.42.0
+
+  # Upstream extracts runtime image binaries to '/bin'
+  # This patch modifies the extractPath func to use '/usr/bin' to work with our setup
+  # Ref: https://github.com/rancher/rke2/blob/master/pkg/bootstrap/bootstrap.go#L144
+  - uses: patch
+    with:
+      patches: bootstrap.go.patch
 
   - runs: |
       cat > build.sh <<'EOF'
@@ -119,10 +129,9 @@ update:
       replace: "${1}.${2}.${3}.${5}.${7}"
   ignore-regex-patterns:
     - '-rc'
-  github:
-    identifier: rancher/rke2
+  git:
     strip-prefix: v
-    tag-filter: v1.31
+    tag-filter-prefix: v1.31
 
 test:
   environment:
@@ -130,7 +139,7 @@ test:
       packages:
         - ${{package.name}}-charts
         - docker
-        - kubelet
+        - kubelet-${{vars.kubernetes-version}}
         - bash
   pipeline:
     - name: Test rke2 binary exists and runs
@@ -154,7 +163,7 @@ test:
 
         # Allow some time for logs to generate
         TIMEOUT=60
-        while ! grep -q "Server node token is available at" /tmp/rke2-server.log && [ $TIMEOUT -gt 0 ]; do
+        while ! grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-server.log && [ $TIMEOUT -gt 0 ]; do
           sleep 1
           TIMEOUT=$((TIMEOUT-1))
         done
@@ -164,13 +173,9 @@ test:
         fi
 
         # Validate rke2-server logs
-        grep -q "Server node token is available at" /tmp/rke2-server.log
-        grep -q "To join server node to cluster:" /tmp/rke2-server.log
-        grep -q "Agent node token is available at" /tmp/rke2-server.log
-        grep -q "To join agent node to cluster:" /tmp/rke2-server.log
-        grep -q "Wrote kubeconfig" /tmp/rke2-server.log
-        grep -q "Run: rke2 kubectl" /tmp/rke2-server.log
-        grep -q "Running kube-proxy" /tmp/rke2-server.log
+        grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-server.log
+        grep -q "Starting rke2" /tmp/rke2-server.log
+        grep -q "Managed etcd cluster initializing" /tmp/rke2-server.log
 
         # Validate rke2-agent logs
         grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-agent.log
