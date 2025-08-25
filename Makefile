@@ -136,7 +136,7 @@ configs/%/build.yaml:
 	--type=https://apko.dev/image-configuration \
 	--certificate-oidc-issuer=https://token.actions.githubusercontent.com \
 	--certificate-identity=https://github.com/chainguard-images/images-private/.github/workflows/release.yaml@refs/heads/main \
-		"cgr.dev/chainguard-private/$*" > $@.tmp.json
+	"cgr.dev/chainguard-private/$*" > $@.tmp.json
 	jq -r . $@.tmp.json | yq -P > $@.tmp && rm $@.tmp.json
 	yq -P -i '.payload | @base64d | fromjson | .predicate' $@.tmp
 	for i in $(BOOT_PKGS) ; do \
@@ -298,19 +298,19 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"qcow2\": \"$$gcs_qcow2_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"qcow2_signed_url\": \"$$qcow2_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 .PHONY: publish-vmware
-publish-vmware: $(foreach name,$(disks_vmware),publish-vmware-$(subst generic-,,$(name)))
-$(foreach name,$(disks_vmware),publish-vmware-$(subst generic-,,$(name))): publish-vmware-%: $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json
+publish-vmware: $(foreach name,$(disks_vmware),publish-$(name))
+$(foreach name,$(disks_vmware),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/disk.raw $(ARCH_OUT_D)/generic-%/disk.vmdk
+$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
+$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk
 	@mkdir -p $(dir $@)
 	@echo "Publishing VMWARE images for $* ($(ARCH))"
 	@artifact_name="$(VMWARENAME).raw"; \
-	gcs_raw_path="$(VMWAREBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	gcs_raw_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
 	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
 	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
 	@artifact_name="$(VMWARENAME).vmdk"; \
-	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
 	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
 	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
 	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
