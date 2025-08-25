@@ -4,7 +4,7 @@ import (
 	"log"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/credentials"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/spf13/cobra"
@@ -24,7 +24,7 @@ func setupCmd() *cobra.Command {
 				tagName: utils.ToPtr(""),
 			}
 
-			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			cred, err := credentials.NewDefaultCredential(ctx)
 			if err != nil {
 				log.Fatalf("failed to get Azure credentials: %v", err)
 			}

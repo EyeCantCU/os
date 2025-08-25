@@ -10,7 +10,7 @@ import (
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/azutil"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/credentials"
 	"github.com/spf13/cobra"
 )
 
@@ -29,7 +29,7 @@ func sshCmd() *cobra.Command {
 		Short: "SSH into an Azure VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			cred, err := credentials.NewDefaultCredential(ctx)
 			if err != nil {
 				log.Fatalf("failed to get Azure credentials: %v", err)
 			}
@@ -96,7 +96,7 @@ func runRemoteCmd() *cobra.Command {
 		Short: "run a binary on an Azure VM by tag",
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
-			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			cred, err := credentials.NewDefaultCredential(ctx)
 			if err != nil {
 				log.Fatalf("failed to get Azure credentials: %v", err)
 			}
@@ -168,7 +168,7 @@ func waitForSSHCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
-			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			cred, err := credentials.NewDefaultCredential(ctx)
 			if err != nil {
 				log.Fatalf("failed to get Azure credentials: %v", err)
 			}

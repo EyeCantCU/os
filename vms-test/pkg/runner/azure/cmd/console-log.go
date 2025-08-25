@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/azutil"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/credentials"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/spf13/cobra"
 )
@@ -27,7 +27,7 @@ func consoleLogCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
-			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			cred, err := credentials.NewDefaultCredential(ctx)
 			if err != nil {
 				log.Fatalf("failed to obtain Azure credential: %v", err)
 			}
