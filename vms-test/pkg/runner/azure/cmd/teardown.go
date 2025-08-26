@@ -4,8 +4,8 @@ import (
 	"log"
 	"strings"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/credentials"
 	azruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/spf13/cobra"
@@ -21,7 +21,7 @@ func teardownCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
-			cred, err := credentials.NewDefaultCredential(ctx)
+			cred, err := azidentity.NewDefaultAzureCredential(nil)
 			if err != nil {
 				log.Fatalf("failed to create credential: %v", err)
 			}

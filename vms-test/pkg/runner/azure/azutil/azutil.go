@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 )
 
 // Return first instance with a tag
-func GetFirstInstanceByTag(ctx context.Context, cred azcore.TokenCredential, subscriptionID, resourceGroup, vmTag string) (*armcompute.VirtualMachine, error) {
+func GetFirstInstanceByTag(ctx context.Context, cred *azidentity.DefaultAzureCredential, subscriptionID, resourceGroup, vmTag string) (*armcompute.VirtualMachine, error) {
 	vmClient, err := armcompute.NewVirtualMachinesClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create VM client: %v", err)
@@ -42,7 +42,7 @@ func GetFirstInstanceByTag(ctx context.Context, cred azcore.TokenCredential, sub
 }
 
 // Return primary public IP address of the first VM with a tag
-func GetIPByTag(ctx context.Context, cred azcore.TokenCredential, subscriptionID, resourceGroup, vmTag string) (string, error) {
+func GetIPByTag(ctx context.Context, cred *azidentity.DefaultAzureCredential, subscriptionID, resourceGroup, vmTag string) (string, error) {
 	vm, err := GetFirstInstanceByTag(ctx, cred, subscriptionID, resourceGroup, vmTag)
 	if err != nil {
 		return "", err
