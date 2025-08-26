@@ -9,9 +9,9 @@ package:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: d679fe99fe5a39615ee45400035c0281fa6eff5c
-      repository: https://github.com/linkerd/linkerd2-proxy-init
+      repository: https://github.com/linkerd/linkerd2-proxy-init.git
       tag: cni-plugin/v${{package.version}}
+      expected-commit: d679fe99fe5a39615ee45400035c0281fa6eff5c
 
   - uses: go/build
     with:
@@ -21,6 +21,54 @@ pipeline:
   - uses: strip
 
 subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility files for ${{package.name}}
+    dependencies:
+      runtime:
+        - bash
+        - inotify-tools
+        - jq
+        - procps
+    pipeline:
+      - runs: |
+          install -Dm755 -t "${{targets.subpkgdir}}/linkerd/" LICENSE
+          install -Dm755 -t "${{targets.subpkgdir}}/linkerd/" cni-plugin/deployment/scripts/filter.jq
+          install -Dm755 -t "${{targets.subpkgdir}}/linkerd/" cni-plugin/deployment/scripts/install-cni.sh
+          # CONTAINER_MOUNT_PREFIX defaults to /host; files get copied between directories
+          mkdir -p \
+            "${{targets.subpkgdir}}/opt/cni/bin/" \
+            "${{targets.subpkgdir}}/host/opt/cni/bin" \
+            "${{targets.subpkgdir}}/host/etc/cni"
+          ln -s /usr/bin/linkerd-cni-plugin "${{targets.subpkgdir}}/opt/cni/bin/linkerd-cni"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+        - name: Verify files are present
+          runs: |
+            stat /linkerd/filter.jq
+            stat /linkerd/LICENSE
+            stat /linkerd/install-cni.sh | grep -F -e "0755"
+        - name: Test jq filter script can be executed
+          runs: |
+            echo '{"plugins": []}' | jq -f /linkerd/filter.jq --argjson CNI_TMP_CONF_DATA '{"type": "linkerd-cni"}' | grep "linkerd-cni"
+        - name: Test server startup
+          uses: test/daemon-check-output
+          with:
+            setup: mkdir -p /host/etc/cni/net.d /var/run/secrets/kubernetes.io/serviceaccount
+            start: /linkerd/install-cni.sh
+            timeout: 30
+            expected_output: |
+              Wrote linkerd CNI binaries to
+              Setting up watches.
+              Watches established.
+              No active CNI configuration files found
+
   - name: linkerd2-cni-repair-controller
     description: Linkerd2 utility to scan & evict pods that failed to aquire a network configuration
     pipeline:
@@ -30,40 +78,11 @@ subpackages:
           output: linkerd-cni-repair-controller
     test:
       pipeline:
-        - name: version / help check
+        # Functional testing requires a functional cni-plugin pod
+        - name: Smoke tests
           runs: |
-            # Test version output
-            linkerd-cni-repair-controller --version
-
-            # Test help output
-            linkerd-cni-repair-controller --help
-
-  - name: ${{package.name}}-compat
-    description: Compatibility files for ${{package.name}}
-    pipeline:
-      - runs: |
-          # Linkerd directory for supporting files
-          mkdir -p -m 0755 ${{targets.subpkgdir}}/linkerd
-          install -Dm755 LICENSE ${{targets.subpkgdir}}/linkerd/LICENSE
-          install -Dm755 cni-plugin/deployment/scripts/filter.jq ${{targets.subpkgdir}}/linkerd/filter.jq
-          install -Dm755 cni-plugin/deployment/scripts/install-cni.sh ${{targets.subpkgdir}}/linkerd/install-cni.sh
-
-          # CONTAINER_MOUNT_PREFIX defaults to /host; files get copied between directories
-          mkdir -p -m 0755 ${{targets.subpkgdir}}/opt/cni/bin
-          mkdir -p -m 0755 ${{targets.subpkgdir}}/host/opt/cni/bin
-          mkdir -p -m 0755 ${{targets.subpkgdir}}/host/etc/cni
-          ln -s /usr/bin/linkerd-cni-plugin ${{targets.subpkgdir}}/opt/cni/bin/linkerd-cni
-    test:
-      pipeline:
-        - name: Verify files are present
-          runs: |
-            stat /linkerd/filter.jq
-            stat /linkerd/install-cni.sh
-            stat /linkerd/LICENSE
-        - name: Verify successful symlink creation
-        - uses: test/tw/symlink-check
-          with:
-            allow-absolute: "true"
+            linkerd-cni-repair-controller --version | grep -E -e "linkerd-cni-repair-controller [[:digit:]]\.[[:digit:]]\.[[:digit:]]"
+            linkerd-cni-repair-controller --help | grep -F -e "Print help"
 
   - name: linkerd2-cni-repair-controller-compat
     description: Compatibility files for linkerd2-cni-repair-controller
@@ -93,31 +112,13 @@ test:
   environment:
     contents:
       packages:
-        - bash
-        - ${{package.name}}-compat
-        - inotify-tools
         - jq
-        - procps
   pipeline:
     - uses: test/tw/ldd-check
     - name: CNI plugin functionality test
       runs: |
         # Test CNI plugin recognizes proper CNI environment
-        CNI_COMMAND=VERSION linkerd-cni-plugin 2>&1 | grep '"cniVersion"'
+        CNI_COMMAND=VERSION linkerd-cni-plugin 2>&1 | jq -rc '.cniVersion' | grep -E -e "[[:digit:]]\.[[:digit:]]\.[[:digit:]]"
 
         # Test CNI plugin fails appropriately without env vars
-        linkerd-cni-plugin --help 2>&1 | grep -q "required env variables.*CNI_COMMAND.*missing"
-    - name: Script and filter functionality test
-      runs: |
-        # Test jq filter script can be executed
-        echo '{"plugins": []}' | jq -f /linkerd/filter.jq --argjson CNI_TMP_CONF_DATA '{"type": "linkerd-cni"}' | grep "linkerd-cni"
-
-        # Script to install Linkerd CNI on a Kubernetes host.
-        # - Expects the host CNI binary path to be mounted at /host/opt/cni/bin
-        # - Expects the host CNI network config path to be mounted at /host/etc/cni/net.d
-        # - Expects the desired CNI config in the CNI_NETWORK_CONFIG env variable
-        exec /linkerd/install-cni.sh 2>&1 | grep "/host/etc/cni/net.d: No such file or directory"
-
-        # Test filter.jq exists and install script is executable
-        stat /linkerd/filter.jq
-        test -x /linkerd/install-cni.sh
+        linkerd-cni-plugin --help 2>&1 | jq -rc '.msg' | grep -F -e "required env variables [CNI_COMMAND] missing"
