@@ -1,0 +1,770 @@
+package:
+  name: intel-onemkl
+  version: "2025.2.0.629"
+  epoch: 0
+  description: Intel® oneAPI Math Kernel Library
+  copyright:
+    - license: PROPRIETARY
+  target-architecture:
+    - x86_64
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - coreutils # sha384sum is used by the self-extracting archive
+      - gnutar
+      - libstdc++ # self-extracting archive runtime
+      - libtbb-dev # used by melange to generate so: deps
+      - libumf0-dev # used by melange to generate so: deps
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '(\d+\.\d+).*'
+    replace: '$1'
+    to: mangled-version
+
+pipeline:
+  # This is a self-extracting archive that contains the mkl libs and headers,
+  # as well as a number of other things, all in binary form. Some of those
+  # things are open source projects, so we don't generate packages for them
+  # here and instead depend on our own packages.
+  - uses: fetch
+    with:
+      uri: https://registrationcenter-download.intel.com/akdlm/IRC_NAS/47c7d946-fca1-441a-b0df-b094e3f045ea/${{package.name}}-${{package.version}}_offline.sh
+      expected-sha512: 60e0b86b2e63da1becb527db0d912d19e2a664671e1e6cf54ac6fad35ced3bb791e490d4b7d1a555231a0b553a32652d1c6c41869222c88f30e17fee5c436cd3
+      extract: false
+
+  - runs: |
+      mkdir -p unpack
+      sh ${{package.name}}-${{package.version}}_offline.sh \
+        -a --cli --silent --eula accept --install-dir unpack
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+subpackages:
+  # The subpackage layout is based on the upstream .deb packages
+  # Many packages are commented out because we don't need them (yet)
+  - name: intel-oneapi-common-licensing
+    description: oneAPI Common License
+    pipeline:
+      - runs: |
+          src="unpack/licensing/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/"
+          mkdir -p "$dest"
+
+          mv "$src/licensing" "$dest/"
+
+  - name: intel-oneapi-common-oneapi-vars
+    description: oneAPI Common Toolkit Environment Script
+    dependencies:
+      runtime:
+        - bash
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+        - procps
+    pipeline:
+      - runs: |
+          src="unpack"
+          dest="${{targets.contextdir}}/opt/intel/oneapi"
+          mkdir -p "$dest"
+
+          mv "$src"/common "$dest"
+    test:
+      pipeline:
+        - runs: |
+            bash -c '. /opt/intel/oneapi/common/latest/oneapi-vars.sh && env'
+
+  - name: intel-oneapi-common-vars
+    description: oneAPI Common Environment Scripts
+    dependencies:
+      runtime:
+        - bash
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+        - procps
+    pipeline:
+      - runs: |
+          src="unpack"
+          dest="${{targets.contextdir}}/opt/intel/oneapi"
+          mkdir -p "$dest"
+
+          mv \
+            "$src/modulefiles-setup.sh" \
+            "$src/setvars.sh"           \
+            "$src/support.txt"          \
+            "$dest"
+
+  # - name: intel-oneapi-mkl-dev
+  #   description: Complete oneMKL package for development - metapackage
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-sycl-dev=${{package.full-version}}
+  #       - intel-oneapi-mkl-classic-dev=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   test:
+  #     pipeline:
+  #       - uses: test/emptypackage
+  #
+  # - name: intel-oneapi-mkl
+  #   description: Complete oneMKL package for runtime only - metapackage
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-classic-include=${{package.full-version}}
+  #       - intel-oneapi-mkl-core-dev=${{package.full-version}}
+  #       - intel-oneapi-mkl-cluster-dev=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   test:
+  #     pipeline:
+  #       - uses: test/emptypackage
+  #
+  # - name: intel-oneapi-mkl-classic-dev
+  #   description: oneMKL development package for C/Fortran functionality and Cluster components - metapackage
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-classic-include=${{package.full-version}}
+  #       - intel-oneapi-mkl-core-dev=${{package.full-version}}
+  #       - intel-oneapi-mkl-cluster-dev=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   test:
+  #     pipeline:
+  #       - uses: test/emptypackage
+  #
+  - name: intel-oneapi-mkl-classic-include
+    dependencies:
+      runtime:
+        - intel-oneapi-common-vars=${{package.full-version}}
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+    pipeline:
+      - runs: |
+          src="unpack/mkl/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+          mkdir -p "$dest/include"
+          for inc in "$src/include/"*; do
+            if [ "$inc" = "$src/include/oneapi" ]; then
+              continue
+            fi
+            mv "$inc" "$dest/include"
+          done
+
+  # - name: intel-oneapi-mkl-classic
+  #   description: oneMKL runtime package for C/Fortran functionality and Cluster components - metapackage
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-mkl-cluster=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   test:
+  #     pipeline:
+  #       - uses: test/emptypackage
+  #
+  # - name: intel-oneapi-mkl-cluster-dev
+  #   description: Intel® oneAPI Math Kernel Library for cluster development
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-core-dev=${{package.full-version}}
+  #       - intel-oneapi-mkl-cluster=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         mkdir -p "$dest/lib"
+  #         mv "$src"/lib/libmkl_blacs*.a "$dest/lib"
+  #         mkdir -p "$dest/share/mkl/interfaces"
+  #         mv \
+  #           "$src/share/mkl/interfaces/"*cdft \
+  #           "$src/share/mkl/interfaces/mklmpi" \
+  #           "$dest/share/mkl/interfaces"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-cluster
+  #   description: Intel® oneAPI Math Kernel Library for cluster development
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv \
+  #           "$srclib/"libmkl_blacs*.so*     \
+  #           "$srclib/"libmkl_cdft_core*.so* \
+  #           "$srclib/"libmkl_scalapack*.so* \
+  #           "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  - name: intel-oneapi-mkl-core-dev
+    description: Intel® oneAPI Math Kernel Library for core development
+    dependencies:
+      runtime:
+        - intel-oneapi-mkl-cg=${{package.full-version}}
+        - intel-oneapi-mkl-core=${{package.full-version}}
+        - intel-oneapi-mkl-classic-include=${{package.full-version}}
+        - intel-oneapi-common-vars=${{package.full-version}}
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+    pipeline:
+      - runs: |
+          src="unpack/mkl/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+          mkdir -p "$dest"
+
+          mkdir -p "$dest/bin"
+          mv "$src/bin/mkl_link_tool" "$dest"
+          # will fail if unexpected files exist
+          rmdir "$src/bin"
+
+          srclib="$src/lib"
+          destlib="$dest/lib"
+          mkdir -p "$destlib"
+          mv \
+            "$srclib"/libmkl_blas95_*.a    \
+            "$srclib/libmkl_core.a"        \
+            "$srclib/"libmkl_gf_*.a        \
+            "$srclib"/libmkl_gnu_thread.a  \
+            "$srclib"/libmkl_intel_*.a     \
+            "$srclib"/libmkl_lapack95_*.a  \
+            "$srclib"/libmkl_sequential.a  \
+            "$srclib"/libmkl_tbb_thread.a  \
+            "$srclib"/cmake                \
+            "$srclib"/pkgconfig            \
+            "$destlib"
+
+          mkdir -p "$dest"/share/mkl
+          mv "$src/share/mkl/interfaces" "$dest"/share/mkl
+    test:
+      environment:
+        contents:
+          packages:
+            - build-base
+        environment:
+          C_INCLUDE_PATH: "/opt/intel/oneapi/mkl/latest/include"
+          LIBRARY_PATH: "/opt/intel/oneapi/mkl/latest/lib"
+      pipeline:
+        - uses: test/tw/ldd-check
+        - runs: |
+            set -o pipefail
+            cat > app.c <<EOF
+            #include <stdio.h>
+            #include "mkl.h"
+
+            int main()
+            {
+              MKLVersion mkl_version;
+              mkl_get_version(&mkl_version);
+
+              printf("You are using oneMKL %d.%d\n", mkl_version.MajorVersion, mkl_version.UpdateVersion);
+
+              return 0;
+            }
+            EOF
+            gcc app.c -o app -lmkl_rt
+            ./app | grep -w '${{vars.mangled-version}}'
+
+  - name: intel-oneapi-mkl-cg
+    description: MKL integration files for Chainguard OS
+    pipeline:
+      - runs: |
+          dest="${{targets.contextdir}}/opt/intel/oneapi/mkl"
+          mkdir -p "$dest"
+          ln -s "${{vars.mangled-version}}" "$dest/latest"
+
+          mkdir -p "${{targets.contextdir}}/etc/ld.so.conf.d"
+          echo "/opt/intel/oneapi/mkl/${{vars.mangled-version}}/lib" > \
+            ${{targets.contextdir}}/etc/ld.so.conf.d/${{context.name}}.conf
+
+  - name: intel-oneapi-mkl-core
+    description: Intel® oneAPI Math Kernel Library for core
+    dependencies:
+      runtime:
+        - intel-oneapi-mkl-cg=${{package.full-version}}
+        - intel-oneapi-openmp=${{package.full-version}}
+        - intel-oneapi-common-vars=${{package.full-version}}
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+    pipeline:
+      - runs: |
+          src="unpack/mkl/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+          mkdir -p "$dest"
+
+          mv "$src/etc" "$dest"
+          srclib="$src/lib"
+          destlib="$dest/lib"
+          mkdir -p "$destlib"
+          mv \
+            "$srclib"/libmkl_avx*.so* \
+            "$srclib"/libmkl_core.so* \
+            "$srclib"/libmkl_def.so* \
+            "$srclib"/libmkl_gf_*.so* \
+            "$srclib"/libmkl_gnu_thread.so* \
+            "$srclib"/libmkl_intel_*.so* \
+            "$srclib"/libmkl_mc3.so* \
+            "$srclib"/libmkl_rt.so* \
+            "$srclib"/libmkl_sequential.so* \
+            "$srclib"/libmkl_tbb_thread.so* \
+            "$srclib"/libmkl_*vml_*.so* \
+            "$destlib"
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  # - name: intel-oneapi-mkl-sycl-dev
+  #   description: oneMKL development package for SYCL functionality and GPU support
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-include=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl=${{package.full-version}}
+  #       - intel-oneapi-mkl-core-dev=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         mkdir -p ${{targets.contextdir}}/opt/intel/oneapi/mkl/lib
+  #         mv unpack/mkl/${{vars.mangled-version}}/lib/libmkl_sycl.a \
+  #           ${{targets.contextdir}}/opt/intel/oneapi/mkl/lib/
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-include
+  #   description: oneMKL development package for SYCL functionality and GPU support headers
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-classic-include=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest/include"
+  #         mv "$src/include/oneapi" "$dest/include"
+  #
+  # - name: intel-oneapi-mkl-sycl
+  #   description: oneMKL runtime package for SYCL functionality and GPU support
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-blas=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-lapack=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-dft=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-sparse=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-vm=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-rng=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-stats=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-data-fitting=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv "$srclib/libmkl_sycl.so" "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-blas
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for BLAS only
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv "$srclib/"libmkl_sycl_blas.so* "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-data-fitting
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for Data Fitting only (experimental library)
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv "$srclib/"libmkl_sycl_data_fitting.so* "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-dft
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for the Fast Fourier transforms only
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv "$srclib/"libmkl_sycl_dft.so* "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-lapack
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for LAPACK only
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-blas=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv "$srclib/"libmkl_sycl_lapack.so* "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-rng
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for Random Number Generators only
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv "$srclib/"libmkl_sycl_rng.so* "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-sparse
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for Sparse BLAS only
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-sycl-blas=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv "$srclib/"libmkl_sycl_sparse.so* "$destlib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-stats
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for Summary Statistics only
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         mkdir -p "$dest/lib"
+  #         mv "$src/lib/"libmkl_sycl_stats.so* "$dest/lib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  #
+  # - name: intel-oneapi-mkl-sycl-vm
+  #   description: oneMKL runtime package for SYCL functionality and GPU support for Vector Math only
+  #   options:
+  #     no-depends: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-mkl-cg=${{package.full-version}}
+  #       - intel-oneapi-mkl-core=${{package.full-version}}
+  #       - intel-oneapi-compiler-dpcpp-cpp-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/mkl/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         mkdir -p "$dest/lib"
+  #         mv "$src/lib/"libmkl_sycl_vm.so* "$dest/lib"
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  - name: intel-oneapi-compiler-shared-runtime
+    description: Intel® oneAPI DPC++/C++ Compiler runtime
+    dependencies:
+      runtime:
+        - intel-oneapi-openmp=${{package.full-version}}
+        - intel-oneapi-common-vars=${{package.full-version}}
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+        - libtbb
+        - libstdc++
+    options:
+      # Avoid generating deps on libs that are in this package,
+      # but for which we generate no provides.
+      no-depends: true
+      # This package provides binary-only shlibs that may overlap
+      # with things we build from source. We don't want this to
+      # be used as a dependency for anything that hasn't explicitly
+      # opted-in to it.
+      no-provides: true
+    pipeline:
+      - runs: |
+          src="unpack/compiler/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/compiler/${{vars.mangled-version}}"
+          mkdir -p "$dest"
+
+          srclib="$src/lib"
+          destlib="$dest/lib"
+          mkdir -p "$destlib"
+
+          mv \
+            "$srclib/cl.cfg"               \
+            "$srclib"/cl*.rtl              \
+            "$srclib/icx-lto.so"           \
+            "$srclib"/libOpenCL.so.*       \
+            "$srclib"/libcommon_clang.so.* \
+            "$srclib/libimf.so"            \
+            "$srclib"/libintelocl.so*      \
+            "$srclib"/libintlc.so*         \
+            "$srclib/libirc.so"            \
+            "$srclib/libirng.so"           \
+            "$srclib/libistrconv.so"       \
+            "$srclib"/libocl_svml_*.so     \
+            "$srclib/libqkmalloc.so"       \
+            "$srclib/libsvml.so"           \
+            "$srclib/libxptifw.so"         \
+            "$destlib"
+
+          mkdir -p ${{targets.contextdir}}/etc/ld.so.conf.d
+          echo "/opt/intel/oneapi/compiler/${{vars.mangled-version}}/lib" > \
+            ${{targets.contextdir}}/etc/ld.so.conf.d/${{context.name}}.conf
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  # - name: intel-oneapi-compiler-dpcpp-cpp-runtime
+  #   description: Intel® oneAPI DPC++/C++ Compiler runtime
+  #   options:
+  #     # uses libs from intel-oneapi-compiler-shared-runtime, but that package
+  #     # doesn't provide them because they live in a non-standard path
+  #     no-depends: true
+  #     # This package provides binary-only shlibs that may overlap
+  #     # with things we build from source. We don't want this to
+  #     # be used as a dependency for anything that hasn't explicitly
+  #     # opted-in to it.
+  #     no-provides: true
+  #   dependencies:
+  #     runtime:
+  #       - intel-oneapi-compiler-shared-runtime=${{package.full-version}}
+  #       - intel-oneapi-common-vars=${{package.full-version}}
+  #       - intel-oneapi-common-licensing=${{package.full-version}}
+  #       - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+  #       - libstdc++
+  #       - libumf0
+  #   pipeline:
+  #     - runs: |
+  #         src="unpack/compiler/${{vars.mangled-version}}"
+  #         dest="${{targets.contextdir}}/opt/intel/oneapi/compiler/${{vars.mangled-version}}"
+  #         mkdir -p "$dest"
+  #
+  #         srclib="$src/lib"
+  #         destlib="$dest/lib"
+  #         mkdir -p "$destlib"
+  #         mv \
+  #           "$srclib"/libpstloffload.so* \
+  #           "$srclib"/libsycl* \
+  #           "$srclib"/libur_* \
+  #           "$srclib/libze_trace_collector.so" \
+  #           "$destlib"
+  #         mkdir -p ${{targets.contextdir}}/etc/ld.so.conf.d
+  #         echo "/opt/intel/oneapi/compiler/${{vars.mangled-version}}/lib" > \
+  #           ${{targets.contextdir}}/etc/ld.so.conf.d/${{context.name}}.conf
+  #   test:
+  #     pipeline:
+  #       - uses: test/tw/ldd-check
+  - name: intel-oneapi-openmp
+    description: Intel® OpenMP* Runtime Library
+    options:
+      # uses libs from intel-oneapi-compiler-shared-runtime, but that package
+      # doesn't provide them because they live in a non-standard path
+      no-depends: true
+      # This package provides binary-only shlibs that may overlap
+      # with things we build from source. We don't want this to
+      # be used as a dependency for anything that hasn't explicitly
+      # opted-in to it.
+      no-provides: true
+    dependencies:
+      runtime:
+        - intel-oneapi-compiler-shared-runtime
+        - intel-oneapi-common-vars=${{package.full-version}}
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+        - intel-oneapi-openmp-common
+    pipeline:
+      - runs: |
+          src="unpack/compiler/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/compiler/${{vars.mangled-version}}"
+          mkdir -p "$dest"
+
+          mv "$src/bin" "$dest"
+
+          srclib="$src/lib"
+          destlib="$dest/lib"
+          mkdir -p "$destlib"
+          mv \
+            "$srclib"/clang           \
+            "$srclib/libarcher.so"    \
+            "$srclib"/libiomp*        \
+            "$srclib"/libomp*         \
+            "$srclib"/libonnxruntime* \
+            "$srclib"/pkgconfig       \
+            "$destlib"
+
+          mv "$src/opt" "$dest"
+          mkdir -p "$dest/share"
+          mv "$src/share/clang" "$dest/share"
+
+  - name: intel-oneapi-openmp-common
+    description: Intel® OpenMP* Runtime Library common
+    dependencies:
+      runtime:
+        - intel-oneapi-common-vars=${{package.full-version}}
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+    pipeline:
+      - runs: |
+          src="unpack/compiler/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/compiler/${{vars.mangled-version}}"
+          mkdir -p "$dest"
+          ln -s "${{vars.mangled-version}}" "$dest/latest"
+
+          mv "$src/env" "$dest"
+          mv "$src/etc" "$dest"
+
+update:
+  # We use the pypi release as a proxy for when a new upstream release
+  # is available. The self-extracting archive we're using has an additional
+  # version component (2025.2.0.629 vs pypi's 2025.2.0). Looking up that
+  # version is currently manual.
+  enabled: true
+  manual: true
+  release-monitor:
+    identifier: 184490
