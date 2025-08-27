@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	LAUNCH_ATTEMPTS_MAX = 3
-	LAUNCH_BACKOFF_SECS = 5
+	LAUNCH_ATTEMPTS_MAX = 5
+	LAUNCH_BACKOFF_SECS = 10
 )
 
 func launchCmd() *cobra.Command {
@@ -185,7 +185,8 @@ func launchCmd() *cobra.Command {
 				if isResourceExhaustionError(err) {
 					log.Printf("Zone %s has insufficient capacity (attempt %d/%d failed): %v", zone, attempt, LAUNCH_ATTEMPTS_MAX, err)
 					if attempt < LAUNCH_ATTEMPTS_MAX {
-						time.Sleep(time.Duration(LAUNCH_BACKOFF_SECS) * time.Second)
+						backoffSecs := attempt * LAUNCH_BACKOFF_SECS
+						time.Sleep(time.Duration(backoffSecs) * time.Second)
 						continue
 					}
 				}
