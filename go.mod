@@ -3,14 +3,14 @@ module chainguard.dev/apkoaas
 go 1.24.5
 
 require (
-	chainguard.dev/apko v0.30.5
+	chainguard.dev/apko v0.30.6
 	github.com/anchore/syft v1.31.0
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/charmbracelet/log v0.4.2
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-containerregistry v0.20.6
 	github.com/spf13/cobra v1.9.1
-	github.com/wolfi-dev/wolfictl v0.38.11
+	github.com/wolfi-dev/wolfictl v0.38.12
 	golang.org/x/crypto v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
