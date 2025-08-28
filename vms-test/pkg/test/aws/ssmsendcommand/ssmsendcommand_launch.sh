@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 set -o pipefail
 WAIT_SSH_TIMEOUT=${WAIT_SSH_TIMEOUT:-5m}
 
