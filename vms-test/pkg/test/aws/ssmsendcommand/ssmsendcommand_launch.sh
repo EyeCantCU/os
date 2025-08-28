@@ -85,12 +85,26 @@ main() {
         sleep 5
     done
 
+    # Wait for instance to be known online
+    local ping_status=
+    while [[ "$ping_status" != 'Online' ]]; do
+        ping_status=$(
+            aws ssm describe-instance-information \
+                 --region "$region" \
+                 --instance-information-filter-list "key=InstanceIds,valueSet=$instance_id" \
+                 --query 'InstanceInformationList[0].PingStatus' \
+                 --output text
+        )
+        sleep 5
+    done
+
     # Send command
     vr aws ssm send-command --region "$region" \
         --document-name "AWS-RunShellScript" \
         --parameters 'commands=["printf '\''hello wolfi'\'' > /tmp/hello-wolfi.txt"]' \
         --targets "Key=tag:Name,Values=$tag" \
         --comment "wolfi-vm-test-hello-wolfi" --output text
+
 }
 
 main "$@"
