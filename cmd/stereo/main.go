@@ -91,6 +91,7 @@ func main() {
 	root.AddCommand(buildDepsCmd())
 	root.AddCommand(imageDependenciesCmd())
 	root.AddCommand(vmDependenciesCmd())
+	root.AddCommand(makeCmd())
 	root.AddCommand(seedDependenciesCmd())
 	root.AddCommand(withdrawCmd())
 
