@@ -99,12 +99,21 @@ main() {
     done
 
     # Send command
-    vr aws ssm send-command --region "$region" \
-        --document-name "AWS-RunShellScript" \
-        --parameters 'commands=["printf '\''hello wolfi'\'' > /tmp/hello-wolfi.txt"]' \
-        --targets "Key=tag:Name,Values=$tag" \
-        --comment "wolfi-vm-test-hello-wolfi" --output text
+    local command_id=
+    command_id=$(
+        aws ssm send-command --region "$region" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["printf '\''hello wolfi'\'' > /tmp/hello-wolfi.txt"]' \
+            --targets "Key=tag:Name,Values=$tag" \
+            --comment "wolfi-vm-test-hello-wolfi" \
+            --query 'Command.CommandId' \
+            --output text
+    ) || failrc "cannot send command to $instance_id ($tag)"
 
+    # Wait for command to execute
+    cancel_timeout
+    timeout 'timeout waiting for ssm agent to execute the command'
+    vr aws ssm wait command-executed --region "$region" --instance-id "$instance_id" --command-id "$command_id"
 }
 
 main "$@"
