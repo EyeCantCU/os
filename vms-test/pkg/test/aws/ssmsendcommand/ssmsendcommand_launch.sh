@@ -82,7 +82,7 @@ main() {
                               "Key=ManagedStatus,Values=Managed" \
                 | jq -re '.Nodes | length'
         ) || failrc "can't list ssm agent nodes"
-        sleep 1
+        sleep 5
     done
 
     # Send command
