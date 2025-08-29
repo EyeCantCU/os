@@ -21,10 +21,8 @@ group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
-.PHONY: test test-generic
-
 ifeq ($(UNAME_M),arm64)
-	UNAME_M = aarch64
+  UNAME_M = aarch64
 endif
 
 BUILDER ?= builder
@@ -44,6 +42,8 @@ names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
 gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
 	go build -o apkoaas
+
+.PHONY: test test-generic
 
 test:
 	go test -v -tags withauth ./...
