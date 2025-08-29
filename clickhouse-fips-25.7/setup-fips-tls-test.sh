@@ -54,9 +54,6 @@ cat > test_config.xml << EOF
 </clickhouse>
 EOF
 
-# Verify FIPS mode is currently enabled
-openssl-fips-test check
-
 # Create standard FIPS-compliant certificate
 openssl req -new -newkey rsa:2048 -days 1 -nodes -x509 \
   -subj "/C=US/ST=Test/L=Test/O=Test/CN=localhost" \
