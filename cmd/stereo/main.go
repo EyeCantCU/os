@@ -92,6 +92,7 @@ func main() {
 	root.AddCommand(imageDependenciesCmd())
 	root.AddCommand(vmDependenciesCmd())
 	root.AddCommand(seedDependenciesCmd())
+	root.AddCommand(versionStreamDependenciesCmd())
 	root.AddCommand(withdrawCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
