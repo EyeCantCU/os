@@ -56,6 +56,7 @@ func versionStreamDependenciesCmd() *cobra.Command {
 		useWithdrawn           bool
 		withdrawnDir           string
 		packageVersionMetadata string
+		repositories           []string
 	)
 
 	cmd := &cobra.Command{
@@ -76,7 +77,13 @@ When no --arch is specified, processes both x86_64 and aarch64 architectures.`,
 			} else {
 				architectures = []string{"x86_64", "aarch64"}
 			}
-			return versionStreamDependencies(cmd.Context(), architectures, useWithdrawn, withdrawnDir, packageVersionMetadata)
+
+			// Default to "os" repository if no repositories specified
+			if len(repositories) == 0 {
+				repositories = []string{"os"}
+			}
+
+			return versionStreamDependencies(cmd.Context(), architectures, useWithdrawn, withdrawnDir, packageVersionMetadata, repositories)
 		},
 	}
 
@@ -84,11 +91,12 @@ When no --arch is specified, processes both x86_64 and aarch64 architectures.`,
 	cmd.Flags().BoolVar(&useWithdrawn, "use-withdrawn", false, "Use withdrawn APKINDEX files instead of live repositories")
 	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn APKINDEX files")
 	cmd.Flags().StringVar(&packageVersionMetadata, "package-version-metadata", "package-version-metadata", "Path to package-version-metadata directory")
+	cmd.Flags().StringSliceVar(&repositories, "repositories", []string{"os"}, "Repositories to use (os, extra-packages, enterprise-packages)")
 
 	return cmd
 }
 
-func versionStreamDependencies(ctx context.Context, architectures []string, useWithdrawn bool, withdrawnDir, packageVersionMetadata string) error {
+func versionStreamDependencies(ctx context.Context, architectures []string, useWithdrawn bool, withdrawnDir, packageVersionMetadata string, repositories []string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -142,13 +150,25 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 
 		cache := apk.NewCache(true)
 
-		// Build repository list - restrict to os repository only
+		// Build repository list from specified repositories
 		var buildRepos []string
 		if useWithdrawn {
 			withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
-			buildRepos = []string{withdrawnRepos["os"]}
+			for _, repo := range repositories {
+				if repoURL, ok := withdrawnRepos[repo]; ok {
+					buildRepos = append(buildRepos, repoURL)
+				} else {
+					return fmt.Errorf("unknown repository: %s", repo)
+				}
+			}
 		} else {
-			buildRepos = []string{dirToRepo["os"]}
+			for _, repo := range repositories {
+				if repoURL, ok := dirToRepo[repo]; ok {
+					buildRepos = append(buildRepos, repoURL)
+				} else {
+					return fmt.Errorf("unknown repository: %s", repo)
+				}
+			}
 		}
 
 		log.Printf("Processing version streams for architecture: %s...", arch)
