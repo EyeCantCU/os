@@ -1,0 +1,385 @@
+From 04725682509186cd0ccb20dd38bbd1f8111f8ca1 Mon Sep 17 00:00:00 2001
+From: Alan Rominger <arominge@redhat.com>
+Date: Wed, 2 Jul 2025 14:28:43 -0400
+Subject: [PATCH] AAP-48392 Handle DAB RBAC either before or after new type
+ model (for merge) (#16045)
+
+* Handle DAB RBAC either before or after new type model
+
+* Translate CT to DAB CT
+
+* Fixes for content type switch
+
+* Use more compatible coding pattern
+
+* Deeper purge of content_type_id
+
+* revert, turns out that did not work
+
+* More content type replacements
+
+* Revert changes to serializer
+
+* Revert another content_type change
+
+* Fix for rearrangement of post_migration methods
+
+* Remove thing I am not going to do
+
+* Revert branch pin that was temporary
+---
+ awx/api/views/__init__.py                     |  5 ++-
+ awx/main/migrations/_dab_rbac.py              | 21 +++++++++-
+ awx/main/models/mixins.py                     |  2 +-
+ awx/main/models/rbac.py                       |  5 ++-
+ awx/main/models/unified_jobs.py               |  8 ++--
+ .../functional/dab_rbac/test_dab_rbac_api.py  | 14 ++++---
+ .../dab_rbac/test_translation_layer.py        | 39 ++++++++++++++++---
+ .../test_rbac_execution_environment.py        |  7 ++--
+ awx_collection/test/awx/conftest.py           |  4 +-
+ 9 files changed, 79 insertions(+), 26 deletions(-)
+
+diff --git a/awx/api/views/__init__.py b/awx/api/views/__init__.py
+index 51e57b0711..153b7344db 100644
+--- a/awx/api/views/__init__.py
++++ b/awx/api/views/__init__.py
+@@ -64,6 +64,7 @@ from wsgiref.util import FileWrapper
+ from ansible_base.lib.utils.requests import get_remote_hosts
+ from ansible_base.rbac.models import RoleEvaluation, ObjectRole
+ from ansible_base.resource_registry.shared_types import OrganizationType, TeamType, UserType
++from ansible_base.rbac import permission_registry
+ 
+ # AWX
+ from awx.main.tasks.system import send_notifications, update_inventory_computed_fields
+@@ -858,8 +859,8 @@ class TeamProjectsList(SubListAPIView):
+     def get_queryset(self):
+         team = self.get_parent_object()
+         self.check_parent_access(team)
+-        model_ct = ContentType.objects.get_for_model(self.model)
+-        parent_ct = ContentType.objects.get_for_model(self.parent_model)
++        model_ct = permission_registry.content_type_model.objects.get_for_model(self.model)
++        parent_ct = permission_registry.content_type_model.objects.get_for_model(self.parent_model)
+ 
+         rd = get_role_definition(team.member_role)
+         role = ObjectRole.objects.filter(object_id=team.id, content_type=parent_ct, role_definition=rd).first()
+diff --git a/awx/main/migrations/_dab_rbac.py b/awx/main/migrations/_dab_rbac.py
+index 00e3ec62d9..ca1f517370 100644
+--- a/awx/main/migrations/_dab_rbac.py
++++ b/awx/main/migrations/_dab_rbac.py
+@@ -17,7 +17,13 @@ logger = logging.getLogger('awx.main.migrations._dab_rbac')
+ 
+ 
+ def create_permissions_as_operation(apps, schema_editor):
++    # NOTE: the DAB ContentType changes adjusted how they fire
++    # before they would fire on every app config, like contenttypes
+     create_dab_permissions(global_apps.get_app_config("main"), apps=apps)
++    # This changed to only fire once and do a global creation
++    # so we need to call it for specifically the dab_rbac app
++    # multiple calls will not hurt anything
++    create_dab_permissions(global_apps.get_app_config("dab_rbac"), apps=apps)
+ 
+ 
+ """
+@@ -112,7 +118,12 @@ def get_descendents(f, children_map):
+ 
+ def get_permissions_for_role(role_field, children_map, apps):
+     Permission = apps.get_model('dab_rbac', 'DABPermission')
+-    ContentType = apps.get_model('contenttypes', 'ContentType')
++    try:
++        # After migration for remote permissions
++        ContentType = apps.get_model('dab_rbac', 'DABContentType')
++    except LookupError:
++        # If using DAB from before remote permissions are implemented
++        ContentType = apps.get_model('contenttypes', 'ContentType')
+ 
+     perm_list = []
+     for child_field in get_descendents(role_field, children_map):
+@@ -282,7 +293,13 @@ def setup_managed_role_definitions(apps, schema_editor):
+         'special': '{cls.__name__} {action}',
+     }
+ 
+-    ContentType = apps.get_model('contenttypes', 'ContentType')
++    try:
++        # After migration for remote permissions
++        ContentType = apps.get_model('dab_rbac', 'DABContentType')
++    except LookupError:
++        # If using DAB from before remote permissions are implemented
++        ContentType = apps.get_model('contenttypes', 'ContentType')
++
+     Permission = apps.get_model('dab_rbac', 'DABPermission')
+     RoleDefinition = apps.get_model('dab_rbac', 'RoleDefinition')
+     Organization = apps.get_model(settings.ANSIBLE_BASE_ORGANIZATION_MODEL)
+diff --git a/awx/main/models/mixins.py b/awx/main/models/mixins.py
+index 5df78e15b6..09dc3f9b31 100644
+--- a/awx/main/models/mixins.py
++++ b/awx/main/models/mixins.py
+@@ -85,7 +85,7 @@ class ResourceMixin(models.Model):
+             raise RuntimeError(f'Role filters only valid for users and ancestor role, received {accessor}')
+ 
+         if content_types is None:
+-            ct_kwarg = dict(content_type_id=ContentType.objects.get_for_model(cls).id)
++            ct_kwarg = dict(content_type=ContentType.objects.get_for_model(cls))
+         else:
+             ct_kwarg = dict(content_type_id__in=content_types)
+ 
+diff --git a/awx/main/models/rbac.py b/awx/main/models/rbac.py
+index c93792d23a..c35f291c1c 100644
+--- a/awx/main/models/rbac.py
++++ b/awx/main/models/rbac.py
+@@ -24,7 +24,8 @@ from django.apps import apps
+ from django.conf import settings
+ 
+ # Ansible_base app
+-from ansible_base.rbac.models import RoleDefinition
++from ansible_base.rbac.models import RoleDefinition, RoleUserAssignment, RoleTeamAssignment
++from ansible_base.rbac import permission_registry
+ from ansible_base.lib.utils.models import get_type_for_model
+ 
+ # AWX
+@@ -560,7 +561,7 @@ def get_role_definition(role):
+     rd_name = f'{model_print} {action_name.title()} Compat'
+     perm_list = get_role_codenames(role)
+     defaults = {
+-        'content_type_id': role.content_type_id,
++        'content_type': permission_registry.content_type_model.objects.get_by_natural_key(role.content_type.app_label, role.content_type.model),
+         'description': f'Has {action_name.title()} permission to {model_print} for backwards API compatibility',
+     }
+     with impersonate(None):
+diff --git a/awx/main/models/unified_jobs.py b/awx/main/models/unified_jobs.py
+index 1cced0a5b4..79540858ec 100644
+--- a/awx/main/models/unified_jobs.py
++++ b/awx/main/models/unified_jobs.py
+@@ -32,6 +32,7 @@ from polymorphic.models import PolymorphicModel
+ 
+ from ansible_base.lib.utils.models import prevent_search, get_type_for_model
+ from ansible_base.rbac import permission_registry
++from ansible_base.rbac.models import RoleEvaluation
+ 
+ # AWX
+ from awx.main.models.base import CommonModelNameNotUnique, PasswordFieldsModel, NotificationFieldsModel
+@@ -210,20 +211,21 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, ExecutionEn
+         # do not use this if in a subclass
+         if cls != UnifiedJobTemplate:
+             return super(UnifiedJobTemplate, cls).accessible_pk_qs(accessor, role_field)
+-        from ansible_base.rbac.models import RoleEvaluation
+ 
+         action = to_permissions[role_field]
+ 
+         # Special condition for super auditor
+         role_subclasses = cls._submodels_with_roles()
+-        role_cts = ContentType.objects.get_for_models(*role_subclasses).values()
+         all_codenames = {f'{action}_{cls._meta.model_name}' for cls in role_subclasses}
+         if not (all_codenames - accessor.singleton_permissions()):
++            role_cts = ContentType.objects.get_for_models(*role_subclasses).values()
+             qs = cls.objects.filter(polymorphic_ctype__in=role_cts)
+             return qs.values_list('id', flat=True)
+ 
++        dab_role_cts = permission_registry.content_type_model.objects.get_for_models(*role_subclasses).values()
++
+         return (
+-            RoleEvaluation.objects.filter(role__in=accessor.has_roles.all(), codename__in=all_codenames, content_type_id__in=[ct.id for ct in role_cts])
++            RoleEvaluation.objects.filter(role__in=accessor.has_roles.all(), codename__in=all_codenames, content_type_id__in=[ct.id for ct in dab_role_cts])
+             .values_list('object_id')
+             .distinct()
+         )
+diff --git a/awx/main/tests/functional/dab_rbac/test_dab_rbac_api.py b/awx/main/tests/functional/dab_rbac/test_dab_rbac_api.py
+index ec7885a533..00676b6f16 100644
+--- a/awx/main/tests/functional/dab_rbac/test_dab_rbac_api.py
++++ b/awx/main/tests/functional/dab_rbac/test_dab_rbac_api.py
+@@ -1,6 +1,5 @@
+ import pytest
+ 
+-from django.contrib.contenttypes.models import ContentType
+ from django.urls import reverse as django_reverse
+ from django.test.utils import override_settings
+ 
+@@ -9,13 +8,14 @@ from awx.main.models import JobTemplate, Inventory, Organization
+ from awx.main.access import JobTemplateAccess, WorkflowJobTemplateAccess
+ 
+ from ansible_base.rbac.models import RoleDefinition
++from ansible_base.rbac import permission_registry
+ 
+ 
+ @pytest.mark.django_db
+ def test_managed_roles_created(setup_managed_roles):
+     "Managed RoleDefinitions are created in post_migration signal, we expect to see them here"
+     for cls in (JobTemplate, Inventory):
+-        ct = ContentType.objects.get_for_model(cls)
++        ct = permission_registry.content_type_model.objects.get_for_model(cls)
+         rds = list(RoleDefinition.objects.filter(content_type=ct))
+         assert len(rds) > 1
+         assert f'{cls.__name__} Admin' in [rd.name for rd in rds]
+@@ -31,7 +31,7 @@ def test_custom_read_role(admin_user, post, setup_managed_roles):
+     )
+     rd_id = resp.data['id']
+     rd = RoleDefinition.objects.get(id=rd_id)
+-    assert rd.content_type == ContentType.objects.get_for_model(Inventory)
++    assert rd.content_type == permission_registry.content_type_model.objects.get_for_model(Inventory)
+ 
+ 
+ @pytest.mark.django_db
+@@ -69,7 +69,9 @@ def test_assign_managed_role(admin_user, alice, rando, inventory, post, setup_ma
+ @pytest.mark.django_db
+ def test_assign_custom_delete_role(admin_user, rando, inventory, delete, patch):
+     rd, _ = RoleDefinition.objects.get_or_create(
+-        name='inventory-delete', permissions=['delete_inventory', 'view_inventory'], content_type=ContentType.objects.get_for_model(Inventory)
++        name='inventory-delete',
++        permissions=['delete_inventory', 'view_inventory', 'change_inventory'],
++        content_type=permission_registry.content_type_model.objects.get_for_model(Inventory),
+     )
+     rd.give_permission(rando, inventory)
+     inv_id = inventory.pk
+@@ -82,7 +84,9 @@ def test_assign_custom_delete_role(admin_user, rando, inventory, delete, patch):
+ @pytest.mark.django_db
+ def test_assign_custom_add_role(admin_user, rando, organization, post, setup_managed_roles):
+     rd, _ = RoleDefinition.objects.get_or_create(
+-        name='inventory-add', permissions=['add_inventory', 'view_organization'], content_type=ContentType.objects.get_for_model(Organization)
++        name='inventory-add',
++        permissions=['add_inventory', 'view_organization'],
++        content_type=permission_registry.content_type_model.objects.get_for_model(Organization),
+     )
+     rd.give_permission(rando, organization)
+     url = reverse('api:inventory_list')
+diff --git a/awx/main/tests/functional/dab_rbac/test_translation_layer.py b/awx/main/tests/functional/dab_rbac/test_translation_layer.py
+index 6032820497..f212068446 100644
+--- a/awx/main/tests/functional/dab_rbac/test_translation_layer.py
++++ b/awx/main/tests/functional/dab_rbac/test_translation_layer.py
+@@ -2,8 +2,6 @@ from unittest import mock
+ 
+ import pytest
+ 
+-from django.contrib.contenttypes.models import ContentType
+-
+ from crum import impersonate
+ 
+ from awx.main.models.rbac import get_role_from_object_role, give_creator_permissions
+@@ -39,9 +37,40 @@ def test_round_trip_roles(organization, rando, role_name, setup_managed_roles):
+     assert old_role.id == getattr(organization, role_name).id
+ 
+ 
++@pytest.mark.django_db
++@pytest.mark.parametrize('model', sorted(permission_registry.all_registered_models, key=lambda cls: cls._meta.model_name))
++def test_role_migration_matches(request, model, setup_managed_roles):
++    fixture_name = model._meta.verbose_name.replace(' ', '_')
++    obj = request.getfixturevalue(fixture_name)
++    role_ct = 0
++    for field in obj._meta.get_fields():
++        if isinstance(field, ImplicitRoleField):
++            if field.name == 'read_role':
++                continue  # intentionally left as "Compat" roles
++            role_ct += 1
++            old_role = getattr(obj, field.name)
++            old_codenames = set(get_role_codenames(old_role))
++            rd = get_role_definition(old_role)
++            new_codenames = set(rd.permissions.values_list('codename', flat=True))
++            # all the old roles should map to a non-Compat role definition
++            if 'Compat' not in rd.name:
++                model_rds = RoleDefinition.objects.filter(content_type=permission_registry.content_type_model.objects.get_for_model(obj))
++                rd_data = {}
++                for rd in model_rds:
++                    rd_data[rd.name] = list(rd.permissions.values_list('codename', flat=True))
++            assert (
++                'Compat' not in rd.name
++            ), f'Permissions for old vs new roles did not match.\nold {field.name}: {old_codenames}\nnew:\n{json.dumps(rd_data, indent=2)}'
++            assert new_codenames == set(old_codenames)
++
++    # In the old system these models did not have object-level roles, all others expect some model roles
++    if model._meta.model_name not in ('notificationtemplate', 'executionenvironment'):
++        assert role_ct > 0
++
++
+ @pytest.mark.django_db
+ def test_role_naming(setup_managed_roles):
+-    qs = RoleDefinition.objects.filter(content_type=ContentType.objects.get(model='jobtemplate'), name__endswith='dmin')
++    qs = RoleDefinition.objects.filter(content_type=permission_registry.content_type_model.objects.get(model='jobtemplate'), name__endswith='dmin')
+     assert qs.count() == 1  # sanity
+     rd = qs.first()
+     assert rd.name == 'JobTemplate Admin'
+@@ -51,7 +80,7 @@ def test_role_naming(setup_managed_roles):
+ 
+ @pytest.mark.django_db
+ def test_action_role_naming(setup_managed_roles):
+-    qs = RoleDefinition.objects.filter(content_type=ContentType.objects.get(model='jobtemplate'), name__endswith='ecute')
++    qs = RoleDefinition.objects.filter(content_type=permission_registry.content_type_model.objects.get(model='jobtemplate'), name__endswith='ecute')
+     assert qs.count() == 1  # sanity
+     rd = qs.first()
+     assert rd.name == 'JobTemplate Execute'
+@@ -63,7 +92,7 @@ def test_action_role_naming(setup_managed_roles):
+ def test_compat_role_naming(setup_managed_roles, job_template, rando, alice):
+     with impersonate(alice):
+         job_template.read_role.members.add(rando)
+-    qs = RoleDefinition.objects.filter(content_type=ContentType.objects.get(model='jobtemplate'), name__endswith='ompat')
++    qs = RoleDefinition.objects.filter(content_type=permission_registry.content_type_model.objects.get(model='jobtemplate'), name__endswith='ompat')
+     assert qs.count() == 1  # sanity
+     rd = qs.first()
+     assert rd.name == 'JobTemplate Read Compat'
+diff --git a/awx/main/tests/functional/test_rbac_execution_environment.py b/awx/main/tests/functional/test_rbac_execution_environment.py
+index 9146bc9b7b..4501cd5c9a 100644
+--- a/awx/main/tests/functional/test_rbac_execution_environment.py
++++ b/awx/main/tests/functional/test_rbac_execution_environment.py
+@@ -1,7 +1,5 @@
+ import pytest
+ 
+-from django.contrib.contenttypes.models import ContentType
+-
+ from awx.main.access import ExecutionEnvironmentAccess
+ from awx.main.models import ExecutionEnvironment, Organization
+ from awx.main.models.rbac import get_role_codenames
+@@ -10,6 +8,7 @@ from awx.api.versioning import reverse
+ from django.urls import reverse as django_reverse
+ 
+ from ansible_base.rbac.models import RoleDefinition
++from ansible_base.rbac import permission_registry
+ 
+ 
+ @pytest.fixture
+@@ -17,7 +16,7 @@ def ee_rd():
+     return RoleDefinition.objects.create_from_permissions(
+         name='EE object admin',
+         permissions=['change_executionenvironment', 'delete_executionenvironment'],
+-        content_type=ContentType.objects.get_for_model(ExecutionEnvironment),
++        content_type=permission_registry.content_type_model.objects.get_for_model(ExecutionEnvironment),
+     )
+ 
+ 
+@@ -26,7 +25,7 @@ def org_ee_rd():
+     return RoleDefinition.objects.create_from_permissions(
+         name='EE org admin',
+         permissions=['add_executionenvironment', 'change_executionenvironment', 'delete_executionenvironment', 'view_organization'],
+-        content_type=ContentType.objects.get_for_model(Organization),
++        content_type=permission_registry.content_type_model.objects.get_for_model(Organization),
+     )
+ 
+ 
+diff --git a/awx_collection/test/awx/conftest.py b/awx_collection/test/awx/conftest.py
+index 42500342ac..f525f6a636 100644
+--- a/awx_collection/test/awx/conftest.py
++++ b/awx_collection/test/awx/conftest.py
+@@ -18,6 +18,7 @@ import pytest
+ from ansible.module_utils.six import raise_from
+ 
+ from ansible_base.rbac.models import RoleDefinition, DABPermission
++from ansible_base.rbac import permission_registry
+ from awx.main.tests.functional.conftest import _request
+ from awx.main.tests.functional.conftest import credentialtype_scm, credentialtype_ssh  # noqa: F401; pylint: disable=unused-import
+ from awx.main.models import (
+@@ -36,7 +37,6 @@ from awx.main.models import (
+ )
+ 
+ from django.db import transaction
+-from django.contrib.contenttypes.models import ContentType
+ 
+ 
+ HAS_TOWER_CLI = False
+@@ -341,7 +341,7 @@ def notification_template(organization):
+ 
+ @pytest.fixture
+ def job_template_role_definition():
+-    rd = RoleDefinition.objects.create(name='test_view_jt', content_type=ContentType.objects.get_for_model(JobTemplate))
++    rd = RoleDefinition.objects.create(name='test_view_jt', content_type=permission_registry.content_type_model.objects.get_for_model(JobTemplate))
+     permission_codenames = ['view_jobtemplate', 'execute_jobtemplate']
+     permissions = DABPermission.objects.filter(codename__in=permission_codenames)
+     rd.permissions.add(*permissions)
+-- 
+2.50.1
+
