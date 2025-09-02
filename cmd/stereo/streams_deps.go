@@ -142,13 +142,13 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 
 		cache := apk.NewCache(true)
 
-		// Build repository list
+		// Build repository list - restrict to os repository only
 		var buildRepos []string
 		if useWithdrawn {
 			withdrawnRepos := dirToWithdrawnRepo(withdrawnDir)
-			buildRepos = []string{withdrawnRepos["os"], withdrawnRepos["extra-packages"], withdrawnRepos["enterprise-packages"]}
+			buildRepos = []string{withdrawnRepos["os"]}
 		} else {
-			buildRepos = []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]}
+			buildRepos = []string{dirToRepo["os"]}
 		}
 
 		log.Printf("Processing version streams for architecture: %s...", arch)
