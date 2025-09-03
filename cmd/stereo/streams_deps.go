@@ -48,6 +48,7 @@ type VersionStreamDependencies struct {
 	Architecture     string            `json:"architecture"`
 	VersionStreams   map[string]string `json:"version_streams"`   // stream -> latest package version
 	KeptDependencies []string          `json:"kept_dependencies"` // all dependencies from kept packages
+	AllKeptPackages  []string          `json:"all_kept_packages"` // all packages (main + subpackages) that are kept
 }
 
 func versionStreamDependenciesCmd() *cobra.Command {
@@ -233,8 +234,8 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 				for _, dep := range streamDeps.KeptDependencies {
 					allDependencies[dep] = true
 				}
-				// Also add the newest-version packages themselves
-				for _, keptPackage := range streamDeps.VersionStreams {
+				// Add all kept packages (main + subpackages)
+				for _, keptPackage := range streamDeps.AllKeptPackages {
 					allKeptPackages[keptPackage] = true
 				}
 				mu.Unlock()
@@ -431,29 +432,88 @@ func processVersionStream(ctx context.Context, packageName string, stream *Versi
 
 	log.Printf("Found %d version streams for package %s", len(streamPackages), packageName)
 
-	// For each stream, keep only the latest version
+	// For each stream, keep the latest version and all its subpackages
 	versionStreams := make(map[string]string)
 	allKeptDependencies := make(map[string]bool)
+	allKeptPackages := make(map[string]bool) // Track all packages we're keeping (main + subpackages)
 
 	for streamVersion, packages := range streamPackages {
 		// Sort packages to get the latest (lexicographically last typically represents newest)
 		sort.Strings(packages)
-		latestPackage := packages[len(packages)-1]
+		latestPackageSpec := packages[len(packages)-1]
 
-		log.Printf("Stream %s-%s: keeping %s (from %d candidates)", packageName, streamVersion, latestPackage, len(packages))
+		// Parse the latest package spec to get name and version
+		parts := strings.Split(latestPackageSpec, "=")
+		if len(parts) != 2 {
+			log.Printf("Warning: invalid package spec format %s, skipping", latestPackageSpec)
+			continue
+		}
+		latestPackageName, latestPackageVersion := parts[0], parts[1]
 
-		versionStreams[streamVersion] = latestPackage
+		log.Printf("Stream %s-%s: processing latest package %s (from %d candidates)", packageName, streamVersion, latestPackageSpec, len(packages))
 
-		// Resolve dependencies for this package
-		deps, err := resolvePackageDependencies(ctx, latestPackage, cache, buildRepos, arch)
-		if err != nil {
-			log.Printf("Warning: could not resolve dependencies for %s: %v", latestPackage, err)
-			// Continue with other streams even if this one fails
-		} else {
-			for _, dep := range deps {
-				allKeptDependencies[dep] = true
+		versionStreams[streamVersion] = latestPackageSpec
+
+		// Find the origin and version of the latest package to get all associated subpackages
+		var originName string
+		var pkgVersion string
+
+		// Search through all indexes to find this package and get its origin
+		found := false
+		for _, index := range indexes {
+			for _, pkg := range index.Packages {
+				if pkg.Name == latestPackageName && pkg.Version == latestPackageVersion {
+					originName = pkg.Origin
+					pkgVersion = pkg.Version
+					found = true
+					break
+				}
+			}
+			if found {
+				break
 			}
 		}
+
+		if !found {
+			log.Printf("Warning: could not find package %s in any index", latestPackageSpec)
+			continue
+		}
+
+		if originName == "" {
+			log.Printf("Warning: package %s has no origin, using package name as origin", latestPackageSpec)
+			originName = latestPackageName
+		}
+
+		log.Printf("Stream %s-%s: found origin=%s, pkgver=%s for %s", packageName, streamVersion, originName, pkgVersion, latestPackageSpec)
+
+		// Find ALL packages with the same origin and pkgver AND resolve their dependencies in one pass
+		subpackagesFound := 0
+		for _, index := range indexes {
+			for _, pkg := range index.Packages {
+				if pkg.Origin == originName && pkg.Version == pkgVersion {
+					subpackageSpec := fmt.Sprintf("%s=%s", pkg.Name, pkg.Version)
+					allKeptPackages[subpackageSpec] = true
+					subpackagesFound++
+					log.Printf("Stream %s-%s: keeping subpackage %s (origin=%s)", packageName, streamVersion, subpackageSpec, originName)
+
+					// Resolve dependencies for this subpackage immediately
+					log.Printf("Stream %s-%s: resolving dependencies for subpackage %s", packageName, streamVersion, subpackageSpec)
+
+					deps, err := resolvePackageDependencies(ctx, subpackageSpec, cache, buildRepos, arch)
+					if err != nil {
+						log.Printf("Warning: could not resolve dependencies for %s: %v", subpackageSpec, err)
+						// Continue with other subpackages even if this one fails
+					} else {
+						for _, dep := range deps {
+							allKeptDependencies[dep] = true
+						}
+						log.Printf("Stream %s-%s: resolved %d dependencies for subpackage %s", packageName, streamVersion, len(deps), subpackageSpec)
+					}
+				}
+			}
+		}
+
+		log.Printf("Stream %s-%s: found and processed %d total packages (including subpackages) for origin %s", packageName, streamVersion, subpackagesFound, originName)
 	}
 
 	// Convert dependencies set to sorted slice
@@ -463,11 +523,19 @@ func processVersionStream(ctx context.Context, packageName string, stream *Versi
 	}
 	sort.Strings(keptDependencies)
 
+	// Convert all kept packages to sorted slice
+	allKeptPackagesList := make([]string, 0, len(allKeptPackages))
+	for pkg := range allKeptPackages {
+		allKeptPackagesList = append(allKeptPackagesList, pkg)
+	}
+	sort.Strings(allKeptPackagesList)
+
 	return &VersionStreamDependencies{
 		PackageName:      packageName,
 		Architecture:     arch,
 		VersionStreams:   versionStreams,
 		KeptDependencies: keptDependencies,
+		AllKeptPackages:  allKeptPackagesList, // New field for all packages (main + subpackages)
 	}, nil
 }
 

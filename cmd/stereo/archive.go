@@ -166,6 +166,16 @@ func archive(ctx context.Context, duration time.Duration, architectures []string
 	log.Printf("After filtering seed dependencies: %d packages remain", len(filtered))
 	candidates = filtered
 
+	// Step 9: Filter out packages that are retained by version streams
+	filtered, retained, err = filterByVersionStreams(candidates)
+	if err != nil {
+		return fmt.Errorf("filtering by version streams: %w", err)
+	}
+	retainedPackages = append(retainedPackages, retained...)
+
+	log.Printf("After filtering version streams: %d packages remain", len(filtered))
+	candidates = filtered
+
 	// Create archive and retain directories if they don't exist
 	archiveDir := "archive"
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
@@ -964,6 +974,78 @@ func filterBySeedDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate
 
 	log.Printf("Filtered out %d candidates that are seed dependencies", len(retained))
 	log.Printf("Remaining candidates after seed filtering: %d", len(filtered))
+
+	return filtered, retained, nil
+}
+
+func filterByVersionStreams(candidates []ArchiveCandidate) ([]ArchiveCandidate, []RetainCandidate, error) {
+	log.Println("Checking for version stream dependencies across all architectures...")
+
+	// Load cached version stream dependencies from resolved/version-streams/ directory for all architectures
+	versionStreamDependencies := make(map[string]bool) // package=version -> true if it's a version stream dependency
+
+	architectures := []string{"x86_64", "aarch64"}
+	for _, arch := range architectures {
+		versionStreamsFile := filepath.Join("resolved", "version-streams", arch, "version-streams.json")
+
+		if _, err := os.Stat(versionStreamsFile); os.IsNotExist(err) {
+			log.Printf("Warning: Version streams file not found: %s. This is optional.", versionStreamsFile)
+			continue
+		}
+
+		file, err := os.Open(versionStreamsFile)
+		if err != nil {
+			log.Printf("Warning: Could not open version streams file %s: %v", versionStreamsFile, err)
+			continue
+		}
+		defer file.Close()
+
+		var data struct {
+			Architecture              string   `json:"architecture"`
+			KeptVersionStreamPackages []string `json:"kept_version_stream_packages"`
+			Dependencies              []string `json:"dependencies"`
+		}
+
+		if err := json.NewDecoder(file).Decode(&data); err != nil {
+			log.Printf("Warning: Error decoding JSON from %s: %v", versionStreamsFile, err)
+			continue
+		}
+
+		// Add both kept version stream packages and their dependencies
+		for _, pkg := range data.KeptVersionStreamPackages {
+			versionStreamDependencies[pkg] = true
+		}
+
+		for _, dep := range data.Dependencies {
+			versionStreamDependencies[dep] = true
+		}
+	}
+
+	log.Printf("Loaded %d version stream dependencies from cache across all architectures", len(versionStreamDependencies))
+
+	// Filter out candidates that are used by version streams on any architecture
+	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
+	for _, candidate := range candidates {
+		packageVersion := candidate.Name + "=" + candidate.Version
+		if versionStreamDependencies[packageVersion] {
+			// This package is a version stream dependency, retain it
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "used by version streams",
+			})
+		} else {
+			// Not a version stream dependency, continue filtering
+			candidate.Reasons = append(candidate.Reasons, "not used by version streams")
+			filtered = append(filtered, candidate)
+		}
+	}
+
+	log.Printf("Filtered out %d candidates that are version stream dependencies", len(retained))
+	log.Printf("Remaining candidates after version stream filtering: %d", len(filtered))
 
 	return filtered, retained, nil
 }
