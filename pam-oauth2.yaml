@@ -1,0 +1,80 @@
+package:
+  name: pam-oauth2
+  version: 1.0.1
+  epoch: 0
+  description: PAM module for OAuth2 authentication
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - linux-pam
+
+vars:
+  py-version: 3.13
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - curl-dev
+      - linux-pam-dev
+      - openssl-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 3dd86d6759be51ff0b5eb829a0c542d580ff97fc
+      repository: https://github.com/CyberDem0n/pam-oauth2
+      tag: v${{package.version}}
+      recurse-submodules: true
+
+  - uses: autoconf/make
+
+  - runs: |
+      DESTDIR="${{targets.destdir}}" make install  PAM_DIR=/usr/lib/security
+
+  - uses: strip
+
+test:
+  environment:
+    contents:
+      packages:
+        - sudo-rs
+        - python-${{vars.py-version}}
+        - shadow
+        - wait-for-it
+        - py${{vars.py-version}}-flask
+        - script
+        - syslog-ng
+        - wait-for-it
+    environment:
+      PAM_TEST_USER: testuser
+      LOG_BODIES: true
+  pipeline:
+    - uses: test/tw/ldd-check
+    - runs: |
+        addgroup -S tester 2>/dev/null
+        adduser -D -h /home/foo -s /bin/bash foo 2>/dev/null
+        adduser foo tester 2>/dev/null
+        cat > /etc/pam.d/base-auth << EOF
+        auth sufficient pam_oauth2.so http://127.0.0.1:8000/?access_token= uid grp=tester
+        account sufficient pam_oauth2.so http://127.0.0.1:8000/?access_token= uid grp=tester
+        account  sufficient  pam_oauth2.so
+
+        EOF
+        # Start the OAuth server and wait for it to be read
+        syslog-ng > /var/log/messages 2>&1 &
+        python3 mock_oauth_server.py /dev/null > /tmp/flask.log 2>&1 &
+        wait-for-it 127.0.0.1:8000 -t 10
+
+        ( sleep 1; printf 'bar\n' ) | script -qfec "su - foo" /dev/stdout
+        cat /var/log/messages | grep "pam_oauth2: successfully authenticated 'foo'"
+        cat /tmp/flask.log | grep 200
+
+update:
+  enabled: true
+  github:
+    identifier: CyberDem0n/pam-oauth2
+    strip-prefix: v
+    use-tag: true
