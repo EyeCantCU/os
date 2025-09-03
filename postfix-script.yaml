@@ -53,7 +53,8 @@ pipeline:
     runs: |
       cd "${{targets.contextdir}}"
 
-      # Create rspamd script (replacing opendkim.sh)
+      # Create rspamd script (replacing scripts/opendkim.sh)
+      # supervisor calls this script to manage the rspamd service
       cat > scripts/rspamd.sh << 'EOF'
       #!/bin/sh
       set -e
@@ -68,57 +69,22 @@ pipeline:
              -e 's/DKIM check/Rspamd check/g' \
              scripts/healthcheck.sh
 
-      # Fix cron.sh flag
+      # Fix error in logs due to missing cron.sh
       sed -i 's/crond -f -S/crond -f/' scripts/cron.sh
 
   - name: "Create Rspamd configuration files"
     runs: |
       mkdir -p "${{targets.contextdir}}"/etc/postfix/main.cf.d
-
-      cat > "${{targets.contextdir}}"/etc/postfix/main.cf.d/milter.conf << EOF
-      # DKIM signing only, no spam filtering
-      # Outbound mail scanning (required for DKIM signing)
-      non_smtpd_milters = inet:localhost:11332
-      EOF
-
-      # handle permissions and ownership at runtime in postfix_setup_rspamd()
       mkdir -p "${{targets.contextdir}}"/etc/rspamd/local.d
-
-      # Fix cron warnings, cron checks /etc/cron.d in log
       mkdir -p "${{targets.contextdir}}"/etc/cron.d
 
-      # Create DKIM signing configuration for Postfix-specific settings
-      # This will override the base Rspamd configuration without conflicts
-      cat > "${{targets.contextdir}}"/etc/rspamd/local.d/dkim_signing.conf << EOF
-      # Postfix-specific DKIM signing overrides
-      # Note: DKIM signing requires outbound mail scanning via non_smtpd_milters
+      # Install postfix milter config for rspamd DKIM signing
+      # Used for connecting postfix to rspamd on port 11332 for outbound mail processing
+      install -Dm644 ./main.cf.d/milter.conf "${{targets.contextdir}}"/etc/postfix/main.cf.d/
 
-      # CRITICAL: Enable DKIM signing by uncommenting the path and selector
-      # This overrides the commented-out lines in the upstream config
-      path = "/var/lib/rspamd/dkim/\$domain.\$selector.key";
-      selector = "default";
-
-      # Sign authenticated users (SMTP authentication)
-      sign_authenticated = true;
-
-      # Sign local network mail
-      sign_local = true;
-
-      # Don't sign inbound mail (only outbound)
-      sign_inbound = false;
-
-      # Use domain from email header for signing
-      use_domain = "header";
-
-      # Normalize domains to eSLD (e.g., sub.example.com -> example.com)
-      use_esld = true;
-
-      # Check if public key matches private key (recommended for production)
-      check_pubkey = true;
-
-      # Allow public key mismatch (for key rotation scenarios)
-      allow_pubkey_mismatch = true;
-      EOF
+      # Install rspamd DKIM signing config
+      # This overrides the default rspamd config for postfix specific settings
+      install -Dm644 ./rspamd/local.d/dkim_signing.conf "${{targets.contextdir}}"/etc/rspamd/local.d/
 
 subpackages:
   - name: ${{package.name}}-supervisor-config
@@ -153,62 +119,31 @@ test:
     - uses: test/tw/ldd-check
     - runs: |
         #!/bin/bash
-        # same test as postfix
-        #create postdrop group and postfix user with unique group IDs
-
+        # Setup postfix environment, required for postfix to startup
+        
+        # Create required system users and groups for Postfix
         addgroup -S postfix
         addgroup -S postdrop
         adduser -S -D -H -h /dev/null -s /sbin/nologin -G postfix postfix
+        
+        # Set up postfix spool directory permissions
         chown -R postfix:postdrop /var/spool/postfix
         chmod -R 755 /var/spool/postfix
-
+        
         # Fix ownership of /var/spool/postfix and its subdirectories
         chown root:root /var/spool/postfix
         chown root:root /var/spool/postfix/pid
-
+        
         # Fix ownership of /var/lib/postfix
         chown -R postfix:postfix /var/lib/postfix
-
+        
         # Fix ownership and permissions of postqueue and postdrop executables
         chown root:postdrop /usr/bin/postqueue /usr/bin/postdrop
         chmod 2755 /usr/bin/postqueue /usr/bin/postdrop
 
-        set +e
-        postfix -v start
-        set -e
+        export ALLOWED_SENDER_DOMAINS="localhost" INBOUND_DEBUGGING="1"
 
-        postfix check
-        postfix status
-
-        echo "Checking Postfix mail queue..."
-        mailq
-
-        LOG_FILE="/var/log/maillog"
-        if [ -f "$LOG_FILE" ]; then
-            echo "Checking Postfix logs for email delivery status..."
-            grep "$(date +'%b %d')" $LOG_FILE | tail -n 10
-        else
-            echo "Log file not found: $LOG_FILE"
-        fi
-
-        TO_EMAIL="localuser@localhost"
-        FROM_EMAIL="testuser@localhost"
-        SUBJECT="Postfix Test Email"
-        BODY="This is a test email sent via Postfix to verify functionality."
-
-        EMAIL_CONTENT="From: $FROM_EMAIL\nTo: $TO_EMAIL\nSubject: $SUBJECT\n\n$BODY"
-
-        echo -e "$EMAIL_CONTENT" | /usr/bin/sendmail -t
-
-        sleep 3
-
-        MAIL_QUEUE=$(mailq)
-
-        if [ -z "$MAIL_QUEUE" ]; then
-            echo "Postfix test successful: Mail queue is empty. Email was likely delivered."
-        else
-            echo "Postfix test result: Mail queue is not empty. Here is the current queue:"
-            echo "$MAIL_QUEUE"
-        fi
-
-        echo "Test complete."
+        # Test Postfix startup
+        # outputs to stderr
+        postfix start 2>&1 | grep -q "starting the Postfix mail system"
+        postfix status 2>&1 | grep -q "the Postfix mail system is running"
