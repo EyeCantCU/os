@@ -35,7 +35,7 @@ based on the following criteria:
 - Not still in use in images, VMs, or manual seed dependencies
 
 When no --arch is specified, analysis is performed across both x86_64 and aarch64 architectures,
-consolidating age-based candidates from all architectures and considering a package for archival 
+consolidating age-based candidates from all architectures and considering a package for archival
 only if it meets dependency criteria on ALL supported architectures.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var architectures []string
@@ -688,7 +688,12 @@ func filterByMostRecentVersion(candidates []ArchiveCandidate, archiveCtx *Archiv
 
 		for _, arch := range archiveCtx.Architectures {
 			allVersions := archiveCtx.AllPackages[arch][candidate.Name]
-			if len(allVersions) <= 1 {
+			if len(allVersions) == 0 {
+				// No versions of this candidate on the target architecture - just skip
+				continue
+			}
+
+			if len(allVersions) == 1 {
 				// Only one version available on this architecture, don't archive it
 				isMostRecentOnAnyArch = true
 				retainReason = fmt.Sprintf("only version of package still built from melange on architecture %s", arch)
