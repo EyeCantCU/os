@@ -1,15 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -85,15 +86,17 @@ func main() {
 		SilenceUsage: true,
 	}
 
-	root.AddCommand(bucketsCmd())
-	root.AddCommand(lintCmd())
 	root.AddCommand(archiveCmd())
+	root.AddCommand(bucketsCmd())
 	root.AddCommand(buildDepsCmd())
 	root.AddCommand(imageDependenciesCmd())
-	root.AddCommand(vmDependenciesCmd())
+	root.AddCommand(lintCmd())
 	root.AddCommand(makeCmd())
+	root.AddCommand(impactCmd())
 	root.AddCommand(seedDependenciesCmd())
 	root.AddCommand(versionStreamDependenciesCmd())
+	root.AddCommand(unguardedCmd())
+	root.AddCommand(vmDependenciesCmd())
 	root.AddCommand(withdrawCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
@@ -101,43 +104,13 @@ func main() {
 	}
 }
 
-func lintCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "lint",
-		Short: "Find duplicate package names",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return lint(cmd.Context())
-		},
-	}
-}
-
-func lint(ctx context.Context) error {
-	pkgss, err := dirToPackages(ctx)
-	if err != nil {
-		return err
-	}
-
-	var errs []error
-
-	// name -> yaml path
-	seen := map[string]string{}
-	for repo, pkgs := range pkgss {
-		for pkg, cfg := range pkgs {
-			want := path.Join(repo, cfg.Package.Name)
-			if got, ok := seen[pkg]; ok {
-				errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml and %s.yaml", pkg, got, want))
-			}
-			seen[pkg] = want
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
 func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configuration, error) {
 	pkgss := map[string]map[string]*config.Configuration{}
 
-	var g errgroup.Group
+	var (
+		mu sync.Mutex
+		g  errgroup.Group
+	)
 	for dir := range dirToRepo {
 		g.Go(func() error {
 			local := fmt.Sprintf("./%s", dir)
@@ -146,6 +119,10 @@ func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configura
 			if err != nil {
 				return fmt.Errorf("walking %s: %w", dir, err)
 			}
+
+			mu.Lock()
+			defer mu.Unlock()
+
 			pkgss[dir] = pkgs
 			return nil
 		})
@@ -154,7 +131,60 @@ func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configura
 	return pkgss, g.Wait()
 }
 
+func dirToOrigins(ctx context.Context) (map[string]map[string]*config.Configuration, error) {
+	pkgss := map[string]map[string]*config.Configuration{}
+
+	var (
+		mu sync.Mutex
+		g  errgroup.Group
+	)
+	for dir := range dirToRepo {
+		g.Go(func() error {
+			local := fmt.Sprintf("./%s", dir)
+			pipelines := fmt.Sprintf("./%s/pipelines/", dir)
+			pkgs, err := NewOrigins(ctx, os.DirFS(dir), local, pipelines)
+			if err != nil {
+				return fmt.Errorf("walking %s: %w", dir, err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			pkgss[dir] = pkgs
+			return nil
+		})
+	}
+
+	return pkgss, g.Wait()
+}
+
+// NewPackages returns map of every package to its config, including subpackages.
+// See NewOrigins if you only care about unique build environments.
 func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (map[string]*config.Configuration, error) {
+	origins, err := NewOrigins(ctx, fsys, dirPath, pipelineDir)
+	if err != nil {
+		return nil, err
+	}
+
+	pkgs := maps.Clone(origins)
+	var errs []error
+	for _, c := range origins {
+		for i := range c.Subpackages {
+			subpkg := c.Subpackages[i]
+
+			if other, ok := pkgs[subpkg.Name]; ok {
+				errs = append(errs, fmt.Errorf("conflict: %s: %q in %s.yaml and %s.yaml", dirPath, subpkg.Name, c.Package.Name, other.Package.Name))
+			}
+
+			pkgs[subpkg.Name] = c
+		}
+	}
+
+	return pkgs, errors.Join(errs...)
+}
+
+// NewOrigins returns a map of main package to its config.
+func NewOrigins(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (map[string]*config.Configuration, error) {
 	pkgs := map[string]*config.Configuration{}
 
 	var (
@@ -223,15 +253,6 @@ func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (
 			}
 
 			pkgs[c.Package.Name] = c
-			for i := range c.Subpackages {
-				subpkg := c.Subpackages[i]
-
-				if _, ok := pkgs[subpkg.Name]; ok {
-					errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml", subpkg.Name, c.Package.Name))
-				}
-
-				pkgs[subpkg.Name] = c
-			}
 
 			return nil
 		})
@@ -265,10 +286,11 @@ func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *
 
 	configs, _, err := apko_build.LockImageConfiguration(ctx, c.Environment, opts...)
 	if err != nil {
-		if err := json.NewEncoder(os.Stderr).Encode(c.Environment); err != nil {
+		config := &bytes.Buffer{}
+		if err := json.NewEncoder(config).Encode(c.Environment); err != nil {
 			return nil, fmt.Errorf("encoding %s: %w", c.Name)
 		}
-		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
+		return nil, fmt.Errorf("unable to lock image configuration: %w\nimage config:\n%s", err, config.String())
 	}
 
 	locked, ok := configs["index"]
