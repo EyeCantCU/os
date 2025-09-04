@@ -123,7 +123,10 @@ func radius(ctx context.Context, arch string) error {
 		return fmt.Errorf("getting package configurations: %w", err)
 	}
 
-	beforeMap, err := lockAllBuildDeps(ctx, pkgss, arch, before)
+	// Share this cache across the before/after so that we don't re-fetch each prod APKINDEX.
+	cache := apk.NewCache(true)
+
+	beforeMap, err := lockAllBuildDeps(ctx, pkgss, arch, before, cache)
 	if err != nil {
 		return err
 	}
@@ -132,7 +135,7 @@ func radius(ctx context.Context, arch string) error {
 		log.Printf("before: saw %d errors", errs)
 	}
 
-	afterMap, err := lockAllBuildDeps(ctx, pkgss, arch, after)
+	afterMap, err := lockAllBuildDeps(ctx, pkgss, arch, after, cache)
 	if err != nil {
 		return err
 	}
@@ -204,7 +207,7 @@ func unguarded(ctx context.Context, arch string) error {
 		"enterprise-packages": []string{dirToRepo["os"], dirToRepo["extra-packages"], dirToRepo["enterprise-packages"]},
 	}
 
-	depMap, err := lockAllBuildDeps(ctx, pkgss, arch, repoDeps)
+	depMap, err := lockAllBuildDeps(ctx, pkgss, arch, repoDeps, apk.NewCache(true))
 	if err != nil {
 		return err
 	}
@@ -240,10 +243,9 @@ type depMap struct {
 }
 
 // TODO: build-dependencies command should probably use this
-func lockAllBuildDeps(ctx context.Context, pkgss map[string]map[string]*config.Configuration, arch string, buildRepos map[string][]string) (*depMap, error) {
+func lockAllBuildDeps(ctx context.Context, pkgss map[string]map[string]*config.Configuration, arch string, buildRepos map[string][]string, cache *apk.Cache) (*depMap, error) {
 	// Create APK cache for build dependency resolution
 	var mu sync.Mutex
-	cache := apk.NewCache(true)
 
 	results := &depMap{
 		errors: map[string]error{},
