@@ -93,6 +93,7 @@ func main() {
 	root.AddCommand(vmDependenciesCmd())
 	root.AddCommand(makeCmd())
 	root.AddCommand(seedDependenciesCmd())
+	root.AddCommand(versionStreamDependenciesCmd())
 	root.AddCommand(withdrawCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
