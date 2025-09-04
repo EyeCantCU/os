@@ -1,0 +1,112 @@
+package:
+  name: nvidia-cuda-nvcc-13.0
+  version: "13.0.48"
+  epoch: 0
+  description: CUDA NVCC
+  copyright:
+    - license: PROPRIETARY
+  dependencies:
+    runtime:
+      - nvidia-cuda-crt-${{vars.cuda-version}}
+      - nvidia-cuda-ld-config-${{vars.cuda-version}}
+      - nvidia-libnvptxcompiler-${{vars.cuda-version}}
+      - nvidia-libnvvm-${{vars.cuda-version}}
+
+environment:
+  contents:
+    packages:
+      - busybox
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+
+vars:
+  # Bumping this to 15 caused the compilation test to hang indefinitely as of
+  # 13.0.48
+  gcc-major-version: 14
+
+pipeline:
+  - assertions:
+      required-steps: 1
+    pipeline:
+      - if: ${{build.arch}} == 'aarch64'
+        uses: fetch
+        with:
+          # SBSA = ARM Server Base System Architecture (now called SystemReady)
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-sbsa/cuda_nvcc-linux-sbsa-${{package.version}}-archive.tar.xz"
+          expected-sha256: "3146cee5148535cb06ea5727b6cc1b0d97a85838d1d98514dc6a589ca38e1495"
+          timeout: 30
+      - if: ${{build.arch}} == 'x86_64'
+        uses: fetch
+        with:
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-${{package.version}}-archive.tar.xz"
+          expected-sha256: "cc5ff4a00d3be7c6c86ff740de7672e142ec87fea74e7e46b1b142b59fd2ac51"
+          timeout: 30
+
+  # Setup version symlinks
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
+      mv include ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
+      mv LICENSE ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/${{package.name}}.LICENSE
+      mv bin ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development headers
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - nvidia-cuda-crt-${{vars.cuda-version}}-dev
+        - nvidia-libnvptxcompiler-${{vars.cuda-version}}-dev
+        - nvidia-libnvvm-${{vars.cuda-version}}-dev
+
+  - name: nvidia-cuda-nvcc-gcc-${{vars.cuda-version}}
+    description: ${{package.name}} configured to use compatible gcc
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - gcc-${{vars.gcc-major-version}}
+    pipeline:
+      - runs: |
+          cuda_home="/usr/local/cuda-${{vars.cuda-version}}"
+          mkdir -p "${{targets.contextdir}}$cuda_home/bin"
+          for cmd in gcc g++; do
+            wrapper="${{targets.contextdir}}$cuda_home/bin/$cmd"
+            cat > "$wrapper" << EOF
+          #!/bin/sh
+          exec ${cmd}-${{vars.gcc-major-version}} "\$@"
+          EOF
+            chmod +x "$wrapper"
+          done
+    test:
+      environment:
+        contents:
+          packages:
+            - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+            - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
+      pipeline:
+        - runs: |
+            cuda_home="/usr/local/cuda-${{vars.cuda-version}}"
+            cat > gcc-version.cu << EOF
+            #include <iostream>
+
+            int main() {
+              std::cout << __GNUC__ << "\n";
+            }
+            EOF
+            "$cuda_home/bin/nvcc" gcc-version.cu -o gcc-version
+            [ "$(./gcc-version)" = "${{vars.gcc-major-version}}" ]
+
+update:
+  # No release-monitoring support for the multi-arch "enterprise" driver, only
+  # for x86-only consumer release train.
+  enabled: false
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check

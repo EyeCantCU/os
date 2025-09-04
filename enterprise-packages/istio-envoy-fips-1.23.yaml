@@ -1,7 +1,7 @@
 package:
   name: istio-envoy-fips-1.23
   version: "1.23.6"
-  epoch: 3
+  epoch: 4
   description: Envoy with additional Istio plugins (wasm, telemetry, etc)
   copyright:
     - license: Apache-2.0
@@ -11,6 +11,8 @@ package:
   dependencies:
     provides:
       - istio-envoy-fips=${{package.full-version}}
+    runtime:
+      - boringssl-fips-static-${{vars.boringssl}}-tools
 
 environment:
   contents:
@@ -21,7 +23,7 @@ environment:
       - bash
       - bazel-6
       - binutils
-      - boringssl-fips-static=0.1-r2
+      - boringssl-fips-static-${{vars.boringssl}}
       - build-base
       - busybox
       - ca-certificates-bundle
@@ -39,6 +41,9 @@ environment:
       - samurai
       - wolfi-baselayout
 
+vars:
+  boringssl: "2023042800"
+
 pipeline:
   - uses: git-checkout
     with:
@@ -49,13 +54,13 @@ pipeline:
   - name: make go toolchain happy
     runs: sed -i 's/go 1\.22\.0/go 1.22/' go.mod
 
-  - name: Add use-precompiled-boringssl-from-build-env patch
+  - name: Add boringssl-fips version & compat patch
     runs: |
-      # Append new patch use-precompiled-boringssl-from-build-environment.patch to the envoy in WORKSPACE.
-      # it will search for the entry `sha256 = ENVOY_SHA256`` and append the patch entry after it.
-      # This patch is sets the code to use the precompiled boringssl from the build environment.
+      # Append patch to the envoy in WORKSPACE. It will search for the
+      # entry `sha256 = ENVOY_SHA256`` and append the patch entry
+      # after it.
       sed -i "/sha256 = ENVOY_SHA256/a\\
-         patches = [\"//:use-precompiled-boringssl-from-build-environment.patch\"], patch_args = [\"-p1\"]," WORKSPACE
+         patches = [\"//:0001-version-Print-FIPS-module-version.patch\",\"//:2a2d09835de778304f0f0483ed2181de3b07c240.patch\"], patch_args = [\"-p1\"]," WORKSPACE
 
   - name: Build envoy
     runs: |
@@ -66,6 +71,7 @@ pipeline:
       # See https://github.com/envoyproxy/envoy/blob/v1.27.0/bazel/BUILD#L475
       bazel build \
         --define=boringssl=fips \
+        --override_repository=boringssl_fips=/usr/lib/boringssl-fips-static \
         --discard_analysis_cache \
         --nokeep_state_after_build \
         --notrack_incremental_state \
@@ -103,6 +109,16 @@ test:
       runs: |
         envoy --version
         envoy --help
+    - runs: |
+        envoy_version=$(envoy --version | sed -n 's|.*/BoringSSL-FIPS-\(.*\)|\1|p')
+        [ "$envoy_version" = "${{vars.boringssl}}" ]
+        /usr/bin/bssl-test_fips
+        bssl_version=$(/usr/bin/bssl-test_fips | sed -n 's|^Module version: \(.*\)|\1|p')
+        [ "$bssl_version" = "${{vars.boringssl}}" ]
+    - uses: test/cmvp-fips-certification-check
+      with:
+        certificate-number: 4953
+        software-version: ${{vars.boringssl}}
     - name: "Test Envoy admin interface startup"
       uses: test/daemon-check-output
       with:
