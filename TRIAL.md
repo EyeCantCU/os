@@ -48,10 +48,10 @@ cp os/crane.yaml enterprise-packages/
 ```
 
 One of our goals is to prevent us from accidentally doing this.
-Let's see if `stereo ci lint` catches that:
+Let's see if `stereo lint` catches that:
 
 ```
-stereo ci lint
+stereo lint
 Error: conflict: "tensorrt-10.0-dev" in extra-packages/tensorrt-10.0.yaml and enterprise-packages/tensorrt-10.0.yaml
 conflict: "tensorrt-10.0" in extra-packages/tensorrt-10.0.yaml and enterprise-packages/tensorrt-10.0.yaml
 conflict: "crane" in enterprise-packages/crane.yaml and os/crane.yaml
@@ -75,7 +75,7 @@ As an example, let's bump `curl` and see how large of a change that is:
 make clean
 (cd os && wolfictl bump curl) # We should probably implement `stereo bump` or something.
 make package/curl
-stereo ci radius | tail -n 20
+stereo impact | tail -n 20
 
 2025/08/29 14:18:38 before: saw 7 errors
 2025/08/29 14:18:55 after: saw 7 errors
@@ -120,7 +120,7 @@ What if we do the same thing for something less critical to our package builds, 
 make clean
 (cd os && wolfictl bump crane)
 make package/crane
-stereo ci radius
+stereo impact
 
 2025/08/29 14:24:09 before: saw 7 errors
 2025/08/29 14:24:25 after: saw 7 errors
@@ -167,7 +167,7 @@ Eventually, once the cue-ificiation of image plans has fully materialized, we ca
 ### Detecting Unguarded Packages
 
 Another common occurence we'd like to avoid is accidentally orphaning reverse dependencies.
-While `stereo ci radius` can tell you things that _were_ affected by your change, it can't tell you about things that unexpectedly _weren't_.
+While `stereo impact` can tell you things that _were_ affected by your change, it can't tell you about things that unexpectedly _weren't_.
 If I decided to rename `crane` to `crage`, all the package that depend on `crane` would continue to pull in the last-built version.
 Sometimes this is easy to detect by just grepping for the package name, but sometimes it's less obvious because things get pulled in by `provides` and `depends` and it's a whole mess.
 
@@ -176,17 +176,17 @@ Let's actually look at that `crane` example by renaming it to `crage`.
 We see 0 affected packages, which makes me feel warm and fuzzy (if perhaps slightly confused):
 
 ```
-stereo ci radius
+stereo impact
 2025/08/29 14:41:30 before: saw 7 errors
 2025/08/29 14:41:45 after: saw 7 errors
 2025/08/29 14:41:45 0 builds have new failures
 2025/08/29 14:41:45 0 melange builds affected by new packages
 ```
 
-But if I look at the output of `stereo ci unguarded`, I see a handful of packages that still depend on `crane` instead of `crage`:
+But if I look at the output of `stereo unguarded`, I see a handful of packages that still depend on `crane` instead of `crage`:
 
 ```
-stereo ci unguarded | grep -B1 crane
+stereo unguarded | grep -B1 crane
 enterprise-packages/k3s-1.31:
   crane
 --

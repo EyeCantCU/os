@@ -86,17 +86,18 @@ func main() {
 		SilenceUsage: true,
 	}
 
-	root.AddCommand(bucketsCmd())
-	root.AddCommand(ciCmd())
 	root.AddCommand(archiveCmd())
+	root.AddCommand(bucketsCmd())
 	root.AddCommand(buildDepsCmd())
 	root.AddCommand(imageDependenciesCmd())
-	root.AddCommand(vmDependenciesCmd())
+	root.AddCommand(lintCmd())
 	root.AddCommand(makeCmd())
+	root.AddCommand(impactCmd())
 	root.AddCommand(seedDependenciesCmd())
 	root.AddCommand(versionStreamDependenciesCmd())
+	root.AddCommand(unguardedCmd())
+	root.AddCommand(vmDependenciesCmd())
 	root.AddCommand(withdrawCmd())
-	root.AddCommand(radiusCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)

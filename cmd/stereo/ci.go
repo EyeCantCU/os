@@ -21,18 +21,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func ciCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "ci",
-		Short: "subcommand for various ci checks",
-	}
-
-	cmd.AddCommand(lintCmd(), radiusCmd(), unguardedCmd())
-
-	return cmd
-
-}
-
 func lintCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "lint",
@@ -43,13 +31,13 @@ func lintCmd() *cobra.Command {
 	}
 }
 
-func radiusCmd() *cobra.Command {
+func impactCmd() *cobra.Command {
 	var arch string
 	cmd := &cobra.Command{
-		Use:   "radius",
+		Use:   "impact",
 		Short: "Find melange builds that are affected by new (locally-built) packages",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return radius(cmd.Context(), arch)
+			return impact(cmd.Context(), arch)
 		},
 	}
 
@@ -96,7 +84,7 @@ func lint(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func radius(ctx context.Context, arch string) error {
+func impact(ctx context.Context, arch string) error {
 	// Build repository mapping for each directory
 	before := map[string][]string{
 		"os":                  []string{dirToRepo["os"]},
