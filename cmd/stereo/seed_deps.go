@@ -17,16 +17,16 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// SeedPackage represents a manual seed for archive exclusion
-type SeedPackage struct {
-	Package string `json:"package"`
+// SeedOrigin represents a manual seed origin for archive exclusion
+type SeedOrigin struct {
+	Origin  string `json:"origin"`
 	Version string `json:"version"`
 	Reason  string `json:"reason"`
 }
 
 // SeedsFile represents the archive-seeds.json structure
 type SeedsFile struct {
-	Seeds    []SeedPackage `json:"seeds"`
+	Seeds    []SeedOrigin `json:"seeds"`
 	Metadata struct {
 		Created     string `json:"created"`
 		Description string `json:"description"`
@@ -44,10 +44,11 @@ func seedDependenciesCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "seed-dependencies",
-		Short: "Resolve dependencies for manual seed packages",
-		Long: `This command reads archive-seeds.json file, generates minimal APKO configurations
-for each seed package, and resolves their full dependency chains. The results are written
-to JSON files in the resolved/seeds/ directory for use by the archive command.
+		Short: "Resolve dependencies for manual seed origins",
+		Long: `This command reads archive-seeds.json file, finds all subpackages for each seed origin
+with the specified version by searching APKINDEX files, and resolves their full dependency
+chains. The results are written to JSON files in the resolved/seeds/ directory for use by
+the archive command.
 
 When no --arch is specified, dependencies are computed for both x86_64 and aarch64 architectures.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -129,10 +130,33 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 
 		cache := apk.NewCache(true)
 
+		// First, fetch APKINDEX for all repositories to find subpackages
+		log.Printf("Fetching APKINDEX files for architecture: %s...", arch)
+		var allPackagesByOrigin = make(map[string]map[string][]*apk.Package) // origin -> version -> packages
+
+		for _, repoURL := range buildRepos {
+			index, err := fetchAPKIndex(ctx, repoURL, arch)
+			if err != nil {
+				log.Printf("Warning: Could not fetch APKINDEX for %s (arch: %s): %v", repoURL, arch, err)
+				continue
+			}
+
+			// Group packages by origin and version
+			for _, pkg := range index.Packages {
+				if pkg.Origin == "" {
+					continue // Skip packages without origin
+				}
+				if allPackagesByOrigin[pkg.Origin] == nil {
+					allPackagesByOrigin[pkg.Origin] = make(map[string][]*apk.Package)
+				}
+				allPackagesByOrigin[pkg.Origin][pkg.Version] = append(allPackagesByOrigin[pkg.Origin][pkg.Version], pkg)
+			}
+		}
+
 		// Collect all unique APK packages across all seeds
 		allPackages := make(map[string]bool) // package -> true if used
 		unresolvedSeeds := make([]struct {
-			Package string `json:"package"`
+			Origin  string `json:"origin"`
 			Version string `json:"version"`
 			Error   string `json:"error"`
 		}, 0)
@@ -150,29 +174,65 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 				currentSeed := seed
 				currentArch := arch
 
-				log.Printf("Resolving dependencies for seed: %s=%s (architecture: %s)", currentSeed.Package, currentSeed.Version, currentArch)
+				log.Printf("Resolving dependencies for seed origin: %s=%s (architecture: %s)", currentSeed.Origin, currentSeed.Version, currentArch)
 
-				// Create minimal APKO configuration for this seed
-				cfg := &apko_types.ImageConfiguration{
-					Contents: apko_types.ImageContents{
-						Packages: []string{fmt.Sprintf("%s=%s", currentSeed.Package, currentSeed.Version)},
-					},
-					Archs: []apko_types.Architecture{apko_types.Architecture(currentArch)},
-				}
-
-				// Resolve seed to APK packages
-				packages, err := lockImageDependencies(ctx, cfg, cache, buildRepos, currentArch)
-				if err != nil {
-					log.Printf("Error resolving seed dependencies for %s=%s (architecture: %s): %v", currentSeed.Package, currentSeed.Version, currentArch, err)
+				// Find all subpackages for this origin and version
+				subpackages, exists := allPackagesByOrigin[currentSeed.Origin][currentSeed.Version]
+				if !exists || len(subpackages) == 0 {
+					err := fmt.Errorf("no packages found for origin %s with version %s", currentSeed.Origin, currentSeed.Version)
+					log.Printf("Error finding subpackages for origin %s=%s (architecture: %s): %v", currentSeed.Origin, currentSeed.Version, currentArch, err)
 
 					// Add to unresolved seeds list
 					mu.Lock()
 					unresolvedSeeds = append(unresolvedSeeds, struct {
-						Package string `json:"package"`
+						Origin  string `json:"origin"`
 						Version string `json:"version"`
 						Error   string `json:"error"`
 					}{
-						Package: currentSeed.Package,
+						Origin:  currentSeed.Origin,
+						Version: currentSeed.Version,
+						Error:   err.Error(),
+					})
+					mu.Unlock()
+					return nil // Don't fail the entire operation
+				}
+
+				log.Printf("Found %d subpackages for origin %s=%s: %v", len(subpackages), currentSeed.Origin, currentSeed.Version,
+					func() []string {
+						names := make([]string, len(subpackages))
+						for i, p := range subpackages {
+							names[i] = p.Name
+						}
+						return names
+					}())
+
+				// Create package list for APKO configuration
+				var packageList []string
+				for _, pkg := range subpackages {
+					packageList = append(packageList, fmt.Sprintf("%s=%s", pkg.Name, pkg.Version))
+				}
+
+				// Create minimal APKO configuration for all subpackages
+				cfg := &apko_types.ImageConfiguration{
+					Contents: apko_types.ImageContents{
+						Packages: packageList,
+					},
+					Archs: []apko_types.Architecture{apko_types.Architecture(currentArch)},
+				}
+
+				// Resolve origin subpackages to APK packages
+				packages, err := lockImageDependencies(ctx, cfg, cache, buildRepos, currentArch)
+				if err != nil {
+					log.Printf("Error resolving seed dependencies for origin %s=%s (architecture: %s): %v", currentSeed.Origin, currentSeed.Version, currentArch, err)
+
+					// Add to unresolved seeds list
+					mu.Lock()
+					unresolvedSeeds = append(unresolvedSeeds, struct {
+						Origin  string `json:"origin"`
+						Version string `json:"version"`
+						Error   string `json:"error"`
+					}{
+						Origin:  currentSeed.Origin,
 						Version: currentSeed.Version,
 						Error:   err.Error(),
 					})
@@ -186,14 +246,25 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 				copy(sortedPkgs, packages)
 				sort.Strings(sortedPkgs)
 
-				seedDetailFile := filepath.Join(seedsDetailDir, fmt.Sprintf("%s_%s.json", currentSeed.Package, currentSeed.Version))
+				// Create subpackage names list
+				subpackageNames := make([]string, len(subpackages))
+				for i, pkg := range subpackages {
+					subpackageNames[i] = pkg.Name
+				}
+				sort.Strings(subpackageNames)
+
+				seedDetailFile := filepath.Join(seedsDetailDir, fmt.Sprintf("%s_%s.json", currentSeed.Origin, currentSeed.Version))
 				seedData := struct {
-					SeedPackage  string   `json:"seed_package"`
+					SeedOrigin   string   `json:"seed_origin"`
+					SeedVersion  string   `json:"seed_version"`
+					Subpackages  []string `json:"subpackages"`
 					Reason       string   `json:"reason"`
 					Architecture string   `json:"architecture"`
 					Dependencies []string `json:"dependencies"`
 				}{
-					SeedPackage:  fmt.Sprintf("%s=%s", currentSeed.Package, currentSeed.Version),
+					SeedOrigin:   currentSeed.Origin,
+					SeedVersion:  currentSeed.Version,
+					Subpackages:  subpackageNames,
 					Reason:       currentSeed.Reason,
 					Architecture: currentArch,
 					Dependencies: sortedPkgs,
@@ -210,7 +281,7 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 					encoder.SetIndent("", "  ")
 					return encoder.Encode(seedData)
 				}(); err != nil {
-					log.Printf("Warning: failed to write detailed dependencies for %s=%s: %v", currentSeed.Package, currentSeed.Version, err)
+					log.Printf("Warning: failed to write detailed dependencies for origin %s=%s: %v", currentSeed.Origin, currentSeed.Version, err)
 				}
 
 				// Add all packages to the set (with mutex protection)
@@ -270,7 +341,7 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 			unresolvedData := struct {
 				Architecture    string `json:"architecture"`
 				UnresolvedSeeds []struct {
-					Package string `json:"package"`
+					Origin  string `json:"origin"`
 					Version string `json:"version"`
 					Error   string `json:"error"`
 				} `json:"unresolved_seeds"`
@@ -314,8 +385,8 @@ func readSeedsFile(filename string) (*SeedsFile, error) {
 
 	// Validate seeds
 	for i, seed := range seedsFile.Seeds {
-		if seed.Package == "" {
-			return nil, fmt.Errorf("seed %d: package name is required", i)
+		if seed.Origin == "" {
+			return nil, fmt.Errorf("seed %d: origin is required", i)
 		}
 		if seed.Version == "" {
 			return nil, fmt.Errorf("seed %d: version is required", i)
