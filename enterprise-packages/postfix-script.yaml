@@ -1,0 +1,149 @@
+package:
+  name: postfix-script
+  version: "4.4.0"
+  epoch: 0
+  description: Multi architecture simple SMTP server (postfix null relay) host for your Docker and Kubernetes containers
+  copyright:
+    - license: MIT
+  checks:
+    disabled:
+      - usrmerge
+  dependencies:
+    runtime:
+      - bash
+      - busybox
+      - cronie
+      - postfix
+      - rspamd
+      - rsyslog
+      - supervisor
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/bokysan/docker-postfix
+      tag: v${{package.version}}
+      expected-commit: 5113756b0836cc27e928040b2aa9762e820dc71b
+
+  - uses: patch
+    with:
+      patches: |
+        0001-migrate-to-rspamd.patch
+
+  # Copy upstream scripts and configs
+  - name: "Copy upstream scripts and configs"
+    runs: |
+      # Copy scripts from upstream with permissions
+      install -Dm755 scripts/*.sh -t "${{targets.contextdir}}"/scripts/
+
+      # Copy configs from upstream (except supervisord.conf - subpackage will handle it)
+      install -Dm644 configs/* -t "${{targets.contextdir}}"/etc/
+      rm -f "${{targets.contextdir}}"/etc/supervisord.conf
+
+  # Customize scripts for rspamd instead of OpenDKIM
+  - name: "Customize scripts for rspamd integration"
+    runs: |
+      cd "${{targets.contextdir}}"
+
+      # Create rspamd script (replacing scripts/opendkim.sh)
+      # supervisor calls this script to manage the rspamd service
+      cat > scripts/rspamd.sh << 'EOF'
+      #!/bin/sh
+      set -e
+      exec /usr/bin/rspamd -c /etc/rspamd/rspamd.conf -f -u _rspamd -g _rspamd
+      EOF
+      chmod +x scripts/rspamd.sh
+
+      # patch only stable files to avoid upstream drift issues
+      # update healthcheck.sh to check rspamd instead of opendkim (consolidated)
+      sed -i -e 's/check_dkim/check_rspamd/g' \
+             -e 's/printf.*8891/printf "\\x18Clocalhost\\x004\\x00\\x00127.0.0.1\\x00" | nc -w 2 127.0.0.1 11332/g' \
+             -e 's/DKIM check/Rspamd check/g' \
+             scripts/healthcheck.sh
+
+      # Fix error in logs due to missing cron.sh
+      sed -i 's/crond -f -S/crond -f/' scripts/cron.sh
+
+  - name: "Create Rspamd configuration files"
+    runs: |
+      mkdir -p "${{targets.contextdir}}"/etc/postfix/main.cf.d
+      mkdir -p "${{targets.contextdir}}"/etc/rspamd/local.d
+      mkdir -p "${{targets.contextdir}}"/etc/cron.d
+
+      # Install postfix milter config for rspamd DKIM signing
+      # Used for connecting postfix to rspamd on port 11332 for outbound mail processing
+      install -Dm644 ./main.cf.d/milter.conf "${{targets.contextdir}}"/etc/postfix/main.cf.d/
+
+      # Install rspamd DKIM signing config
+      # This overrides the default rspamd config for postfix specific settings
+      install -Dm644 ./rspamd/local.d/dkim_signing.conf "${{targets.contextdir}}"/etc/rspamd/local.d/
+
+subpackages:
+  - name: ${{package.name}}-supervisor-config
+    description: Supervisor configuration for Postfix with Rspamd integration
+    dependencies:
+      replaces:
+        - supervisor-config
+      provides:
+        - supervisor-config
+      runtime:
+        - supervisor # Only depend on base supervisor, not supervisor-config
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/etc
+          install -m644 configs/supervisord.conf "${{targets.subpkgdir}}"/etc/
+
+          # Modify the supervisord.conf to replace opendkim with rspamd (consolidated)
+          sed -i -e 's/\[program:opendkim\]/\[program:rspamd\]/' \
+                 -e 's/command.*=.*opendkim.sh/command         = \/scripts\/rspamd.sh/' \
+                 -e 's/user.*=.*opendkim/user            = _rspamd/' \
+                 "${{targets.subpkgdir}}"/etc/supervisord.conf
+
+update:
+  enabled: true
+  github:
+    identifier: bokysan/docker-postfix
+    use-tag: true
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - runs: |
+        #!/bin/bash
+        # Setup postfix environment, required for postfix to startup
+
+        # Create required system users and groups for Postfix
+        addgroup -S postfix
+        addgroup -S postdrop
+        adduser -S -D -H -h /dev/null -s /sbin/nologin -G postfix postfix
+
+        # Set up postfix spool directory permissions
+        chown -R postfix:postdrop /var/spool/postfix
+        chmod -R 755 /var/spool/postfix
+
+        # Fix ownership of /var/spool/postfix and its subdirectories
+        chown root:root /var/spool/postfix
+        chown root:root /var/spool/postfix/pid
+
+        # Fix ownership of /var/lib/postfix
+        chown -R postfix:postfix /var/lib/postfix
+
+        # Fix ownership and permissions of postqueue and postdrop executables
+        chown root:postdrop /usr/bin/postqueue /usr/bin/postdrop
+        chmod 2755 /usr/bin/postqueue /usr/bin/postdrop
+
+        export ALLOWED_SENDER_DOMAINS="localhost" INBOUND_DEBUGGING="1"
+
+        # Test Postfix startup
+        # outputs to stderr
+        postfix start 2>&1 | grep -q "starting the Postfix mail system"
+        postfix status 2>&1 | grep -q "the Postfix mail system is running"

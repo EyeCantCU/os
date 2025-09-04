@@ -1,0 +1,195 @@
+package:
+  name: sssd
+  version: 2.11.1
+  epoch: 0
+  description: A daemon to manage identity, authentication and authorization for centrally-managed systems.
+  copyright:
+    - license: GPL-3.0-only
+  dependencies:
+    runtime:
+      # sssctl analyze requires systemd python3 bindings
+      - py${{vars.py-version}}-systemd
+      # Requires `ldb` backend libraries
+      - samba
+
+vars:
+  py-version: 3.13
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bind-tools
+      - build-base
+      - busybox
+      - c-ares-dev
+      - cifs-utils-dev
+      - curl-dev
+      - dbus-dev
+      - ding-libs-dev
+      - docbook-xml
+      - gettext-dev
+      - jansson-dev
+      - jose-dev
+      - keyutils-dev
+      - krb5-dev
+      - libcap-dev
+      - libselinux-dev
+      - libsemanage-dev
+      - libtool
+      - libunistring-dev
+      - libxml2-utils
+      - libxslt
+      - linux-pam-dev
+      - nfs-utils-dev
+      - openldap-dev
+      - p11-kit-dev
+      - pcre2-dev
+      - pkgconf-dev
+      - popt-dev
+      - py3-setuptools
+      - python3-dev
+      - samba-dev
+      - samba-server-libs
+      - shadow-dev
+      - systemd-dev
+      - talloc-dev
+      - tdb-dev
+      - tevent-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/SSSD/sssd.git
+      tag: ${{package.version}}
+      expected-commit: ced937c9d3818567c59f624379e61be0004edf2f
+
+  # `samba-server-libs` installs libidmap-private-samba.so to `/usr/lib` instead of `/usr/lib/samba`
+  - uses: patch
+    with:
+      patches: samba-correct-directory.patch
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --datadir=/usr/share \
+        --disable-rpath \
+        --disable-static \
+        --enable-gss-spnego-for-zero-maxssf \
+        --enable-nfsidmaplibdir=/usr/lib/libnfsidmap \
+        --enable-nsslibdir=/usr/lib \
+        --enable-pac-responder \
+        --enable-pammoddir=/usr/lib/security \
+        --enable-sss-default-nss-plugin \
+        --libexecdir=/usr/lib/sssd \
+        --localstatedir=/var \
+        --prefix=/usr \
+        --runstatedir=/run \
+        --sbindir=/usr/bin \
+        --sysconfdir=/etc \
+        --with-db-path=/var/lib/sss/db \
+        --with-gpo-cache-path=/var/lib/sss/gpo_cache \
+        --with-id-provider-idp=no \
+        --with-initscript=systemd \
+        --with-krb5-rcache-dir=/var/cache/krb5rcache \
+        --with-ldb-lib-dir=/usr/lib/samba/ldb \
+        --with-mcache-path=/var/lib/sss/mc \
+        --with-os=fedora \
+        --with-passkey \
+        --with-pipe-path=/var/lib/sss/pipes \
+        --with-pubconf-path=/var/lib/sss/pubconf \
+        --with-python3-bindings \
+        --with-sssd-user=sssd \
+        --with-subid \
+        --with-syslog=journald \
+        --with-systemdunitdir=/usr/lib/systemd/system \
+        --with-test-dir=/dev/shm \
+        --with-tmpfilesdir=/usr/lib/tmpfiles.d \
+        --without-python2-bindings
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+update:
+  enabled: true
+  git: {}
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development files
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+  - name: ${{package.name}}-doc
+    description: ${{package.name}} documentation and examples
+    pipeline:
+      - uses: split/manpages
+      - runs: install -Dpm0644 -t "${{targets.destdir}}/usr/share/doc/${{package.name}}/examples/" ./src/examples/*
+    test:
+      pipeline:
+        - uses: test/docs
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: sssd
+          gid: 65532
+        - groupname: messagebus
+          gid: 65531
+      users:
+        - username: sssd
+          gid: 65532
+          uid: 65532
+        - username: messagebus
+          gid: 65531
+          uid: 65531
+    contents:
+      packages:
+        - ${{package.name}}-doc
+        - dbus
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Smoke tests
+      runs: |
+        set -o pipefail
+        sss_cache --help | grep -F -e "Usage: sss_cache"
+        sss_seed --help | grep -F -e "Usage: sss_seed"
+        sss_ssh_authorizedkeys --help | grep -F -e "Usage: sss_ssh_authorizedkeys"
+        sss_ssh_knownhosts --help | grep -F -e "Usage: sss_ssh_knownhosts"
+        sssd --help | grep -F -e "Usage: sssd"
+        {
+          sss_override --help 2>&1 || true
+        } | grep -F -e "sss_override COMMAND COMMAND-ARGS"
+        {
+          sss_ssh_knownhostsproxy --help 2>&1 || true
+        } | grep -F -e "Your system is configured to use the obsolete tool"
+        {
+          sssctl --help 2>&1 || true
+        } | grep -F -e "sssctl COMMAND"
+    - name: Test SSSD server functionality
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          install -Dpm0600 -t "/etc/sssd/" "/usr/share/doc/${{package.name}}/examples/sssd.conf"
+          mkdir -p /run/sssd /run/dbus
+
+          DBUS_PID=$(dbus-daemon --nopidfile --system --print-pid)
+        start: |
+          sssd -i
+        timeout: 60
+        expected_output: |
+          Starting with debug level
+          Entering main loop under
+        # We dont expect any valid output out of these since the default config does not
+        # declare any domains or anything
+        post: |
+          sssctl domain-list
+          sssctl gpo-list | grep -F -e "Cached GPOs in domain"

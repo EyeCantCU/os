@@ -1,7 +1,7 @@
 package:
   name: ct-manylinux-2.28
   version: 1.27.0
-  epoch: 1
+  epoch: 2
   description: "the cross native toolchain for manylinux 2.28"
   copyright:
     - license: GPL-3.0-or-later
@@ -215,10 +215,10 @@ pipeline:
       + -pthread
 
       *cc1plus:
-      + -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}} -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/backward -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include-fixed -I/usr/lib/oldglibc/usr/include -I/usr/include
+      + %{!nostdinc:%{!nostdinc++:-nostdinc++ -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}} -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/backward}}
 
       *cpp:
-      + -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include-fixed -I/usr/lib/oldglibc/usr/include -I/usr/include
+      + %{!nostdinc:-nostdinc -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include-fixed -idirafter /usr/lib/oldglibc/usr/include -idirafter /usr/include}
 
       *link:
       + -L/usr/lib/oldglibc/usr/lib -ldl -lutil -lanl --allow-shlib-undefined
@@ -226,10 +226,9 @@ pipeline:
 
       mkdir -p ${{targets.destdir}}/etc/clang
       cat <<EOF >${{targets.destdir}}/etc/clang/oldglibc.cfg
-      -I/usr/lib/oldglibc/usr/include
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}/backward
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/backward
       -L/usr/lib/oldglibc/usr/lib
       -ldl -lutil -lanl
       -Wl,--allow-shlib-undefined
@@ -238,6 +237,14 @@ pipeline:
       # override gcc-wrapper to statically link libgcc and libstdc++ which are of higher ABI than allowed by manylinux 2.28
       mkdir -p ${{targets.destdir}}/usr/local/bin/
       cp gcc-wrapper ${{targets.destdir}}/usr/local/bin/
+
+      # add a clang-wrapper for things we can't do via config files
+      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/bin
+      cp clang-wrapper ${{targets.destdir}}/usr/lib/oldglibc/bin
+      ln -s ../../lib/oldglibc/bin/clang-wrapper \
+        ${{targets.destdir}}/usr/local/bin/clang
+      ln -s ../../lib/oldglibc/bin/clang-wrapper \
+        ${{targets.destdir}}/usr/local/bin/clang++
 
 test:
   environment:
@@ -251,6 +258,7 @@ test:
         - aom
         - aom-dev
         - aom-libs
+        - clang
         - dav1d-dev
         - expat-dev
         - fontconfig-dev
@@ -279,6 +287,70 @@ test:
         - yasm
         - zeromq-dev
   pipeline:
+    - uses: test/compiler/smoke
+      with:
+        cc: gcc
+        cxx: g++
+    - uses: test/compiler/smoke
+      with:
+        cc: clang
+        cxx: clang++
+    - uses: test/compiler/hardening-check
+      with:
+        cc: clang
+    - uses: test/compiler/hardening-check
+      with:
+        cc: gcc
+    - name: oldglibc headers should win
+      runs: |
+        stdio="/usr/lib/oldglibc/usr/include/stdio.h"
+        tmpdir="$(mktemp -d)"
+        cd "$tmpdir"
+        trap "rm -rf $tmpdir; mv ${stdio}.bak ${stdio}" EXIT
+        cp "${stdio}" "${stdio}.bak"
+        echo "#error oldglibc headers did win (not really an error)" > "${stdio}"
+        cat > smoke.c <<EOF
+        #include <stdio.h>
+        int main() { printf("OK"); }
+        EOF
+        gcc smoke.c -o smoke 2>&1 | grep "oldglibc headers did win"
+        clang smoke.c -o smoke 2>&1 | grep "oldglibc headers did win"
+    - name: system glibc headers should be ignored
+      runs: |
+        stdio="/usr/include/stdio.h"
+        tmpdir="$(mktemp -d)"
+        cd "$tmpdir"
+        trap "rm -rf $tmpdir; mv ${stdio}.bak ${stdio}" EXIT
+        cp "${stdio}" "${stdio}.bak"
+        echo "#error this file should not be in your include path" > "${stdio}"
+        cat > smoke.c <<EOF
+        #include <stdio.h>
+        int main() { printf("OK"); }
+        EOF
+        gcc smoke.c -o smoke
+        ./smoke
+        clang smoke.c -o smoke
+        ./smoke
+    - name: C++ headers before C headers
+      runs: |
+        chdr="/usr/lib/oldglibc/usr/include/stdlib.h"
+        cxxhdr="/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/stdlib.h"
+
+        tmpdir="$(mktemp -d)"
+        cd "$tmpdir"
+
+        cp "${chdr}" "${chdr}.bak"
+        cp "${cxxhdr}" "${cxxhdr}.bak"
+        trap "rm -rf $tmpdir; mv ${chdr}.bak ${chdr}; mv ${cxxhdr}.bak ${cxxhdr}" EXIT
+        echo "#warning CHDR-MARKER" > "${chdr}"
+        echo "#warning CXXHDR-MARKER" > "${cxxhdr}"
+        cat > smoke.cpp <<EOF
+        #include <stdlib.h>
+        int main() { }
+        EOF
+        for cxx in g++ clang++; do
+          $cxx smoke.cpp -o smoke 2>&1 | grep MARKER | head -1 | grep CXXHDR-MARKER
+        done
     - uses: git-checkout
       with:
         destination: openssl
