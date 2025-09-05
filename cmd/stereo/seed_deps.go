@@ -137,7 +137,7 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 		for _, repoURL := range buildRepos {
 			var index *apk.APKIndex
 			var err error
-			
+
 			if useWithdrawn {
 				// Load from local file
 				indexPath := filepath.Join(repoURL, arch, "APKINDEX.tar.gz")

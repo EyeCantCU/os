@@ -372,6 +372,6 @@ func loadLocalAPKIndex(indexPath string) (*apk.APKIndex, error) {
 		return nil, fmt.Errorf("opening local APKINDEX file %s: %w", indexPath, err)
 	}
 	defer file.Close()
-	
+
 	return apk.IndexFromArchive(file)
 }
