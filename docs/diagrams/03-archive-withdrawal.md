@@ -17,6 +17,7 @@ digraph archive_withdrawal {
         I2 [label="resolved/images/{arch}/\nImage dependencies", shape=folder, fillcolor="#f1f8e9"];
         I3 [label="resolved/vms/{arch}/\nVM dependencies", shape=folder, fillcolor="#fff8e1"];
         I4 [label="resolved/seeds/{arch}/\nSeed dependencies\n(optional)", shape=folder, fillcolor="#fce4ec"];
+        I5 [label="resolved/version-streams/{arch}/\nVersion stream dependencies\n(optional)", shape=folder, fillcolor="#e8f5e8"];
     }
 
     // Archive Analysis cluster
@@ -35,7 +36,7 @@ digraph archive_withdrawal {
         AA3A [label="No reverse dependencies\non ANY architecture", fillcolor="#fce4ec"];
         AA3B [label="Not in active builds\non ANY architecture", fillcolor="#fce4ec"];
         AA3C [label="Not most recent version\nif still built", fillcolor="#fce4ec"];
-        AA3D [label="Not in images/VMs\non ANY architecture", fillcolor="#fce4ec"];
+        AA3D [label="Not in images/VMs/seeds/version-streams\non ANY architecture", fillcolor="#fce4ec"];
 
         AA -> AA1;
         AA1 -> AA2;
@@ -73,21 +74,18 @@ digraph archive_withdrawal {
         WP6 [label="Save to Output Directory\nwithdrawn-indexes/", fillcolor="#f3e5f5"];
 
         // Download sources
-        WP2A [label="packages.wolfi.dev/os\nx86_64/APKINDEX.tar.gz", shape=ellipse, fillcolor="#e8f5e8"];
-        WP2B [label="packages.wolfi.dev/os\naarch64/APKINDEX.tar.gz", shape=ellipse, fillcolor="#e8f5e8"];
-        WP2C [label="packages.cgr.dev/extras\n{arch}/APKINDEX.tar.gz", shape=ellipse, fillcolor="#e8f5e8"];
-        WP2D [label="apk.cgr.dev/chainguard-private\n{arch}/APKINDEX.tar.gz", shape=ellipse, fillcolor="#e8f5e8"];
+        WP2A [label="packages.wolfi.dev/os\n{arch}/APKINDEX.tar.gz", shape=ellipse, fillcolor="#e8f5e8"];
+        WP2B [label="packages.cgr.dev/extras\n{arch}/APKINDEX.tar.gz", shape=ellipse, fillcolor="#e8f5e8"];
+        WP2C [label="apk.cgr.dev/chainguard-private\n{arch}/APKINDEX.tar.gz", shape=ellipse, fillcolor="#e8f5e8"];
 
         WP -> WP1 -> WP2;
         WP1 -> WP3;
         WP2 -> WP2A;
         WP2 -> WP2B;
         WP2 -> WP2C;
-        WP2 -> WP2D;
         WP2A -> WP4;
         WP2B -> WP4;
         WP2C -> WP4;
-        WP2D -> WP4;
         WP3 -> WP4;
         WP4 -> WP5 -> WP6;
     }
@@ -99,9 +97,9 @@ digraph archive_withdrawal {
         fillcolor="#e1bee7";
 
         WOS [label="withdrawn-indexes/\nModified APKINDEX files", fillcolor="#e1bee7"];
-        WOS1 [label="os/\n├── x86_64/APKINDEX.tar.gz\n└── aarch64/APKINDEX.tar.gz", shape=folder, fillcolor="#f0f0f0"];
-        WOS2 [label="extra-packages/\n├── x86_64/APKINDEX.tar.gz\n└── aarch64/APKINDEX.tar.gz", shape=folder, fillcolor="#f0f0f0"];
-        WOS3 [label="enterprise-packages/\n├── x86_64/APKINDEX.tar.gz\n└── aarch64/APKINDEX.tar.gz", shape=folder, fillcolor="#f0f0f0"];
+        WOS1 [label="os/\n{arch}/APKINDEX.tar.gz", shape=folder, fillcolor="#f0f0f0"];
+        WOS2 [label="extra-packages/\n{arch}/APKINDEX.tar.gz", shape=folder, fillcolor="#f0f0f0"];
+        WOS3 [label="enterprise-packages/\n{arch}/APKINDEX.tar.gz", shape=folder, fillcolor="#f0f0f0"];
 
         WOS -> WOS1;
         WOS -> WOS2;
@@ -113,6 +111,7 @@ digraph archive_withdrawal {
     I2 -> AA [ltail=cluster_input, lhead=cluster_analysis];
     I3 -> AA [ltail=cluster_input, lhead=cluster_analysis];
     I4 -> AA [ltail=cluster_input, lhead=cluster_analysis];
+    I5 -> AA [ltail=cluster_input, lhead=cluster_analysis];
 
     AA4 -> AO1 [ltail=cluster_analysis, lhead=cluster_outputs];
     AA4 -> AO2 [ltail=cluster_analysis, lhead=cluster_outputs];
@@ -131,6 +130,6 @@ digraph archive_withdrawal {
 | No reverse deps | **ALL** architectures | ✅ Safe to remove |
 | Not in active builds | **ALL** architectures | ✅ Won't break builds |
 | Not most recent version | If still built | ✅ Keep latest only |
-| Not in images/VMs | **ALL** architectures | ✅ Won't break deployments |
+| Not in images/VMs/seeds/version-streams | **ALL** architectures | ✅ Won't break deployments |
 
 **Key Safety Feature:** Packages only archived if criteria met across **ALL** supported architectures
