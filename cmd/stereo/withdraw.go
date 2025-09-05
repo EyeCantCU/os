@@ -11,16 +11,14 @@ import (
 	"strings"
 
 	"chainguard.dev/apko/pkg/apk/apk"
-	"chainguard.dev/melange/pkg/sign"
 	"github.com/spf13/cobra"
 	"golang.org/x/exp/slices"
 )
 
 func withdrawCmd() *cobra.Command {
 	var (
-		arch       string
-		outDir     string
-		signingKey string
+		arch   string
+		outDir string
 	)
 
 	cmd := &cobra.Command{
@@ -38,18 +36,17 @@ When no --arch is specified, packages are withdrawn from both x86_64 and aarch64
 			} else {
 				architectures = []string{"x86_64", "aarch64"}
 			}
-			return withdraw(cmd.Context(), architectures, outDir, signingKey)
+			return withdraw(cmd.Context(), architectures, outDir)
 		},
 	}
 
 	cmd.Flags().StringVar(&arch, "arch", "", "Architecture to process (default: both x86_64 and aarch64)")
 	cmd.Flags().StringVar(&outDir, "output-dir", "withdrawn-indexes", "Output directory for modified APKINDEX files")
-	cmd.Flags().StringVar(&signingKey, "signing-key", "melange.rsa", "The signing key to use for signing the modified APKINDEX")
 
 	return cmd
 }
 
-func withdraw(ctx context.Context, architectures []string, outDir, signingKey string) error {
+func withdraw(ctx context.Context, architectures []string, outDir string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -124,7 +121,7 @@ func withdraw(ctx context.Context, architectures []string, outDir, signingKey st
 
 			// Save modified index to disk
 			outputFile := filepath.Join(repoDir, "APKINDEX.tar.gz")
-			if err := saveAPKIndex(ctx, index, outputFile, signingKey); err != nil {
+			if err := saveAPKIndex(index, outputFile); err != nil {
 				return fmt.Errorf("saving modified APKINDEX for %s/%s: %w", repo, arch, err)
 			}
 
@@ -161,7 +158,7 @@ func loadWithdrawnPackages(filename string) (map[string]bool, error) {
 	return withdrawnPackages, nil
 }
 
-func saveAPKIndex(ctx context.Context, index *apk.APKIndex, outputFile, signingKey string) error {
+func saveAPKIndex(index *apk.APKIndex, outputFile string) error {
 	log.Printf("Saving APKINDEX with %d packages to %s", len(index.Packages), outputFile)
 
 	// Create archive from index
@@ -170,58 +167,19 @@ func saveAPKIndex(ctx context.Context, index *apk.APKIndex, outputFile, signingK
 		return fmt.Errorf("creating archive from index: %w", err)
 	}
 
-	// Create temporary file for signing (no extension like wolfictl)
-	tmp, err := os.CreateTemp("", "stereo-withdraw")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	defer os.Remove(tmp.Name()) // Clean up temp file
-
-	// Write archive to temp file
-	bytesWritten, err := io.Copy(tmp, archive)
-	if err != nil {
-		return fmt.Errorf("writing temp file: %w", err)
-	}
-	log.Printf("Wrote %d bytes to temp file %s", bytesWritten, tmp.Name())
-
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-
-	// Sign the index
-	log.Printf("Signing index with key %s", signingKey)
-	if err := sign.SignIndex(ctx, signingKey, tmp.Name()); err != nil {
-		return fmt.Errorf("signing index: %w", err)
-	}
-
-	// Open the signed file
-	signed, err := os.Open(tmp.Name())
-	if err != nil {
-		return fmt.Errorf("opening signed temp file %s: %w", tmp.Name(), err)
-	}
-	defer signed.Close()
-
-	// Get signed file size for debugging
-	signedInfo, err := signed.Stat()
-	if err != nil {
-		log.Printf("Warning: could not stat signed file: %v", err)
-	} else {
-		log.Printf("Signed file size: %d bytes", signedInfo.Size())
-	}
-
-	// Create final output file
+	// Create output file
 	outputFileHandle, err := os.Create(outputFile)
 	if err != nil {
 		return fmt.Errorf("creating output file %s: %w", outputFile, err)
 	}
 	defer outputFileHandle.Close()
 
-	// Copy signed archive to final output
-	finalBytesWritten, err := io.Copy(outputFileHandle, signed)
+	// Copy archive directly to output
+	bytesWritten, err := io.Copy(outputFileHandle, archive)
 	if err != nil {
-		return fmt.Errorf("writing signed archive to %s: %w", outputFile, err)
+		return fmt.Errorf("writing archive to %s: %w", outputFile, err)
 	}
-	log.Printf("Wrote %d bytes to final output file %s", finalBytesWritten, outputFile)
+	log.Printf("Wrote %d bytes to %s", bytesWritten, outputFile)
 
 	return nil
 }
