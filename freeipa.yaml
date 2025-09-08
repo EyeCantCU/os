@@ -1,0 +1,383 @@
+package:
+  name: freeipa
+  version: 4.12.4
+  epoch: 0
+  description: IPA is an integrated solution to provide centrally managed Identity, Authentication, and Authorization
+  copyright:
+    - license: GPL-3.0-or-later
+  dependencies:
+    runtime:
+      - py${{vars.py-version}}-dogtag-pki
+      - py${{vars.py-version}}-ifaddr
+      - py${{vars.py-version}}-ifaddr
+      - py${{vars.py-version}}-ipaclient
+      - py${{vars.py-version}}-ipalib
+      - py${{vars.py-version}}-ipaplatform
+      - py${{vars.py-version}}-ipapython
+      - py${{vars.py-version}}-ipaserver
+      - py${{vars.py-version}}-ipatests
+      - py${{vars.py-version}}-jinja2
+      - py${{vars.py-version}}-lib389
+      - py${{vars.py-version}}-pexpect
+      - py${{vars.py-version}}-pytest
+      - py${{vars.py-version}}-pytest-multihost
+      - py${{vars.py-version}}-samba
+      - systemd
+
+vars:
+  py-version: 3.13
+
+environment:
+  contents:
+    packages:
+      - 389-ds-base-dev
+      - bash
+      - build-base
+      - busybox
+      - coreutils
+      - curl-dev
+      - ding-libs-dev
+      - gettext-dev
+      - jansson-dev
+      - krb5-dev
+      - libnspr-dev
+      - libpwquality-dev
+      - libtool
+      - libunistring-dev
+      - nodejs
+      - openldap-dev
+      - openssl-dev
+      - pkgconf-dev
+      - popt-dev
+      - py${{vars.py-version}}-build-base-dev
+      - py${{vars.py-version}}-lesscpy
+      - py${{vars.py-version}}-rjsmin
+      - samba-dev
+      - sssd-dev
+      - systemd-dev
+      - talloc-dev
+      - tevent-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: \.
+    replace: "-"
+    to: mangled-package-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://pagure.io/freeipa.git
+      tag: release-${{vars.mangled-package-version}}
+      expected-commit: a1ec8df7427a30affa9522ae4f10e49ba43e9062
+
+  # Our `py3-setuptools` package seems to include `[post(date)]` to the end of the setuptools version array
+  # Which is unexpected by a build script
+  - uses: patch
+    with:
+      patches: |
+        freeipa-correct-setuptools-version.patch
+
+  # Using krb5 versions that have the `-final` suffix is not expected by freeIPA
+  - uses: patch
+    with:
+      patches: freeipa-krb5-no-suffix.patch
+
+  # FreeIPA doesnt directly support wolfi, we need this so that it works fine
+  # TODO: Add support upstream (this is non-trivial.)
+  - uses: patch
+    with:
+      patches: freeipa-platform-fedora.patch
+
+  # Required for python-cryptography 44.0+ support on FreeIPA
+  - uses: patch
+    with:
+      patches: freeipa-pyCA44.patch freeipa-pyCA44-2.patch
+
+  # Need this so it will recognize wolfi from `/etc/os-release` to be a valid platform
+  - working-directory: ipaplatform
+    runs: |
+      ln -s ./fedora ./wolfi
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --sbindir=/usr/bin \
+        --with-vendor-suffix=-${{package.epoch}} \
+        --enable-server \
+        --enable-client
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+update:
+  enabled: true
+  git:
+    strip-prefix: release-
+
+subpackages:
+  - name: ${{package.name}}-doc
+    description: ${{package.name}} documentation and manpages
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - name: py${{vars.py-version}}-ipatests
+    description: ${{package.name}} python subpackage ipatests
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-cryptography
+        - py${{vars.py-version}}-dnspython
+        - py${{vars.py-version}}-gssapi
+        - py${{vars.py-version}}-ipaclient
+        - py${{vars.py-version}}-ipalib
+        - py${{vars.py-version}}-ipaplatform
+        - py${{vars.py-version}}-ipapython
+        - py${{vars.py-version}}-pexpect
+        - py${{vars.py-version}}-polib
+        - py${{vars.py-version}}-pytest
+        - py${{vars.py-version}}-pytest-multihost
+        - py${{vars.py-version}}-ldap
+        - py${{vars.py-version}}-six
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+          mv ${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/ipatests* ${{targets.contextdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.py-version}}
+      pipeline:
+        # Not importable, so no import test here, its supposed to be used ipa-run-tests
+        - uses: test/tw/pip-check
+          with:
+            python: python${{vars.py-version}}
+
+  - name: py${{vars.py-version}}-ipaserver
+    description: ${{package.name}} python subpackage ipaserver
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-cryptography
+        - py${{vars.py-version}}-dbus-python
+        - py${{vars.py-version}}-dnspython
+        - py${{vars.py-version}}-ipaclient
+        - py${{vars.py-version}}-ipalib
+        - py${{vars.py-version}}-ipaplatform
+        - py${{vars.py-version}}-ipapython
+        - py${{vars.py-version}}-jwcrypto
+        - py${{vars.py-version}}-typing-extensions
+        - py${{vars.py-version}}-lxml
+        - py${{vars.py-version}}-netaddr
+        - py${{vars.py-version}}-psutil
+        - py${{vars.py-version}}-pyasn1
+        - py${{vars.py-version}}-augeas
+        - py${{vars.py-version}}-ldap
+        - py${{vars.py-version}}-requests
+        - py${{vars.py-version}}-six
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/python${{vars.py-version}}
+          mv ${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/ipaserver* ${{targets.contextdir}}/usr/lib/python${{vars.py-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.py-version}}
+      pipeline:
+        - uses: test/tw/pip-check
+          with:
+            python: python${{vars.py-version}}
+        - uses: python/import
+          with:
+            python: python${{vars.py-version}}
+            import: ipaserver
+
+  - name: py${{vars.py-version}}-ipaplatform
+    description: ${{package.name}} python subpackage ipaplatform
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-cffi
+        - py${{vars.py-version}}-ipapython
+        - py${{vars.py-version}}-pyasn1
+        - py${{vars.py-version}}-six
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+          mv ${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/ipaplatform* ${{targets.contextdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.py-version}}
+      pipeline:
+        - uses: test/tw/pip-check
+          with:
+            python: python${{vars.py-version}}
+        - uses: python/import
+          with:
+            python: python${{vars.py-version}}
+            import: ipaplatform
+
+  - name: py${{vars.py-version}}-ipalib
+    description: ${{package.name}} python subpackage ipalib
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-setuptools
+        - py${{vars.py-version}}-ldap
+        - py${{vars.py-version}}-ipaplatform
+        - py${{vars.py-version}}-ipapython
+        - py${{vars.py-version}}-netaddr
+        - py${{vars.py-version}}-pyasn1
+        - py${{vars.py-version}}-pyasn1-modules
+        - py${{vars.py-version}}-six
+        - py${{vars.py-version}}-urllib3
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/python${{vars.py-version}}/site-packages
+          mv ${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/ipalib* ${{targets.contextdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.py-version}}
+      pipeline:
+        - uses: test/tw/pip-check
+          with:
+            python: python${{vars.py-version}}
+        - uses: python/import
+          with:
+            python: python${{vars.py-version}}
+            import: ipalib
+
+  - name: py${{vars.py-version}}-ipapython
+    description: ${{package.name}} python subpackage ipapython
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-cffi
+        - py${{vars.py-version}}-cryptography
+        - py${{vars.py-version}}-dnspython
+        - py${{vars.py-version}}-gssapi
+        - py${{vars.py-version}}-ipaplatform
+        - py${{vars.py-version}}-netaddr
+        - py${{vars.py-version}}-six
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+          mv ${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/ipapython* ${{targets.contextdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.py-version}}
+      pipeline:
+        - uses: test/tw/pip-check
+          with:
+            python: python${{vars.py-version}}
+        - uses: python/import
+          with:
+            python: python${{vars.py-version}}
+            import: ipapython
+
+  - name: py${{vars.py-version}}-ipaclient
+    description: ${{package.name}} python subpackage ipaclient
+    dependencies:
+      runtime:
+        - py${{vars.py-version}}-cryptography
+        - py${{vars.py-version}}-ipalib
+        - py${{vars.py-version}}-ipapython
+        - py${{vars.py-version}}-qrcode
+        - py${{vars.py-version}}-six
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+          mv ${{targets.destdir}}/usr/lib/python${{vars.py-version}}/site-packages/ipaclient* ${{targets.contextdir}}/usr/lib/python${{vars.py-version}}/site-packages/
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.py-version}}
+      pipeline:
+        - uses: test/tw/pip-check
+          with:
+            python: python${{vars.py-version}}
+        - uses: python/import
+          with:
+            python: python${{vars.py-version}}
+            import: ipaclient
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Fail expected
+      runs: |
+        # Every single one of these is expected to fail as we cannot run `ipa-client-install`
+        # because it requires a system booted with systemd so it can run `systemctl` to query
+        # information.
+        # The expected failure must not be a "missing python module" one, instead, something
+        # complaining about not being able to run due to FreeIPA client/server not running
+
+        check_compliant() {
+          COMMAND="${1}"
+          shift
+
+          OUTPUT_TEST="$(mktemp)"
+          { "${COMMAND}" --help || true ; } 2>&1 | tee "${OUTPUT_TEST}"
+          if grep -F -e "No module named" "${OUTPUT_TEST}" ; then
+            echo "Failed test due to module not being found"
+            rm -f "${OUTPUT_TEST}"
+            exit 1
+          fi
+          if grep -F -e "IPA is not configured on this system" ; then
+            echo "$COMMAND: expected failure"
+          fi
+          rm -f "${OUTPUT_TEST}"
+        }
+
+        for COMMAND in \
+            ipa-acme-manage \
+            ipa-adtrust-install \
+            ipa-advise \
+            ipa-backup \
+            ipa-ca-install \
+            ipa-cacert-manage \
+            ipa-cert-fix \
+            ipa-certupdate \
+            ipa-client-automount \
+            ipa-client-install \
+            ipa-client-samba \
+            ipa-compat-manage \
+            ipa-crlgen-manage \
+            ipa-csreplica-manage \
+            ipa-dns-install \
+            ipa-epn \
+            ipa-getkeytab \
+            ipa-join \
+            ipa-kra-install \
+            ipa-ldap-updater \
+            ipa-managed-entries \
+            ipa-migrate \
+            ipa-nis-manage \
+            ipa-otptoken-import \
+            ipa-pkinit-manage \
+            ipa-replica-conncheck \
+            ipa-replica-install \
+            ipa-replica-manage \
+            ipa-restore \
+            ipa-rmkeytab \
+            ipa-run-tests \
+            ipa-server-certinstall \
+            ipa-server-install \
+            ipa-server-upgrade \
+            ipa-test-config \
+            ipa-test-task \
+            ipa-winsync-migrate \
+            ipa \
+            ipactl ; do
+            check_compliant "${COMMAND}"
+          done
