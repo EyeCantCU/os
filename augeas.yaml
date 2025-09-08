@@ -1,0 +1,100 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: augeas
+  version: 1.14.1
+  epoch: 0
+  description: Library for changing configuration files
+  copyright:
+    - license: LGPL-2.0-or-later
+
+environment:
+  contents:
+    packages:
+      - bison
+      - build-base
+      - busybox
+      - flex-dev
+      - libtool
+      - libxml2-dev
+      - pkgconf-dev
+      - python3
+      - readline-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/hercules-team/augeas.git
+      tag: release-${{package.version}}
+      expected-commit: b993ce902243a6d7b607c3895b4f67789d69e245
+
+  - uses: git-checkout
+    with:
+      # "Gnulib does not make releases. It is intended to be used at the source level."
+      repository: https://https.git.savannah.gnu.org/git/gnulib.git
+      branch: master
+      expected-commit: f05b5a23f6cef8833402a298d1576a0118912ac8
+      destination: .gnulib
+
+  - runs: |
+      # Copied from upstream ./bootstrap:
+      modules='argz fnmatch getline getopt-gnu gitlog-to-changelog
+      canonicalize-lgpl isblank locale mkstemp regex safe-alloc selinux-h
+      stpcpy stpncpy strchrnul strndup sys_wait vasprintf'
+      .gnulib/gnulib-tool             \
+        --lgpl=2                      \
+        --with-tests                  \
+        --m4-base=gnulib/m4           \
+        --source-base=gnulib/lib      \
+        --tests-base=gnulib/tests     \
+        --aux-dir=build/ac-aux        \
+        --libtool                     \
+        --quiet                       \
+        --import $modules
+
+  - uses: autoconf/configure
+    with:
+      opts: --enable-static
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+update:
+  enabled: true
+  git:
+    strip-prefix: release-
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Smoke tests
+      runs: |
+        set -o pipefail
+        augmatch --help 2>&1 | grep -F -e "Print the contents of a file as parsed by augeas."
+        { augparse --help 2>&1 || true ; } | grep -F -e "Usage: augparse [OPTIONS] MODULE"
+        augprint --help | grep -F -e "augprint [--target=realname]"
+        augtool help | grep -F -e "Admin commands:"
+        { fadot -h 2>&1 || true ; }| grep -F -e "Usage: fadot [OPTIONS] REGEXP"
+    - name: Functionality checks
+      runs: |
+        set -o pipefail
+        augmatch /etc/hosts | grep -E -e "[0-9]\/ipaddr\ \= 127.0.0.1"
+        augparse --trace $(find /usr/share/augeas/lenses/dist -type f -maxdepth 1 | tail -n 1) | grep -E -e "^Module.*loaded$"
+        augprint /etc/hosts | grep -E -e "set /files/.*\:\:\*\[ipaddr\="
+        augtool <<'EOF' | grep -F -e "/files/etc/hosts/seq (o)"
+        set /files/etc/hosts/seq::*[ipaddr='127.0.0.1' and canonical='localhost']/ipaddr '127.0.0.1'
+        get /files/etc/hosts/seq
+        EOF
+        fadot '[0-9]*' '.*[0-9]' -o concat | grep -F -e '[^\n0-9]*[0-9]([^\n0-9][^\n0-9]*[0-9]|[0-9])*'
