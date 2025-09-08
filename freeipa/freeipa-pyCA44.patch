@@ -1,0 +1,164 @@
+From d4d56a6705c870901bc73882e4804367f7c9c91a Mon Sep 17 00:00:00 2001
+From: Alexander Bokovoy <abokovoy@redhat.com>
+Date: Sun, 1 Dec 2024 20:16:54 +0200
+Subject: [PATCH] ipalib/x509: support PyCA 44.0
+
+PyCA made x509.Certificate class concrete, it cannot be extended anymore
+by Python code. The intent is to use helper functions to instantiate
+certificate objects and never create them directly.
+
+FreeIPA wraps PyCA's x509.Certificate class and provides own shim
+on top of it. In most cases we load the certificate content via the
+helper functions and don't really need to derive from the certificate
+class.
+
+Move IPACertificate to be a normal Python object class that stores
+x509.Certificate internally. The only place where this breaks is when
+IPACertificate object needs to be passed to a code that expects
+x509.Certificate (Dogtag PKI). In such cases, expose the underlying
+certificate instance via IPACertificate.cert property.
+
+Fixes: https://pagure.io/freeipa/issue/9708
+
+Signed-off-by: Alexander Bokovoy <abokovoy@redhat.com>
+Reviewed-By: Florence Blanc-Renaud <flo@redhat.com>
+---
+ ipalib/ipajson.py           |  4 ++--
+ ipalib/x509.py              | 10 +++++++++-
+ ipapython/ipaldap.py        | 15 +++++++--------
+ ipaserver/plugins/dogtag.py |  3 ++-
+ 4 files changed, 20 insertions(+), 12 deletions(-)
+
+diff --git a/ipalib/ipajson.py b/ipalib/ipajson.py
+index 5551d12e5fe..fd99c8219c7 100644
+--- a/ipalib/ipajson.py
++++ b/ipalib/ipajson.py
+@@ -9,7 +9,7 @@
+ import json
+ import six
+ from ipalib.constants import LDAP_GENERALIZED_TIME_FORMAT
+-from ipalib import capabilities
++from ipalib import capabilities, x509
+ from ipalib.x509 import Encoding as x509_Encoding
+ from ipapython.dn import DN
+ from ipapython.dnsutil import DNSName
+@@ -72,7 +72,7 @@ def __init__(self, version, _identity=_identity):
+             list: self._enc_list,
+             tuple: self._enc_list,
+             dict: self._enc_dict,
+-            crypto_x509.Certificate: self._enc_certificate,
++            x509.IPACertificate: self._enc_certificate,
+             crypto_x509.CertificateSigningRequest: self._enc_certificate,
+         })
+ 
+diff --git a/ipalib/x509.py b/ipalib/x509.py
+index fd08238962b..6780bead00b 100644
+--- a/ipalib/x509.py
++++ b/ipalib/x509.py
+@@ -88,7 +88,7 @@
+ SAN_KRB5PRINCIPALNAME = '1.3.6.1.5.2.2'
+ 
+ 
+-class IPACertificate(crypto_x509.Certificate):
++class IPACertificate:
+     """
+     A proxy class wrapping a python-cryptography certificate representation for
+     IPA purposes
+@@ -205,6 +205,10 @@ def fingerprint(self, algorithm):
+         """
+         return self._cert.fingerprint(algorithm)
+ 
++    @property
++    def cert(self):
++        return self._cert
++
+     @property
+     def serial_number(self):
+         return self._cert.serial_number
+@@ -457,6 +461,8 @@ def load_pem_x509_certificate(data):
+     :returns: a ``IPACertificate`` object.
+     :raises: ``ValueError`` if unable to load the certificate.
+     """
++    if isinstance(data, IPACertificate):
++        return data
+     return IPACertificate(
+         crypto_x509.load_pem_x509_certificate(data, backend=default_backend())
+     )
+@@ -469,6 +475,8 @@ def load_der_x509_certificate(data):
+     :returns: a ``IPACertificate`` object.
+     :raises: ``ValueError`` if unable to load the certificate.
+     """
++    if isinstance(data, IPACertificate):
++        return data
+     return IPACertificate(
+         crypto_x509.load_der_x509_certificate(data, backend=default_backend())
+     )
+diff --git a/ipapython/ipaldap.py b/ipapython/ipaldap.py
+index 1888e40916a..5bb81c1bc84 100644
+--- a/ipapython/ipaldap.py
++++ b/ipapython/ipaldap.py
+@@ -33,7 +33,6 @@
+ 
+ from collections import OrderedDict
+ 
+-from cryptography import x509 as crypto_x509
+ from cryptography.hazmat.primitives import serialization
+ 
+ import ldap
+@@ -748,10 +747,10 @@ class LDAPClient:
+         'dnszoneidnsname': DNSName,
+         'krbcanonicalname': Principal,
+         'krbprincipalname': Principal,
+-        'usercertificate': crypto_x509.Certificate,
+-        'usercertificate;binary': crypto_x509.Certificate,
+-        'cACertificate': crypto_x509.Certificate,
+-        'cACertificate;binary': crypto_x509.Certificate,
++        'usercertificate': x509.IPACertificate,
++        'usercertificate;binary': x509.IPACertificate,
++        'cACertificate': x509.IPACertificate,
++        'cACertificate;binary': x509.IPACertificate,
+         'nsds5replicalastupdatestart': unicode,
+         'nsds5replicalastupdateend': unicode,
+         'nsds5replicalastinitstart': unicode,
+@@ -1000,7 +999,7 @@ def encode(self, val):
+             return dct
+         elif isinstance(val, datetime):
+             return val.strftime(LDAP_GENERALIZED_TIME_FORMAT).encode('utf-8')
+-        elif isinstance(val, crypto_x509.Certificate):
++        elif isinstance(val, x509.IPACertificate):
+             return val.public_bytes(x509.Encoding.DER)
+         elif val is None:
+             return None
+@@ -1027,7 +1026,7 @@ def decode(self, val, attr):
+                     return DNSName.from_text(val.decode('utf-8'))
+                 elif target_type in (DN, Principal):
+                     return target_type(val.decode('utf-8'))
+-                elif target_type is crypto_x509.Certificate:
++                elif target_type is x509.IPACertificate:
+                     return x509.load_der_x509_certificate(val)
+                 else:
+                     return target_type(val)
+@@ -1381,7 +1380,7 @@ def make_filter_from_attr(
+             ]
+             return cls.combine_filters(flts, rules)
+         elif value is not None:
+-            if isinstance(value, crypto_x509.Certificate):
++            if isinstance(value, x509.IPACertificate):
+                 value = value.public_bytes(serialization.Encoding.DER)
+             if isinstance(value, bytes):
+                 value = binascii.hexlify(value).decode('ascii')
+diff --git a/ipaserver/plugins/dogtag.py b/ipaserver/plugins/dogtag.py
+index 78afb279795..ee6d0e347d6 100644
+--- a/ipaserver/plugins/dogtag.py
++++ b/ipaserver/plugins/dogtag.py
+@@ -1581,7 +1581,8 @@ def get_client(self):
+ 
+         crypto = cryptoutil.CryptographyCryptoProvider(
+             transport_cert_nick="ra_agent",
+-            transport_cert=x509.load_certificate_from_file(paths.RA_AGENT_PEM)
++            transport_cert=x509.load_certificate_from_file(
++                paths.RA_AGENT_PEM).cert
+         )
+ 
+         # TODO: obtain KRA host & port from IPA service list or point to KRA load balancer
+
