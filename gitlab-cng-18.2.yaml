@@ -5,16 +5,22 @@
 vars:
   # Container registry tags: https://gitlab.com/gitlab-org/container-registry/-/tags
   registry-commit: 8497f0c60508712bc3756d6b124d15ceb6fc64cd
-  registry-tag: 4.24.0
+  registry-tag: 'v4.24.0-gitlab'
   # Exporter tags: https://gitlab.com/gitlab-org/ruby/gems/gitlab-exporter/-/tags
   exporter-commit: 5ad17ca3018ad4551b2e33f6a67c33ac934efd39
-  exporter-tag: 15.6.0
+  exporter-tag: '15.6.0'
   # Logger tags: https://gitlab.com/gitlab-org/cloud-native/gitlab-logger/-/tags
   logger-commit: 61e76054e898803f7c2408e7e54dfba96a5085fc
-  logger-tag: 3.0.0
+  logger-tag: 'v3.0.0'
   # Shell tags: https://gitlab.com/gitlab-org/gitlab-shell/-/tags
   shell-commit: 5c26a58406996e5ee8e1922b9dfb580eb3a6b99b
-  shell-tag: 14.44.0
+  shell-tag: 'v14.44.0'
+  # Runtime versions
+  postgres-version: '17'
+  python-version: '3.9'
+  ruby-version: '3.2'
+  # GitLab directories
+  gitlab-home: /srv/gitlab
 
 var-transforms:
   - from: ${{package.version}}
@@ -26,17 +32,17 @@ package:
   name: gitlab-cng-18.2
   # ---Additional updates required--- Review 'vars' section (above), when reviewing version bumps.
   version: "18.2.5"
-  epoch: 0 # GHSA-2464-8j7c-4cjm
+  epoch: 41
   description: Cloud Native container images per component of GitLab
   copyright:
     - license: MIT
+  resources:
+    cpu: 16
+    memory: 24Gi
   dependencies:
     provides:
       - gitlab-cng=${{package.full-version}}
       - gitlab=${{package.full-version}}
-    runtime:
-      - merged-bin
-      - wolfi-baselayout
 
 environment:
   contents:
@@ -45,14 +51,16 @@ environment:
       - build-base
       - busybox
       - ca-certificates
-      - ca-certificates-bundle
+      - gawk
       - heimdal-dev
       - icu-dev
-      - libpq
-      - postgresql-dev
-      - ruby-3.2
-      - ruby-3.2-dev
-      - ruby3.2-bundler
+      - libpq-${{vars.postgres-version}}
+      - postgresql-${{vars.postgres-version}}-dev
+      - py${{vars.python-version}}-pip
+      - ruby${{vars.ruby-version}}-bundler
+      - ruby-${{vars.ruby-version}}
+      - ruby-${{vars.ruby-version}}-dev
+      - yq
       - zlib-dev
 
 pipeline:
@@ -64,10 +72,16 @@ pipeline:
 
   - name: Verify all the vars tags are up to date with the upstream
     runs: |
-      REGISTRY_TAG=$(sed -n 's/.*GITLAB_CONTAINER_REGISTRY_VERSION: *v\([^"]*\).*/\1/p' ./ci_files/variables.yml | sed 's/-gitlab//')
-      EXPORTER_TAG=$(sed -n 's/.*GITLAB_EXPORTER_VERSION: *\([^"]*\).*/\1/p' ./ci_files/variables.yml)
-      LOGGER_TAG=$(sed -n 's/.*GITLAB_LOGGER_VERSION: *v\([^"]*\).*/\1/p' ./ci_files/variables.yml)
-      SHELL_TAG=$(sed -n 's/.*GITLAB_SHELL_VERSION: *v\([^"]*\).*/\1/p' ./ci_files/variables.yml)
+      # Runtime versions
+      POSTGRES_VERSION=$(yq -r '.variables.PG_VERSION' ./ci_files/variables.yml | awk -F '.' '{print $1}')
+      PYTHON_VERSION=$(yq -r '.variables.PYTHON_VERSION' ./ci_files/variables.yml | awk -F '.' '{print $1"."$2}')
+      RUBY_VERSION=$(yq -r '.variables.RUBY_VERSION' ./ci_files/variables.yml | awk -F '.' '{print $1"."$2}')
+
+      # Tags
+      REGISTRY_TAG=$(yq -r '.variables.GITLAB_CONTAINER_REGISTRY_VERSION' ./ci_files/variables.yml)
+      EXPORTER_TAG=$(yq -r '.variables.GITLAB_EXPORTER_VERSION' ./ci_files/variables.yml)
+      LOGGER_TAG=$(yq -r '.variables.GITLAB_LOGGER_VERSION' ./ci_files/variables.yml)
+      SHELL_TAG=$(yq -r '.variables.GITLAB_SHELL_VERSION' ./ci_files/variables.yml)
 
       check_version() {
         local vars_name=$1
@@ -79,7 +93,13 @@ pipeline:
           exit 1
         fi
       }
-      # Run checks
+
+      # Check runtime versions
+      check_version "postgres-version" "${{vars.postgres-version}}" "$POSTGRES_VERSION"
+      check_version "python-version" "${{vars.python-version}}" "$PYTHON_VERSION"
+      check_version "ruby-version" "${{vars.ruby-version}}" "$RUBY_VERSION"
+
+      # Check tags
       check_version "registry-tag" "${{vars.registry-tag}}" "$REGISTRY_TAG"
       check_version "exporter-tag" "${{vars.exporter-tag}}" "$EXPORTER_TAG"
       check_version "logger-tag" "${{vars.logger-tag}}" "$LOGGER_TAG"
@@ -94,7 +114,9 @@ data:
       exporter: ./gitlab-exporter
       gitaly: ./gitaly
       pages: ./gitlab-pages
+      rails: ./gitlab-rails
       shell: ./gitlab-shell
+      workhorse: ./gitlab-workhorse
 
 subpackages:
   - range: scripts
@@ -102,76 +124,81 @@ subpackages:
     dependencies:
       provides:
         - gitlab-${{range.key}}-scripts=${{package.full-version}}
-      runtime:
-        - merged-bin
-        - wolfi-baselayout
     pipeline:
       - runs: |
           cd ${{range.value}}
-          for x in $(find scripts/ -type f); do
-            mkdir -p ${{targets.subpkgdir}}/$(dirname $x)
-            cp -r $x ${{targets.subpkgdir}}/$x
+          for script in $(find scripts/ -type f); do
+            mkdir -p ${{targets.contextdir}}/$(dirname $script)
+            cp $script ${{targets.contextdir}}/$script
           done
 
-  - name: gitlab-shell-scripts-compat-${{vars.major-minor-version}}
-    dependencies:
-      provides:
-        - gitlab-shell-scripts-compat=${{package.full-version}}
-      runtime:
-        - merged-bin
-        - wolfi-baselayout
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"
-          cp  gitlab-shell/scripts/authorized_keys "${{targets.subpkgdir}}/"
-          chmod 755 "${{targets.subpkgdir}}/authorized_keys"
+          # Authorized keys must be at root for GitLab Shell
+          if [ '${{range.key}}' = 'shell' ]; then
+            mv ${{targets.contextdir}}/scripts/authorized_keys ${{targets.contextdir}}/
+          fi
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-${{range.key}}-scripts
+            real-pkg-name: ${{subpkg.name}}
 
   - name: gitlab-base-${{vars.major-minor-version}}
-    pipeline:
-      - runs: |
-          cd ./gitlab-base
-          for x in $(find scripts/ -type f); do
-            mkdir -p ${{targets.subpkgdir}}/$(dirname $x)
-            cp -r $x ${{targets.subpkgdir}}/$x
-          done
     dependencies:
       provides:
         - gitlab-base=${{package.full-version}}
       runtime:
-        - bash
-        - busybox
-        - ca-certificates-bundle
+        - bash-binsh
+        - coreutils
+        - ca-certificates
         - curl
-        - gitlab-logger-${{vars.major-minor-version}}
+        - gawk
+        - gitlab-logger-${{vars.major-minor-version}}=${{package.full-version}}
         - gomplate
-        - merged-bin
+        - findutils
+        - grep
+        - less
         - procps
+        - sed
         - tini
-        - tini-compat
         - tzdata
-        - wolfi-baselayout
         - xtail
-
-  - name: gitlab-certificates-${{vars.major-minor-version}}
     pipeline:
       - runs: |
-          cd ./certificates
-          for x in $(find scripts/ -type f); do
-            mkdir -p ${{targets.subpkgdir}}/$(dirname $x)
-            cp -r $x ${{targets.subpkgdir}}/$x
+          cd ./gitlab-base
+          for script in $(find scripts/ -type f); do
+            mkdir -p ${{targets.contextdir}}/$(dirname $script)
+            cp $script ${{targets.contextdir}}/$script
           done
-          ./scripts/bundle-certificates
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-base
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: gitlab-certificates-${{vars.major-minor-version}}
     dependencies:
       provides:
         - gitlab-certificates=${{package.full-version}}
       runtime:
         - ca-certificates
-        - merged-bin
-        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          cd ./certificates
+          for script in $(find scripts/ -type f); do
+            mkdir -p ${{targets.contextdir}}/$(dirname $script)
+            cp $script ${{targets.contextdir}}/$script
+          done
     test:
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-certificates
+            real-pkg-name: ${{subpkg.name}}
         - name: Test bundle-certificates script
           runs: |
+            /scripts/bundle-certificates
             # if bundle-certificates runs correctly, it dereferences symlinks outside of /etc/ssl/certs
             for f in /etc/ssl/certs/*.pem /etc/ssl/certs/*.crt; do
               if [ -L "$f" ]; then
@@ -189,17 +216,11 @@ subpackages:
     dependencies:
       provides:
         - gitlab-container-registry=${{package.full-version}}
-        # REMOVE_POST_USRMERGE - https://github.com/orgs/wolfi-dev/discussions/40270
-        - gitlab-container-registry-compat-${{vars.major-minor-version}}
-        - gitlab-container-registry-compat=${{package.full-version}}
-      runtime:
-        - merged-bin
-        - wolfi-baselayout
     pipeline:
       - uses: git-checkout
         with:
           repository: https://gitlab.com/gitlab-org/container-registry
-          tag: v${{vars.registry-tag}}-gitlab
+          tag: ${{vars.registry-tag}}
           expected-commit: ${{vars.registry-commit}}
           destination: ./container-registry
       - working-directory: ./container-registry
@@ -230,6 +251,10 @@ subpackages:
           packages:
             - crane
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-container-registry
+            real-pkg-name: ${{subpkg.name}}
         - runs: |
             #!/bin/bash
 
@@ -293,11 +318,9 @@ subpackages:
       runtime:
         - busybox
         - jemalloc
-        - libpq-16
-        - merged-bin
-        - ruby-3.2
-        - ruby3.2-bundler
-        - wolfi-baselayout
+        - libpq-${{vars.postgres-version}}
+        - ruby-${{vars.ruby-version}}
+        - ruby${{vars.ruby-version}}-bundler
     pipeline:
       - uses: git-checkout
         with:
@@ -330,6 +353,10 @@ subpackages:
       - uses: ruby/clean
     test:
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-exporter
+            real-pkg-name: ${{subpkg.name}}
         - uses: test/tw/ldd-check
         - name: "Test gitlab-exporter"
           runs: |
@@ -343,14 +370,12 @@ subpackages:
     dependencies:
       provides:
         - gitlab-logger=${{package.full-version}}
-      runtime:
-        - merged-bin
-        - wolfi-baselayout
+        - gitlab-logger-compat-${{vars.major-minor-version}}=${{package.full-version}}
     pipeline:
       - uses: git-checkout
         with:
           repository: https://gitlab.com/gitlab-org/cloud-native/gitlab-logger
-          tag: v${{vars.logger-tag}}
+          tag: ${{vars.logger-tag}}
           destination: ./logger
       - uses: go/build
         with:
@@ -360,23 +385,21 @@ subpackages:
             -X main.version=${component_version}
             -X main.buildtime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
           modroot: ./logger
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -s /usr/bin/gitlab-logger ${{targets.contextdir}}/usr/local/bin/
     test:
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-logger
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-logger-compat-${{vars.major-minor-version}}
+            real-pkg-name: ${{subpkg.name}}
         - runs: |
             gitlab-logger -h
-
-  - name: gitlab-logger-compat-${{vars.major-minor-version}}
-    dependencies:
-      provides:
-        - gitlab-logger-compat=${{package.full-version}}
-      runtime:
-        - merged-bin
-        - wolfi-baselayout
-    pipeline:
-      - runs: |
-          # GitLab helm chart mostly hardcodes multiple executables path to /usr/local/bin/*
-          mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
-          ln -s /usr/bin/gitlab-logger "${{targets.subpkgdir}}"/usr/local/bin/gitlab-logger
 
   - name: gitlab-shell-${{vars.major-minor-version}}
     description: SSH access for GitLab
@@ -384,14 +407,12 @@ subpackages:
       provides:
         - gitlab-shell=${{package.full-version}}
       runtime:
-        - merged-bin
         - openssh
-        - wolfi-baselayout
     pipeline:
       - uses: git-checkout
         with:
           repository: https://gitlab.com/gitlab-org/gitlab-shell
-          tag: v${{vars.shell-tag}}
+          tag: ${{vars.shell-tag}}
           expected-commit: ${{vars.shell-commit}}
           destination: ./shell
       - uses: go/bump
@@ -419,19 +440,144 @@ subpackages:
           install -d ${{targets.contextdir}}/etc/ssh
           install -d ${{targets.contextdir}}/var/log/gitlab-shell
           touch ${{targets.contextdir}}/var/log/gitlab-shell/gitlab-shell.log
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-shell
+            real-pkg-name: ${{subpkg.name}}
 
   - name: gitaly-config-${{vars.major-minor-version}}
+    description: Config for Gitaly ${{vars.major-minor-version}}
     dependencies:
       provides:
         - gitaly-config=${{package.full-version}}
-      runtime:
-        - merged-bin
-        - wolfi-baselayout
     pipeline:
       - working-directory: ./gitaly
         runs: |
           mkdir -p "${{targets.contextdir}}/etc/gitaly"
           cp config.toml "${{targets.contextdir}}/etc/gitaly/config.toml.tpl"
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitaly-config
+            real-pkg-name: ${{subpkg.name}}
+        - runs: stat /etc/gitaly/config.toml.tpl
+
+  - name: gitlab-webservice-ce-${{vars.major-minor-version}}
+    description: Webservice for GitLab CE ${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-webservice-ce=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-webservice/Dockerfile
+      runtime:
+        - gitlab-base-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-${{vars.major-minor-version}}=${{package.full-version}}
+        - py${{vars.python-version}}-docutils
+    pipeline:
+      - runs: |
+          # Install scripts
+          mkdir -p ${{targets.contextdir}}/scripts
+          cp -r ./gitlab-webservice/scripts/* ${{targets.contextdir}}/scripts/
+
+          # Install configs
+          mkdir -p ${{targets.contextdir}}/${{vars.gitlab-home}}/config
+          cp -r ./gitlab-webservice/configuration/* ${{targets.contextdir}}/${{vars.gitlab-home}}/config/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-webservice-ce
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/daemon-check-output
+          with:
+            start: /scripts/process-wrapper
+            timeout: 30
+            expected_output: |
+              Puma starting in cluster mode
+              Preloading application
+
+  - name: gitlab-sidekiq-ce-${{vars.major-minor-version}}
+    description: Sidekiq for GitLab CE ${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-sidekiq-ce=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-sidekiq/Dockerfile
+      runtime:
+        - cosign
+        - gitlab-base-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-${{vars.major-minor-version}}=${{package.full-version}}
+        - openssh-client
+        - py${{vars.python-version}}-docutils
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/scripts
+          cp -r ./gitlab-sidekiq/scripts/* ${{targets.contextdir}}/scripts/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-sidekiq-ce
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/daemon-check-output
+          with:
+            start: /scripts/process-wrapper
+            timeout: 30
+            expected_output: |
+              No queues found, you must select at least one queue
+
+  - name: gitlab-toolbox-ce-${{vars.major-minor-version}}
+    description: Toolbox for GitLab CE ${{vars.major-minor-version}}
+    options:
+      no-provides: true
+    dependencies:
+      provides:
+        - gitlab-toolbox-ce=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-toolbox/Dockerfile
+      runtime:
+        - azcopy
+        - gitaly-backup-${{vars.major-minor-version}}
+        - gitlab-base-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-${{vars.major-minor-version}}=${{package.full-version}}
+        - gnutar
+        - jq
+        - openssl
+        - redis-benchmark
+        - redis-cli
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          # Packaging these would require packaging the Python 3.9 ecosystem again
+          # which isn't ideal given Python 3.9 goes EOL in less than two months from
+          # the time this has been introduced. When GitLab moves to 3.10, we can use
+          # our existing packages
+          pip install \
+            --ignore-installed \
+            --prefix=/usr --root=${{targets.contextdir}} \
+            'awscli<2' crcmod gsutil PyOpenSSL s3cmd
+
+          # Install scripts
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          cp -r ./gitlab-toolbox/scripts/bin/* ${{targets.contextdir}}/usr/local/bin
+
+          mkdir -p ${{targets.contextdir}}/usr/lib/ruby/vendor_ruby
+          cp -r ./gitlab-toolbox/scripts/lib/* ${{targets.contextdir}}/usr/lib/ruby/vendor_ruby
+    test:
+      environment:
+        environment:
+          CONFIG_TEMPLATE_DIRECTORY: ${{vars.gitlab-home}}/config
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-toolbox-ce
+            real-pkg-name: ${{subpkg.name}}
+        - runs: |
+            entrypoint.sh echo "Hello, there!" | grep "Hello, there!"
+        - uses: test/tw/ldd-check
 
 update:
   enabled: true

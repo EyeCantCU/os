@@ -7,21 +7,28 @@
 vars:
   # Container registry tags: https://gitlab.com/gitlab-org/container-registry/-/tags
   registry-commit: 5c271e407d16e5931054bc8fb5e3a99b38a7a3c0
-  registry-tag: 4.26.1
+  registry-tag: 'v4.26.1-gitlab'
   # Logger tags: https://gitlab.com/gitlab-org/cloud-native/gitlab-logger/-/tags
   logger-commit: 61e76054e898803f7c2408e7e54dfba96a5085fc
-  logger-tag: 3.0.0
+  logger-tag: 'v3.0.0'
   # Shell tags: https://gitlab.com/gitlab-org/gitlab-shell/-/tags
   shell-commit: 5c26a58406996e5ee8e1922b9dfb580eb3a6b99b
-  shell-tag: 14.44.0
+  shell-tag: 'v14.44.0'
+  # Runtime versions
+  python-version: '3.9'
+  # GitLab directories
+  gitlab-home: /srv/gitlab
 
 package:
   name: gitlab-cng-fips-18.3
   version: "18.3.1"
-  epoch: 0 # CVE-2025-47907
+  epoch: 42
   description: Cloud Native container images per component of GitLab
   copyright:
     - license: MIT
+  resources:
+    cpu: 16
+    memory: 24Gi
   dependencies:
     provides:
       - gitlab-cng-fips=${{package.full-version}}
@@ -42,6 +49,8 @@ environment:
       - go-fips
       - heimdal-dev
       - icu-dev
+      - py${{vars.python-version}}-pip
+      - yq
 
 pipeline:
   - uses: git-checkout
@@ -50,49 +59,86 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: 66fd05a599e50ea6730fbaa8d806b3ebe283f55a
 
-  - name: Verify all the vars tags are uptodate with the upstream
+  - name: Verify all the vars tags are up to date with the upstream
     runs: |
-      REGISTRY_TAG=$(sed -n 's/.*GITLAB_CONTAINER_REGISTRY_VERSION: *v\([^"]*\).*/\1/p' ./ci_files/variables.yml | sed 's/-gitlab//')
-      LOGGER_TAG=$(sed -n 's/.*GITLAB_LOGGER_VERSION: *v\([^"]*\).*/\1/p' ./ci_files/variables.yml)
-      SHELL_TAG=$(sed -n 's/.*GITLAB_SHELL_VERSION: *v\([^"]*\).*/\1/p' ./ci_files/variables.yml)
+      # Runtime versions
+      PYTHON_VERSION=$(yq -r '.variables.PYTHON_VERSION' ./ci_files/variables.yml | awk -F '.' '{print $1"."$2}')
+
+      # Tags
+      REGISTRY_TAG=$(yq -r '.variables.GITLAB_CONTAINER_REGISTRY_VERSION' ./ci_files/variables.yml)
+      LOGGER_TAG=$(yq -r '.variables.GITLAB_LOGGER_VERSION' ./ci_files/variables.yml)
+      SHELL_TAG=$(yq -r '.variables.GITLAB_SHELL_VERSION' ./ci_files/variables.yml)
+
       check_version() {
         local vars_name=$1
         local expected_value=$2
         local actual_value=$3
+
         if [ "$expected_value" != "$actual_value" ]; then
           echo "Error: Expected $vars_name: $expected_value but got: $actual_value"
           exit 1
         fi
       }
-      # Run checks
+
+      # Check runtime versions
+      check_version "python-version" "${{vars.python-version}}" "$PYTHON_VERSION"
+
+      # Check tags
       check_version "registry-tag" "${{vars.registry-tag}}" "$REGISTRY_TAG"
       check_version "logger-tag" "${{vars.logger-tag}}" "$LOGGER_TAG"
       check_version "shell-tag" "${{vars.shell-tag}}" "$SHELL_TAG"
 
+data:
+  - name: scripts
+    items:
+      rails: ./gitlab-rails
+      workhorse: ./gitlab-workhorse
+
 subpackages:
-  - name: gitlab-base-fips-${{vars.major-minor-version}}
+  - range: scripts
+    name: gitlab-${{range.key}}-scripts-fips-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-${{range.key}}-scripts-fips=${{package.full-version}}
     pipeline:
       - runs: |
-          cd ./gitlab-base
-          for x in $(find scripts/ -type f); do
-            mkdir -p ${{targets.subpkgdir}}/$(dirname $x)
-            cp -r $x ${{targets.subpkgdir}}/$x
-          done
+          mkdir -p ${{targets.contextdir}}/scripts
+          cp -r ${{range.value}}/scripts/* ${{targets.contextdir}}/scripts/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-${{range.key}}-scripts-fips
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: gitlab-base-fips-${{vars.major-minor-version}}
     dependencies:
       provides:
         - gitlab-base-fips=${{package.full-version}}
       runtime:
-        - bash
-        - busybox
-        - ca-certificates-bundle
+        - bash-binsh
+        - coreutils
+        - ca-certificates
         - curl
-        - gitlab-logger-fips-${{vars.major-minor-version}}
+        - gawk
+        - gitlab-logger-fips-${{vars.major-minor-version}}=${{package.full-version}}
         - gomplate-fips
+        - findutils
+        - grep
+        - less
         - openssl-config-fipshardened
         - procps
-        - xtail
+        - sed
         - tini
-        - tini-compat
+        - tzdata
+        - xtail
+    pipeline:
+      - runs: |
+          cd ./gitlab-base
+          for script in $(find scripts/ -type f); do
+            mkdir -p ${{targets.contextdir}}/$(dirname $script)
+            cp $script ${{targets.contextdir}}/$script
+          done
     test:
       pipeline:
         - uses: test/virtualpackage
@@ -109,7 +155,7 @@ subpackages:
       - uses: git-checkout
         with:
           repository: https://gitlab.com/gitlab-org/container-registry
-          tag: v${{vars.registry-tag}}-gitlab
+          tag: ${{vars.registry-tag}}
           expected-commit: ${{vars.registry-commit}}
           destination: ./container-registry
       - working-directory: ./container-registry
@@ -140,6 +186,10 @@ subpackages:
           packages:
             - crane
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-container-registry-fips
+            real-pkg-name: ${{subpkg.name}}
         - uses: test/go-fips-check
           with:
             package-match: gitlab-container-registry-fips-${{vars.major-minor-version}}
@@ -203,11 +253,12 @@ subpackages:
     dependencies:
       provides:
         - gitlab-logger-fips=${{package.full-version}}
+        - gitlab-logger-fips-compat=${{package.full-version}}
     pipeline:
       - uses: git-checkout
         with:
           repository: https://gitlab.com/gitlab-org/cloud-native/gitlab-logger
-          tag: v${{vars.logger-tag}}
+          tag: ${{vars.logger-tag}}
           destination: ./logger
       - uses: go/build
         with:
@@ -218,8 +269,15 @@ subpackages:
             -X main.buildtime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
           modroot: ./logger
           go-package: go-fips
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -s /usr/bin/gitlab-logger ${{targets.contextdir}}/usr/local/bin/
     test:
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-logger-fips
+            real-pkg-name: ${{subpkg.name}}
         - uses: test/go-fips-check
           with:
             package-match: gitlab-logger-fips-${{vars.major-minor-version}}
@@ -238,7 +296,7 @@ subpackages:
       - uses: git-checkout
         with:
           repository: https://gitlab.com/gitlab-org/gitlab-shell
-          tag: v${{vars.shell-tag}}
+          tag: ${{vars.shell-tag}}
           expected-commit: ${{vars.shell-commit}}
           destination: ./shell
       - uses: go/bump
@@ -268,9 +326,130 @@ subpackages:
           touch ${{targets.contextdir}}/var/log/gitlab-shell/gitlab-shell.log
     test:
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-shell-fips
+            real-pkg-name: ${{subpkg.name}}
         - uses: test/go-fips-check
           with:
             package-match: gitlab-shell-fips-${{vars.major-minor-version}}
+
+  - name: gitlab-webservice-ce-fips-${{vars.major-minor-version}}
+    description: Webservice for GitLab CE FIPS ${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-webservice-ce-fips=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-webservice/Dockerfile
+      runtime:
+        - gitlab-base-fips-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-fips-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-fips-${{vars.major-minor-version}}=${{package.full-version}}
+        - py3.9-docutils
+        - openssl-config-fipshardened
+    pipeline:
+      - runs: |
+          # Install scripts
+          mkdir -p ${{targets.contextdir}}/scripts
+          cp -r ./gitlab-webservice/scripts/* ${{targets.contextdir}}/scripts/
+
+          # Install configs
+          mkdir -p ${{targets.contextdir}}/${{vars.gitlab-home}}/config
+          cp -r ./gitlab-webservice/configuration/* ${{targets.contextdir}}/${{vars.gitlab-home}}/config/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-webservice-ce-fips
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/daemon-check-output
+          with:
+            start: /scripts/process-wrapper
+            timeout: 30
+            expected_output: |
+              Puma starting in cluster mode
+              Preloading application
+
+  - name: gitlab-sidekiq-ce-fips-${{vars.major-minor-version}}
+    description: Sidekiq for GitLab CE FIPS ${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-sidekiq-ce-fips=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-sidekiq/Dockerfile
+      runtime:
+        - cosign-fips
+        - gitlab-base-fips-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-fips-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-fips-${{vars.major-minor-version}}=${{package.full-version}}
+        - openssh-client
+        - openssl-config-fipshardened
+        - py3.9-docutils
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/scripts
+          cp -r ./gitlab-sidekiq/scripts/* ${{targets.contextdir}}/scripts/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-sidekiq-ce-fips
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/daemon-check-output
+          with:
+            start: /scripts/process-wrapper
+            timeout: 30
+            expected_output: |
+              No queues found, you must select at least one queue
+
+  - name: gitlab-toolbox-ce-fips-${{vars.major-minor-version}}
+    description: Toolbox for GitLab CE FIPS ${{vars.major-minor-version}}
+    options:
+      no-provides: true
+    dependencies:
+      provides:
+        - gitlab-toolbox-ce-fips=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-toolbox/Dockerfile
+      runtime:
+        - azcopy
+        - gitaly-backup-fips-${{vars.major-minor-version}}
+        - gitlab-base-fips-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-fips-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-fips-${{vars.major-minor-version}}=${{package.full-version}}
+        - gnutar
+        - jq
+        - openssl-config-fipshardened
+        - openssl
+        - redis-benchmark
+        - redis-cli
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          # Packaging these would require packaging the Python 3.9 ecosystem again
+          # which isn't ideal given Python 3.9 goes EOL in less than two months from
+          # the time this has been introduced. When GitLab moves to 3.10, we can use
+          # our existing packages
+          pip install \
+            --ignore-installed \
+            --prefix=/usr --root=${{targets.contextdir}} \
+            'awscli<2' crcmod gsutil PyOpenSSL s3cmd
+
+          # Install scripts
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          cp -r ./gitlab-toolbox/scripts/bin/* ${{targets.contextdir}}/usr/local/bin
+
+          mkdir -p ${{targets.contextdir}}/usr/lib/ruby/vendor_ruby
+          cp -r ./gitlab-toolbox/scripts/lib/* ${{targets.contextdir}}/usr/lib/ruby/vendor_ruby
+    test:
+      environment:
+        environment:
+          CONFIG_TEMPLATE_DIRECTORY: /srv/gitlab/config
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-toolbox-ce-fips
+            real-pkg-name: ${{subpkg.name}}
+        - runs: |
+            entrypoint.sh echo "Hello, there!" | grep "Hello, there!"
+        - uses: test/tw/ldd-check
 
 update:
   enabled: true
