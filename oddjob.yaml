@@ -1,0 +1,108 @@
+package:
+  name: oddjob
+  version: 0.34.7
+  epoch: 0
+  description: D-Bus service which performs particular tasks for clients which connect to it and issue requests using the system-wide message bus.
+  copyright:
+    - license: BSD-3-Clause
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - dbus-dev
+      - libselinux-dev
+      - libtool
+      - libxml2-dev
+      - pkgconf-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://pagure.io/oddjob.git
+      expected-commit: 49ba6751eda323a37aa9f5f569c6df1a05961550
+      tag: oddjob-${{package.version}}
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --disable-dependency-tracking \
+        --disable-static \
+        --enable-compat-dtd \
+        --enable-now \
+        --enable-pie \
+        --enable-sample \
+        --enable-xml-docs \
+        --with-selinux-acls \
+        --with-selinux-labels \
+        --without-python
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - runs: |
+      mv ${{targets.destdir}}/usr/sbin/* "${{targets.destdir}}/usr/bin"
+      rm -rf "${{targets.destdir}}/usr/sbin"
+
+  - uses: strip
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - 0_
+  git:
+    strip-prefix: oddjob-
+
+subpackages:
+  - name: ${{package.name}}-doc
+    description: ${{package.name}} manpages
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: messagebus
+          gid: 65532
+      users:
+        - username: messagebus
+          gid: 65532
+          uid: 65532
+    contents:
+      packages:
+        - dbus
+        - systemd # specifically just for busctl
+        - jq
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test OddJob server functionality
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /run/dbus
+          DBUS_PID=$(dbus-daemon --nopidfile --system --print-pid)
+        start: |
+          oddjobd -d
+        timeout: 60
+        expected_output: |
+          Adding new handler for ("com.redhat.oddjob","/com/redhat/oddjob","com.redhat.oddjob","quit").
+          Adding new handler for ("com.redhat.oddjob","/com/redhat/oddjob","com.redhat.oddjob","reload").
+          Adding new handler for ("com.redhat.oddjob","/com/redhat/oddjob","com.redhat.oddjob","list").
+          Adding new handler for ("com.redhat.oddjob","/com/redhat/oddjob","com.redhat.oddjob","listall").
+        post: |
+          set -xeuo pipefail
+          busctl introspect com.redhat.oddjob /com/redhat/oddjob | grep -F -e ".reload" # Checks if methods exist
+          busctl call com.redhat.oddjob /com/redhat/oddjob com.redhat.oddjob list --json=short | jq .type | grep -F -e "iss"
+          busctl call com.redhat.oddjob /com/redhat/oddjob com.redhat.oddjob listall --json=short | jq .data[1] | grep -F -e "service"
+          oddjob_request list | grep -F -e "service=\"com.redhat.oddjob\""
+          oddjob_request listall | grep -F -e "object=\"/com/redhat/oddjob\""
+          oddjob_request quit
+          if busctl call com.redhat.oddjob /com/redhat/oddjob com.redhat.oddjob list 2>&1 | grep "com.redhat.oddjob was not provided by any .service files" ; then
+            echo "Expected dbus call failure"
+          fi
