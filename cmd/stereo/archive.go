@@ -927,7 +927,7 @@ func filterBySeedDependencies(candidates []ArchiveCandidate) ([]ArchiveCandidate
 
 	architectures := []string{"x86_64", "aarch64"}
 	for _, arch := range architectures {
-		seedDepsFile := filepath.Join("resolved", arch, "seeds.json")
+		seedDepsFile := filepath.Join("resolved", "seeds", arch, "seeds.json")
 
 		if _, err := os.Stat(seedDepsFile); os.IsNotExist(err) {
 			log.Printf("Warning: Seed dependencies file not found: %s. Run 'stereo seed-dependencies' first if using manual seeds.", seedDepsFile)

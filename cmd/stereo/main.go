@@ -364,3 +364,14 @@ func fetchAPKIndex(ctx context.Context, baseURL, arch string) (*apk.APKIndex, er
 
 	return apk.IndexFromArchive(resp.Body)
 }
+
+// loadLocalAPKIndex loads an APKINDEX from a local file
+func loadLocalAPKIndex(indexPath string) (*apk.APKIndex, error) {
+	file, err := os.Open(indexPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening local APKINDEX file %s: %w", indexPath, err)
+	}
+	defer file.Close()
+
+	return apk.IndexFromArchive(file)
+}

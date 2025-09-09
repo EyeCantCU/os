@@ -126,22 +126,19 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 		log.Printf("Processing architecture: %s", arch)
 
 		// Create output directories
-		var resolvedDir, unresolvedDir string
+		var resolvedDir string
 		if useWithdrawn {
 			resolvedDir = filepath.Join("withdrawn-test", "resolved", "version-streams", arch)
-			unresolvedDir = filepath.Join("withdrawn-test", "unresolved", "version-streams", arch)
 		} else {
 			resolvedDir = filepath.Join("resolved", "version-streams", arch)
-			unresolvedDir = filepath.Join("unresolved", "version-streams", arch)
 		}
 
 		if err := os.MkdirAll(resolvedDir, 0755); err != nil {
 			return fmt.Errorf("creating resolved version-streams directory: %w", err)
 		}
 
-		if err := os.MkdirAll(unresolvedDir, 0755); err != nil {
-			return fmt.Errorf("creating unresolved version-streams directory: %w", err)
-		}
+		// Note: We don't create unresolved directory for version streams -
+		// not finding some versions is expected behavior
 
 		// Create detailed output subdirectory
 		detailDir := filepath.Join(resolvedDir, "packages")
@@ -177,10 +174,6 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 		// Collect results for all version streams
 		allDependencies := make(map[string]bool) // all dependencies from kept packages
 		allKeptPackages := make(map[string]bool) // all newest-version packages that are kept
-		unresolvedStreams := make([]struct {
-			PackageName string `json:"package_name"`
-			Error       string `json:"error"`
-		}, 0)
 
 		var mu sync.Mutex
 
@@ -198,19 +191,8 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 				// Process this version stream
 				streamDeps, err := processVersionStream(ctx, currentPackage, currentStream, cache, buildRepos, arch)
 				if err != nil {
-					log.Printf("Error processing version stream for %s (architecture: %s): %v", currentPackage, arch, err)
-
-					mu.Lock()
-					unresolvedStreams = append(unresolvedStreams, struct {
-						PackageName string `json:"package_name"`
-						Error       string `json:"error"`
-					}{
-						PackageName: currentPackage,
-						Error:       err.Error(),
-					})
-					mu.Unlock()
-
-					return nil // Don't fail the entire operation for one stream
+					log.Printf("Skipping version stream for %s (architecture: %s): %v", currentPackage, arch, err)
+					return nil // Don't fail the entire operation for one stream - this is expected
 				}
 
 				// Save individual stream dependencies to detailed JSON file
@@ -279,7 +261,7 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 			Architecture:              arch,
 			KeptVersionStreamPackages: keptPackagesList,
 			Dependencies:              dependencyList,
-			ProcessedStreamsCount:     len(versionStreams) - len(unresolvedStreams),
+			ProcessedStreamsCount:     len(versionStreams),
 			KeptPackagesCount:         len(keptPackagesList),
 			DependenciesCount:         len(dependencyList),
 			TotalPackagesAndDeps:      len(keptPackagesList) + len(dependencyList),
@@ -302,37 +284,6 @@ func versionStreamDependencies(ctx context.Context, architectures []string, useW
 		}
 
 		log.Printf("Successfully wrote version-stream dependencies for architecture %s to %s", arch, outputFile)
-
-		// Write unresolved streams if there are any
-		if len(unresolvedStreams) > 0 {
-			unresolvedFile := filepath.Join(unresolvedDir, "version-streams.json")
-			unresolvedData := struct {
-				Architecture      string `json:"architecture"`
-				UnresolvedStreams []struct {
-					PackageName string `json:"package_name"`
-					Error       string `json:"error"`
-				} `json:"unresolved_streams"`
-			}{
-				Architecture:      arch,
-				UnresolvedStreams: unresolvedStreams,
-			}
-
-			unresolvedFileHandle, err := os.Create(unresolvedFile)
-			if err != nil {
-				log.Printf("Warning: Could not create unresolved streams file %s: %v", unresolvedFile, err)
-			} else {
-				log.Printf("Writing %d unresolved streams to %s", len(unresolvedStreams), unresolvedFile)
-
-				encoder := json.NewEncoder(unresolvedFileHandle)
-				encoder.SetIndent("", "  ")
-				if err := encoder.Encode(unresolvedData); err != nil {
-					log.Printf("Warning: Error encoding unresolved streams JSON to %s: %v", unresolvedFile, err)
-				} else {
-					log.Printf("Successfully wrote unresolved streams for architecture %s to %s", arch, unresolvedFile)
-				}
-				unresolvedFileHandle.Close()
-			}
-		}
 	}
 
 	log.Printf("Version-stream dependency processing complete for architectures %v", architectures)
