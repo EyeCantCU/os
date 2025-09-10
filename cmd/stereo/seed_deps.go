@@ -95,11 +95,11 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 		// Create output directories - use withdrawn-test prefix when testing with withdrawn indexes
 		var resolvedDir, unresolvedDir string
 		if useWithdrawn {
-			resolvedDir = filepath.Join("withdrawn-test", "resolved", arch)
-			unresolvedDir = filepath.Join("withdrawn-test", "unresolved", arch)
+			resolvedDir = filepath.Join("withdrawn-test", "resolved", "seeds", arch)
+			unresolvedDir = filepath.Join("withdrawn-test", "unresolved", "seeds", arch)
 		} else {
-			resolvedDir = filepath.Join("resolved", arch)
-			unresolvedDir = filepath.Join("unresolved", arch)
+			resolvedDir = filepath.Join("resolved", "seeds", arch)
+			unresolvedDir = filepath.Join("unresolved", "seeds", arch)
 		}
 
 		if err := os.MkdirAll(resolvedDir, 0755); err != nil {
@@ -131,14 +131,28 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 		cache := apk.NewCache(true)
 
 		// First, fetch APKINDEX for all repositories to find subpackages
-		log.Printf("Fetching APKINDEX files for architecture: %s...", arch)
+		log.Printf("Loading APKINDEX files for architecture: %s...", arch)
 		var allPackagesByOrigin = make(map[string]map[string][]*apk.Package) // origin -> version -> packages
 
 		for _, repoURL := range buildRepos {
-			index, err := fetchAPKIndex(ctx, repoURL, arch)
-			if err != nil {
-				log.Printf("Warning: Could not fetch APKINDEX for %s (arch: %s): %v", repoURL, arch, err)
-				continue
+			var index *apk.APKIndex
+			var err error
+
+			if useWithdrawn {
+				// Load from local file
+				indexPath := filepath.Join(repoURL, arch, "APKINDEX.tar.gz")
+				index, err = loadLocalAPKIndex(indexPath)
+				if err != nil {
+					log.Printf("Warning: Could not load local APKINDEX from %s: %v", indexPath, err)
+					continue
+				}
+			} else {
+				// Fetch from URL
+				index, err = fetchAPKIndex(ctx, repoURL, arch)
+				if err != nil {
+					log.Printf("Warning: Could not fetch APKINDEX for %s (arch: %s): %v", repoURL, arch, err)
+					continue
+				}
 			}
 
 			// Group packages by origin and version
