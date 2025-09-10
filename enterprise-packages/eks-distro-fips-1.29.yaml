@@ -1,7 +1,7 @@
 package:
   name: eks-distro-fips-1.29
-  version: "1.29.45"
-  epoch: 0 # CVE-2025-47907
+  version: "1.29.47"
+  epoch: 1 # CVE-2025-47907
   description: EKS Distro FIPS 1.29 components
   copyright:
     - license: Apache-2.0
@@ -13,6 +13,8 @@ environment:
   contents:
     packages:
       - libcap-utils
+  environment:
+    BUILD_ARTIFACTS: "true" # New Makefile changes in 1.29.47 need this to checkout the repo properly
 
 # Transform the full version that EKS talks about. They use a form:
 # 1-30-eks-12, where 1-30 is the k8s version, 12 is the eks-distro release.
@@ -28,7 +30,7 @@ var-transforms:
   - from: ${{vars.package-version}}
     match: '(\d+-\d+)(-\d+)'
     replace: '$1-eks$2'
-    to: eks-distro-version
+    to: mangled-package-version
   - from: ${{vars.package-version}}
     match: '(\d+-\d+)-\d+'
     replace: '$1'
@@ -58,8 +60,13 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/aws/eks-distro
-      tag: v${{vars.eks-distro-version}}
-      expected-commit: ecc714bc7b227336666cf0c6c63cc54477a21655
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 9e7aadaf6c4af54898fcd3704e098203a84a2129
+
+  # Patch the bootstrap script to use local files instead of AWS S3
+  - uses: patch
+    with:
+      patches: patch-bootstrap-use-local.patch
 
   # Checkout EKS distro projects
   - runs: |
@@ -132,10 +139,30 @@ subpackages:
           modroot: ./projects/${{vars.coredns}}/coredns
           go-package: go-fips
       - runs: |
-          setcap cap_net_bind_service=+ep ${{targets.subpkgdir}}/usr/bin/coredns
+          setcap cap_net_bind_service=+ep ${{targets.contextdir}}/usr/bin/coredns
           ln -s /usr/bin/coredns ${{targets.contextdir}}/coredns
     test:
       pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: eks-distro-coredns-fips
+            real-pkg-name: ${{subpkg.name}}
         - uses: test/go-fips-check
           with:
             package-match: "^eks-distro-coredns-fips-${{vars.kubernetes-major-minor}}"
+
+update:
+  enabled: true
+  version-transform:
+    - match: 'eks-'
+      replace: ''
+    - match: '-'
+      replace: '.'
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v1-29
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage
