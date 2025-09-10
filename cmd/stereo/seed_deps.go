@@ -300,6 +300,12 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 
 				// Add all packages to the set (with mutex protection)
 				mu.Lock()
+				// First add all the subpackages from this origin
+				for _, subpkg := range subpackages {
+					packageKey := fmt.Sprintf("%s=%s", subpkg.Name, subpkg.Version)
+					allPackages[packageKey] = true
+				}
+				// Then add all the resolved dependencies
 				for _, pkg := range packages {
 					allPackages[pkg] = true
 				}
