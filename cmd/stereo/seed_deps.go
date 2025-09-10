@@ -352,6 +352,13 @@ func seedDependencies(ctx context.Context, seedsFile string, architectures []str
 
 		// Write unresolved seeds to JSON file if there are any
 		if len(unresolvedSeeds) > 0 {
+			// Sort unresolved seeds by origin+version for consistent output
+			sort.Slice(unresolvedSeeds, func(i, j int) bool {
+				keyI := fmt.Sprintf("%s=%s", unresolvedSeeds[i].Origin, unresolvedSeeds[i].Version)
+				keyJ := fmt.Sprintf("%s=%s", unresolvedSeeds[j].Origin, unresolvedSeeds[j].Version)
+				return keyI < keyJ
+			})
+
 			unresolvedData := struct {
 				Architecture    string `json:"architecture"`
 				UnresolvedSeeds []struct {

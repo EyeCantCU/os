@@ -251,6 +251,11 @@ func vmDependencies(ctx context.Context, architectures []string, useWithdrawn bo
 
 		// Write unresolved VMs to JSON file if there are any
 		if len(unresolvedVMs) > 0 {
+			// Sort unresolved VMs by config path for consistent output
+			sort.Slice(unresolvedVMs, func(i, j int) bool {
+				return unresolvedVMs[i].ConfigPath < unresolvedVMs[j].ConfigPath
+			})
+
 			unresolvedData := struct {
 				Architecture  string `json:"architecture"`
 				UnresolvedVMs []struct {

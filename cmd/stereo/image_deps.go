@@ -266,6 +266,11 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 
 		// Write unresolved images to JSON file if there are any
 		if len(unresolvedImages) > 0 {
+			// Sort unresolved images by address for consistent output
+			sort.Slice(unresolvedImages, func(i, j int) bool {
+				return unresolvedImages[i].Address < unresolvedImages[j].Address
+			})
+
 			unresolvedData := struct {
 				RepositorySet    string `json:"repository_set"`
 				Architecture     string `json:"architecture"`
