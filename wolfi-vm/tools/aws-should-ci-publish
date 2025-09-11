@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [--as-of=timestamp] [--max-age=days] product_id
+
+  Determine whether the CI should publish a new build of 'product_id' to the
+  AWS Marketplace. By default, a new build should be published if it is Monday
+  or the latest published build is older than 7 days.
+
+  This requires the AWS CLI to be on the PATH, and AWS credentials for the
+  aws-marketplace account to be present (via an instance profile, environment
+  variables, or a configured credential helper).
+
+    options:
+
+           --as-of   TIMESTAMP  assume now is TIMESTAMP (any date format
+                                recognized by date(1) is acceptable)
+      -h | --help               show this help text
+           --max-age DAYS       if the latest published build is older than
+                                DAYS, decide to publish
+EOF
+}
+
+stderr() {
+    echo "$*" >&2
+}
+
+bail() {
+    stderr "$*"
+    exit 1
+}
+
+decide() {
+    local decision=$1
+    local reason=$2
+
+    echo "${decision}"
+
+    if [[ ${decision} = yes ]]; then
+        stderr "Yes, the CI should publish: ${reason}."
+    else
+        stderr "No, the CI should not publish: ${reason}."
+    fi
+
+    exit 0
+}
+
+awsmp_latest_publish_date() {
+    local product_id=$1
+    local entity
+
+    if ! entity=$(aws marketplace-catalog describe-entity \
+            --catalog AWSMarketplace \
+            --entity-id "${product_id}" \
+            --output json
+    ); then
+        bail "Failed to describe '${product_id}' on the AWS Marketplace."
+    fi
+
+    jq -r '
+        .DetailsDocument.Versions
+        | to_entries
+        | map(select(.value.DeliveryOptions[0].Visibility == "Public"))
+        | map({
+            VersionTitle: .value.VersionTitle,
+            CreationDate: .value.CreationDate,
+            DeliveryOptionId: .value.DeliveryOptions[0].Id
+        })
+        | sort_by(.CreationDate)
+        | .[-1].CreationDate' <<<"${entity}"
+}
+
+main() {
+    # Check for no arguments first
+    if [[ $# -eq 0 ]]; then
+        Usage 1>&2
+        bail "No product ID provided."
+    fi
+
+    local short_opts='h'
+    local long_opts='as-of:,help,max-age:'
+    local getopt_out
+
+    if getopt_out=$(getopt --name "${0##*/}" --options "${short_opts}" --long "${long_opts}" -- "$@"); then
+        eval set -- "${getopt_out}"
+    else
+        Usage 1>&2
+        exit 1
+    fi
+
+    local max_age_days=7 now product_id
+
+    while [[ $# -ne 0 ]]; do
+        cur=$1
+        next=$2
+        case ${cur} in
+            --as-of)
+                now=${next}
+                shift
+                ;;
+            -h|--help)
+                Usage
+                exit 0
+                ;;
+            --max-age)
+                max_age_days=${next}
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+        esac
+        shift
+    done
+
+    if [[ $# -eq 1 ]]; then
+        product_id=$1
+        shift
+    else
+        Usage 1>&2
+        bail "Got $# product IDs, but expected exactly one."
+    fi
+
+    if [[ -z ${now} ]]; then
+        if ! now=$(date +%s); then
+            bail 'Cannot determine date.'
+        fi
+        now="@${now}"
+    fi
+
+    local weekday
+    if ! weekday=$(date --date="${now}" +%A); then
+        bail 'Cannot determine weekday.'
+    fi
+
+    if [[ ${weekday} = Monday ]]; then
+        decide yes 'it is Monday'
+    fi
+
+    local latest
+    if ! latest=$(awsmp_latest_publish_date "${product_id}"); then
+        bail "Cannot determine latest publishing date for '${product_id}'."
+    fi
+
+    if [[ ${latest} = null ]]; then
+        decide yes "${product_id} has no public versions."
+    fi
+
+    local epoch_latest
+    if ! epoch_latest=$(date --date="${latest}" +%s); then
+        bail "AWS Marketplace returned invalid date format '${latest}' for '${product_id}'."
+    fi
+
+    local epoch_now
+    if ! epoch_now=$(date --date="${now}" +%s); then
+        bail "The provided --as-of date ('${now}') cannot be parsed by date."
+    fi
+
+    if [[ $(( epoch_now - epoch_latest )) -gt $(( max_age_days * 24 * 60 * 60 )) ]]; then
+        decide yes "${product_id} has last been published at ${latest}"
+    fi
+
+    decide no "there is no reason to publish ${product_id} now"
+}
+
+main "$@"

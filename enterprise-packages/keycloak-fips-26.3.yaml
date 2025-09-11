@@ -1,0 +1,283 @@
+package:
+  name: keycloak-fips-26.3
+  version: "26.3.3"
+  epoch: 6 # GHSA-3p8m-j85q-pgmj
+  description: Open Source Identity and Access Management For Modern Applications and Services
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash # Keycloak helper scripts require bash, aren't compatible with busybox.
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - merged-usrsbin
+      - openjdk-${{vars.java-version}}-default-jvm
+      - wolfi-baselayout
+    provides:
+      - keycloak-fips-policy-140-3=${{package.full-version}}
+      - keycloak-fips=${{package.full-version}}
+
+vars:
+  java-version: 21
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bouncycastle-fips~2.1
+      - build-base
+      - busybox
+      - gcc-14-default
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    LANG: en_US.UTF-8
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/keycloak/keycloak
+      tag: ${{package.version}}
+      expected-commit: e5daa1fd200e7926f88b899bd7f987ed35bbea10
+
+  - uses: patch
+    with:
+      # Disables a redundant FIPS host check in Keycloak which expects the
+      # underlying host to be RHEL and running a RHEL patched version of JDK.
+      # We use vanilla JDK with bcfips, so this is not applicable.
+      # While classpath-script.patch patches kcadm.sh and kcreg.sh to use the CLASSPATH env variable
+      patches: |
+        disable-rhel-fips-check.patch
+        classpath-script.patch
+        kc.sh-misc-FIPS-related-fixes.patch
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      properties-file: pombump-properties.yaml
+
+  - runs: |
+      gcc napi-static-assert.c -o /tmp/preload.so -fPIC -shared -ldl
+
+  - runs: |
+      # Keycloak installation. Note we use the maven wrapper as configured in
+      # the source repo to build - ensures the correct maven version for
+      # building the project, preventing issues such as CI hangs.
+
+      # Build keycloak-server. Depends on `keycloak-js-adapter-jar`.
+      # Gross hack to work around broken NAPI ast-grep module that has
+      # undefined symbol: static_assert
+      export LD_PRELOAD=/tmp/preload.so
+      ./mvnw clean install -DskipTests -Dmaven.test.skip=true -DskipITs -DskipProtoLock=true -Pdistribution
+      unset LD_PRELOAD
+
+      mkdir -p ${{targets.destdir}}/usr/share/java
+      unzip -d ${{targets.destdir}}/usr/share/java quarkus/dist/target/keycloak-*.zip
+      cp -avR ${{targets.destdir}}/usr/share/java/keycloak-* ${{targets.destdir}}/usr/share/java/keycloak
+
+      # Create an empty data directory for keycloak. Required by the UI to store some data.
+      mkdir -p ${{targets.destdir}}/usr/share/java/keycloak/data
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in kc.sh kcadm.sh kcreg.sh; do
+        ln -sf /usr/share/java/keycloak/bin/$i ${{targets.destdir}}/usr/bin/$i
+      done
+
+      # Remove any non-FIPS bcprov JARs dynamically across all possible locations
+      find ${{targets.destdir}} -type f \( \
+          -name "bcprov-jdk*.jar" -o \
+          -name "bcpkix-jdk*.jar" -o \
+          -name "bcutil-jdk*.jar" \) -delete
+
+      # Remove any existing providers
+      rm -r ${{targets.contextdir}}/usr/share/java/keycloak/providers/*
+
+      mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers
+      ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/
+
+      mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib
+      ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
+
+subpackages:
+  # NOTE: This is forked from the non-FIPS keycloak-iamguarded-compat package so that
+  # the steps copying Keycloak binaries to the expected path include the required
+  # BC FIPS Jars
+  - name: ${{package.name}}-iamguarded-fips
+    description: "compat package for using FIPS with iamguarded/keycloak image"
+    dependencies:
+      # Remove this once the image has moved over
+      provides:
+        - keycloak-fips-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - bash # Keycloak helper scripts require bash, aren't compatible with busybox.
+        - coreutils # Keycloak Helm Chart scripts require coreutils, aren't compatible with busybox. (i.e., `cp` with `--preserve` option)
+        - krb5
+        - libaio
+        - merged-usrsbin
+        - net-tools
+        - openjdk-${{vars.java-version}}-default-jvm
+        - posix-libc-utils
+        - procps
+        - su-exec
+        - wait-for-port
+        - wolfi-baselayout
+        - zlib
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: keycloak
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /iamguarded/keycloak
+          mkdir -p /opt/iamguarded/keycloak
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+
+          for dir in bin conf conf.default lib providers themes; do
+            mkdir -p /opt/iamguarded/keycloak/$dir
+          done
+
+          chmod g+rwX /opt/iamguarded
+
+          # Copy keycloak files to /opt/iamguarded/keycloak for compatibility with
+          # their Helm Chart, which copies the directories into an emptyDir in
+          # an initContainer
+          cp -r ${{targets.destdir}}/usr/share/java/keycloak/* /opt/iamguarded/keycloak
+
+          # Replace the incorrect Java paths in the iamguarded scripts
+          sed -i 's/JAVA_HOME="\/opt\/iamguarded\/java"/JAVA_HOME="\/usr\/lib\/jvm\/java-${{vars.java-version}}-openjdk"/g' /opt/iamguarded/scripts/keycloak-env.sh
+          sed -i 's/\/opt\/iamguarded\/java\/lib\/security/\/usr\/lib\/jvm\/java-${{vars.java-version}}-openjdk\/conf\/security/g' /opt/iamguarded/scripts/java/postunpack.sh
+
+          # Disable some commands used in iamguarded scripts. These commands more likely fail in this since this image take non root approach
+          sed -i 's/chown -R "$KEYCLOAK_DAEMON_USER" "$dir"/# chown -R "$KEYCLOAK_DAEMON_USER" "$dir"/g' /opt/iamguarded/scripts/keycloak/postunpack.sh
+          sed -i 's/ensure_user_exists/# ensure_user_exists/g' /opt/iamguarded/scripts/keycloak/postunpack.sh
+          sed -i 's/am_i_root/# am_i_root/g' /opt/iamguarded/scripts/keycloak/setup.sh
+          sed -i 's/hostname --fqdn/hostname -f/g' /opt/iamguarded/scripts/keycloak-env.sh
+
+          # The `--userspec`` flag belongs to GNU's chroot, whereas we are use BusyBox's. As a workaround, use `su-exec` instead.
+          sed -i 's|exec chroot --userspec="$userspec" /|exec chroot / su-exec "$userspec"|' /opt/iamguarded/scripts/libos.sh
+          sed -i 's|chroot --userspec="$userspec" /|chroot / su-exec "$userspec"|' /opt/iamguarded/scripts/libos.sh
+
+          # Use package path while unpacking
+          /opt/iamguarded/scripts/keycloak/postunpack.sh || true
+
+          # Link binaries used by iamguarded config
+          ln -sf /opt/iamguarded/scripts/keycloak/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
+          ln -sf /opt/iamguarded/scripts/keycloak/run.sh ${{targets.contextdir}}/run.sh
+      - uses: iamguarded/finalize-compat
+        with:
+          package: keycloak
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - postgresql
+            - postgresql-client
+            - glibc-locale-posix # Adding locales to prevent test failure on aarch64
+            - shadow
+            - sudo-rs
+            - jq
+        accounts:
+          groups:
+            - groupname: bn_keycloak
+              gid: 65532
+          users:
+            - username: bn_keycloak
+              gid: 65532
+              uid: 65532
+          run-as: 0
+        environment:
+          PGDATA: /tmp/test_db
+          PGUSER: bn_keycloak
+          PGDB: iamguarded_keycloak
+          ALLOW_EMPTY_PASS: true
+          LANG: C.UTF-8 # Adding locales to prevent test failure on aarch64
+          LC_ALL: C.UTF-8 # Adding locales to prevent test failure on aarch64
+          KC_CACHE: ispn
+          KC_CACHE_CONFIG_FILE: cache-ispn.xml
+          KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-}
+          KC_BOOTSTRAP_ADMIN_PASSWORD: $KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD
+          KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: keycloak
+            version: ${{vars.major-version}}
+        - working-directory: /tmp
+          pipeline:
+            - name: "Test database creation"
+              with:
+                setup: echo "127.0.0.1 postgresql" >> /etc/hosts
+              runs: |
+                sudo -u $PGUSER initdb -D $PGDATA
+                sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
+                sudo -u $PGUSER createdb $PGDB
+                sudo -u $PGUSER psql -lqt | cut -d \| -f 1 | grep -qw $PGDB
+            - name: "start daemon on localhost"
+              uses: test/daemon-check-output
+              with:
+                setup: |
+                  #!/bin/sh -e
+                  echo "127.0.0.1 postgresql" >> /etc/hosts
+                  echo "$(hostname) postgresql" >> /etc/hosts
+                start: |
+                  env "IAMGUARDED_APP_NAME=keycloak" \
+                    "APP_VERSION=${{package.version}}" \
+                    "PATH=/opt/iamguarded/keycloak/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+                    "KEYCLOAK_ADMIN=admin" \
+                    "KEYCLOAK_ADMIN_PASSWORD=PASSWORD-FOR-ADMIN-USER" \
+                    "KEYCLOAK_EXTRA_ARGS=--features=fips --fips-mode=non-strict --https-key-store-password=LongKeystorePassword" \
+                    "KEYCLOAK_ENABLE_HEALTH_ENDPOINTS=true" \
+                    /opt/iamguarded/scripts/keycloak/entrypoint.sh \
+                    /opt/iamguarded/scripts/keycloak/run.sh
+                timeout: 120
+                # NOTE: We ignore spurious ERROR logs here that stem from the
+                # additional complexity fully configuring Keycloak for BCFIPS.
+                # There is additional coverage in the image test + a stricter
+                # version of this test for the non-FIPS iamguarded keycloak
+                # package.
+                error_strings: |
+                  FATAL
+                  FAIL
+                expected_output: |
+                  Welcome to the Iamguarded image for Keycloak
+                  keycloak setup finished!
+                  server listening on
+                  Keycloak ${{package.version}}
+                  Profile dev activated.
+                post: |
+                  #!/bin/sh -e
+                  url=http://localhost:9000/health/ready
+                  response=$(curl -fsS --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 0 --retry-max-time 40 "$url") || {
+                    echo "curl ${url} failed $?"
+                    exit 1
+                  }
+                  echo "$response" | jq .status | grep -q UP || {
+                    echo "response from $url did not contain \"UP\""
+                    echo "response: $response"
+                    exit 1
+                  }
+                  echo "$url had expected output: $response"
+
+test:
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+        classpath: /usr/share/java/keycloak/providers/*:.
+
+update:
+  # The upstream repos releases contains a 'nightly' release. Which we want to
+  # exclude from discovery.
+  ignore-regex-patterns:
+    - '.*nightly.*'
+  enabled: true
+  github:
+    identifier: keycloak/keycloak
+    tag-filter: 26.3.

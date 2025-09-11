@@ -1,0 +1,295 @@
+package:
+  name: apache-hop-fips
+  version: "2.15.0"
+  epoch: 13 # GHSA-3p8m-j85q-pgmj
+  description: Apache Hop FIPS-compliant data orchestration and data engineering platform
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - coreutils
+      - dash-binsh
+      - fontconfig
+      - glibc-locale-en
+      - gnutar
+      - grep
+      - gtk-3
+      - libxext
+      - libxrender
+      - libxtst
+      - msttcorefonts-installer
+      - openjdk-${{vars.java-version}}
+      - openssl-config-fipshardened
+      - ttf-dejavu
+
+vars:
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bouncycastle-fips~2.1
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - unzip
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    MAVEN_OPTS: |
+      -Xmx2g
+      -XX:+UseG1GC
+      -Dorg.slf4j.simpleLogger.defaultLogLevel=WARN
+    LANG: en_US.UTF-8
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://downloads.apache.org/hop/${{package.version}}/apache-hop-${{package.version}}-src.tar.gz
+      expected-sha512: d2bd32e1f508585aa35db2ee3d9dc15fa20ad6f06ebaf894bba687aaaacf7771a0d0c5f5ffa8ed8c3e01d9239e20d26194e8f491f7cf10c2de140b64c58a2ede
+
+  - uses: patch
+    with:
+      patches: |
+        CustomSocketFactory-use-default-Keystore-type.patch
+        use-default-KeyStore-type-in-more-places.patch
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      properties-file: pombump-properties.yaml
+
+  - runs: |
+      mvn clean install -T 2 -DskipTests -Dmaven.javadoc.skip=true
+
+      unzip assemblies/client/target/hop-client-*.zip -d /tmp/hop-unpacked
+      cd /tmp/hop-unpacked/hop
+
+      mkdir -p ${{targets.contextdir}}/opt/hop
+      mkdir -p ${{targets.contextdir}}/usr/bin
+
+      cp -r ./* ${{targets.contextdir}}/opt/hop/
+
+      for tool in hop-conf hop-encrypt hop-gui hop-import hop-run hop-search hop-server; do
+        ln -sf /opt/hop/$tool.sh ${{targets.contextdir}}/usr/bin/$tool
+      done
+
+      mkdir -p ${{targets.contextdir}}/home/hop
+      mkdir -p ${{targets.contextdir}}/files
+
+      cp /home/build/docker/resources/run.sh ${{targets.contextdir}}/opt/hop/run.sh
+      cp /home/build/docker/resources/load-and-execute.sh ${{targets.contextdir}}/opt/hop/load-and-execute.sh
+      chmod +x ${{targets.contextdir}}/opt/hop/run.sh
+      chmod +x ${{targets.contextdir}}/opt/hop/load-and-execute.sh
+
+  - runs: |
+      # Remove any non-FIPS bcprov JARs and replace with FIPS versions
+      find ${{targets.contextdir}} -type f \( \
+          -name "bcprov-jdk*.jar" -o \
+          -name "bcpkix-jdk*.jar" -o \
+          -name "bcutil-jdk*.jar" -o \
+          -name "bcmail-jdk*.jar" -o \
+          -name "bcpg-jdk*.jar" -o \
+          -name "bctls-jdk*.jar" \) -delete
+
+      # Link BCFIPS JARs to Hop lib directory
+      mkdir -p ${{targets.contextdir}}/opt/hop/lib/fips
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/opt/hop/lib/fips/
+
+      # Ensure FIPS JARs are in the classpath and Modify startup scripts to include FIPS JARs
+      for script in ${{targets.contextdir}}/opt/hop/*.sh; do
+        if [ -f "$script" ]; then
+          sed -i 's|CLASSPATH="\(.*\)"|CLASSPATH="/opt/hop/lib/fips/*:\1"|' "$script" || true
+        fi
+      done
+
+  - uses: strip
+
+update:
+  release-monitor:
+    identifier: 383281
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - curl
+        - jq
+        - openjdk-${{vars.java-version}}-default-jdk
+        - openssl
+        - xmlstarlet
+        - wait-for-it
+    environment:
+      # Empty env vars below are required by load-and-execute.sh which uses 'set -u'
+      # The script references these variables directly and fails if they're undefined, but handles empty strings properly
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      DEPLOYMENT_PATH: /opt/hop
+      VOLUME_MOUNT_POINT: /files
+      HOP_LOG_LEVEL: Basic
+      HOP_FILE_PATH: ""
+      HOP_LOG_PATH: /opt/hop/hop.err.log
+      HOP_SHARED_JDBC_FOLDERS: ""
+      HOP_PROJECT_NAME: project1
+      HOP_PROJECT_DIRECTORY: ""
+      HOP_PROJECT_FOLDER: ""
+      HOP_PROJECT_CONFIG_FILE_NAME: project-config.json
+      HOP_ENVIRONMENT_NAME: environment1
+      HOP_ENVIRONMENT_CONFIG_FILE_NAME_PATHS: ""
+      HOP_RUN_CONFIG: ""
+      HOP_RUN_PARAMETERS: ""
+      HOP_RUN_METADATA_EXPORT: ""
+      HOP_SYSTEM_PROPERTIES: ""
+      HOP_OPTIONS: -XX:+AggressiveHeap
+      HOP_CUSTOM_ENTRYPOINT_EXTENSION_SHELL_FILE_PATH: ""
+      HOP_SERVER_USER: cluster
+      HOP_SERVER_PASSWORD: cluster
+      HOP_SERVER_HOSTNAME: 0.0.0.0
+      HOP_SERVER_PORT: "8080"
+      HOP_SERVER_SHUTDOWNPORT: "8079"
+      HOP_SERVER_METADATA_FOLDER: ""
+      HOP_SERVER_KEYSTORE: "/opt/hop/conf/hop-keystore.bcfks"
+      HOP_SERVER_KEYSTORE_PASSWORD: "HopSSLTest123!"
+      HOP_SERVER_KEY_PASSWORD: "HopSSLTest123!"
+      HOP_SERVER_MAX_LOG_LINES: ""
+      HOP_SERVER_MAX_LOG_TIMEOUT: ""
+      HOP_SERVER_MAX_OBJECT_TIMEOUT: ""
+      CLASSPATH: "/usr/share/java/bouncycastle-fips/*:./*:."
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+      JDK_JAVA_OPTIONS: "--add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED -Djavax.net.ssl.trustStoreType=BCFKS -Djavax.net.ssl.keyStore=/opt/hop/conf/hop-keystore.bcfks -Djavax.net.ssl.keyStorePassword=HopSSLTest123! -Djavax.net.ssl.keyStoreType=BCFKS -Djavax.net.ssl.trustStore=/opt/hop/conf/hop-truststore.bcfks -Djavax.net.ssl.trustStorePassword=HopSSLTest123! -Djavax.net.ssl.trustStoreType=BCFKS"
+      LANG: en_US.UTF-8
+  pipeline:
+    - name: "Verify FIPS Installation"
+      runs: |
+        # Verify symlinks
+        [ "$(readlink -f /usr/bin/hop-gui)" = "/opt/hop/hop-gui.sh" ]
+        [ "$(readlink -f /usr/bin/hop-run)" = "/opt/hop/hop-run.sh" ]
+        [ "$(readlink -f /usr/bin/hop-conf)" = "/opt/hop/hop-conf.sh" ]
+        [ "$(readlink -f /usr/bin/hop-encrypt)" = "/opt/hop/hop-encrypt.sh" ]
+        [ "$(readlink -f /usr/bin/hop-import)" = "/opt/hop/hop-import.sh" ]
+        [ "$(readlink -f /usr/bin/hop-search)" = "/opt/hop/hop-search.sh" ]
+        [ "$(readlink -f /usr/bin/hop-server)" = "/opt/hop/hop-server.sh" ]
+
+        # Verify shell scripts are executable
+        [ -x "${DEPLOYMENT_PATH}/hop-conf.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/hop-encrypt.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/hop-gui.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/hop-import.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/hop-run.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/hop-search.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/hop-server.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/run.sh" ]
+        [ -x "${DEPLOYMENT_PATH}/load-and-execute.sh" ]
+
+        # Verify key directories exist
+        [ -d "${DEPLOYMENT_PATH}/lib" ]
+        [ -d "${DEPLOYMENT_PATH}/lib/fips" ]
+        [ -d "${DEPLOYMENT_PATH}/plugins" ]
+        [ -d "${DEPLOYMENT_PATH}/config" ]
+        [ -d "${DEPLOYMENT_PATH}/static" ]
+        [ -d "${DEPLOYMENT_PATH}/licenses" ]
+        [ -d "${VOLUME_MOUNT_POINT}" ]
+        [ -d "/home/hop" ]
+
+        # Verify core files exist
+        [ -f "${DEPLOYMENT_PATH}/LICENSE" ]
+        [ -f "${DEPLOYMENT_PATH}/NOTICE" ]
+        [ -f "${DEPLOYMENT_PATH}/hop-server.xml" ]
+
+        # Verify FIPS JARs are linked
+        ls -la "${DEPLOYMENT_PATH}/lib/fips/" | grep -E "bc.*fips.*\.jar"
+      with:
+        java-version: ${{vars.java-version}}
+    - name: "Test GUI Functionality"
+      working-directory: /opt/hop
+      runs: |
+        ./hop-run.sh --version 2>&1 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$'
+        ./hop-conf.sh --help 2>&1 | grep -E "Usage: <main class>"
+    - name: "Test Pipeline Validation"
+      runs: |
+        mkdir -p /tmp/hop-test
+        cat > /tmp/hop-test/test-pipeline.hpl <<EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <pipeline>
+          <info>
+            <name>test-pipeline</name>
+            <description>Test pipeline for FIPS validation</description>
+          </info>
+          <transforms>
+            <transform>
+              <name>Generate Data</name>
+              <type>RowGenerator</type>
+              <fields>
+                <field>
+                  <name>message</name>
+                  <type>String</type>
+                  <value>Hello FIPS Hop</value>
+                </field>
+              </fields>
+              <limit>1</limit>
+            </transform>
+          </transforms>
+        </pipeline>
+        EOF
+        xmlstarlet val /tmp/hop-test/test-pipeline.hpl
+    - name: "Run Test Pipeline"
+      working-directory: /opt/hop
+      runs: |
+        ./hop-run.sh --file=/tmp/hop-test/test-pipeline.hpl 2>&1 | grep "Starting pipeline.*test-pipeline"
+    - name: "Generate FIPS KeyStore and TrustStore"
+      runs: |
+        mkdir -p /opt/hop/conf
+
+        keytool \
+          -v -keystore /opt/hop/conf/hop-keystore.bcfks \
+          -storetype BCFKS \
+          -providername BCFIPS \
+          -alias hop-server \
+          -genkeypair -sigalg SHA256withRSA -keyalg RSA -keysize 2048 \
+          -dname "CN=localhost" \
+          -storepass "HopSSLTest123!" \
+          -keypass "HopSSLTest123!" \
+          -validity 365
+
+        # Export certificate from keystore for curl to trust
+        keytool \
+          -v -keystore /opt/hop/conf/hop-keystore.bcfks \
+          -storetype BCFKS \
+          -providername BCFIPS \
+          -alias hop-server \
+          -exportcert -rfc \
+          -storepass "HopSSLTest123!" \
+          -file /opt/hop/conf/hop-server.crt
+
+        # Create truststore and import the certificate
+        keytool \
+          -v -keystore /opt/hop/conf/hop-truststore.bcfks \
+          -storetype BCFKS \
+          -providername BCFIPS \
+          -alias hop-server \
+          -importcert -noprompt \
+          -file /opt/hop/conf/hop-server.crt \
+          -storepass "HopSSLTest123!"
+    - name: "Test Hop Server with HTTPS/TLS"
+      uses: test/daemon-check-output
+      with:
+        start: /opt/hop/load-and-execute.sh
+        expected_output: |
+          Writing a hop-server config file to /tmp/hop-server.xml
+          Configuring SSL with key store file: /opt/hop/conf/hop-keystore.bcfks
+          Starting a hop-server on port 8080
+          HopServer - Using SSL mode
+          org.bouncycastle.jsse.provider
+        timeout: 60
+        post: |-
+          wait-for-it localhost:8080 -t 45
+          curl --cacert /opt/hop/conf/hop-server.crt -fsSL -u cluster:cluster https://localhost:8080/ | grep "Hop hop server"

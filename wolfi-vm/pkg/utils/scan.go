@@ -77,6 +77,7 @@ func CreateAttestation(ctx context.Context, layer io.Reader) (io.Reader, error) 
 			"sbom",
 			// TODO consider how to turn it on https://github.com/chainguard-dev/internal-dev/issues/8731
 			"elf-package",
+			"rpm",
 		),
 	).WithCatalogers(
 		catalogers.AngularJSReference,

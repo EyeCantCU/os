@@ -1,6 +1,6 @@
 package:
   name: kibana-9
-  version: "9.1.1"
+  version: "9.1.3"
   epoch: 0
   description: Your window into the Elastic Stack
   copyright:
@@ -19,6 +19,7 @@ package:
       - libnspr # needed for the @kbn/screenshotting-plugin/chromium package
       - libnss # needed for the @kbn/screenshotting-plugin/chromium package
       - merged-usrsbin
+      - nodejs-22
       - wolfi-baselayout
 
 # this will be resolved to 9 only
@@ -38,7 +39,7 @@ environment:
       - coreutils
       - jq
       - node-gyp
-      - nvm
+      - nodejs~22.17.1
       - python3
       - wget
       - yarn
@@ -49,49 +50,28 @@ pipeline:
     with:
       repository: https://github.com/elastic/kibana
       tag: v${{package.version}}
-      expected-commit: e3b2d1cf5b2141407d44284364b6d6bcd10634cb
+      expected-commit: 7c4882bd34f27e726bd4c662e4536e7deb9113fc
 
   - uses: patch
     with:
-      patches: CVE-2024-53382.patch
+      patches: CVE-2024-53382.patch node-version-bypass.patch enable-build-as-root.patch
 
   - runs: |
-      # find kibana's pinned node version, download it, use it to bootstrap
-      # it will run bazel and then vendor a copy.
-      node_version=$(jq -r .engines.node package.json)
-      arch="x64"
-      if [ "$(uname -m)" != "x86_64" ]; then
-        arch="arm64"
-      fi
-      node_filename="node-v${node_version}-linux-${arch}.tar.xz"
-      node_sha256sum=$(grep -E -o "linux-${arch}.+[a-z0-9]{32}" WORKSPACE.bazel | awk -F '"' '{print $NF}')
-      node_url="https://us-central1-elastic-kibana-184716.cloudfunctions.net/kibana-ci-proxy-cache/node-glibc-217/dist/v${node_version}/${node_filename}"
-      wget "$node_url"
-      our_sha256sum=$(sha256sum "$node_filename" | awk '{print $1}')
-      if [ "$our_sha256sum" != "$node_sha256sum" ]; then
-        echo "mismatched sha256sums: ours=$our_sha256sum theirs=$node_sha256sum"
-        exit 1
-      fi
-      unxz "$node_filename"
-      tar xf "$(basename -s .xz "$node_filename")" -C /usr --strip-components=1
-
-  - runs: |
-      bash -c '\
       export NODE_OPTIONS="--max-old-space-size=32768 --max-semi-space-size=8192"
-      source /usr/share/nvm/nvm.sh
-      nvm install $(cat .nvmrc)
-      nvm use $(cat .nvmrc)
       yarn install --force-install
       yarn kbn bootstrap --allow-root
 
       # builds fail in x86_64 CI without upping bazels available memory
       echo "startup --host_jvm_args=-Xmx48g" >> ~/.bazelrc
       node --optimize_for_size --gc-interval=100 scripts/build --release --skip-os-packages --skip-canvas-shareable-runtime --skip-docker-ubi --skip-docker-fips
-      '
 
   - runs: |
       mkdir -p "${{targets.destdir}}"/usr/share/kibana
       tar xf target/kibana-${{package.version}}-linux-*.tar.gz -C ${{targets.destdir}}/usr/share/kibana --strip-components=1
+
+  - runs: |
+      rm -rf "${{targets.destdir}}"/usr/share/kibana/node/glibc-217/bin/node
+      ln -sf /usr/bin/node "${{targets.destdir}}"/usr/share/kibana/node/glibc-217/bin/node
 
 # kibana should not be using the "strip" pipeline as the only binaries being stripped are
 # ones provided by upstream - node and headless_shell browser ; it's better that our binaries
@@ -111,6 +91,7 @@ subpackages:
         - libnss # needed for the @kbn/screenshotting-plugin/chromium package
         - libnspr # needed for the @kbn/screenshotting-plugin/chromium package
         - merged-usrsbin
+        - nodejs-22
         - wolfi-baselayout
     pipeline:
       - uses: bitnami/compat
@@ -174,10 +155,10 @@ subpackages:
             real-pkg-name: ${{subpkg.name}}
 
   - name: ${{package.name}}-iamguarded
-    description: ElasticSearch for Iamguarded
+    description: Your window into the Elastic Stack
     dependencies:
       provides:
-        - elasticsearch-iamguarded=${{package.full-version}}
+        - kibana-iamguarded=${{package.full-version}}
       runtime:
         - bash
         - busybox
@@ -186,6 +167,7 @@ subpackages:
         - libnss # needed for the @kbn/screenshotting-plugin/chromium package
         - libnspr # needed for the @kbn/screenshotting-plugin/chromium package
         - merged-usrsbin
+        - nodejs-22
         - wolfi-baselayout
     pipeline:
       - uses: iamguarded/build-compat
@@ -250,7 +232,7 @@ subpackages:
         - uses: test/tw/ldd-check
         - uses: test/virtualpackage
           with:
-            virtual-pkg-name: elasticsearch-iamguarded
+            virtual-pkg-name: kibana-iamguarded
             real-pkg-name: ${{subpkg.name}}
 
 update:

@@ -25,9 +25,8 @@ contents:
   # We need a way to copy file into EFI without mounting it
   - mtools
   - findutils
-  # for mkfs.xfs
-  - xfsprogs
-  - xfsprogs-extra
+  # for mkfs.ext4
+  - e2fsprogs
   # Needed for forcing reproducibility
   - libfaketime
   # We mount the output 9p shared dir
@@ -41,6 +40,22 @@ cmd: |
   set -e
   set -x
   set -o pipefail
+
+  empty_dir() {
+    # empty an existing dir maintaining its timestamp. error on non-existing.
+    local d="$1" tmpf=""
+    [ -d "$d" ] || { echo "ERROR: empty_dir $d: '$d' is not a directory" 1>&2; return 1; }
+    [ -L "$d" ] && { echo "ERROR: empty_dir $d: '$d' is a symlink" 1>&2; return 1; }
+    tmpf=$(mktemp)
+    touch --reference="$d" "$tmpf" &&
+      find "$d" -mindepth 1 -delete &&
+      touch --reference="$tmpf" "$d" &&
+      rm -f "$tmpf" || {
+        echo "ERROR: empty_dir $d: failed $?"
+        rm -f "$tmpf"
+        return 1
+      }
+  }
 
   mkdir /output
   mount -t 9p -otrans=virtio -oversion=9p2000.L output /output
@@ -99,8 +114,8 @@ cmd: |
 
   # Create a scratch disk in /tmp where we unpack potentially
   # very large disks
-  mkfs.xfs "${scratch}"
-  mount -t xfs -o noatime,nodiratime "${scratch}" /tmp/
+  mkfs.ext4 "${scratch}"
+  mount -t ext4 -o noatime,nodiratime "${scratch}" /tmp/
 
   # Extract rootfs and clean it up
   root_dir=$(mktemp -d /tmp/root.XXXXXX)
@@ -113,7 +128,7 @@ cmd: |
     --numeric-owner \
     -C $root_dir
   # Remove included char devices that we dont need
-  rm -rf $root_dir/dev
+  empty_dir "$root_dir/dev"
 
   # Format our EFP System Partition with FAT32 (required)
   # using invariant will make the partition reproducible
@@ -128,7 +143,7 @@ cmd: |
   drive c: file="$uefi_partition" partition=0 hidden=$sstart
   EOF
   # First create directories
-  find $root_dir/boot/ -type d -printf "%P\n" | sort | while read -r dir; do
+  find $root_dir/boot/firmware -type d -printf "%P\n" | sort | while read -r dir; do
       if [ -n "$dir" ]; then
           MTOOLS_SKIP_CHECK=1 \
               SOURCE_DATE_EPOCH=$FROZEN_TIMESTAMP \
@@ -137,51 +152,38 @@ cmd: |
       fi
   done
   # Then copy all files
-  find $root_dir/boot/ -type f -printf "%P\n" | sort | while read -r file; do
+  find $root_dir/boot/firmware -type f -printf "%P\n" | sort | while read -r file; do
       MTOOLS_SKIP_CHECK=1 \
           SOURCE_DATE_EPOCH=$FROZEN_TIMESTAMP \
           TZ=UTC \
-          mcopy -o -p -m -Q "$root_dir/boot/$file" "c:/$file"
+          mcopy -o -p -m -Q "$root_dir/boot/firmware/$file" "c:/$file"
   done
 
-  # Remove unused efi files for XFS partition
-  rm -rf "$root_dir/boot/*"
+  # Remove unused efi files for root partition
+  empty_dir "$root_dir/boot/firmware"
 
   # Raspberry Pi tweaks
   # Put the login prompt on vt1 on the raspberry pi to login on the console
   echo "ReserveVT=1" >> $root_dir/etc/systemd/logind.conf
+  # add linky:chainguard default user/password
+  echo "linky:x:1000:1000:linky:/home/linky:/bin/sh" >> $root_dir/etc/passwd
+  echo "linky:\$6\$FYPmcA88EX5ECj/Q\$AgKP9MbV9Tv1GYGKL7LWHJguO9OL4fHEh16euFwH/B93K9MGD.QW29eI2OG.au7UemqlJKuhqLEDLKMKo2lsj1:20341:0:99999:7:::" >> $root_dir/etc/shadow
+  # add linky user to the docker group
+  echo "docker:x:125:linky" >> $root_dir/etc/group
   # Fix timestamps for reproducibility
   touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/systemd/logind.conf
+  touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/passwd
+  touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/shadow
+  touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/group
 
-  # Format our root partition with xfs
-  FAKE_TIME="$(date -d @"$FROZEN_TIMESTAMP" +"%Y-%m-%d %H:%M:%S")"
-  export LD_PRELOAD="/usr/lib/faketime/libfaketime.so.1"
-  export FAKERANDOM_SEED="0x12345678DEADBEEF"
-  export FAKETIME=$FAKE_TIME
-  export NO_FAKE_STAT=1
-
-  mkfs.xfs \
-    -b size=4096 \
-    -d agcount=4 \
-    -d noalign \
-    -i attr=2 \
-    -i projid32bit=1 \
-    -i size=512 \
-    -l size=67108864 \
-    -l su=4096 \
-    -l version=2 \
-    -m crc=1 \
-    -m finobt=1 \
-    -m uuid=$FS_UUID_ROOT \
-    -n size=16384 \
-    -n version=2 \
-    -p file=$root_dir \
-    $root_partition
-
-  # Ensure / is 0755 or systemd will complain
-  # by default it will inherit whatever permission $root_dir will have
-  # for consistency lets set it manually.
-  xfs_db -x $root_partition -c "inode 128" -c "write core.mode 040755"
+  # For RPi we switch back to ext4 until I get the bootloader to work
+  # correctly with XFS
+  SOURCE_DATE_EPOCH=$FROZEN_TIMESTAMP mkfs.ext4 \
+  -F \
+  -d $root_dir \
+  -E hash_seed=035cb65d-0a86-404a-bad7-19c88d05e400 \
+  -U $FS_UUID_ROOT \
+  -L root $root_partition
 
   sync
   echo -n 0 > /output/result

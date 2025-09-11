@@ -5,12 +5,18 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	LAUNCH_ATTEMPTS_MAX = 5
+	LAUNCH_BACKOFF_SECS = 10
 )
 
 func launchCmd() *cobra.Command {
@@ -163,13 +169,28 @@ func launchCmd() *cobra.Command {
 				Zone:             zone,
 				InstanceResource: instance,
 			}
-			op, err := instancesClient.Insert(ctx, req)
-			if err != nil {
-				log.Print("Maybe try gcloud auth login --update-adc") // Try to handle this in setup instead.
-				log.Fatalf("could not create instance: %v", err)
-			}
-			// Wait until the operation completes.
-			if err := op.Wait(ctx); err != nil {
+
+			for attempt := 1; attempt <= LAUNCH_ATTEMPTS_MAX; attempt++ {
+				op, err := instancesClient.Insert(ctx, req)
+				if err != nil {
+					log.Print("Maybe try gcloud auth login --update-adc") // Try to handle this in setup instead.
+					log.Fatalf("could not create instance: %v", err)
+				}
+
+				err = op.Wait(ctx)
+				if err == nil {
+					break
+				}
+
+				if isResourceExhaustionError(err) {
+					log.Printf("Zone %s has insufficient capacity (attempt %d/%d failed): %v", zone, attempt, LAUNCH_ATTEMPTS_MAX, err)
+					if attempt < LAUNCH_ATTEMPTS_MAX {
+						backoffSecs := attempt * LAUNCH_BACKOFF_SECS
+						time.Sleep(time.Duration(backoffSecs) * time.Second)
+						continue
+					}
+				}
+
 				log.Fatalf("instance creation operation failed: %v", err)
 			}
 			log.Printf("Launched GCE VM: %s", instanceName)
@@ -217,4 +238,11 @@ func parseMetadataString(input string) map[string]string {
 		res[split[0]] = split[1]
 	}
 	return res
+}
+
+func isResourceExhaustionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "ZONE_RESOURCE_POOL_EXHAUSTED")
 }

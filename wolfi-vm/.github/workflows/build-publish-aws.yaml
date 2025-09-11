@@ -79,17 +79,17 @@ jobs:
       VM_GROUP: ${{ matrix.group }}
       VM_CLOUD: 'aws'
       PUBLISH_TO_MP: ${{ github.event.inputs.publish-to-marketplace || 'on-schedule' }}
-      WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'false' }}
+      WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'true' }}
 
     steps:
       - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: audit
 
-      - uses: chainguard-dev/actions/apt-faster@df684a72f67ce7eecd78098365cb5057f16be3b1 # v1.4.8
+      - uses: chainguard-dev/actions/apt-faster@f632aec66edeebe245ad686a33a0c0a2160cac31 # v1.4.14
 
       - name: Checkout source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -217,18 +217,38 @@ jobs:
       - name: "Publish AWS Images to marketplace"
         run: |
           if [ "$PUBLISH_TO_MP" = 'on-schedule' ]; then
-            if ! weekday=$(date +%A); then
-              echo 'Trying to publish once a week only, but failed to determine the weekday. Bailing!'
-              exit 1
+            # If this is a scheduled run, limit how often the images get published to the AWS Marketplace
+            # as there is a limit of 100 version per product (and reducing the number of versions requires
+            # coordination with AWS Support). Hand off the decision whether to publish to a helper script
+            # (so the script can be tested in isolation). The intention is to publish once on Monday, or
+            # whenever the next scheduled build after that succeeds and passes testing (i.e. whenever the
+            # last published build is older than 7 days).
+            #
+            # It is sufficient to look at a single product from this job as all products from the same
+            # (group, architecture) tuple are published at the same time. While a publish request for a
+            # single product from the group could fail asynchronously, historically that failure is likely
+            # to be persistent and need manual intervention. Republishing the entire group when only one
+            # of the products needs publishing will quickly exhaust the version limit.
+
+            # sort only to slurp all output and avoid a broken pipe
+            variant=$(make list-$VM_GROUP | sort | head -n1)
+            product_id=$(yq .awspub.images[].marketplace.entity_id awspub/$VM_ARCH/$variant.yaml | head -n1)
+            echo "Evaluating $variant ($product_id) for whether the group needs to be published..."
+            if ! should_publish=$(./tools/aws-should-ci-publish "$product_id"); then
+              echo 'Failed to decide whether to publish.'
             fi
-            echo "The automated job is publishing to the AWS Marketplace once a week on Mondays only. Today is $weekday."
-            if [ "$weekday" = 'Monday' ]; then
-              echo 'Will publish.'
-              PUBLISH_TO_MP=true
-            else
-              echo 'Will not publish.'
-              PUBLISH_TO_MP=false
-            fi
+
+            case "$should_publish" in
+              yes)
+                PUBLISH_TO_MP=true
+                ;;
+              no)
+                PUBLISH_TO_MP=false
+                ;;
+              *)
+                echo "Unexpected verdict '$should_publish'."
+                exit 1
+            esac
           fi
 
           case "$PUBLISH_TO_MP" in
@@ -253,5 +273,5 @@ jobs:
           message-color: ${{ job.status == 'success' && '#3fb950' || '#f85149'}}
           text: |
             For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            Or run ./hack/fetch-test-result -c ${{ env.VM_CLOUD }} -r ${{ github.run_id }}
+            Or run ./hack/fetch-test-result -c ${{ env.VM_CLOUD }} -r ${{ github.run_id }} -a ${{ matrix.arch }} -f 'test-results-*${{matrix.group}}*'
           unfurl-links: true

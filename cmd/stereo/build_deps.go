@@ -275,6 +275,11 @@ func buildDeps(ctx context.Context, architectures []string, useWithdrawn bool, w
 
 			// Write unresolved packages to JSON file if there are any
 			if len(unresolvedPackages) > 0 {
+				// Sort unresolved packages by package name for consistent output
+				sort.Slice(unresolvedPackages, func(i, j int) bool {
+					return unresolvedPackages[i].Package < unresolvedPackages[j].Package
+				})
+
 				unresolvedData := struct {
 					Repository         string `json:"repository"`
 					Architecture       string `json:"architecture"`

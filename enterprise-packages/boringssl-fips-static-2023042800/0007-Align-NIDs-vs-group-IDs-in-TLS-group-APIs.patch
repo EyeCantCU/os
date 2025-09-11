@@ -1,0 +1,462 @@
+From c0fb9a06b7b161434e4f85492622bdc8a637c39d Mon Sep 17 00:00:00 2001
+From: David Benjamin <davidben@google.com>
+Date: Fri, 26 May 2023 22:03:30 -0400
+Subject: [PATCH 07/10] Align NIDs vs group IDs in TLS group APIs
+
+Right now we use NIDs to configure the group list, but group IDs (the
+TLS codepoints) to return the negotiated group. The NIDs come from
+OpenSSL, while the group ID was original our API. OpenSSL has since
+added SSL_get_negotiated_group, but we don't implement it.
+
+To add Kyber to QUIC, we'll need to add an API for configuring groups to
+QUICHE. Carrying over our inconsistency into QUICHE's public API would
+be unfortunate, so let's use this as the time to align things.
+
+We could either align with OpenSSL and say NIDs are now the group
+representation at the public API, or we could add a parallel group ID
+API. (Or we could make a whole new SSL_NAMED_GROUP object to pattern
+after SSL_CIPHER, which isn't wrong, but is even more new APIs.)
+
+Aligning with OpenSSL would be fewer APIs, but NIDs aren't a great
+representation. The numbers are ad-hoc and even diverge a bit between
+OpenSSL and BoringSSL. The TLS codepoints are better to export out to
+callers. Also QUICHE has exported the negotiated group using the
+codepoints, so the natural solution would be to use codepoints on input
+too.
+
+Thus, this CL adds SSL_CTX_set1_group_ids and SSL_set1_group_ids. It
+also rearranges the API docs slightly to put the group ID ones first,
+and leaves a little note about the NID representation before introducing
+those.
+
+While I'm here, I've added SSL_get_negotiated_group. NGINX seems to use
+it when available, so we may as well fill in that unnecessary
+compatibility hole.
+
+Bug: chromium:1442377
+Change-Id: I47ca8ae52c274133f28da9893aed7fc70f942bf8
+Reviewed-on: https://boringssl-review.googlesource.com/c/boringssl/+/60208
+Commit-Queue: David Benjamin <davidben@google.com>
+Reviewed-by: Adam Langley <agl@google.com>
+(cherry picked from commit 6cf98208371e5c2c8b9d34ce3b8c452ea90e2963)
+Conflicts:
+	include/openssl/base.h
+Do not bump BORINGSSL_API_VERSION as Envoy/Quiche stopped checking it
+---
+ fuzz/ssl_ctx_api.cc     |  7 ++++
+ include/openssl/ssl.h   | 76 ++++++++++++++++++++++++++---------------
+ ssl/internal.h          |  4 +++
+ ssl/ssl_key_share.cc    |  9 +++++
+ ssl/ssl_lib.cc          | 48 ++++++++++++++++++++++----
+ ssl/ssl_test.cc         | 15 ++++++++
+ ssl/test/fuzzer.h       | 10 +++---
+ ssl/test/test_config.cc | 35 ++-----------------
+ ssl/test/test_config.h  |  2 +-
+ 9 files changed, 134 insertions(+), 72 deletions(-)
+
+diff --git a/fuzz/ssl_ctx_api.cc b/fuzz/ssl_ctx_api.cc
+index f7c1f7350..bbf7c71a6 100644
+--- a/fuzz/ssl_ctx_api.cc
++++ b/fuzz/ssl_ctx_api.cc
+@@ -416,6 +416,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
+         }
+         SSL_CTX_set1_groups(ctx, groups.data(), groups.size());
+       },
++      [](SSL_CTX *ctx, CBS *cbs) {
++        std::vector<uint16_t> groups;
++        if (!GetVector(&groups, cbs)) {
++          return;
++        }
++        SSL_CTX_set1_group_ids(ctx, groups.data(), groups.size());
++      },
+       [](SSL_CTX *ctx, CBS *cbs) {
+         std::string groups;
+         if (!GetString(&groups, cbs)) {
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index d2f277565..a75fdcb4d 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2349,34 +2349,6 @@ OPENSSL_EXPORT size_t SSL_CTX_get_num_tickets(const SSL_CTX *ctx);
+ // TLS 1.3 and later, ECDSA curves are part of the signature algorithm. See
+ // |SSL_SIGN_*|.
+ 
+-// SSL_CTX_set1_groups sets the preferred groups for |ctx| to be |groups|. Each
+-// element of |groups| should be a |NID_*| constant from nid.h. It returns one
+-// on success and zero on failure.
+-//
+-// Note that this API does not use the |SSL_GROUP_*| values defined below.
+-OPENSSL_EXPORT int SSL_CTX_set1_groups(SSL_CTX *ctx, const int *groups,
+-                                       size_t num_groups);
+-
+-// SSL_set1_groups sets the preferred groups for |ssl| to be |groups|. Each
+-// element of |groups| should be a |NID_*| constant from nid.h. It returns one
+-// on success and zero on failure.
+-//
+-// Note that this API does not use the |SSL_GROUP_*| values defined below.
+-OPENSSL_EXPORT int SSL_set1_groups(SSL *ssl, const int *groups,
+-                                   size_t num_groups);
+-
+-// SSL_CTX_set1_groups_list sets the preferred groups for |ctx| to be the
+-// colon-separated list |groups|. Each element of |groups| should be a curve
+-// name (e.g. P-256, X25519, ...). It returns one on success and zero on
+-// failure.
+-OPENSSL_EXPORT int SSL_CTX_set1_groups_list(SSL_CTX *ctx, const char *groups);
+-
+-// SSL_set1_groups_list sets the preferred groups for |ssl| to be the
+-// colon-separated list |groups|. Each element of |groups| should be a curve
+-// name (e.g. P-256, X25519, ...). It returns one on success and zero on
+-// failure.
+-OPENSSL_EXPORT int SSL_set1_groups_list(SSL *ssl, const char *groups);
+-
+ // SSL_GROUP_* define TLS group IDs.
+ #define SSL_GROUP_SECP224R1 21
+ #define SSL_GROUP_SECP256R1 23
+@@ -2385,6 +2357,19 @@ OPENSSL_EXPORT int SSL_set1_groups_list(SSL *ssl, const char *groups);
+ #define SSL_GROUP_X25519 29
+ #define SSL_GROUP_X25519_KYBER768_DRAFT00 0x6399
+ 
++// SSL_CTX_set1_group_ids sets the preferred groups for |ctx| to |group_ids|.
++// Each element of |group_ids| should be one of the |SSL_GROUP_*| constants. It
++// returns one on success and zero on failure.
++OPENSSL_EXPORT int SSL_CTX_set1_group_ids(SSL_CTX *ctx,
++                                          const uint16_t *group_ids,
++                                          size_t num_group_ids);
++
++// SSL_set1_group_ids sets the preferred groups for |ssl| to |group_ids|. Each
++// element of |group_ids| should be one of the |SSL_GROUP_*| constants. It
++// returns one on success and zero on failure.
++OPENSSL_EXPORT int SSL_set1_group_ids(SSL *ssl, const uint16_t *group_ids,
++                                      size_t num_group_ids);
++
+ // SSL_get_group_id returns the ID of the group used by |ssl|'s most recently
+ // completed handshake, or 0 if not applicable.
+ OPENSSL_EXPORT uint16_t SSL_get_group_id(const SSL *ssl);
+@@ -2407,6 +2392,39 @@ OPENSSL_EXPORT const char *SSL_get_group_name(uint16_t group_id);
+ // list, so this does not apply if, say, sending strings across services.
+ OPENSSL_EXPORT size_t SSL_get_all_group_names(const char **out, size_t max_out);
+ 
++// The following APIs also configure Diffie-Hellman groups, but use |NID_*|
++// constants instead of |SSL_GROUP_*| constants. These are provided for OpenSSL
++// compatibility. Where NIDs are unstable constants specific to OpenSSL and
++// BoringSSL, group IDs are defined by the TLS protocol. Prefer the group ID
++// representation if storing persistently, or exporting to another process or
++// library.
++
++// SSL_CTX_set1_groups sets the preferred groups for |ctx| to be |groups|. Each
++// element of |groups| should be a |NID_*| constant from nid.h. It returns one
++// on success and zero on failure.
++OPENSSL_EXPORT int SSL_CTX_set1_groups(SSL_CTX *ctx, const int *groups,
++                                       size_t num_groups);
++
++// SSL_set1_groups sets the preferred groups for |ssl| to be |groups|. Each
++// element of |groups| should be a |NID_*| constant from nid.h. It returns one
++// on success and zero on failure.
++OPENSSL_EXPORT int SSL_set1_groups(SSL *ssl, const int *groups,
++                                   size_t num_groups);
++
++// SSL_CTX_set1_groups_list decodes |groups| as a colon-separated list of group
++// names (e.g. "X25519" or "P-256") and sets |ctx|'s preferred groups to the
++// result. It returns one on success and zero on failure.
++OPENSSL_EXPORT int SSL_CTX_set1_groups_list(SSL_CTX *ctx, const char *groups);
++
++// SSL_set1_groups_list decodes |groups| as a colon-separated list of group
++// names (e.g. "X25519" or "P-256") and sets |ssl|'s preferred groups to the
++// result. It returns one on success and zero on failure.
++OPENSSL_EXPORT int SSL_set1_groups_list(SSL *ssl, const char *groups);
++
++// SSL_get_negotiated_group returns the NID of the group used by |ssl|'s most
++// recently completed handshake, or |NID_undef| if not applicable.
++OPENSSL_EXPORT int SSL_get_negotiated_group(const SSL *ssl);
++
+ 
+ // Certificate verification.
+ //
+@@ -5350,6 +5368,7 @@ OPENSSL_EXPORT int SSL_set_compliance_policy(
+ #define SSL_CTRL_GET_CLIENT_CERT_TYPES doesnt_exist
+ #define SSL_CTRL_GET_EXTRA_CHAIN_CERTS doesnt_exist
+ #define SSL_CTRL_GET_MAX_CERT_LIST doesnt_exist
++#define SSL_CTRL_GET_NEGOTIATED_GROUP doesnt_exist
+ #define SSL_CTRL_GET_NUM_RENEGOTIATIONS doesnt_exist
+ #define SSL_CTRL_GET_READ_AHEAD doesnt_exist
+ #define SSL_CTRL_GET_RI_SUPPORT doesnt_exist
+@@ -5440,6 +5459,7 @@ OPENSSL_EXPORT int SSL_set_compliance_policy(
+ #define SSL_get0_chain_certs SSL_get0_chain_certs
+ #define SSL_get_max_cert_list SSL_get_max_cert_list
+ #define SSL_get_mode SSL_get_mode
++#define SSL_get_negotiated_group SSL_get_negotiated_group
+ #define SSL_get_options SSL_get_options
+ #define SSL_get_secure_renegotiation_support \
+     SSL_get_secure_renegotiation_support
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 424238d82..a462c97ad 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -1144,6 +1144,10 @@ bool ssl_nid_to_group_id(uint16_t *out_group_id, int nid);
+ // true. Otherwise, it returns false.
+ bool ssl_name_to_group_id(uint16_t *out_group_id, const char *name, size_t len);
+ 
++// ssl_group_id_to_nid returns the NID corresponding to |group_id| or
++// |NID_undef| if unknown.
++int ssl_group_id_to_nid(uint16_t group_id);
++
+ 
+ // Handshake messages.
+ 
+diff --git a/ssl/ssl_key_share.cc b/ssl/ssl_key_share.cc
+index b7ebef41a..d932ef385 100644
+--- a/ssl/ssl_key_share.cc
++++ b/ssl/ssl_key_share.cc
+@@ -345,6 +345,15 @@ bool ssl_name_to_group_id(uint16_t *out_group_id, const char *name, size_t len)
+   return false;
+ }
+ 
++int ssl_group_id_to_nid(uint16_t group_id) {
++  for (const auto &group : kNamedGroups) {
++    if (group.group_id == group_id) {
++      return group.nid;
++    }
++  }
++  return NID_undef;
++}
++
+ BSSL_NAMESPACE_END
+ 
+ using namespace bssl;
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index b7303d49a..d7b5be3dd 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -1939,6 +1939,32 @@ int SSL_CTX_set_tlsext_ticket_key_cb(
+   return 1;
+ }
+ 
++static bool check_group_ids(Span<const uint16_t> group_ids) {
++  for (uint16_t group_id : group_ids) {
++    if (ssl_group_id_to_nid(group_id) == NID_undef) {
++      OPENSSL_PUT_ERROR(SSL, SSL_R_UNSUPPORTED_ELLIPTIC_CURVE);
++      return false;
++    }
++  }
++  return true;
++}
++
++int SSL_CTX_set1_group_ids(SSL_CTX *ctx, const uint16_t *group_ids,
++                           size_t num_group_ids) {
++  auto span = MakeConstSpan(group_ids, num_group_ids);
++  return check_group_ids(span) && ctx->supported_group_list.CopyFrom(span);
++}
++
++int SSL_set1_group_ids(SSL *ssl, const uint16_t *group_ids,
++                       size_t num_group_ids) {
++  if (!ssl->config) {
++    return 0;
++  }
++  auto span = MakeConstSpan(group_ids, num_group_ids);
++  return check_group_ids(span) &&
++         ssl->config->supported_group_list.CopyFrom(span);
++}
++
+ static bool ssl_nids_to_group_ids(Array<uint16_t> *out_group_ids,
+                                   Span<const int> nids) {
+   Array<uint16_t> group_ids;
+@@ -1948,6 +1974,7 @@ static bool ssl_nids_to_group_ids(Array<uint16_t> *out_group_ids,
+ 
+   for (size_t i = 0; i < nids.size(); i++) {
+     if (!ssl_nid_to_group_id(&group_ids[i], nids[i])) {
++      OPENSSL_PUT_ERROR(SSL, SSL_R_UNSUPPORTED_ELLIPTIC_CURVE);
+       return false;
+     }
+   }
+@@ -1993,6 +2020,7 @@ static bool ssl_str_to_group_ids(Array<uint16_t> *out_group_ids,
+     col = strchr(ptr, ':');
+     if (!ssl_name_to_group_id(&group_ids[i++], ptr,
+                               col ? (size_t)(col - ptr) : strlen(ptr))) {
++      OPENSSL_PUT_ERROR(SSL, SSL_R_UNSUPPORTED_ELLIPTIC_CURVE);
+       return false;
+     }
+     if (col) {
+@@ -2025,6 +2053,14 @@ uint16_t SSL_get_group_id(const SSL *ssl) {
+   return session->group_id;
+ }
+ 
++int SSL_get_negotiated_group(const SSL *ssl) {
++  uint16_t group_id = SSL_get_group_id(ssl);
++  if (group_id == 0) {
++    return NID_undef;
++  }
++  return ssl_group_id_to_nid(group_id);
++}
++
+ int SSL_CTX_set_tmp_dh(SSL_CTX *ctx, const DH *dh) {
+   return 1;
+ }
+@@ -3188,7 +3224,7 @@ namespace fips202205 {
+ // Section 3.3.1
+ // "The server shall be configured to only use cipher suites that are
+ // composed entirely of NIST approved algorithms"
+-static const int kGroups[] = {NID_X9_62_prime256v1, NID_secp384r1};
++static const uint16_t kGroups[] = {SSL_GROUP_SECP256R1, SSL_GROUP_SECP384R1};
+ 
+ static const uint16_t kSigAlgs[] = {
+     SSL_SIGN_RSA_PKCS1_SHA256,
+@@ -3225,7 +3261,7 @@ static int Configure(SSL_CTX *ctx) {
+       // Encrypt-then-MAC extension is required for all CBC cipher suites and so
+       // it's easier to drop them.
+       SSL_CTX_set_strict_cipher_list(ctx, kTLS12Ciphers) &&
+-      SSL_CTX_set1_groups(ctx, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
++      SSL_CTX_set1_group_ids(ctx, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
+       SSL_CTX_set_signing_algorithm_prefs(ctx, kSigAlgs,
+                                           OPENSSL_ARRAY_SIZE(kSigAlgs)) &&
+       SSL_CTX_set_verify_algorithm_prefs(ctx, kSigAlgs,
+@@ -3239,7 +3275,7 @@ static int Configure(SSL *ssl) {
+   return SSL_set_min_proto_version(ssl, TLS1_2_VERSION) &&
+          SSL_set_max_proto_version(ssl, TLS1_3_VERSION) &&
+          SSL_set_strict_cipher_list(ssl, kTLS12Ciphers) &&
+-         SSL_set1_groups(ssl, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
++         SSL_set1_group_ids(ssl, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
+          SSL_set_signing_algorithm_prefs(ssl, kSigAlgs,
+                                          OPENSSL_ARRAY_SIZE(kSigAlgs)) &&
+          SSL_set_verify_algorithm_prefs(ssl, kSigAlgs,
+@@ -3252,7 +3288,7 @@ namespace wpa202304 {
+ 
+ // See WPA version 3.1, section 3.5.
+ 
+-static const int kGroups[] = {NID_secp384r1};
++static const uint16_t kGroups[] = {SSL_GROUP_SECP384R1};
+ 
+ static const uint16_t kSigAlgs[] = {
+     SSL_SIGN_RSA_PKCS1_SHA384,        //
+@@ -3272,7 +3308,7 @@ static int Configure(SSL_CTX *ctx) {
+   return SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) &&
+          SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION) &&
+          SSL_CTX_set_strict_cipher_list(ctx, kTLS12Ciphers) &&
+-         SSL_CTX_set1_groups(ctx, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
++         SSL_CTX_set1_group_ids(ctx, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
+          SSL_CTX_set_signing_algorithm_prefs(ctx, kSigAlgs,
+                                              OPENSSL_ARRAY_SIZE(kSigAlgs)) &&
+          SSL_CTX_set_verify_algorithm_prefs(ctx, kSigAlgs,
+@@ -3285,7 +3321,7 @@ static int Configure(SSL *ssl) {
+   return SSL_set_min_proto_version(ssl, TLS1_2_VERSION) &&
+          SSL_set_max_proto_version(ssl, TLS1_3_VERSION) &&
+          SSL_set_strict_cipher_list(ssl, kTLS12Ciphers) &&
+-         SSL_set1_groups(ssl, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
++         SSL_set1_group_ids(ssl, kGroups, OPENSSL_ARRAY_SIZE(kGroups)) &&
+          SSL_set_signing_algorithm_prefs(ssl, kSigAlgs,
+                                          OPENSSL_ARRAY_SIZE(kSigAlgs)) &&
+          SSL_set_verify_algorithm_prefs(ssl, kSigAlgs,
+diff --git a/ssl/ssl_test.cc b/ssl/ssl_test.cc
+index 44070141a..0d1e6c1a6 100644
+--- a/ssl/ssl_test.cc
++++ b/ssl/ssl_test.cc
+@@ -7581,6 +7581,7 @@ TEST(SSLTest, ConnectionPropertiesDuringRenegotiate) {
+     EXPECT_EQ(SSL_CIPHER_get_id(cipher),
+               uint32_t{TLS1_CK_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256});
+     EXPECT_EQ(SSL_get_group_id(client.get()), SSL_GROUP_X25519);
++    EXPECT_EQ(SSL_get_negotiated_group(client.get()), NID_X25519);
+     EXPECT_EQ(SSL_get_peer_signature_algorithm(client.get()),
+               SSL_SIGN_RSA_PKCS1_SHA256);
+     bssl::UniquePtr<X509> peer(SSL_get_peer_certificate(client.get()));
+@@ -8542,6 +8543,20 @@ TEST(SSLTest, InvalidSignatureAlgorithm) {
+       ctx.get(), kDuplicatePrefs, OPENSSL_ARRAY_SIZE(kDuplicatePrefs)));
+ }
+ 
++TEST(SSLTest, InvalidGroups) {
++  bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
++  ASSERT_TRUE(ctx);
++
++  static const uint16_t kInvalidIDs[] = {1234};
++  EXPECT_FALSE(SSL_CTX_set1_group_ids(
++      ctx.get(), kInvalidIDs, OPENSSL_ARRAY_SIZE(kInvalidIDs)));
++
++  // This is a valid NID, but it is not a valid group.
++  static const int kInvalidNIDs[] = {NID_rsaEncryption};
++  EXPECT_FALSE(SSL_CTX_set1_groups(
++      ctx.get(), kInvalidNIDs, OPENSSL_ARRAY_SIZE(kInvalidNIDs)));
++}
++
+ TEST(SSLTest, NameLists) {
+   struct {
+     size_t (*func)(const char **, size_t);
+diff --git a/ssl/test/fuzzer.h b/ssl/test/fuzzer.h
+index 0edf79028..5a8e5e774 100644
+--- a/ssl/test/fuzzer.h
++++ b/ssl/test/fuzzer.h
+@@ -418,11 +418,11 @@ class TLSFuzzer {
+       return false;
+     }
+ 
+-    static const int kGroups[] = {NID_X25519Kyber768Draft00, NID_X25519,
+-                                  NID_X9_62_prime256v1, NID_secp384r1,
+-                                  NID_secp521r1};
+-    if (!SSL_CTX_set1_groups(ctx_.get(), kGroups,
+-                             OPENSSL_ARRAY_SIZE(kGroups))) {
++    static const uint16_t kGroups[] = {
++        SSL_GROUP_X25519_KYBER768_DRAFT00, SSL_GROUP_X25519,
++        SSL_GROUP_SECP256R1, SSL_GROUP_SECP384R1, SSL_GROUP_SECP521R1};
++    if (!SSL_CTX_set1_group_ids(ctx_.get(), kGroups,
++                                OPENSSL_ARRAY_SIZE(kGroups))) {
+       return false;
+     }
+ 
+diff --git a/ssl/test/test_config.cc b/ssl/test/test_config.cc
+index 515a76d42..48122ad6e 100644
+--- a/ssl/test/test_config.cc
++++ b/ssl/test/test_config.cc
+@@ -1895,38 +1895,9 @@ bssl::UniquePtr<SSL> TestConfig::NewSSL(
+   if (!check_close_notify) {
+     SSL_set_quiet_shutdown(ssl.get(), 1);
+   }
+-  if (!curves.empty()) {
+-    std::vector<int> nids;
+-    for (auto curve : curves) {
+-      switch (curve) {
+-        case SSL_GROUP_SECP224R1:
+-          nids.push_back(NID_secp224r1);
+-          break;
+-
+-        case SSL_GROUP_SECP256R1:
+-          nids.push_back(NID_X9_62_prime256v1);
+-          break;
+-
+-        case SSL_GROUP_SECP384R1:
+-          nids.push_back(NID_secp384r1);
+-          break;
+-
+-        case SSL_GROUP_SECP521R1:
+-          nids.push_back(NID_secp521r1);
+-          break;
+-
+-        case SSL_GROUP_X25519:
+-          nids.push_back(NID_X25519);
+-          break;
+-
+-        case SSL_GROUP_X25519_KYBER768_DRAFT00:
+-          nids.push_back(NID_X25519Kyber768Draft00);
+-          break;
+-      }
+-      if (!SSL_set1_curves(ssl.get(), &nids[0], nids.size())) {
+-        return nullptr;
+-      }
+-    }
++  if (!curves.empty() &&
++      !SSL_set1_group_ids(ssl.get(), curves.data(), curves.size())) {
++    return nullptr;
+   }
+   if (initial_timeout_duration_ms > 0) {
+     DTLSv1_set_initial_timeout_duration(ssl.get(), initial_timeout_duration_ms);
+diff --git a/ssl/test/test_config.h b/ssl/test/test_config.h
+index e8c473a16..e5c605799 100644
+--- a/ssl/test/test_config.h
++++ b/ssl/test/test_config.h
+@@ -35,7 +35,7 @@ struct TestConfig {
+   std::vector<uint16_t> signing_prefs;
+   std::vector<uint16_t> verify_prefs;
+   std::vector<uint16_t> expect_peer_verify_prefs;
+-  std::vector<int> curves;
++  std::vector<uint16_t> curves;
+   std::string key_file;
+   std::string cert_file;
+   std::string expect_server_name;
+-- 
+2.48.1
+

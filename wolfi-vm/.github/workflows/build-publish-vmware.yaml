@@ -1,0 +1,177 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Build and push VMWare VMs images"
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      notify-slack:
+        type: boolean
+        required: false
+        default: false
+        description: Notify slack when the workflow finishes.
+      notify-slack-success:
+        type: boolean
+        required: false
+        default: false
+        description: Send notifications on success as well as failure.
+      with-compliance-scan:
+        type: boolean
+        required: false
+        description: Run CIS Benchmarks compliance scanning and generate a report
+  # Only build when main is updated, we won't publish the artifacts out
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+# Allow only one workflow run at a time
+concurrency:
+  group: 'release-vmware'
+  cancel-in-progress: false
+
+jobs:
+  init:
+    if: ${{ github.repository == 'chainguard-dev/wolfi-vm' }}
+
+    runs-on: ubuntu-8-core
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
+
+  vmware-build-push:
+    runs-on: ubuntu-8-core
+    needs:
+      - init
+
+    permissions:
+      id-token: write # federated identity
+      contents: read # read repo
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
+
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_ARCH: ${{ matrix.arch }}
+      VM_CLOUD: "vmware"
+      WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'false' }}
+
+    steps:
+      - uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: chainguard-dev/actions/apt-faster@f632aec66edeebe245ad686a33a0c0a2160cac31 # v1.4.14
+
+      - name: Checkout source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build vms disks
+        uses: './.github/actions/build-disks'
+        with:
+          cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          vm_group: "vmware"
+          arch: '${{ matrix.arch }}'
+
+      - name: Scan disks
+        uses: './.github/actions/scan-disks'
+        with:
+          cloud_provider: "vmware"
+          arch: '${{ matrix.arch }}'
+
+      - name: add HOME/bin to PATH
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - name: make firmware
+        run: |
+          make "builder/ovmf-${{ matrix.arch }}.fd"
+
+      - name: "Create vmdk images"
+        run: |
+          names=$(make list-vmware)
+          [ -n "$names" ] || { echo "make list-vmware produced empty output"; exit 1; }
+
+          echo "Creating vmdk images for: $names"
+          for name in $names; do
+            echo "Creating vmdk for $name"
+            make "vmdk-$name"
+          done
+
+      - name: "Setup GCP Creds for GCS Publishing"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: 'projects/212178706475/locations/global/workloadIdentityPools/ci-pool/providers/ci-provider'
+          service_account: 'github-ci@wolfi-vm.iam.gserviceaccount.com'
+
+      - name: "Install GCP Deps"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: wolfi-vm
+
+      - name: "Configure gcloud"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          gcloud config set storage/parallel_composite_upload_enabled True
+
+      - name: "Publish VMware Images to GCS staging"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          arch="${{ env.VM_ARCH }}"
+          names=$(make list-vmware)
+          [ -n "$names" ] || { echo "make list-vmware produced empty output"; exit 1; }
+          make -j$(nproc) --output-sync=recurse publish-vmware PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
+
+      # TODO We don't have a test setup for vmware yet. QEMU won't work because we're not including the qemu guest helper.
+      # Don't publish images anywhere else yet.
+
+      #- name: "Test VMWare images"
+      #  uses: './.github/actions/vms-test'
+      #  with:
+      #    cloud_provider: "vmware"
+      #    vm_group: "vmware"
+      #    arch: '${{ matrix.arch }}'
+      #    with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
+
+      #- name: "Publish VMware Images to GCS"
+      #  if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      #  run: |
+      #    arch="${{ env.VM_ARCH }}"
+      #    names=$(make list-vmware)
+      #    [ -n "$names" ] || { echo "make list-vmware produced empty output"; exit 1; }
+      #    make -j$(nproc) --output-sync=recurse publish-vmware PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
+
+      #- uses: './.github/actions/notify-slack'
+      #  if: ${{ (inputs.notify-slack-success || failure()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
+      #  with:
+      #    webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
+      #    title: ${{ github.workflow }} (${{ matrix.arch }}) ${{ job.status }}
+      #    message-color: ${{ job.status == 'success' && '#3fb950' || '#f85149'}}
+      #    text: |
+      #      For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      #      Or run ./hack/fetch-test-result -c ${{ env.VM_CLOUD }} -r ${{ github.run_id }}
+      #    unfurl-links: true

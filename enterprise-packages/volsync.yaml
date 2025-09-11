@@ -1,0 +1,104 @@
+package:
+  name: volsync
+  version: "0.13.0"
+  epoch: 0
+  description: Asynchronous data replication for Kubernetes volumes
+  copyright:
+    - license: AGPL-3.0-or-later
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/backube/volsync
+      tag: v${{package.version}}
+      expected-commit: 34b8e30c6354bb8380dc77310ae07ba8687b3e5b
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-viper/mapstructure/v2@v2.4.0
+
+  - uses: go/build
+    with:
+      ldflags: -X=main.volsyncVersion=v${{package.version}}
+      packages: ./cmd
+      output: manager
+
+subpackages:
+  - name: ${{package.name}}-cli
+    description: CLI for volsync
+    pipeline:
+      - uses: go/build
+        with:
+          ldflags: -X=main.volsyncVersion=v${{package.version}}
+          packages: ./kubectl-volsync
+          output: kubectl-volsync
+    test:
+      pipeline:
+        - name: "basic test"
+          runs: |
+            # (TODO): grep for version. right now it returns 0.0.0 even after setting ldflags. same behaviour with upstream
+            kubectl-volsync --version
+
+  - name: ${{package.name}}-diskrsync-tcp
+    description: CLI for volsync
+    pipeline:
+      - uses: go/build
+        with:
+          ldflags: |
+            -X=main.volsyncVersion=v${{package.version}}
+          packages: ./diskrsync-tcp
+          output: diskrsync-tcp
+    test:
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tmp/target
+            start: |
+              diskrsync-tcp --target --port 9000 --verbose --no-compress --control-file /tmp/diskrsync.done /tmp/recv.raw
+            timeout: 20
+            expected_output: "Listening for tcp connection"
+
+update:
+  enabled: true
+  github:
+    identifier: backube/volsync
+    strip-prefix: v
+    use-tag: true
+  ignore-regex-patterns:
+    - "-rc"
+    - "helm-"
+
+test:
+  environment:
+    environment:
+      EXTERNAL_SNAPSHOTTER_VERSION: "release-6.0"
+    contents:
+      packages:
+        - helm
+        - curl
+        - wait-for-it
+  pipeline:
+    - uses: test/kwok/cluster
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          helm pull volsync \
+            --repo https://backube.github.io/helm-charts/ \
+            --version ${{package.version}} --untar
+          helm template volsync ./volsync \
+            --set manageCRDs=true \
+            --show-only templates/volsync.backube_replicationdestinations.yaml \
+            --show-only templates/volsync.backube_replicationsources.yaml \
+          | kubectl apply -f -
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${EXTERNAL_SNAPSHOTTER_VERSION}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${EXTERNAL_SNAPSHOTTER_VERSION}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${EXTERNAL_SNAPSHOTTER_VERSION}/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+        start: |
+          timeout 2s manager --kubeconfig="$KUBECONFIG" --metrics-bind-address=127.0.0.1:18080 --health-probe-bind-address=127.0.0.1:18081
+        timeout: 20
+        expected_output: "Registered Movers"
+        post: |
+          wait-for-it localhost:18080 -t 15
+          curl -fsSL http://localhost:18080/metrics | grep "volsync"

@@ -1,7 +1,7 @@
 package:
   name: airflow-2
   version: "2.11.0"
-  epoch: 10
+  epoch: 12
   description: Platform to programmatically author, schedule, and monitor workflows
   options:
     #  There is a dependency on libarrow.so although it
@@ -110,11 +110,14 @@ pipeline:
       #GHSA-r244-wg5g-6w2r (redshift-connector>=2.1.6)
       #CVE-2025-50213 (apache-airflow-providers-snowflake>=6.4.0)
       #GHSA-9548-qrrj-x5pj (aiohttp 3.12.4)
+      #GHSA-847f-9342-265h (h2 4.3.0)
       pip3.12 install --verbose \
         --force-reinstall --prefix=/opt/airflow --root="${{targets.contextdir}}" \
         aiohttp>=3.10.11 tornado>=6.5.0 statsd packaging pyparsing \
         apache-airflow==${{package.version}} apache-airflow-providers-celery==3.10.0 "flask>=2.2.1,<2.3" \
-        redshift-connector>=2.1.6 flask-appbuilder>=4.6.2 apache-airflow-providers-snowflake>=6.4.0 aiohttp==3.12.14
+        redshift-connector>=2.1.6 flask-appbuilder>=4.6.2 apache-airflow-providers-snowflake>=6.4.0 aiohttp==3.12.14 \
+        paramiko==3.5.1 h2==4.3.0
+      # NOTE: paramiko is pinned to 3.5.1 to resolve compatibility issues with SFTP providers. Unpin once upstream support is merged, https://github.com/apache/airflow/pull/54165.
       # NOTE: apache-airflow-providers-celery is pinned to 3.10.0 because 3.10.3 introduced a regresssion.
       # https://github.com/apache/airflow/issues/47781 details more about it.
       # NOTE: flask is pinned to < 2.3 as required by apache-airflow-providers-fab:
@@ -167,49 +170,6 @@ subpackages:
         - uses: test/virtualpackage
           with:
             virtual-pkg-name: airflow-compat
-            real-pkg-name: ${{subpkg.name}}
-
-  - name: ${{package.name}}-bitnami-compat
-    dependencies:
-      runtime:
-        - ${{package.name}}
-        - bash
-        - busybox
-        - coreutils
-        - ini-file
-        - merged-usrsbin
-        - wait-for-port
-        - wolfi-baselayout
-      provides:
-        - airflow-bitnami-compat=${{package.full-version}}
-    description: "Compatibility package for Bitnami's Airflow image"
-    pipeline:
-      - uses: bitnami/compat
-        with:
-          image: airflow
-          version-path: 2/debian-12
-          commit: 2fe4a9e70c66f608d4c7669ca2b52009cc6f4663
-      - runs: |
-          mkdir -p ${{targets.subpkgdir}}/opt/bitnami
-          ln -sf /opt/airflow ${{targets.subpkgdir}}/opt/bitnami
-          mkdir -p ${{targets.subpkgdir}}/opt/airflow/venv
-          chmod g+rwX ${{targets.subpkgdir}}/opt/bitnami
-          ln -sf /opt/airflow/lib /opt/airflow/bin ${{targets.subpkgdir}}/opt/airflow/venv
-          mkdir -p ${{targets.subpkgdir}}/opt/airflow/bin
-          touch ${{targets.subpkgdir}}/opt/airflow/bin/activate
-          chmod 0755 ${{targets.subpkgdir}}/opt/airflow/bin/activate
-          find ${{targets.subpkgdir}}/opt/bitnami/scripts -type f -exec sed -i 's|/opt/bitnami/scripts/|${{targets.subpkgdir}}/opt/bitnami/scripts/|g' {} +
-          sed -i 's/-g "root"//g' ${{targets.subpkgdir}}/opt/bitnami/scripts/airflow/postunpack.sh
-          sed -i 's/locale-gen/localedef -i en_US -f UTF-8 en_US.UTF-8/g' ${{targets.subpkgdir}}/opt/bitnami/scripts/locales/add-extra-locales.sh
-          ${{targets.subpkgdir}}/opt/bitnami/scripts/airflow/postunpack.sh
-          ${{targets.subpkgdir}}/opt/bitnami/scripts/locales/add-extra-locales.sh
-          find ${{targets.contextdir}}/opt/bitnami -type f -exec sed -E 's#${{targets.contextdir}}##g' -i {} \;
-          sed -i '/if ! am_i_root && \[\[ -e "$LIBNSS_WRAPPER_PATH" \]\]; then/,/fi/d' ${{targets.subpkgdir}}/opt/bitnami/scripts/airflow/entrypoint.sh
-    test:
-      pipeline:
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: airflow-bitnami-compat
             real-pkg-name: ${{subpkg.name}}
 
   - name: ${{package.name}}-iamguarded-compat
@@ -311,4 +271,20 @@ test:
         export PYTHONPATH=/opt/airflow/lib/python3.12/site-packages
         HOME=/home/build airflow version
         python3.12 -c "import airflow"
+
+        # Test paramiko version and SFTP provider imports
+        python3.12 - <<'PY'
+        import paramiko
+        print("paramiko", paramiko.__version__)
+
+        # Verify paramiko is < 4.0.0
+        from packaging import version
+        paramiko_version = version.parse(paramiko.__version__)
+        expected_max = version.parse("4.0.0")
+
+        if paramiko_version >= expected_max:
+            raise Exception(f"paramiko version {paramiko.__version__} is >= 4.0.0, which breaks SFTP providers")
+
+        print(f"✓ paramiko version {paramiko.__version__} is compatible (< 4.0.0)")
+        PY
     - uses: test/tw/ldd-check
