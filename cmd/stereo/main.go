@@ -105,39 +105,6 @@ func main() {
 	}
 }
 
-func lintCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "lint",
-		Short: "Find duplicate package names",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return lint(cmd.Context())
-		},
-	}
-}
-
-func lint(ctx context.Context) error {
-	pkgss, err := dirToPackages(ctx, true)
-	if err != nil {
-		return err
-	}
-
-	var errs []error
-
-	// name -> yaml path
-	seen := map[string]string{}
-	for repo, pkgs := range pkgss {
-		for pkg, cfg := range pkgs {
-			want := path.Join(repo, cfg.Package.Name)
-			if got, ok := seen[pkg]; ok {
-				errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml and %s.yaml", pkg, got, want))
-			}
-			seen[pkg] = want
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
 func dirToPackages(ctx context.Context, subpackages bool) (map[string]map[string]*config.Configuration, error) {
 	pkgss := map[string]map[string]*config.Configuration{}
 
@@ -311,7 +278,7 @@ func NewOrigins(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (m
 }
 
 // lock dependencies for a Melange confiugration
-func lockMelangeDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
+func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
 	// Work around LockImageConfiguration assuming multi-arch.
 	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
 

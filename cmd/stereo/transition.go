@@ -700,7 +700,7 @@ func determineBuildOrder(ctx context.Context, packages []RebuildCandidate, arch 
 		}
 
 		// Resolve dependencies
-		fullPackages, err := lockMelangeDependencies(ctx, dummyConfig, cache, repoURLs, arch)
+		fullPackages, err := lockBuildDependencies(ctx, dummyConfig, cache, repoURLs, arch)
 		if err != nil {
 			log.Printf("Warning: Could not resolve dependencies for %s: %v", pkg.Name, err)
 			continue
