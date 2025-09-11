@@ -15,6 +15,7 @@ disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu := $(call list_cloud_images,generic)
 disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
+disks_rpi := $(call list_cloud_images,rpi)
 
 group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
 group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
@@ -53,7 +54,7 @@ test-generic: $(ARCH_OUT_D)/generic/disk.raw builder/ovmf-$(ARCH).fd
 	QEMU_VMS=generic ./vms-test/helpers/test-wolfi-vm \
   --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results/$(ARCH)"
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
 disks-aws-noneks: $(foreach name,$(group_aws_noneks),disk-$(name))
@@ -61,8 +62,9 @@ disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
 disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
+disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
 
-.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-vmware
+.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-vmware list-rpi
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -75,6 +77,8 @@ list-qemu:
 	@for n in $(disks_qemu); do echo $$n; done
 list-vmware:
 	@for n in $(disks_vmware); do echo $$n; done
+list-rpi:
+	@for n in $(disks_rpi); do echo $$n; done
 list-%:
 	@groups="$(group_$(subst -,_,$(*)))"; \
 	[ -n "$$groups" ] || { echo "no group $*"; exit 1; }; \
@@ -191,12 +195,14 @@ ifeq ($(PUBLISH_TARGET),dev)
   GCPBUCKET = $(GCPPROJECT)
   QEMUBUCKET = gs://$(GCPPROJECT)
   VMWAREBUCKET = gs://$(GCPPROJECT)
+  RPIBUCKET = gs://$(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
   AZGALLERY = vmtesting
   GCPPROJECT = staging-vms-h8zx
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://wolfi-vm-images-workloads
   VMWAREBUCKET = gs://wolfi-vm-images-workloads
+  RPIBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
   AZGALLERY = chainguard_vms_eap
@@ -204,6 +210,7 @@ else ifeq ($(PUBLISH_TARGET),eap)
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://chainguard-vms-eap
   VMWAREBUCKET = gs://chainguard-vms-eap
+  RPIBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),production)
 # Currently we are using wolfi-vm for internal images for workstations and other cases.
 # TODO: Move production workstation images to the chainguard-workstations project.
@@ -211,6 +218,7 @@ else ifeq ($(PUBLISH_TARGET),production)
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://wolfi-vm-images-workloads
   VMWAREBUCKET = gs://wolfi-vm-images-workloads
+  RPIBUCKET = gs://wolfi-vm-images-workloads
 else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
@@ -314,6 +322,23 @@ $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_
 	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
 	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
 	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+
+.PHONY: publish-rpi
+publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
+$(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name))): publish-rpi-%: $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json
+
+$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: RPINAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
+$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-generic-%/disk.raw
+	@mkdir -p $(dir $@)
+	@echo "Publishing RPI images for $* ($(ARCH))"
+	@artifact_name="$(RPINAME).raw"; \
+	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
+	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
+	@echo "Generating signed URLs for uploaded artifacts"; \
+	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$(RPINAME).raw"; \
+	raw_signed_url=$$(gcloud storage sign-url "$$gcs_raw_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
+	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
