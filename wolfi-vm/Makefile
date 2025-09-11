@@ -323,6 +323,7 @@ $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspu
 $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
+	--log-level=debug \
 	--arch=$(ARCH) \
 	--build-arch=$(BUILDER_ARCH) \
 	--builder-cpio=$(BUILDER_INITRD) \
