@@ -10,7 +10,6 @@ contents:
   - mattmoor-chainit-init
 
   # We need a shell
-  - busybox
   - bash
   - bash-binsh
   # We need tar, truncate, and other posix tools.
@@ -25,13 +24,18 @@ contents:
   # We need a way to copy file into EFI without mounting it
   - mtools
   - findutils
-  # for mkfs.ext4
-  - e2fsprogs
+  # for mkfs.xfs
+  - xfsprogs
+  - xfsprogs-extra
   # Needed for forcing reproducibility
   - libfaketime
   # We mount the output 9p shared dir
   - mount
+  # Hardenize vm
+  - harden-vm
   - sed
+  - grep
+  - busybox
 
 entrypoint:
   command: /bin/bash
@@ -114,8 +118,8 @@ cmd: |
 
   # Create a scratch disk in /tmp where we unpack potentially
   # very large disks
-  mkfs.ext4 "${scratch}"
-  mount -t ext4 -o noatime,nodiratime "${scratch}" /tmp/
+  mkfs.xfs "${scratch}"
+  mount -t xfs -o noatime,nodiratime "${scratch}" /tmp/
 
   # Extract rootfs and clean it up
   root_dir=$(mktemp -d /tmp/root.XXXXXX)
@@ -143,7 +147,7 @@ cmd: |
   drive c: file="$uefi_partition" partition=0 hidden=$sstart
   EOF
   # First create directories
-  find $root_dir/boot/firmware -type d -printf "%P\n" | sort | while read -r dir; do
+  find $root_dir/boot/efi -type d -printf "%P\n" | sort | while read -r dir; do
       if [ -n "$dir" ]; then
           MTOOLS_SKIP_CHECK=1 \
               SOURCE_DATE_EPOCH=$FROZEN_TIMESTAMP \
@@ -152,38 +156,50 @@ cmd: |
       fi
   done
   # Then copy all files
-  find $root_dir/boot/firmware -type f -printf "%P\n" | sort | while read -r file; do
+  find $root_dir/boot/efi -type f -printf "%P\n" | sort | while read -r file; do
       MTOOLS_SKIP_CHECK=1 \
           SOURCE_DATE_EPOCH=$FROZEN_TIMESTAMP \
           TZ=UTC \
-          mcopy -o -p -m -Q "$root_dir/boot/firmware/$file" "c:/$file"
+          mcopy -o -p -m -Q "$root_dir/boot/efi/$file" "c:/$file"
   done
 
-  # Remove unused efi files for root partition
-  empty_dir "$root_dir/boot/firmware"
+  # Remove unused efi files for XFS partition
+  empty_dir "$root_dir/boot/efi"
 
-  # Raspberry Pi tweaks
-  # Put the login prompt on vt1 on the raspberry pi to login on the console
-  echo "ReserveVT=1" >> $root_dir/etc/systemd/logind.conf
-  # add linky:chainguard default user/password
-  echo "linky:x:1000:1000:linky:/home/linky:/bin/sh" >> $root_dir/etc/passwd
-  echo "linky:\$6\$FYPmcA88EX5ECj/Q\$AgKP9MbV9Tv1GYGKL7LWHJguO9OL4fHEh16euFwH/B93K9MGD.QW29eI2OG.au7UemqlJKuhqLEDLKMKo2lsj1:20341:0:99999:7:::" >> $root_dir/etc/shadow
-  # add linky user to the docker group
-  echo "docker:x:125:linky" >> $root_dir/etc/group
-  # Fix timestamps for reproducibility
-  touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/systemd/logind.conf
-  touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/passwd
-  touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/shadow
-  touch -c -h --date="@${FROZEN_TIMESTAMP}" $root_dir/etc/group
+  # Run CIS Hardening
+  ln -sf /proc/self/fd /dev/fd
+  # TODO: this is not reproducible yet
+  SOURCE_DATE_EPOCH=$FROZEN_TIMESTAMP /usr/bin/apply-hardening --profile cis-level-1 --sysroot "${root_dir}"
 
-  # For RPi we switch back to ext4 until I get the bootloader to work
-  # correctly with XFS
-  SOURCE_DATE_EPOCH=$FROZEN_TIMESTAMP mkfs.ext4 \
-  -F \
-  -d $root_dir \
-  -E hash_seed=035cb65d-0a86-404a-bad7-19c88d05e400 \
-  -U $FS_UUID_ROOT \
-  -L root $root_partition
+  # Format our root partition with xfs
+  FAKE_TIME="$(date -d @"$FROZEN_TIMESTAMP" +"%Y-%m-%d %H:%M:%S")"
+  export LD_PRELOAD="/usr/lib/faketime/libfaketime.so.1"
+  export FAKERANDOM_SEED="0x12345678DEADBEEF"
+  export FAKETIME=$FAKE_TIME
+  unset NO_FAKE_STAT
+
+  mkfs.xfs \
+    -b size=4096 \
+    -d agcount=4 \
+    -d noalign \
+    -i attr=2 \
+    -i projid32bit=1 \
+    -i size=512 \
+    -l size=67108864 \
+    -l su=4096 \
+    -l version=2 \
+    -m crc=1 \
+    -m finobt=1 \
+    -m uuid=$FS_UUID_ROOT \
+    -n size=16384 \
+    -n version=2 \
+    -p file=$root_dir \
+    $root_partition
+
+  # Ensure / is 0755 or systemd will complain
+  # by default it will inherit whatever permission $root_dir will have
+  # for consistency lets set it manually.
+  xfs_db -x $root_partition -c "inode 128" -c "write core.mode 040755"
 
   sync
   echo -n 0 > /output/result
