@@ -31,8 +31,13 @@ environment:
       - gcc-${{vars.gcc-default-version}}-default
 
 vars:
-  # note also update the ct configs
   gcc-default-version: 14
+
+# note also update the ct configs and patches
+data:
+  - name: gcc-versions
+    items:
+      14:
 
 pipeline:
   # Note ct-ng has all mirrors and checksums built-in, but doing fetch
@@ -137,74 +142,11 @@ pipeline:
       extract: false
 
   - runs: |
-      # setup config
-      mv config.${{build.arch}} .config
-
-      # consistency check
-      grep -q 'CT_GCC_VERSION="${{vars.gcc-default-version}}.' .config
-
-      # parallel build
-      ct-ng build.0
-
       # Setup usr-merge
       mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr/lib
       ln -s usr/lib ${{targets.destdir}}/usr/lib/oldglibc/lib
       ln -s usr/lib ${{targets.destdir}}/usr/lib/oldglibc/lib64
       ln -s lib ${{targets.destdir}}/usr/lib/oldglibc/usr/lib64
-
-      # start building the frankenstein's monster
-      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr
-      mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-      mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-      cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include ${{targets.destdir}}/usr/lib/oldglibc/usr/
-      mv x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-default-version}}/*.a ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-
-      # ship gcc built-in headers that sometimes mask or reference glibc headers, without merging them into /usr/lib/oldglibc/usr/include/
-      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}
-      cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-default-version}}/include ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}
-      cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-default-version}}/include-fixed ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}
-      cp -vr x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/
-
-  - name: Fix aarch64 non-linker script libm
-    runs: |
-      prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
-      if [ "${{build.arch}}" = "aarch64" ]; then
-        rm -f $prefix/libm.so
-        ln -s libm.so.6 $prefix/libm.so
-        # New glibc on aarch64 has libmvec and has linker scripts, but 2.28 on
-        # aarch64 did not, hence create custom public linker scripts to
-        # override modern glibc on aarch64 linker scripts
-        cat <<EOF >${{targets.destdir}}/usr/lib/libm.a
-      /* GNU ld script
-      */
-      OUTPUT_FORMAT(elf64-littleaarch64)
-      GROUP ( /usr/lib/oldglibc/usr/lib/libm.a )
-      EOF
-        cat <<EOF >${{targets.destdir}}/usr/lib/libm.so
-      /* GNU ld script
-      */
-      OUTPUT_FORMAT(elf64-littleaarch64)
-      GROUP ( /usr/lib/oldglibc/usr/lib/libm.so.6 )
-      EOF
-      fi
-
-  - name: fixup glibc linker scripts due to relocation
-    runs: |
-      prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
-      case "${{build.arch}}" in
-        x86_64)
-          linker_files="$prefix/libc.so $prefix/libm.so $prefix/libm.a"
-          ;;
-        aarch64)
-          linker_files="$prefix/libc.so"
-          ;;
-      esac
-      sed -i 's| /lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-      sed -i 's| /usr/lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-      sed -i 's| /lib/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-
-      # override system linker scripts too
-      cp $linker_files ${{targets.destdir}}/usr/lib
 
   - runs: |
       # make all unsupported headers from system glibc error out, as
@@ -261,6 +203,99 @@ pipeline:
       ln -s ../../lib/oldglibc/bin/clang-wrapper \
         ${{targets.destdir}}/usr/local/bin/clang++
 
+subpackages:
+  - range: gcc-versions
+    name: ${{package.name}}-gcc-${{range.key}}
+    description: "gcc-${{range.key}} for manylinux 2.28"
+    dependencies:
+      runtime:
+        - ${{package.name}}=${{package.full-version}}
+    pipeline:
+      # start building the frankenstein's monster
+      - runs: |
+          cp config.${{build.arch}}-gcc-${{range.key}} .config
+          # consistency check
+          grep -q "CT_GCC_VERSION=\"${{range.key}}." .config
+      - runs: |
+          # FIXME: avoid doing a full bootstrap for each version
+          # (abusing ct-ng STOP/RESTART doesn't work because it checks that the config did not change)
+          ct-ng build.0
+      - name: common files should come from the default gcc build
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+
+          mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+          mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+          cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include ${{targets.destdir}}/usr/lib/oldglibc/usr/
+          mv x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/*.a ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+      - name: Fix aarch64 non-linker script libm
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+          [ "${{build.arch}}" = "aarch64" ] || exit 0
+
+          prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
+          rm -f $prefix/libm.so
+          ln -s libm.so.6 $prefix/libm.so
+          # New glibc on aarch64 has libmvec and has linker scripts, but 2.28 on
+          # aarch64 did not, hence create custom public linker scripts to
+          # override modern glibc on aarch64 linker scripts
+          cat <<EOF >${{targets.destdir}}/usr/lib/libm.a
+          /* GNU ld script
+          */
+          OUTPUT_FORMAT(elf64-littleaarch64)
+          GROUP ( /usr/lib/oldglibc/usr/lib/libm.a )
+          EOF
+          cat <<EOF >${{targets.destdir}}/usr/lib/libm.so
+          /* GNU ld script
+          */
+          OUTPUT_FORMAT(elf64-littleaarch64)
+          GROUP ( /usr/lib/oldglibc/usr/lib/libm.so.6 )
+          EOF
+      - name: fixup glibc linker scripts due to relocation
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+
+          prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
+          case "${{build.arch}}" in
+            x86_64)
+              linker_files="$prefix/libc.so $prefix/libm.so $prefix/libm.a"
+              ;;
+            aarch64)
+              linker_files="$prefix/libc.so"
+              ;;
+          esac
+          sed -i 's| /lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+          sed -i 's| /usr/lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+          sed -i 's| /lib/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+
+          # override system linker scripts too
+          cp $linker_files ${{targets.destdir}}/usr/lib
+      - name: gcc-specific files
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/
+          # ship gcc built-in headers that sometimes mask or reference glibc headers, without merging them into /usr/lib/oldglibc/usr/include/
+          mkdir -p ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/include ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/include-fixed ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/include/
+    test:
+      environment:
+        contents:
+          packages:
+            - gcc-${{range.key}}
+      pipeline:
+        - uses: test/compiler/smoke
+          with:
+            cc: gcc-${{range.key}}
+            cxx: g++-${{range.key}}
+        - uses: test/compiler/hardening-check
+          with:
+            cc: gcc-${{range.key}}
+        - uses: test/compiler/oldglibc
+          with:
+            cc: gcc-${{range.key}}
+            cxx: g++-${{range.key}}
+
 test:
   environment:
     contents:
@@ -304,22 +339,11 @@ test:
   pipeline:
     - uses: test/compiler/smoke
       with:
-        cc: gcc
-        cxx: g++
-    - uses: test/compiler/smoke
-      with:
         cc: clang
         cxx: clang++
     - uses: test/compiler/hardening-check
       with:
         cc: clang
-    - uses: test/compiler/hardening-check
-      with:
-        cc: gcc
-    - uses: test/compiler/oldglibc
-      with:
-        cc: gcc
-        cxx: g++
     - uses: test/compiler/oldglibc
       with:
         cc: clang
