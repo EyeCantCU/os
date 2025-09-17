@@ -3,7 +3,7 @@ TOOLS_D = $(TOP_D)/tools
 HASH := \#
 
 # when converting from an existing image, we stuff these in.
-BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
+BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
 
 # list_cloud_images(cloud)
 define list_cloud_images
