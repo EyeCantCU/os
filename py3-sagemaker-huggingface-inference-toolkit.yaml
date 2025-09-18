@@ -39,17 +39,18 @@ subpackages:
       runtime:
         # None of PyTorch, TensorFlow >= 2.0, or Flax have been found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
         # Include pytorch on the image because it can depend on cuda or not
+        - openjdk-${{vars.java-version}}
         - py${{range.key}}-huggingface-hub
         - py${{range.key}}-librosa
+        - py${{range.key}}-model-archiver-bin
+        - py${{range.key}}-multi-model-server-bin
         - py${{range.key}}-phonemizer
         - py${{range.key}}-pillow
         - py${{range.key}}-pyctcdecode
-        - py${{range.key}}-torch-cuda-12.9
         - py${{range.key}}-retrying
         - py${{range.key}}-sagemaker-inference
+        - py${{range.key}}-torch-cuda-12.9
         - py${{range.key}}-transformers
-        - py${{range.key}}-multi-model-server-bin
-        - openjdk-${{vars.java-version}}
     pipeline:
       - uses: py/pip-build-install
         with:
@@ -83,36 +84,45 @@ subpackages:
           packages:
             - curl
             - wait-for-it
-            - coreutils
+            - jq
             - openjdk-${{vars.java-version}}-default-jdk
       pipeline:
-        - runs: |
-            python${{range.key}} <<EOF
-            from sagemaker_huggingface_inference_toolkit import serving
-
-            serving.main()
-            EOF
-            exit 1
         - uses: test/daemon-check-output
           with:
             setup: |
               tee /etc/sagemaker-mms.properties <<EOF
               model_store=/opt/ml/model
+              option.model_id=/opt/ml/model
               load_models=ALL
               inference_address=http://0.0.0.0:8080
               management_address=http://0.0.0.0:8081
               enable_envvars_config=true
               EOF
-              mkdir -p /opt/ml/model
-              curl -o - https://s3.amazonaws.com/model-server/model_archive_1.0/squeezenet_v1.1.mar | tar xvf -C /opt/ml/model
-            start: env HF_TASK=token-classification serve
+            start: |
+              env \
+                HF_MODEL_ID="distilbert/distilbert-base-uncased-finetuned-sst-2-english" \
+                HF_TASK="text-classification" \
+                HF_OPTIMUM_BATCH_SIZE=1 \
+                HF_OPTIMUM_SEQUENCE_LENGTH=128 \
+                serve
             expected_output: |
               Inference API bind to:
-              Management API bind to:
+              Management address:
             post: |
-              wait-for-it localhost:8080
-              curl -Lo kitten.jpg https://raw.githubusercontent.com/awslabs/multi-model-server/706aa9c755576e4d8122514358649a0edfbc8992/docs/images/kitten_small.jpg
-              curl -X POST http://127.0.0.1:8080/predictions/squeezenet -T kitten.jpg | grep -F -e "Egyptian cat"
+              #!/bin/sh
+              curl \
+                --request POST \
+                --url http://localhost:8080/invocations \
+                --header "Content-Type: application/json" \
+                --data "{\"inputs\": \"Linky is the best!\"}" | \
+                jq -rc .[].label | grep -F -e "POSITIVE"
+
+              curl \
+                --request POST \
+                --url http://localhost:8080/invocations \
+                --header "Content-Type: application/json" \
+                --data "{\"inputs\": \"Security vulnerabilities are the worst.\"}" | \
+                jq -rc .[].label | grep -F -e "NEGATIVE"
 
 update:
   enabled: true
