@@ -191,7 +191,6 @@ else
 endif
 ifeq ($(PUBLISH_TARGET),dev)
   AZGALLERY = vmtesting_dev
-  AZRESOURCEGROUP = chainguard-vms
   GCPPROJECT = $(shell gcloud config get project)
   GCPBUCKET = $(GCPPROJECT)
   QEMUBUCKET = gs://$(GCPPROJECT)
@@ -199,7 +198,6 @@ ifeq ($(PUBLISH_TARGET),dev)
   RPIBUCKET = gs://$(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
   AZGALLERY = vmtesting
-  AZRESOURCEGROUP = chainguard-vms-staging
   GCPPROJECT = staging-vms-h8zx
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://wolfi-vm-images-workloads
@@ -208,15 +206,12 @@ else ifeq ($(PUBLISH_TARGET),staging)
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
   AZGALLERY = chainguard_vms_eap
-  AZRESOURCEGROUP = chainguard-vms-prod
   GCPPROJECT = chainguard-vms-eap
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://chainguard-vms-eap
   VMWAREBUCKET = gs://chainguard-vms-eap
   RPIBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),production)
-  AZGALLERY = chainguard_vms
-  AZRESOURCEGROUP = chainguard-vms-prod
 # Currently we are using wolfi-vm for internal images for workstations and other cases.
 # TODO: Move production workstation images to the chainguard-workstations project.
   GCPPROJECT = wolfi-vm
@@ -273,7 +268,7 @@ $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/azure-%/disk
 	@$(call capture_stdout,$@,\
 		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
-		--tags="$(AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
+		--tags="$(AZTAGS)" $(dir $@)disk.raw)
 
 .PHONY: publish-gcp
 publish-gcp: $(foreach name,$(disks_gcp),publish-gcp-$(subst gcp-,,$(name)))
@@ -446,14 +441,11 @@ output/azure-marketplace-update-technical-plan-%s.json: azure-marketplace-instal
 ifneq ("$(AZGALLERY)","chainguard_vms_eap")
 	$(error This gallery is not allowed listed in the makefile if you want to upload images from it please update the makefile.)
 endif
-ifneq ("$(AZRESOURCEGROUP)","chainguard-vms-prod")
-	$(error This resouce group is not allowed listed in the makefile if you want to upload images from it please update the makefile.)
-endif
 	$(call capture_stdout,$@,\
 		$(TOOLS_D)/azure-marketplace-add-vm-image-version \
 		--image-version=$(AZVERSION) --image-name=$(AZNAME) \
 		--gallery=$(AZGALLERY) --plan=$(AZMARKETPLACE_PLAN) \
-		--offer=$(AZMARKETPLACE_OFFER) --resource-group=$(AZRESOURCEGROUP) )
+		--offer=$(AZMARKETPLACE_OFFER) )
 
 # Yam doesn't recurse
 .PHONY: lint-configs
