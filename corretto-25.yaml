@@ -1,0 +1,278 @@
+package:
+  name: corretto-25
+  version: "25.0.0.36.2"
+  epoch: 0
+  description: Amazon Corretto 25 is a no-cost, multi-platform, production-ready distribution of OpenJDK 24
+  copyright:
+    - license: GPL-2.0-with-classpath-exception
+  dependencies:
+    runtime:
+      - freetype
+      - java-cacerts
+      - ttf-dejavu
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.){3}(\d+)\.\d+$
+    replace: "$2"
+    to: build-version
+  - from: ${{package.version}}
+    match: ^(\d+)\..*$
+    replace: "$1"
+    to: java-version
+
+environment:
+  contents:
+    packages:
+      - alsa-lib-dev
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cups-dev
+      - file
+      - fontconfig-dev
+      - freetype-dev
+      - giflib-dev
+      - lcms2-dev
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libx11-dev
+      - libxext-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxt-dev
+      - libxtst-dev
+      - openjdk-${{vars.java-version}}-default-jdk
+      - zip
+  environment:
+    # This is needed to work around the error date 1970-01-01T00:00:00Z is not within the valid range 1980-01-01T00:00:02Z to 2099-12-31T23:59:59Z
+    SOURCE_DATE_EPOCH: 315532900
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/corretto/corretto-${{vars.java-version}}
+      tag: ${{package.version}}
+      expected-commit: 947746911b066eeae4bfbedac65d5f7e1418fd36
+
+  - working-directory: /home/build/googletest
+    pipeline:
+      - uses: fetch
+        with:
+          uri: https://github.com/google/googletest/archive/v1.15.2.tar.gz
+          expected-sha512: 9046841044a2bf7edfd96854ad9c44ffae4fcb9fb59a075b367507c0762a98eb32cb6968d46663228272e26321e96f4dd287c95baa22c6af9bad902b8b6ede4e
+
+  - runs: chmod +x configure
+
+  # Note that despite using --with-extra-cflags, --with-extra-cxxflags, and
+  # --with-extra-ldflags, the configure still produces warnings like:
+  # https://github.com/wolfi-dev/os/issues/18747
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --disable-precompiled-headers \
+        --disable-warnings-as-errors \
+        --enable-dtrace=no \
+        --prefix=/usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto \
+        --with-boot-jdk=/usr/lib/jvm/java-25-openjdk \
+        --with-debug-level=release \
+        --with-extra-cflags="$CFLAGS" \
+        --with-extra-cxxflags="$CXXFLAGS" \
+        --with-extra-ldflags="$LDFLAGS" \
+        --with-freetype=system \
+        --with-giflib=system \
+        --with-gtest="/home/build/googletest" \
+        --with-jtreg=no \
+        --with-jvm-variants=server \
+        --with-lcms=system \
+        --with-libjpeg=system \
+        --with-libpng=system \
+        --with-native-debug-symbols=external \
+        --with-vendor-bug-url=https://github.com/wolfi-dev/os/issues \
+        --with-vendor-name=Chainguard \
+        --with-vendor-url=https://chainguard.dev \
+        --with-vendor-version-string=Corretto-${{package.version}} \
+        --with-vendor-vm-bug-url=https://github.com/wolfi-dev/os/issues \
+        --with-version-build=${{vars.build-version}} \
+        --with-version-opt=LTS \
+        --with-version-pre="no" \
+        --with-version-string="" \
+        --with-zlib=system
+
+  - runs: make jdk-image legacy-jre-image
+
+  # Check we built something valid
+  - runs: |
+      _java_bin=$(echo ./build/*-server-release/images/jdk/bin)
+
+      "$_java_bin"/javac -d . HelloWorld.java
+      "$_java_bin"/java HelloWorld
+
+      # run the gtest unittest suites
+      make test-hotspot-gtest
+
+  # Purge any debuginfo files generated to support testing
+  - runs: |
+      find ./build -name "*.debuginfo" -delete
+
+  - runs: |
+      _java_home="usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto"
+
+      mkdir -p "${{targets.destdir}}"/$_java_home
+      cp -r build/*-server-release/images/jdk/* "${{targets.destdir}}"/$_java_home
+      rm "${{targets.destdir}}"/$_java_home/lib/src.zip
+
+      # copy to shared java cacerts store
+      rm -f "${{targets.contextdir}}"/$_java_home/lib/security/cacerts
+      ln -sf /etc/ssl/certs/java/cacerts \
+        "${{targets.contextdir}}"/$_java_home/lib/security/cacerts
+      # symlink for `java-common` to work (which expects jre in $_java_home/jre)
+      ln -sf . "${{targets.contextdir}}/$_java_home/jre"
+
+subpackages:
+  - name: "${{package.name}}-dbg"
+    description: "Corretto ${{vars.java-version}} Java Debug Symbols"
+    pipeline:
+      - uses: split/debug
+    dependencies:
+      runtime:
+        - ${{package.name}}
+
+  - name: "${{package.name}}-jre"
+    description: "Corretto ${{vars.java-version}} Java Runtime Environment"
+    dependencies:
+      runtime:
+        - freetype
+        - java-cacerts
+        - ttf-dejavu
+    pipeline:
+      - runs: |
+          _java_home="usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto"
+
+          mkdir -p "${{targets.subpkgdir}}"/$_java_home
+          cp -r build/*-server-release/images/jre/* "${{targets.subpkgdir}}"/$_java_home
+
+          # copy to shared java cacerts store
+          rm -f "${{targets.subpkgdir}}"/$_java_home/lib/security/cacerts
+          cp /etc/ssl/certs/java/cacerts \
+            "${{targets.subpkgdir}}"/$_java_home/lib/security/cacerts
+
+          # symlink for `java-common` to work (which expects jre in $_java_home/jre)
+          ln -sf . "${{targets.subpkgdir}}/$_java_home/jre"
+
+  - name: "${{package.name}}-jmods"
+    description: "Corretto ${{vars.java-version}} jmods"
+    dependencies:
+      provides:
+        - corretto-jmods=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto
+          mv "${{targets.destdir}}"/usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto/jmods \
+             "${{targets.subpkgdir}}"/usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: corretto-jmods
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: "${{package.name}}-demos"
+    description: "Corretto ${{vars.java-version}} Demos"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto
+          mv "${{targets.destdir}}"/usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto/demo \
+             "${{targets.subpkgdir}}"/usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto
+
+  - name: "${{package.name}}-default-jvm"
+    description: "Use the corretto-${{vars.java-version}} JVM as the default JVM"
+    dependencies:
+      runtime:
+        - java-common-jre
+        - ${{package.name}}-jre
+      provides:
+        - corretto-default-jvm=1.${{vars.java-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/jvm
+          ln -sf java-${{vars.java-version}}-amazon-corretto "${{targets.subpkgdir}}"/usr/lib/jvm/default-jvm
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: corretto-default-jvm
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: "${{package.name}}-default-jdk"
+    description: "Use the corretto-${{vars.java-version}} JVM as the default JVM with the JDK installed"
+    dependencies:
+      runtime:
+        - java-common
+        - ${{package.name}}
+      provides:
+        - corretto-default-jdk=1.${{vars.java-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/jvm
+          ln -sf java-${{vars.java-version}}-amazon-corretto "${{targets.subpkgdir}}"/usr/lib/jvm/default-jvm
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: corretto-default-jdk
+            real-pkg-name: ${{subpkg.name}}
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-default-jdk
+        - ${{package.name}}-jmods
+        - java-common
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-amazon-corretto
+  pipeline:
+    # Test a basic Hello World
+    - working-directory: basic
+      runs: |
+        javac HelloWorld.java
+        java HelloWorld | grep -qi "Hello World!"
+    # Test a basic HTTP connection
+    - working-directory: basic
+      runs: |
+        javac RequestTest.java
+        java RequestTest | grep -qi "Successfully connected to example.org"
+    # Test modules
+    - working-directory: advanced/module-project
+      runs: |
+        mkdir output
+        javac -d output --module-source-path modules $(find modules -name "*.java")
+
+        # Create a jar with the compiled classes
+        jar --verbose --create --file app.jar \
+          --main-class dev.chainguard.module.main.Main \
+          --module-version 1.0 \
+          -C output/test.modules . \
+          -C output/main.app .
+
+        # Test the jar
+        java -jar app.jar
+
+        # Test jlink
+        jlink --verbose --module-path "app.jar:$JAVA_HOME/jmods" \
+          --add-modules test.modules \
+          --output test-project-jre
+
+        # Test custom JRE
+        test-project-jre/bin/java -jar app.jar
+
+update:
+  enabled: true
+  github:
+    identifier: corretto/corretto-25
+    use-tag: true
