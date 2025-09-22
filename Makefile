@@ -198,7 +198,7 @@ ifeq ($(PUBLISH_TARGET),dev)
   VMWAREBUCKET = gs://$(GCPPROJECT)
   RPIBUCKET = gs://$(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
-  AZGALLERY = vmtesting
+  AZGALLERY = chainguard_vms_staging
   AZRESOURCEGROUP = chainguard-vms-staging
   GCPPROJECT = staging-vms-h8zx
   GCPBUCKET = wolfi-vm-images-workloads
@@ -207,7 +207,7 @@ else ifeq ($(PUBLISH_TARGET),staging)
   RPIBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
-  AZGALLERY = chainguard_vms_eap
+  AZGALLERY = eap_chainguard_vms
   AZRESOURCEGROUP = chainguard-vms-prod
   GCPPROJECT = chainguard-vms-eap
   GCPBUCKET = wolfi-vm-images-workloads
