@@ -454,6 +454,8 @@ endif
 		--image-version=$(AZVERSION) --image-name=$(AZNAME) \
 		--gallery=$(AZGALLERY) --plan=$(AZMARKETPLACE_PLAN) \
 		--offer=$(AZMARKETPLACE_OFFER) --resource-group=$(AZRESOURCEGROUP) )
+	@result=$$(jq -rs '.[0].result' "$@"); \
+	if [ "$$result" = "failed" ]; then exit 1; fi
 
 # Yam doesn't recurse
 .PHONY: lint-configs
