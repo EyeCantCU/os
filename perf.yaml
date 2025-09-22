@@ -1,0 +1,121 @@
+package:
+  name: perf
+  version: "6.16.5"
+  epoch: 0
+  description: "Linux kernel performance profiling tool"
+  copyright:
+    - license: GPL-2.0-only WITH Linux-syscall-note
+  dependencies:
+    runtime:
+      - binutils
+      - glibc
+      - json-c
+      - libbpf
+      - libcap
+      - libcap
+      - libdwarf
+      - libelf
+      - libtraceevent
+      - libunwind
+      - libzstd1
+      - perl
+      - python3
+      - slang
+      - zlib
+
+environment:
+  environment:
+    GCC_SPEC_FILE: /dev/null
+    NO_WERROR: 1
+  contents:
+    packages:
+      - bash
+      - bison
+      - build-base
+      - busybox
+      - diffutils
+      - elfutils-dev
+      - flex-dev
+      - libbpf-dev
+      - libtraceevent-dev
+      - libtracefs-dev
+      - libunwind-dev
+      - linux-headers
+      - perl-dev
+      - python3-dev
+      - slang-dev
+      - wolfi-baselayout
+      - zlib-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '^(\d+[.]\d+)[.]0$'
+    replace: '$1'
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: '^(\d+\.\d+)\.\d+$'
+    replace: '$1'
+    to: mangled-kernel-major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gregkh/linux
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 4645fefac0b24d509b962c096b0327e87f34b1d2
+      depth: 1
+
+  - working-directory: tools/perf
+    runs: |
+      make -j$(nproc) NO_WERROR=1
+
+  - working-directory: tools/perf
+    runs: |
+      make install DESTDIR="${{targets.destdir}}" prefix=/usr
+
+  - uses: strip
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: "Basic version flag test"
+      runs: |
+        perf --version | grep -q "${{package.version}}"
+    - name: "Functional tests"
+      runs: |
+        # List events
+        perf list software | grep -q "Software event"
+        # View stats
+        perf stat -e task-clock,cpu-clock,context-switches,page-faults -- sleep 0.05 2>&1 | grep -q "Performance counter stats"
+        # Record some workload
+        perf record -o perf.data -F 99 -a -g -- sleep 1 2>&1
+        # Convert to readable stacks
+        perf script -i perf.data > out.perf
+        # Validate (QEMU may show 'swapper' or lots of 'kworker'—accept either)
+        grep -Eq "swapper|kworker" out.perf
+    - name: "Bench tests"
+      runs: |
+        perf bench sched pipe -l 1000 2>&1 | grep -q "Total time"
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: "${{package.name}}"
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  github:
+    identifier: gregkh/linux
+    use-tag: true
+    strip-prefix: v
+    tag-filter: v6.16
+  ignore-regex-patterns:
+    - -rc
+  version-transform:
+    # mainline release tag x.y to kernel version x.y.0
+    - match: ^(\d+[.]\d+)$
+      replace: $1.0
