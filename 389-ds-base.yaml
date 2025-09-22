@@ -1,0 +1,228 @@
+package:
+  name: 389-ds-base
+  version: 3.1.3
+  epoch: 0
+  description: LDAPv3 compliant server - LDAP server and command line utilities for server administration.
+  copyright:
+    - license: GPL-3.0-or-later
+  dependencies:
+    runtime:
+      - db
+      - libnspr
+      - libnss
+      - libssl3
+      - perl # required by logconv.pl
+      - py${{vars.py-version}}-ldap # necessary for ds-replcheck
+      - py${{vars.py-version}}-lib389 # necessary for ds-replcheck
+      - py${{vars.py-version}}-magic # necessary for logconv.py
+      - python-${{vars.py-version}} # necessary for python scripts in /usr/bin
+
+vars:
+  pypi-package: lib389
+  # Newer Rust versions got slightly more strict and make it so
+  # theres an error when compiling.
+  # TODO: bump this up on next release
+  rust-version: 1.88
+  # Latest supported python version
+  # Necessary for python scripts distributed with this packages
+  py-version: 3.13
+
+data:
+  - name: py-versions
+    items:
+      3.10:
+      3.11:
+      3.12:
+      3.13:
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cmocka-dev
+      - cracklib-dev
+      - db-dev
+      - icu-dev
+      - json-c-dev
+      - krb5-dev
+      - libnspr-dev
+      - libnss-dev
+      - libtool
+      - linux-pam-dev
+      - lmdb-dev
+      - net-snmp-dev
+      - openldap-dev
+      - openssl-dev
+      - pcre2-dev
+      - pkgconf-dev
+      - py3-pip
+      - py3-supported-argcomplete
+      - py3-supported-argcomplete-manpage
+      - py3-supported-build-base-dev
+      - py3-supported-cryptography
+      - py3-supported-dateutil
+      - py3-supported-ldap
+      - py3-supported-pip
+      - py3-supported-psutil
+      - py3-supported-python-dev
+      - rsync
+      - rust-${{vars.rust-version}}
+      - systemd-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/389ds/389-ds-base.git
+      expected-commit: 1c90a9c9592415216199226787b89319f9bc4f8c
+      tag: 389-ds-base-${{package.version}}
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --libexecdir=/usr/lib/${{package.name}} \
+        --with-tmpfiles-d=/usr/lib/tmpfiles.d \
+        --with-systemd \
+        --with-systemdsystemunitdir=/usr/lib/systemd/system \
+        --with-systemdsystemconfdir=/etc/systemd/system \
+        --with-journald \
+        --with-openldap \
+        --enable-autobind \
+        --enable-cmocka \
+        --sbindir=/usr/bin \
+        --with-libldap_r=no
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+update:
+  enabled: true
+  # Old versioning scheme
+  ignore-regex-patterns:
+    - 389-ds-base\..*-[0-9]*
+  git:
+    strip-prefix: 389-ds-base-
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+  - name: ${{package.name}}-doc
+    description: ${{package.name}} documentation and manpages
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}
+    description: ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-argcomplete
+        - py${{range.key}}-cryptography
+        - py${{range.key}}-dateutil
+        - py${{range.key}}-distro
+        - py${{range.key}}-ldap
+        - py${{range.key}}-psutil
+        - py${{range.key}}-pyasn1
+        - py${{range.key}}-pyasn1-modules
+    pipeline:
+      - working-directory: src/lib389
+        uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - name: move usr/bin executables for -bin
+        runs: |
+          mkdir -p ./cleanup/${{range.key}}/
+          mv ${{targets.contextdir}}/usr/bin ./cleanup/${{range.key}}/
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.pypi-package}}
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-bin
+    description: Executable binaries for ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      provider-priority: ${{range.value}}
+      provides:
+        - py3-${{vars.pypi-package}}
+        - py3-${{vars.pypi-package}}-bin
+      runtime:
+        - py${{range.key}}-${{vars.pypi-package}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/usr/"
+          mv "./cleanup/${{range.key}}/bin" "${{targets.contextdir}}/usr/"
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{range.key}}
+      pipeline:
+        - name: Smoke tests
+          runs: |
+            set -o pipefail
+            dsconf --help | grep -F -e "usage: dsconf [-h]"
+            dscreate --help | grep -F -e "usage: dscreate [-h]"
+            dsctl --help | grep -F -e "usage: dsctl [-h]"
+            dsidm --help | grep -F -e "usage: dsidm [-h]"
+            openldap_to_ds --help | grep -F -e "usage: openldap_to_ds [-h]"
+
+  - name: py3-supported-${{vars.pypi-package}}
+    description: meta package providing ${{vars.pypi-package}} for supported python versions.
+    dependencies:
+      runtime:
+        - py3.10-${{vars.pypi-package}}
+        - py3.11-${{vars.pypi-package}}
+        - py3.12-${{vars.pypi-package}}
+        - py3.13-${{vars.pypi-package}}
+    test:
+      pipeline:
+        - uses: python/import
+          with:
+            python: python3.10
+            import: ${{vars.pypi-package}}
+        - uses: python/import
+          with:
+            python: python3.11
+            import: ${{vars.pypi-package}}
+        - uses: python/import
+          with:
+            python: python3.12
+            import: ${{vars.pypi-package}}
+        - uses: python/import
+          with:
+            python: python3.13
+            import: ${{vars.pypi-package}}
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Smoke tests
+      runs: |
+        set -o pipefail
+        ds-logpipe.py --help | grep -F -e "Usage: ds-logpipe.py <name of pipe>"
+        ds-replcheck --help | grep -F -e "usage: ds-replcheck [-h]"
+        logconv.py --help | grep -F -e 'usage: logconv.py [-h]'
+        { logconv.pl --help || true ; } | grep -F -e './logconv.pl [-h]'
+        { dbscan --help || true ; } | grep -F -e "scan a db file and dump the contents"
+        { ldap-agent || true ; } | grep -F -e "Usage: ldap-agent [-D] configfile"
+        { ldclt -h || true ; } | grep -F -e "usage: ldclt"
+        { ns-slapd -h || true ; } 2>&1 | grep -F -e "usage: ns-slapd -D configdir"
+        { pwdhash -h || true ; } 2>&1 | grep -F -e "usage: pwdhash -D config-dir "

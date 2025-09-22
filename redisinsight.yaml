@@ -1,0 +1,123 @@
+package:
+  name: redisinsight
+  version: 2.70.1
+  epoch: 1
+  description: Redis GUI by Redis
+  copyright:
+    - license: SSPL-1.0
+  dependencies:
+    runtime:
+      - nodejs
+
+vars:
+  python-version: 3.12
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gcc
+      - git
+      - jq
+      - make
+      - nodejs
+      - npm
+      - py${{vars.python-version}}-setuptools # To fix `No module named 'distutils'` after bumping to python 3.12
+      - python-${{vars.python-version}}-dev
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 6eb3207f54ae035cb64c290d03487ac751348444
+      repository: https://github.com/redis/RedisInsight
+      tag: ${{package.version}}
+
+  - runs: |
+      # GHSA-4hjh-wcwx-xvwj
+      yarn upgrade axios@1.12.0
+
+      cd redisinsight/api
+
+      # Patch package.json: create .resolutions if missing, then merge in entries
+      tmp="$(mktemp)"
+      jq '(.resolutions //= {}) | .resolutions += {
+        "jest/**/micromatch": "^4.0.8",
+        "mocha/minimatch": "^3.0.5",
+        "**/semver": "^7.5.2",
+        "**/cpu-features": "file:./stubs/cpu-features",
+        "**/cross-spawn": "^7.0.5",
+        "**/redis-parser": "3.0.0",
+        "winston-daily-rotate-file/**/file-stream-rotator": "^1.0.0",
+        "**/form-data": "^4.0.4",
+        "form-data": "^4.0.4",
+        "supertest/**/form-data": "^4.0.4",
+        "**/multer": "^2.0.2",
+
+        # CVE-driven additions
+        "**/on-headers": "1.1.0",
+        "on-headers": "1.1.0",
+        "**/sha.js": "2.4.12",
+        "sha.js": "2.4.12",
+
+        # brace-expansion: v1 under minimatch, v2 anywhere else
+        "minimatch/brace-expansion": "1.1.12",
+        "brace-expansion": "2.0.2"
+      }' package.json > "$tmp" && mv "$tmp" package.json
+
+      # axios: GHSA-4hjh-wcwx-xvwj
+      dependencies='{"axios": "1.12.0"}'
+      jq --argjson dependencies "$dependencies" '.dependencies += $dependencies' package.json > temp.json && mv temp.json package.json
+
+      # fresh install so resolutions are honored
+      yarn install
+      cd ../..
+      SKIP_POSTINSTALL=1 yarn install
+      yarn build:ui && \
+        yarn build:statics && \
+        yarn build:api
+
+      yarn --cwd ./redisinsight/api install --production
+      cp ./redisinsight/api/.yarnclean.prod ./redisinsight/api/.yarnclean
+      yarn --cwd ./redisinsight/api autoclean --force
+
+      mkdir -p ${{targets.contextdir}}/usr/src/app/redisinsight/api/dist
+      cp -r ./redisinsight/api/dist/* ${{targets.contextdir}}/usr/src/app/redisinsight/api/dist
+
+      mkdir -p ${{targets.contextdir}}/usr/src/app/redisinsight/api/node_modules
+      cp -r ./redisinsight/api/node_modules/* ${{targets.contextdir}}/usr/src/app/redisinsight/api/node_modules
+
+      mkdir -p ${{targets.contextdir}}/usr/src/app/redisinsight/ui/dist
+      cp -r ./redisinsight/ui/dist/* ${{targets.contextdir}}/usr/src/app/redisinsight/ui/dist
+
+subpackages:
+  - name: ${{package.name}}-docker-entrypoint
+    description: Docker entrypoint for Redis GUI by Redis
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/src/app
+          install -Dm755 docker-entry.sh ${{targets.contextdir}}/usr/src/app/docker-entry.sh
+          chmod +x ${{targets.contextdir}}/usr/src/app/docker-entry.sh
+    dependencies:
+      runtime:
+        - dash-binsh
+
+update:
+  enabled: true
+  github:
+    identifier: redis/RedisInsight
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-docker-entrypoint
+        - wait-for-it
+        - curl
+  pipeline:
+    - runs: |
+        /usr/src/app/docker-entry.sh node /usr/src/app/redisinsight/api/dist/src/main > /dev/null 2>&1 &
+        wait-for-it localhost:5540 -t 60 -- echo "RedisInsight is up"
+        curl -v http://localhost:5540/api/health/ | grep '"status":"up"'

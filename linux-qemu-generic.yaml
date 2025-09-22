@@ -1,6 +1,6 @@
 package:
   name: linux-qemu-generic
-  version: "6.16.1"
+  version: "6.16.8"
   epoch: 0
   description: "the QEMU generic linux kernel"
   copyright:
@@ -21,6 +21,9 @@ environment:
     KBUILD_BUILD_USER: noreply
     KBUILD_BUILD_HOST: chainguard.dev
     KBUILD_BUILD_VERSION: Chainguard
+  contents:
+    packages:
+      - bootc-dracut
 
 var-transforms:
   - from: ${{package.name}}
@@ -49,17 +52,25 @@ pipeline:
     with:
       repository: https://github.com/gregkh/linux
       tag: v${{vars.mangled-package-version}}
-      expected-commit: 3e0969c9a8c57ff3c6139c084673ebedfc1cf14f
+      expected-commit: 62dae019823123ce3baa50e680219e2beb9a63a5
 
   - uses: patch
     with:
-      patches: 0001-crypto-log-build-time-kernel-version-in-jent-init-${{vars.mangled-kernel-major-version}}.patch
+      patches: 0001-crypto-reusable-jitterentropy-${{vars.mangled-kernel-major-version}}.patch 0001-random-use-jitterentropy-${{vars.mangled-kernel-major-version}}.patch 0001-crypto-fix-hkdf-tests-${{vars.mangled-kernel-major-version}}.patch
 
   - uses: kernel/config
     with:
       flavor: ${{vars.flavor}}
       make-targets: hardening.config
       version-flavor: ${{vars.version-flavor}}
+
+  # TODO: pin this to a certified
+  # jitterentropy version when we
+  # have one.
+  - uses: kernel/reusable-jitterentropy
+    with:
+      version: ${{vars.mangled-kernel-major-version}}
+      kernel-version: ${{vars.mangled-kernel-major-version}}
 
   - uses: kernel/build
     with:
@@ -110,9 +121,43 @@ subpackages:
         - merged-lib
         - wolfi-baselayout
 
+  - name: "${{package.name}}-bootc-boot-installed"
+    description: "Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - ${{package.name}}-modules=${{package.full-version}}
+        - chainguard-baselayout
+        - merged-lib
+        - systemd-boot-installed
+        - wolfi-baselayout
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+      - uses: kernel/dracut
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          kmoddir: ${{targets.destdir}}-modules/usr/lib/modules/${{vars.version-flavor}}
+          output: ${{targets.subpkgdir}}/usr/lib/modules/${{vars.version-flavor}}/initramfs.img
+      - runs: |
+          kmodd=usr/lib/modules/${{vars.version-flavor}}
+          mkdir -p "${{targets.subpkgdir}}/$kmodd"
+          mv ${{targets.subpkgdir}}/boot/chainguard/${{vars.version-flavor}}/linux \
+             "${{targets.subpkgdir}}/$kmodd/vmlinuz"
+          rm -Rf ${{targets.subpkgdir}}/boot
+
 test:
   pipeline:
     - uses: kernel/test/kconfig/systemd
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: jitterentropy
+        # This is =y instead of =m for melange runner reasons
+        x86_64_exclude: CRYPTO_USER_API
+        aarch64_exclude: CRYPTO_USER_API
     - uses: kernel/test/config-snippet
       with:
         snippet: ${{vars.flavor}}
@@ -134,6 +179,13 @@ test:
       uses: kernel/test/console_grep
       with:
         string: "Segment Routing with IPv6"
+    - uses: kernel/test/random_quality
+      with:
+        args: fips=1
+    - name: Test for reusable jent
+      uses: kernel/test/console_grep
+      with:
+        string: "jitterentropy built from ${{vars.mangled-kernel-major-version}}"
 
 update:
   enabled: true

@@ -1,0 +1,73 @@
+package:
+  name: syncthing
+  version: "2.0.9"
+  epoch: 0
+  description: "Open Source Continuous File Synchronization"
+  copyright:
+    - license: MPL-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/syncthing/syncthing
+      tag: v${{package.version}}
+      expected-commit: 3382ccc3f16536b5a7b6df7c8212951f7d4d3a9f
+
+  - runs: |
+      go generate ./...
+
+  - uses: go/build
+    with:
+      ldflags: |
+        -X github.com/syncthing/syncthing/lib/build.Version=v${{package.version}}
+      packages: ./cmd/syncthing
+      output: syncthing
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package for Docker entrypoint"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/bin"
+          install -m755 script/docker-entrypoint.sh "${{targets.subpkgdir}}/usr/bin/entrypoint.sh"
+    test:
+      pipeline:
+        - name: "Test"
+          runs: |
+            test -x /usr/bin/entrypoint.sh
+
+update:
+  enabled: true
+  github:
+    identifier: syncthing/syncthing
+    strip-prefix: v
+    use-tag: true
+  ignore-regex-patterns:
+    - "-rc"
+    - "-beta"
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+  pipeline:
+    - runs: |
+        syncthing version | grep "${{package.version}}"
+        syncthing --help | grep 'syncthing'
+    - runs: |
+        set -euo pipefail
+        syncthing generate | grep 'Generating key and certificate'
+        syncthing paths | grep 'Configuration file'
+    - name: "Test serve"
+      uses: test/daemon-check-output
+      with:
+        start: syncthing serve
+        timeout: 10
+        expected_output: |
+          TCP listener starting
+          QUIC listener starting
+        post: |
+          wait-for-it 127.0.0.1:8384 -t 15
+          curl -fsSL http://127.0.0.1:8384/ | grep 'syncthing'

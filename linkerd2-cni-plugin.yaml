@@ -1,0 +1,126 @@
+package:
+  name: linkerd2-cni-plugin
+  version: 1.6.4
+  epoch: 1 # GHSA-xwfj-jgwm-7wp5
+  description: linkerd2 cni-plugin package (linkerd/linkerd2-proxy-init)
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/linkerd/linkerd2-proxy-init.git
+      tag: cni-plugin/v${{package.version}}
+      expected-commit: d679fe99fe5a39615ee45400035c0281fa6eff5c
+
+  - uses: rust/cargobump
+
+  - uses: go/build
+    with:
+      packages: ./cni-plugin
+      output: linkerd-cni-plugin
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility files for ${{package.name}}
+    dependencies:
+      runtime:
+        - bash
+        - inotify-tools
+        - jq
+        - procps
+    pipeline:
+      - runs: |
+          install -Dm755 -t "${{targets.subpkgdir}}/linkerd/" LICENSE
+          install -Dm755 -t "${{targets.subpkgdir}}/linkerd/" cni-plugin/deployment/scripts/filter.jq
+          install -Dm755 -t "${{targets.subpkgdir}}/linkerd/" cni-plugin/deployment/scripts/install-cni.sh
+          # CONTAINER_MOUNT_PREFIX defaults to /host; files get copied between directories
+          mkdir -p \
+            "${{targets.subpkgdir}}/opt/cni/bin/" \
+            "${{targets.subpkgdir}}/host/opt/cni/bin" \
+            "${{targets.subpkgdir}}/host/etc/cni"
+          ln -s /usr/bin/linkerd-cni-plugin "${{targets.subpkgdir}}/opt/cni/bin/linkerd-cni"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+        - name: Verify files are present
+          runs: |
+            stat /linkerd/filter.jq
+            stat /linkerd/LICENSE
+            stat /linkerd/install-cni.sh | grep -F -e "0755"
+        - name: Test jq filter script can be executed
+          runs: |
+            echo '{"plugins": []}' | jq -f /linkerd/filter.jq --argjson CNI_TMP_CONF_DATA '{"type": "linkerd-cni"}' | grep "linkerd-cni"
+        - name: Test server startup
+          uses: test/daemon-check-output
+          with:
+            setup: mkdir -p /host/etc/cni/net.d /var/run/secrets/kubernetes.io/serviceaccount
+            start: /linkerd/install-cni.sh
+            timeout: 30
+            expected_output: |
+              Wrote linkerd CNI binaries to
+              Setting up watches.
+              Watches established.
+              No active CNI configuration files found
+
+  - name: linkerd2-cni-repair-controller
+    description: Linkerd2 utility to scan & evict pods that failed to aquire a network configuration
+    pipeline:
+      - uses: cargo/build
+        with:
+          modroot: ./cni-repair-controller
+          output: linkerd-cni-repair-controller
+    test:
+      pipeline:
+        # Functional testing requires a functional cni-plugin pod
+        - name: Smoke tests
+          runs: |
+            linkerd-cni-repair-controller --version | grep -E -e "linkerd-cni-repair-controller [[:digit:]]\.[[:digit:]]\.[[:digit:]]"
+            linkerd-cni-repair-controller --help | grep -F -e "Print help"
+
+  - name: linkerd2-cni-repair-controller-compat
+    description: Compatibility files for linkerd2-cni-repair-controller
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/linkerd
+          ln -s /usr/bin/linkerd-cni-repair-controller ${{targets.subpkgdir}}/usr/lib/linkerd/linkerd-cni-repair-controller
+    test:
+      environment:
+        contents:
+          packages:
+            - linkerd2-cni-repair-controller
+      pipeline:
+        - name: Verify successful symlink creation
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
+update:
+  enabled: true
+  github:
+    identifier: linkerd/linkerd2-proxy-init
+    tag-filter: cni-plugin
+    strip-prefix: cni-plugin/v
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: CNI plugin functionality test
+      runs: |
+        # Test CNI plugin recognizes proper CNI environment
+        CNI_COMMAND=VERSION linkerd-cni-plugin 2>&1 | jq -rc '.cniVersion' | grep -E -e "[[:digit:]]\.[[:digit:]]\.[[:digit:]]"
+
+        # Test CNI plugin fails appropriately without env vars
+        linkerd-cni-plugin --help 2>&1 | jq -rc '.msg' | grep -F -e "required env variables [CNI_COMMAND] missing"

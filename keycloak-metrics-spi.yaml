@@ -1,0 +1,115 @@
+package:
+  name: keycloak-metrics-spi
+  version: "7.0.0"
+  epoch: 1
+  description: "Adds a Metrics Endpoint to Keycloak"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openjdk-${{vars.java-version}}-jre
+
+vars:
+  java-version: 21
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - python3
+  environment:
+    JAVA_HOME: /usr/lib/jvm/default-jvm/
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aerogear/keycloak-metrics-spi
+      tag: ${{package.version}}
+      expected-commit: 0331363064ee2864735e7ec36e30d610dfe8465d
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/java/keycloak-metrics-spi
+
+      # upstream has not changed the version in pom.xml for the 7.0.0 release
+      sed -i 's/<version>6.0.1-SNAPSHOT<\/version>/<version>7.0.0<\/version>/' pom.xml
+
+      mvn package
+
+      cp target/keycloak-metrics-spi-${{package.version}}.jar \
+         ${{targets.destdir}}/usr/share/java/keycloak-metrics-spi/keycloak-metrics-spi.jar
+
+test:
+  environment:
+    contents:
+      packages:
+        - keycloak
+        - openjdk-${{vars.java-version}}-default-jdk
+        - curl
+        - wait-for-it
+  pipeline:
+    - name: "verify jar installation"
+      runs: |
+        echo "checking keycloak-metrics-spi jar"
+        JAR_PATH="/usr/share/java/keycloak-metrics-spi/keycloak-metrics-spi.jar"
+
+        if [ -f "$JAR_PATH" ]; then
+           echo "Found: keycloak-metrics-spi jar at $JAR_PATH"
+           jar tf "$JAR_PATH" > /dev/null
+        else
+           echo "Missing: keycloak-metrics-spi jar at $JAR_PATH"
+           exit 1
+        fi
+
+        echo "installing SPI into keycloak providers directory"
+        mkdir -p /usr/share/java/keycloak/providers/
+        cp "$JAR_PATH" /usr/share/java/keycloak/providers/
+
+        echo "verifying installation"
+        if [ -f "/usr/share/java/keycloak/providers/keycloak-metrics-spi.jar" ]; then
+           echo "SPI jar successfully installed to Keycloak providers"
+        else
+           echo "Failed to install SPI jar to Keycloak providers"
+           exit 1
+        fi
+    - name: "start daemon on localhost"
+      uses: test/daemon-check-output
+      with:
+        start: "kc.sh start --hostname=localhost --https-key-store-password=MYPASSWORD"
+        timeout: 60
+        expected_output: |
+          Listening on
+          Profile prod activated
+        setup: |
+          #!/bin/sh -ex
+          echo "127.0.0.1 $(hostname)" >> /etc/hosts
+          kspath=/usr/share/java/keycloak/conf/server.keystore
+          keytool -v \
+              -keystore $kspath \
+              -alias localhost \
+              -genkeypair -sigalg SHA512withRSA -keyalg RSA -dname CN=localhost \
+              -storepass MYPASSWORD || {
+                echo "failed [$?] to create keystore with keytool at $kspath"
+                exit 1
+          }
+    - name: "test metrics endpoint functionality"
+      runs: |
+        kc.sh start --hostname=localhost --https-key-store-password=MYPASSWORD &
+        KC_PID=$!
+        echo "testing metrics endpoint"
+        wait-for-it localhost:8443 --timeout=60
+
+        # endpoint here https://github.com/aerogear/keycloak-metrics-spi?tab=readme-ov-file#install-and-setup
+        curl -k -s -f https://localhost:8443/realms/master/metrics || {
+          echo "metrics endpoint not accessible at /realms/master/metrics"
+          exit 1
+        }
+        kill $KC_PID
+        exit 0
+
+update:
+  enabled: true
+  github:
+    identifier: aerogear/keycloak-metrics-spi
+    strip-prefix: v

@@ -1,0 +1,115 @@
+package:
+  name: aws-advanced-jdbc-wrapper
+  version: "2.6.4"
+  epoch: 0
+  description: "AWS Advanced JDBC Driver - A JDBC driver wrapper designed to enhance database connectivity for Amazon Aurora and RDS databases"
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  java-version: 8
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/default-jvm/
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aws/aws-advanced-jdbc-wrapper
+      tag: ${{package.version}}
+      expected-commit: 89a80c5d5ed14a33e5163ccdc1d67732e3feabf9
+
+  - uses: auth/gradle
+
+  - runs: |
+      set -euo pipefail
+      # Build the wrapper JAR (exclude tests to avoid test dependencies)
+      ./gradlew --no-parallel --no-daemon -x test build
+      ./gradlew --no-parallel --no-daemon -x test shadowJar
+      mkdir -p ${{targets.destdir}}/usr/share/java
+      cp wrapper/build/libs/aws-advanced-jdbc-wrapper-${{package.version}}.jar \
+         ${{targets.destdir}}/usr/share/java/aws-advanced-jdbc-wrapper.jar
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - glibc-locales
+        - openjdk-${{vars.java-version}}-default-jdk
+        - postgresql
+        - postgresql-client
+        - shadow
+        - sudo-rs
+    environment:
+      PGDATA: /tmp/test_db
+      PGUSER: wolfi
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+  pipeline:
+    - name: Test database creation
+      runs: |
+        useradd $PGUSER
+        sudo -u $PGUSER initdb -D $PGDATA
+        sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
+        sudo -u $PGUSER createdb testdb
+        sudo -u $PGUSER psql -d testdb -c "CREATE TABLE test_table (id INTEGER, message TEXT);"
+        sudo -u $PGUSER psql -d testdb -c "INSERT INTO test_table VALUES (1, 'Hello AWS JDBC Wrapper');"
+        # Create a simple Java test program
+        cat > JdbcWrapperTest.java << 'EOF'
+        import java.sql.*;
+        import java.util.Properties;
+        public class JdbcWrapperTest {
+            public static void main(String[] args) {
+                try {
+                    // Load the AWS wrapper driver
+                    Class.forName("software.amazon.jdbc.Driver");
+                    // Connection string using the wrapper
+                    String url = "jdbc:aws-wrapper:postgresql://localhost:5432/testdb";
+                    Properties props = new Properties();
+                    props.setProperty("user", System.getenv("PGUSER"));
+                    props.setProperty("password", System.getenv("PGPASSWORD"));
+                    props.setProperty("wrapperPlugins", "readWriteSplitting");
+                    // Test connection and basic query
+                    try (Connection conn = DriverManager.getConnection(url, props)) {
+                        System.out.println("Connection successful!");
+                        try (Statement stmt = conn.createStatement()) {
+                            ResultSet rs = stmt.executeQuery("SELECT message FROM test_table WHERE id = 1");
+                            if (rs.next()) {
+                                String message = rs.getString("message");
+                                System.out.println("Query result: " + message);
+                                if (!"Hello AWS JDBC Wrapper".equals(message)) {
+                                    throw new RuntimeException("Unexpected result: " + message);
+                                }
+                            } else {
+                                throw new RuntimeException("No results returned");
+                            }
+                        }
+                    }
+                    System.out.println("AWS JDBC Wrapper test passed!");
+                } catch (Exception e) {
+                    System.err.println("Test failed: " + e.getMessage());
+                    e.printStackTrace();
+                    System.exit(1);
+                }
+            }
+        }
+        EOF
+        # Download PostgreSQL JDBC driver for testing
+        curl -L -o postgresql-jdbc.jar "https://jdbc.postgresql.org/download/postgresql-42.7.7.jar"
+        # Compile and run the test
+        CLASSPATH="/usr/share/java/aws-advanced-jdbc-wrapper.jar:postgresql-jdbc.jar"
+        javac -cp "$CLASSPATH" JdbcWrapperTest.java
+        PGUSER="$PGUSER" PGPASSWORD="$PGPASSWORD" java -cp "$CLASSPATH:." JdbcWrapperTest
+        # Clean up
+        sudo -u $PGUSER pg_ctl -D $PGDATA stop
+
+update:
+  enabled: true
+  github:
+    identifier: aws/aws-advanced-jdbc-wrapper
+    strip-prefix: v
