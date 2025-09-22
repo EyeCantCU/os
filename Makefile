@@ -443,7 +443,7 @@ $(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst az
 output/azure-marketplace-update-technical-plan-%s.json: AZNAME=$(PREFIX)-$*
 output/azure-marketplace-update-technical-plan-%s.json: azure-marketplace-install-extension
 # We don't want to publish devel or testing images by mistake
-ifneq ("$(AZGALLERY)","chainguard_vms_eap")
+ifneq ("$(AZGALLERY)","eap_chainguard_vms")
 	$(error This gallery is not allowed listed in the makefile if you want to upload images from it please update the makefile.)
 endif
 ifneq ("$(AZRESOURCEGROUP)","chainguard-vms-prod")
@@ -454,6 +454,8 @@ endif
 		--image-version=$(AZVERSION) --image-name=$(AZNAME) \
 		--gallery=$(AZGALLERY) --plan=$(AZMARKETPLACE_PLAN) \
 		--offer=$(AZMARKETPLACE_OFFER) --resource-group=$(AZRESOURCEGROUP) )
+	@result=$$(jq -rs '.[0].result' "$@"); \
+	if [ "$$result" = "failed" ]; then exit 1; fi
 
 # Yam doesn't recurse
 .PHONY: lint-configs
