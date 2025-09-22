@@ -57,7 +57,7 @@ func launchCmd() *cobra.Command {
 
 			publicIPName := fmt.Sprintf("ip-%s", vmName)
 			log.Printf("Creating public IP: %s", publicIPName)
-			_, err = publicIPClient.BeginCreateOrUpdate(ctx, resourceGroup, publicIPName, armnetwork.PublicIPAddress{
+			ipPoller, err := publicIPClient.BeginCreateOrUpdate(ctx, resourceGroup, publicIPName, armnetwork.PublicIPAddress{
 				Location: &region,
 				Tags:     resourceTags,
 				Properties: &armnetwork.PublicIPAddressPropertiesFormat{
@@ -65,6 +65,9 @@ func launchCmd() *cobra.Command {
 				},
 			}, nil)
 			if err != nil {
+				log.Fatalf("failed to start public IP creation: %v", err)
+			}
+			if _, err = ipPoller.PollUntilDone(ctx, nil); err != nil {
 				log.Fatalf("failed to create public IP: %v", err)
 			}
 
@@ -85,7 +88,7 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("failed to create NIC client: %v", err)
 			}
 
-			_, err = nicClient.BeginCreateOrUpdate(ctx, resourceGroup, nicName, armnetwork.Interface{
+			nicPoller, err := nicClient.BeginCreateOrUpdate(ctx, resourceGroup, nicName, armnetwork.Interface{
 				Location: &region,
 				Tags:     resourceTags,
 				Properties: &armnetwork.InterfacePropertiesFormat{
@@ -106,6 +109,9 @@ func launchCmd() *cobra.Command {
 				},
 			}, nil)
 			if err != nil {
+				log.Fatalf("failed to start NIC creation: %v", err)
+			}
+			if _, err = nicPoller.PollUntilDone(ctx, nil); err != nil {
 				log.Fatalf("failed to create NIC: %v", err)
 			}
 
@@ -124,6 +130,7 @@ func launchCmd() *cobra.Command {
 				log.Fatalf("failed to create VM client: %v", err)
 			}
 
+			log.Printf("Creating Azure VM: %s", vmName)
 			_, err = vmClient.BeginCreateOrUpdate(ctx, resourceGroup, vmName, armcompute.VirtualMachine{
 				Location: &region,
 				Tags:     resourceTags,
@@ -176,8 +183,20 @@ func launchCmd() *cobra.Command {
 				},
 			}, nil)
 			if err != nil {
-				log.Fatalf("failed to launch Azure VM: %v", err)
+				log.Fatalf("failed to start VM creation: %v", err)
 			}
+			// We can't poll VMs for launch state because the Azure
+			// API doesn't consider a VM 'launched' until walinuxagent
+			// reports in to the control plane. This is obviously a problem
+			// for base images and other images without walinuxagent.
+			// We can't poll VM status ourselves because it's going to say 'Creating'
+			// forever until walinuxagent checks in (or the absurdly long timeout is
+			// reached).
+			// Very annoying.
+			//
+			// We can still wait until the VM is actually ready with the wait-for-ssh
+			// command, we just can't tell when there's a 5XX error with the Azure API
+			// when launching.
 
 			log.Printf("Launched Azure VM: %s", vmName)
 		},
