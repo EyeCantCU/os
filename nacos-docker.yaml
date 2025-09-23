@@ -1,0 +1,126 @@
+package:
+  name: nacos-docker
+  version: "3.0.3"
+  epoch: 0
+  description: This project contains a Docker image meant to facilitate the deployment of Nacos.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash-binsh
+      - curl
+      - iputils
+      - libstdc++
+      - ncurses
+      - openjdk-${{vars.java-version}}-jre
+      - vim
+    replaces:
+      - nacos
+
+vars:
+  # Main pom.xml uses Java 17; Docker image uses openjdk-17; Spring boot 3.x uses Java 17+
+  # No documentation / roadmap showing when they will upgrade
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - nacos=${{package.version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/nacos-group/nacos-docker
+      tag: v${{package.version}}
+      destination: docker
+      expected-commit: ecbdb600f7b327a44542932cd640f5af7dd8eadd
+
+  - runs: |
+      dest=${{targets.contextdir}}/usr/share/java/nacos
+      mkdir -p $dest $dest/logs
+
+      cp -r /usr/share/java/nacos/* $dest/
+
+      # Build steps from upstream Dockerfile https://github.com/nacos-group/nacos-docker/blob/master/build/Dockerfile
+      rm -rf $dest/bin/* \
+        $dest/conf/*.properties \
+        $dest/conf/*.example \
+        $dest/conf/nacos-mysql.sql
+
+      install -m755 docker/build/bin/docker-startup.sh $dest/bin/docker-startup.sh
+      cp docker/build/conf/application.properties $dest/conf/application.properties
+
+      # Add JVM args to docker startup script for patched jraft-core compatibility
+      sed -i '/^JAVA_OPT=/ s/"$/ --add-opens=java.base\/java.util=ALL-UNNAMED --add-opens=java.base\/java.lang=ALL-UNNAMED --add-opens=java.base\/java.lang.reflect=ALL-UNNAMED"/' $dest/bin/docker-startup.sh
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+        - wait-for-it
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      JAVA: /usr/lib/jvm/java-${{vars.java-version}}-openjdk/bin/java
+      BASE_DIR: /usr/share/java/nacos
+      MODE: standalone
+      # Dummy values for testing
+      NACOS_AUTH_ENABLE: "false"
+      NACOS_AUTH_TOKEN: VGVzdFRva2VuRm9yTmFjb3NUZXN0aW5nVGhhdElzTG9uZ0Vub3VnaEZvclRoZVJlcXVpcmVtZW50cw==
+      NACOS_AUTH_IDENTITY_KEY: serverIdentity
+      NACOS_AUTH_IDENTITY_VALUE: security
+  pipeline:
+    - name: "Test Nacos Docker entrypoint startup and basic functionality"
+      working-directory: /usr/share/java/nacos
+      runs: |
+        # Start nacos in background and capture PID
+        sh bin/docker-startup.sh &
+        NACOS_PID=$!
+
+        # Cleanup function to kill nacos on exit
+        cleanup() {
+          if kill -0 $NACOS_PID; then
+            kill $NACOS_PID
+            wait $NACOS_PID || true
+          fi
+        }
+        trap cleanup EXIT
+
+        # Wait for nacos to start
+        if ! wait-for-it localhost:8848 -t 60; then
+          echo "=== nacos-docker startup failed ==="
+          cat logs/start.out logs/nacos.log
+          ps aux | grep nacos; netstat -tlnp | grep 8848
+          exit 1
+        fi
+
+        # Test basic connectivity
+        if ! curl -f -s http://localhost:8848/nacos/; then
+          echo "=== nacos-docker basic connectivity failed ==="
+          curl -v http://localhost:8848/nacos/
+          exit 1
+        fi
+
+        # Test configuration management
+        CREATE_RESPONSE=$(curl -f -X POST "http://localhost:8848/nacos/v1/cs/configs" -d "dataId=oci.test.config" -d "group=DEFAULT_GROUP" -d "content=oci.test.value=container")
+        if [ "$CREATE_RESPONSE" != "true" ]; then
+          echo "=== nacos-docker config creation failed: $CREATE_RESPONSE ==="
+          exit 1
+        fi
+
+        # Wait for config to persist...
+        sleep 2
+
+        RESPONSE=$(curl -s "http://localhost:8848/nacos/v1/cs/configs?dataId=oci.test.config&group=DEFAULT_GROUP")
+        if ! echo "$RESPONSE" | grep -q "oci.test.value=container"; then
+          echo "=== nacos-docker config verification failed ==="
+          echo "Expected: oci.test.value=container, Got: $RESPONSE"
+          exit 1
+        fi
+
+update:
+  enabled: true
+  github:
+    identifier: nacos-group/nacos-docker
+    strip-prefix: v
