@@ -1,0 +1,146 @@
+package:
+  name: livekit-egress
+  version: 1.10.0
+  epoch: 0
+  description: "LiveKit Egress: export/record WebRTC sessions & tracks"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - ca-certificates-bundle
+      - chromium
+      - coreutils
+      - curl
+      - font-noto
+      - gnupg
+      - gst-libav
+      - gst-plugins-bad
+      - gst-plugins-base
+      - gst-plugins-good
+      - gstreamer
+      - pulseaudio
+      - pulseaudio-utils
+      - tini
+      - unzip
+      - wget
+      - xorg-server
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - glib-dev
+      - gst-plugins-bad-dev
+      - gst-plugins-base-dev
+      - gstreamer-dev
+      - pkgconf
+  environment:
+    CGO_ENABLED: "1"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/livekit/egress.git
+      tag: v${{package.version}}
+      expected-commit: 19c96f5d8662d400bc1a3d4fc15206f4a0cb3d94
+
+  # Copy the default/sdk templates into the server tree before building egress binary
+  # Upstream Dockerfile REF: https://github.com/livekit/egress/blob/main/build/egress/Dockerfile#L40-L43
+  - runs: |
+      set -euo pipefail
+      mkdir -p cmd/server/templates
+      cp -r template-default cmd/server/templates/default
+      cp -r template-sdk cmd/server/templates/sdk
+      find cmd/server/templates -name '*.map' -delete
+
+  # Upstream uses faac to build audio encoder and x264enc to build video encoder
+  # This patch modifies the addEncoder func to use 'avenc_aac' from gst-libav dependency instead
+  # And sets AAC caps to F32LE as expected by avenc_aac sink.
+  # It also swaps the video encoder from  x264enc to openh264enc and sets bitrate/keyframeinterval accordingly
+  # Ref:
+  # - https://github.com/livekit/egress/blob/main/pkg/pipeline/builder/audio.go#L316-L324
+  # - https://github.com/livekit/egress/blob/main/pkg/pipeline/builder/audio.go#L368-L372
+  # - https://github.com/livekit/egress/blob/main/pkg/pipeline/builder/video.go#L526-L583
+  - uses: patch
+    with:
+      patches: |
+        audio.go.patch \
+        video.go.patch
+
+  - uses: go/build
+    with:
+      modroot: .
+      packages: ./cmd/server
+      output: egress
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    pipeline:
+      - runs: |
+          # REF: https://github.com/livekit/egress/blob/main/build/egress/Dockerfile#L79-L85
+          mkdir -p "${{targets.subpkgdir}}"/chrome
+          mkdir -p "${{targets.subpkgdir}}"/home/egress/tmp
+          mkdir -p "${{targets.subpkgdir}}"/home/egress/.cache/xdgr
+          install -m755 build/egress/entrypoint.sh "${{targets.destdir}}"/entrypoint.sh
+          ln -sf /usr/bin/tini "${{targets.subpkgdir}}"/tini
+          ln -sf /usr/lib/chromium/ "${{targets.subpkgdir}}"/chrome
+
+update:
+  enabled: true
+  github:
+    identifier: livekit/egress
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - redis
+        - ${{package.name}}-compat
+        - livekit-server
+        - wait-for-it
+  pipeline:
+    - name: Verify neeeded gst-plugins elements available
+      runs: |
+        for element in openh264enc avenc_aac pulsesrc; do
+          gst-inspect-1.0 $element | grep -Eq "$element"
+        done
+    - name: Test egress binary exists and runs
+      runs: |
+        set -o pipefail
+        egress --version | grep -F -e ${{package.version}}
+        egress --help | grep -F -e "egress - LiveKit Egress"
+    - name: Egress startup prep
+      runs: |
+        set -o pipefail
+        # Start redis
+        redis-server --daemonize yes > /dev/null 2>&1
+        wait-for-it -t 10 localhost:6379
+
+        # Start livekit server in dev mode
+        livekit-server --dev > /dev/null 2>&1 &
+        wait-for-it -t 10 localhost:7880
+        curl -fsSL http://localhost:7880 | grep -q "OK"
+
+        # Create basic egress config
+        cat <<EOF > /tmp/config.yaml
+        api_key: devkey
+        api_secret: secret
+        ws_url: ws://127.0.0.1:7880
+        redis:
+            address: 127.0.0.1:6379
+        logging:
+            level: info
+        EOF
+    - name: Test basic egress service startup
+      uses: test/daemon-check-output
+      with:
+        start: |
+          egress --config /tmp/config.yaml
+        timeout: 300
+        expected_output: |
+          connecting to redis
+          service ready
