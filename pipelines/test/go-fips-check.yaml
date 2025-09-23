@@ -13,7 +13,7 @@ inputs:
     description: |
       regex matching packages to check.
     required: true
-    default: 'DEFAULT'
+    default: '${{context.name}}'
 
 pipeline:
   - name: "check golang files for fips-ness"
@@ -24,16 +24,35 @@ pipeline:
       r=0
 
       checkfile() {
-          local path="$1" r=0 outf="${TEMP_D}/syms.out"
+          local path="$1" r=0 outf="${TEMP_D}/syms.out" out_version="${TEMP_D}/version.out"
           if ! go tool nm "$path" > "$outf"; then
               echo "$path is golang but HAS NO SYMBOLS"
               return 1
           fi
+          if ! go version -m "$path" > "$out_version"; then
+              echo "$path is golang but failed version check"
+              return 1
+          fi
           if grep -q ' . crypto' "$outf"; then
               # Go binary using cryptography
-              if grep -q -e '_Cfunc__goboringcrypto_' -e 'v2._Cfunc_go_openssl' "$outf"; then
-                  # Go binary using cgo openssl cryptography
-                  echo "$path is golang and is using cgo openssl cryptography"
+              #
+              # From Go 1.25 onwards, golang-fips/openssl autogenerates C wrappers.
+              # This means that symbols have changed and thus we need to match a
+              # different symbol name, that's why we now have this first 'if' statement.
+              # As a way to further test whether the binary is FIPS-capable or not, we
+              # also check if "go version -m" will return "microsoft_systemcrypto=1", which
+              # is another good indication.
+              if grep -qF -e 'mkcgo_EVP_default_properties_is_fips_enabled' "$outf"; then
+                  if grep -qF "microsoft_systemcrypto=1" "$out_version"; then
+                      # Go 1.25+ binary using cgo openssl cryptography
+                      echo "$path is golang 1.25+ and is using cgo openssl cryptography"
+                  else
+                      echo "$path is golang 1.25+ but is NOT compiled with microsoft_systemcrypto=1"
+                      r=1
+                  fi
+              elif grep -qF -e '_Cfunc__goboringcrypto_' -e 'v2._Cfunc_go_openssl' "$outf"; then
+                   # Go (up to 1.24) binary using cgo openssl cryptography
+                  echo "$path is golang (up to 1.24) and is using cgo openssl cryptography"
               else
                   # Go binary using golang cryptography
                   echo "$path is golang but is NOT using cgo openssl cryptography"
@@ -132,12 +151,6 @@ pipeline:
       chmod 755 /tmp/check-fips
 
       pkgmatch='${{inputs.package-match}}'
-      pkgname='${{package.name}}'
-      if [ "${pkgmatch}" = "DEFAULT" ]; then
-        # default behavior is just "pkgname" intending for 'pkg-fips' to
-        # match it and its subpkgs, but those would be named pkg-<thing>-fips
-        pkgmatch="^${pkgname%-fips}"
-      fi
 
       pfile=/tmp/packages.list
       if ! apk info -L >"$pfile" 2>"$pfile.err" ; then

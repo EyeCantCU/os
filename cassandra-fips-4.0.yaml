@@ -2,7 +2,7 @@
 package:
   name: cassandra-fips-4.0
   version: 4.0.15
-  epoch: 1
+  epoch: 6
   description: Open Source NoSQL Database
   copyright:
     - license: Apache-2.0
@@ -11,9 +11,9 @@ package:
       - bash
       - bcfips-policy-140-3-j${{vars.java-version}}
       - coreutils
+      - jemalloc
       - openjdk-${{vars.java-version}}-default-jvm
       - python-${{vars.py-version}} # needed for cqlsh
-      - jemalloc
     provides:
       - cassandra-fips=${{package.full-version}}
 
@@ -53,7 +53,7 @@ pipeline:
 
   - uses: patch
     with:
-      # Bumps snakeyaml and jackson-databind to mitigate a bunch of CVEs
+      # Bumps snakeyaml, jackson-databind and commons-lang3 to mitigate a bunch of CVEs
       patches: bumpdeps.patch
 
   - runs: |
@@ -62,6 +62,9 @@ pipeline:
       # Install cassandra from the tarball in build/dist into the destdir in /usr/share/java/cassandra
       mkdir -p "${{targets.destdir}}"/usr/share/java/cassandra
       tar --strip-components 1 -C "${{targets.destdir}}"/usr/share/java/cassandra -xzf build/apache-cassandra-${{package.version}}-bin.tar.gz
+
+      # Remove pre-built binaries for architectures we don't support.
+      find . -name "libsigar*" | grep -vE '(amd64|arm64|x86)-linux' | xargs rm -f
 
       # Symlink everything in the cassandra bin directory into /usr/bin
       mkdir -p "${{targets.destdir}}"/usr/bin/
@@ -77,6 +80,17 @@ pipeline:
       ln -sT /var/lib/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/data
       ln -sT /var/log/cassandra/ "${{targets.destdir}}"/usr/share/java/cassandra/logs
 
+      # Configure FIPS mode in cassandra-env.sh
+      if [ -f "${{targets.destdir}}"/usr/share/java/cassandra/conf/cassandra-env.sh ]; then
+        cat >>"${{targets.destdir}}"/usr/share/java/cassandra/conf/cassandra-env.sh <<'EOF'
+
+      # FIPS Configuration
+      JVM_OPTS="$JVM_OPTS -Djava.security.egd=file:/dev/urandom"
+      JVM_OPTS="$JVM_OPTS -Djavax.net.ssl.trustStoreType=FIPS"
+      CLASSPATH="/usr/share/java/bouncycastle-fips/*:$CLASSPATH"
+      EOF
+      fi
+
 subpackages:
   - name: ${{package.name}}-compat
     dependencies:
@@ -87,6 +101,11 @@ subpackages:
           install -d ${{targets.subpkgdir}}/etc/cassandra
           mkdir -p ${{targets.subpkgdir}}/opt
           ln -s /usr/share/java/cassandra ${{targets.subpkgdir}}/opt/cassandra
+    # test added by a robot (compat)
+    test:
+      pipeline:
+        - runs: |
+            readlink -v /opt/cassandra
 
 update:
   enabled: false
@@ -100,6 +119,7 @@ test:
   environment:
     contents:
       packages:
+        - ${{package.name}}-compat
         - openjdk-${{vars.java-version}}-default-jdk
     environment:
       LANG: en_US.UTF-8
@@ -117,3 +137,30 @@ test:
         cqlsh --version
         cqlsh.py --version
         stop-server -h
+    - name: "Test Cassandra server startup"
+      uses: test/daemon-check-output
+      with:
+        start: |
+          cassandra -R -f
+        timeout: 120
+        expected_output: |
+          Startup complete
+        post: |
+          # Basic connectivity test
+          nodetool status | grep -q "UN"
+
+          # Run CQL operations
+          cqlsh -e "CREATE KEYSPACE IF NOT EXISTS test_ks
+            WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};"
+
+          cqlsh -e "CREATE TABLE IF NOT EXISTS test_ks.test_table
+            (id uuid PRIMARY KEY, value text);"
+
+          cqlsh -e "INSERT INTO test_ks.test_table (id, value)
+            VALUES (uuid(), 'test_value');"
+
+          # Verify data
+          cqlsh -e "SELECT value FROM test_ks.test_table;" | grep -q "test_value"
+
+          # Check node tools
+          nodetool info | grep -q "Native Transport active"

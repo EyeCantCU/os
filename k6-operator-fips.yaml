@@ -1,0 +1,88 @@
+package:
+  name: k6-operator-fips
+  version: "1.0.0"
+  epoch: 0
+  description: A FIPS compliant Kubernetes operator for orchestrating distributed load testing with k6
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/grafana/k6-operator
+      tag: v${{package.version}}
+      expected-commit: 75341694c70bd407764778c9e775f5b852848655
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/main.go
+      output: manager
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    description: Compatibility package to provide binary at expected upstream location
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}
+          ln -sf /usr/bin/manager ${{targets.subpkgdir}}/manager
+    test:
+      pipeline:
+        - runs: |
+            [ "$(readlink -f /manager)" = "/usr/bin/manager" ]
+
+update:
+  enabled: true
+  github:
+    identifier: grafana/k6-operator
+    strip-prefix: v
+    tag-filter: v
+  ignore-regex-patterns:
+    - helm-.*
+    - rc.*
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+    environment:
+      METRICS_PORT: "8080"
+      HEALTH_PORT: "8081"
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Check version and help output
+      runs: |
+        set -o pipefail
+        manager --help 2>&1 | grep -F "manager"
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Apply CRDs and test operator startup
+      runs: |
+        set -o pipefail
+        kubectl apply -f https://raw.githubusercontent.com/grafana/k6-operator/v${{package.version}}/config/crd/bases/k6.io_testruns.yaml
+        kubectl apply -f https://raw.githubusercontent.com/grafana/k6-operator/v${{package.version}}/config/crd/bases/k6.io_privateloadzones.yaml
+        kubectl create namespace k6-operator-system
+    - name: Test operator daemon
+      uses: test/daemon-check-output
+      with:
+        start: manager
+        timeout: 30
+        expected_output: |
+          starting manager
+          controller-runtime.metrics
+          Starting metrics server
+          Starting EventSource
+          Starting Controller
+          Starting workers
+        post: |
+          set -o pipefail
+          wait-for-it "localhost:${METRICS_PORT}" -t 30
+          curl -fsSL "localhost:${METRICS_PORT}/metrics" | grep -F "controller_runtime_reconcile_total"
+          curl -fsSL "localhost:${METRICS_PORT}/metrics" | grep -F "controller_runtime_active_workers"
+          curl -fsSL "localhost:${METRICS_PORT}/metrics" | grep -F "workqueue_adds_total"

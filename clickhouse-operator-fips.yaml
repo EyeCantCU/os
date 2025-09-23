@@ -1,6 +1,6 @@
 package:
   name: clickhouse-operator-fips
-  version: "0.25.0"
+  version: "0.25.3"
   epoch: 1
   description: Altinity Kubernetes Operator for ClickHouse creates, configures and manages ClickHouse® clusters running on Kubernetes
   copyright:
@@ -11,12 +11,12 @@ pipeline:
     with:
       repository: https://github.com/Altinity/clickhouse-operator
       tag: release-${{package.version}}
-      expected-commit: 001f8c67c231076819377a0026119643b5b9de58
+      expected-commit: 0f6f28f00a87a1a5beddad7a792138bbcdfa8980
 
   - uses: go/build
     with:
       packages: ./cmd/operator
-      ldflags: "-w -X github.com/altinity/clickhouse-operator/pkg/version.Version=v${{package.version}} -extldflags"
+      ldflags: "-w -X github.com/altinity/clickhouse-operator/pkg/version.Version=v${{package.version}}"
       output: clickhouse-operator
       go-package: go-fips
 
@@ -28,21 +28,96 @@ subpackages:
           mkdir -p ${{targets.contextdir}}
           ln -sf /usr/bin/clickhouse-operator ${{targets.contextdir}}/clickhouse-operator
 
+  - name: ${{package.name}}-metrics-exporter
+    description: "a metrics-exporter for ClickHouse Operator"
+    pipeline:
+      - uses: go/build
+        with:
+          go-package: go-fips
+          packages: ./cmd/metrics_exporter
+          ldflags: |
+            -X github.com/altinity/clickhouse-operator/pkg/version.Version=v${{package.version}}
+            -X github.com/altinity/clickhouse-operator/pkg/version.BuiltAt=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" "+%Y-%m-%dT%H:%M:%SZ")
+            -X github.com/altinity/clickhouse-operator/pkg/version.GitSHA='$(git rev-parse HEAD)'
+          output: metrics-exporter
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - name: Smoke tests
+          runs: |
+            metrics-exporter -version | grep ${{package.version}}
+            metrics-exporter -help
+
+  - name: ${{package.name}}-metrics-exporter-compat
+    description: "Compatibility package to place binary in the location expected by clickhouse-operator-metrics-exporter"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          ln -s ./usr/bin/metrics-exporter ${{targets.contextdir}}/metrics-exporter
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-metrics-exporter
+      pipeline:
+        - uses: test/tw/symlink-check
+        - name: Smoke tests
+          runs: |
+            /metrics-exporter -version | grep ${{package.version}}
+            /metrics-exporter -help
+
 update:
   enabled: true
   github:
     identifier: Altinity/clickhouse-operator
     strip-prefix: release-
 
+vars:
+  bin-name: clickhouse-operator
+
 test:
   # Despite using KWOK or specifying a kubeconfig (e.g. `clickhouse-operator -kubeconfig "/root/.kube/config"`),
   # we still encounter this error:
   # Err: Get "https://127.0.0.1:32764/apis/clickhouse.altinity.com/v1/clickhouseoperatorconfigurations":
   # dial tcp 127.0.0.1:32764: connect: connection refused
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "8080"
   pipeline:
     - uses: test/tw/ldd-check
     - name: Basic tests
       runs: |
         clickhouse-operator -version
         clickhouse-operator -help
+    - uses: test/kwok/cluster
+    - name: Launch operator with dummy kubeconfig
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl config view --minify --raw > /tmp/kubeconfig.yaml
+          # clickhouse-operator fails to start without this in place
+          ln -s $HOME/.kube /root/.kube
+        start: ${{vars.bin-name}} --kubeconfig=/tmp/kubeconfig.yaml
+        timeout: 30
+        expected_output: |
+          Starting EventSource
+          Starting Controller
+        # Ignore ERROR keyword, since it is expected.
+        error_strings: |
+          FAIL
+          FATAL
+          Traceback.*most.recent.call
+          Exception in thread
+          java.lang.NullPointerException
+          java.lang.RuntimeException
+          Gem::MissingSpecError
+          command not found
+        post: |
+          echo "Verifying metrics endpoint"
+          curl -sf http://127.0.0.1:8080/metrics
+          echo "Metrics endpoint is serving as expected"
     - uses: test/go-fips-check

@@ -1,7 +1,7 @@
 package:
   name: harbor-fips-2.10
   version: 2.10.3
-  epoch: 18
+  epoch: 27
   description: An open source trusted cloud native registry project that stores, signs, and scans content
   copyright:
     - license: Apache-2.0
@@ -18,6 +18,8 @@ package:
       - so:libssl.so.3
 
 environment:
+  environment:
+    GCC_SPEC_FILE: "no-hardening.spec"
   contents:
     packages:
       - nodejs
@@ -48,15 +50,6 @@ pipeline:
       # Generate API
       swagger generate server --template-dir=tools/swagger/templates --exclude-main --additional-initialism=CVE --additional-initialism=GC --additional-initialism=OIDC -f api/v2.0/swagger.yaml -A harbor --target src/server/v2.0
 
-  - runs: |
-      # These dependencies are transitive dependencies and so they need to be required outside the go/bump block
-      cd src
-      go mod edit -require=helm.sh/helm/v3@v3.17.3
-      go mod edit -require=github.com/beego/beego/v2@v2.3.7
-      go get helm.sh/helm/v3@v3.17.3
-      go get github.com/beego/beego/v2@v2.3.7
-      go mod tidy
-
   - uses: go/bump
     with:
       modroot: ./src
@@ -66,6 +59,7 @@ pipeline:
         helm.sh/helm/v3@v3.17.3
         github.com/go-jose/go-jose/v3@v3.0.4
         golang.org/x/oauth2@v0.27.0
+        golang.org/x/crypto@v0.38.0
         golang.org/x/net@v0.38.0
         github.com/golang-jwt/jwt/v4@v4.5.2
         github.com/gorilla/csrf@v1.7.3
@@ -74,9 +68,6 @@ pipeline:
         go.opentelemetry.io/otel/sdk@v1.34.0
         go.opentelemetry.io/otel/trace@v1.34.0
         github.com/spf13/cast@v1.7.0
-        k8s.io/api@v0.32.2
-        k8s.io/apimachinery@v0.32.2
-        k8s.io/client-go@v0.32.2
         google.golang.org/genproto/googleapis/api@v0.0.0-20250115164207-1a7da9e5054f
         google.golang.org/genproto/googleapis/rpc@v0.0.0-20250115164207-1a7da9e5054f
         google.golang.org/grpc@v1.69.4
@@ -85,7 +76,11 @@ pipeline:
         go.opentelemetry.io/otel/metric@v1.34.0
         go.opentelemetry.io/proto/otlp@v1.5.0
         github.com/Masterminds/semver/v3@v3.3.0
-      replaces: github.com/docker/docker=github.com/docker/docker@v25.0.5+incompatible github.com/docker/cli=github.com/docker/cli@v25.0.1+incompatible github.com/go-jose/go-jose/v3=github.com/go-jose/go-jose/v3@v3.0.4
+      replaces: |
+        github.com/docker/docker=github.com/docker/docker@v25.0.5+incompatible
+        github.com/docker/cli=github.com/docker/cli@v25.0.1+incompatible
+        helm.sh/helm/v3=helm.sh/helm/v3@v3.18.5
+        github.com/beego/beego/v2=github.com/beego/beego/v2@v2.3.7
 
   - uses: go/build
     with:
@@ -169,12 +164,15 @@ subpackages:
           packages: ./jobservice
           output: harbor-jobservice
           modroot: ./src
-          go-package: go-fips
+          go-package: go-fips~1.24
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/harbor
           ln -sf /usr/bin/harbor-jobservice ${{targets.subpkgdir}}/harbor/harbor_jobservice
     test:
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: harbor-fips-2.10-jobservice
         - runs: |
             # jobservice fails outside environment, verify adaptor for harbor registered
             /harbor/harbor_jobservice 2>/dev/null | grep "harbor registered"
@@ -251,26 +249,91 @@ subpackages:
           packages: ./registryctl
           output: harbor-registryctl
           modroot: ./src
-          go-package: go-fips
+          go-package: go-fips~1.24
+          tags: include_oss,include_gcs
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/etc/registryctl
           mkdir -p ${{targets.subpkgdir}}/harbor
           ln -sf /usr/bin/harbor-registryctl ${{targets.subpkgdir}}/harbor/harbor_registryctl
     test:
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: harbor-fips-2.10-registryctl
         - runs: |
             harbor-registryctl --help
 
+  - name: ${{package.name}}-exporter
+    description: harbor exporter
+    dependencies:
+      provides:
+        - harbor-fips-exporter=${{package.full-version}}
+      runtime:
+        - bash-binsh
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/exporter
+          output: harbor_exporter
+          modroot: ./src
+          go-package: go-fips~1.24
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/harbor
+          ln -sf /usr/bin/harbor_exporter ${{targets.subpkgdir}}/harbor/harbor_exporter
+          install -Dm755 make/photon/exporter/entrypoint.sh ${{targets.subpkgdir}}/harbor/
+          install -Dm755 make/photon/common/install_cert.sh ${{targets.subpkgdir}}/harbor/
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: harbor-fips-2.10-exporter
+        - runs: test "$(readlink /harbor/harbor_exporter)" = "/usr/bin/harbor_exporter"
+        - name: "Test entrypoint /harbor/entrypoint.sh"
+          runs: |
+            stat /harbor/entrypoint.sh
+            test -x /harbor/entrypoint.sh
+        - name: "Test exporter"
+          uses: test/daemon-check-output
+          with:
+            start: harbor_exporter
+            timeout: 15
+            # Overriding error strings as it needs a real Harbor registry to be up and running
+            error_strings: |
+              FAIL
+              FATAL
+              Error
+            expected_output: |
+              Registering database: type-PostgreSQL
+
+  - name: ${{package.name}}-redis-compat
+    description: Compat package for running redis with harbor
+    dependencies:
+      provides:
+        - harbor-redis-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mkdir -p ${{targets.subpkgdir}}/etc
+
+          cp ./make/photon/redis/docker-healthcheck ${{targets.subpkgdir}}/usr/bin/
+          cp ./make/photon/redis/redis.conf ${{targets.subpkgdir}}/etc/
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/docker-healthcheck
+            stat /etc/redis.conf
+
 test:
   pipeline:
+    - uses: test/go-fips-check
     - runs: |
         harbor-core --help
 
 update:
   enabled: true
   ignore-regex-patterns:
-    - '-rc'
-    - '-beta'
+    - "-rc"
+    - "-beta"
   github:
     identifier: goharbor/harbor
     strip-prefix: v

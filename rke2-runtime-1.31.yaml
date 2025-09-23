@@ -1,0 +1,184 @@
+package:
+  name: rke2-runtime-1.31
+  version: "1.31.12.2.1"
+  epoch: 0
+  description: Rancher Kubernetes Engine 2 (RKE2) is a fully conformant Kubernetes distribution with minimal dependencies
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+      - containerd
+      - containerd-shim-runc-v2
+      - crictl
+      - ctr
+      - ip6tables
+      - ipset
+      - kubectl-${{vars.kubernetes-version}}
+      - kubelet-${{vars.kubernetes-version}}
+      - mount
+      - runc
+      - umount
+
+# using apk-v2 friendly spec version format for package version string
+# need to transform version (1.33.3.2.1) to match upstream tag: '1.33.3+rke2r1'
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+)$
+    replace: ${1}.${2}.${3}+rke${4}r${5}
+    to: mangled-package-version
+  - from: ${{vars.mangled-package-version}}
+    match: \+
+    replace: "-"
+    to: image-version
+  - from: ${{package.name}}
+    match: '.*-(\d+\.\d+).*'
+    replace: '$1'
+    to: kubernetes-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - curl
+      - gnutar # Needed for build-charts.sh script, as BusyBox tar does not support '--delete' or '--transform' options.
+      - go
+      - pigz
+      - yq
+  environment:
+    CGO_ENABLED: "1"
+    CGO_CFLAGS: "-DSQLITE_ENABLE_DBSTAT_VTAB=1 -DSQLITE_USE_ALLOCA=1"
+    GOEXPERIMENT: boringcrypto
+    # REF: https://github.com/rancher/rke2/blob/release-1.31/scripts/build-binary#L24
+    BUILD_TAGS: "selinux netgo osusergo no_stage static_build sqlite_omit_load_extension no_embedded_executor no_cri_dockerd"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/rancher/rke2
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: eb8f58ec7e1ee69e0bfc76b2d90d11c8ae6853fa
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.40.0
+        golang.org/x/net@v0.42.0
+
+  # Upstream extracts runtime image binaries to '/bin'
+  # This patch modifies the extractPath func to use '/usr/bin' to work with our setup
+  # Ref: https://github.com/rancher/rke2/blob/master/pkg/bootstrap/bootstrap.go#L144
+  - uses: patch
+    with:
+      patches: bootstrap.go.patch
+
+  - runs: |
+      cat > build.sh <<'EOF'
+      #!/bin/bash
+      set -e
+      source scripts/version.sh
+
+      LDFLAGS="
+        -X ${K3S_PKG}/pkg/version.GitCommit=$(git rev-parse HEAD)
+        -X ${K3S_PKG}/pkg/version.Program=${PROG}
+        -X ${K3S_PKG}/pkg/version.Version=${{vars.mangled-package-version}}
+        -X ${K3S_PKG}/pkg/version.UpstreamGolang=$(go env GOVERSION)
+        -X ${RKE2_PKG}/pkg/images.DefaultRegistry=${REGISTRY}
+        -X ${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:${ETCD_VERSION}-build20250612
+        -X ${RKE2_PKG}/pkg/images.DefaultKubernetesImage=rancher/hardened-kubernetes:${KUBERNETES_IMAGE_TAG}
+        -X ${RKE2_PKG}/pkg/images.DefaultPauseImage=rancher/mirrored-pause:${PAUSE_VERSION}
+        -X ${RKE2_PKG}/pkg/images.DefaultRuntimeImage=${REPO}/${PROG}-runtime:v${{vars.image-version}}
+        -X ${RKE2_PKG}/pkg/images.DefaultCloudControllerManagerImage=rancher/rke2-cloud-provider:${CCM_VERSION}
+      "
+
+      mkdir -p ${{targets.destdir}}/usr/bin
+      go build -tags "${BUILD_TAGS}" \-o ${{targets.destdir}}/usr/bin/rke2 -ldflags "${LDFLAGS}"
+      EOF
+
+      chmod +x build.sh
+      ./build.sh
+
+  - name: Generate Charts
+    runs: |
+      bash charts/build-charts.sh
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-charts
+    description: Charts for RKE2 runtime-${{vars.kubernetes-version}}
+    pipeline:
+      - runs: |
+          # Install Charts
+          mkdir -p ${{targets.contextdir}}/charts
+          cp -r /home/build/charts/*.yaml  ${{targets.contextdir}}/charts
+
+          # cleanup
+          # REF: https://github.com/rancher/rke2/blob/release-1.32/Dockerfile#L114
+          rm ${{targets.contextdir}}/charts/chart_versions.yaml
+
+# Matching upstream tag and transforming it back to apkv2 friendly format
+# EX: '1.33.3+rke2r1' --> '1.33.3.2.1'
+update:
+  enabled: true
+  version-transform:
+    - match: ^(\d+)\.(\d+)\.(\d+)\+([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$
+      replace: "${1}.${2}.${3}.${5}.${7}"
+  ignore-regex-patterns:
+    - '-rc'
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v1.31
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-charts
+        - docker
+        - kubelet-${{vars.kubernetes-version}}
+        - bash
+  pipeline:
+    - name: Test rke2 binary exists and runs
+      runs: |
+        set -o pipefail
+        rke2 --version | grep -F -e ${{vars.mangled-package-version}}
+        rke2 --help | grep -F -e "Rancher Kubernetes Engine 2"
+    - name: Functional test
+      runs: |
+        # Start rke2 server
+        set -o pipefail
+        rke2 server --token token --snapshotter native > /tmp/rke2-server.log 2>&1 &
+        rke2server_pid=$!
+
+        # cleanup for server/agent processes - killing server process also kills agent process
+        trap 'kill -9 ${rke2server_pid}' EXIT
+
+        # Start rke2 agent
+        rke2 agent --server https://10.0.2.15:9345 --token token --snapshotter native \
+        > /tmp/rke2-agent.log 2>&1 &
+
+        # Allow some time for logs to generate
+        TIMEOUT=60
+        while ! grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-server.log && [ $TIMEOUT -gt 0 ]; do
+          sleep 1
+          TIMEOUT=$((TIMEOUT-1))
+        done
+        if [ $TIMEOUT -eq 0 ]; then
+          echo "Attempted to launch RKE2 in test, but log validation failed."
+          exit 1
+        fi
+
+        # Validate rke2-server logs
+        grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-server.log
+        grep -q "Starting rke2" /tmp/rke2-server.log
+        grep -q "Managed etcd cluster initializing" /tmp/rke2-server.log
+
+        # Validate rke2-agent logs
+        grep -q "Applying Pod Security Admission Configuration" /tmp/rke2-agent.log
+        grep -q "Starting rke2 agent" /tmp/rke2-agent.log
+        grep -q "Updated load balancer rke2-agent-load-balancer" /tmp/rke2-agent.log
+        grep -q "Running load balancer rke2-agent-load-balancer" /tmp/rke2-agent.log

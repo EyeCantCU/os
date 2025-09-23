@@ -1,8 +1,8 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-envoy-1.16
-  version: "1.16.11"
-  epoch: 0
+  version: "1.16.15"
+  epoch: 0 # CVE-2025-47907
   description: Envoy with additional cilium plugins
   copyright:
     - license: Apache-2.0
@@ -13,31 +13,36 @@ package:
     provides:
       - cilium-envoy=${{package.full-version}}
 
+capabilities:
+  add:
+    - CAP_NET_ADMIN
+    - CAP_SYS_ADMIN
+    - CAP_BPF
+
 environment:
   contents:
     packages:
       - bash
-      - bazel-6
+      - bazel-7
       - binutils
       - build-base
       - busybox
       - ca-certificates-bundle
       - clang-17
-      - clang-17-dev
       - cmake
       - coreutils # for GNU install
       - git
       - glibc-locale-en # Fixes issues with UTF-8 characters in filenames
-      - go
+      # Some CGO FTBFS
+      - go-1.24
       - isl-dev
+      - libcxx1-17-dev
       - libtool
-      - llvm-libcxx-17
-      - llvm-libcxx-17-dev
-      - llvm-libcxxabi-17
-      - llvm-lld-17
-      - llvm17
-      - llvm17-dev
-      - openjdk-11
+      - lld-17
+      - lld-17-dev
+      - llvm-17
+      - llvm-17-dev
+      - openjdk-21-default-jdk
       - patch
       - python3-dev
       - samurai
@@ -48,7 +53,7 @@ pipeline:
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: bf9392a9b488df95ba7de58d14de5f8d3afa2067
+      expected-commit: 75130674084311ceedfc2bd6dfec511478d23105
       destination: cilium
 
   - uses: git-checkout
@@ -64,6 +69,9 @@ pipeline:
     runs: |
       ENVOY_SHA=$(grep 'ARG.*cilium-envoy' ./cilium/images/cilium/Dockerfile \
         | sed "s/^ARG.*:v[0-9.]\+-[0-9]\+-//g" | cut -d@ -f1)
+      echo "SHA is: ${ENVOY_SHA}"
+      # Sometimes the commit is too "hidden" and can't be reset to, so we try fetching it explicitly.
+      git fetch origin ${ENVOY_SHA}
       git reset --hard $ENVOY_SHA
 
   - runs: |
@@ -86,9 +94,10 @@ pipeline:
       # The toolchain at cilium/proxy has paths that are specific to their CI. https://github.com/cilium/proxy/blob/main/WORKSPACE#L3
       # Unregister to use Wolfi's toolchain available in the build env.
       sed 's/register_toolchains/#register_toolchains/g' -i WORKSPACE
+      # Create symlink for llvm-ar-17 since the build expects this specific name
+      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-17
 
   - runs: |
-      export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
       mkdir -p .cache/bazel/_bazel_root
       mkdir -p ${{targets.destdir}}/usr/bin
 
@@ -114,6 +123,7 @@ pipeline:
         --conlyopt="-Wno-strict-prototypes" \
         `# The thread-safety analysis flagged some issue in upstream code` \
         --cxxopt="-Wno-thread-safety" \
+        --action_env=LIBURING_CFLAGS="-ftrivial-auto-var-init=uninitialized" \
         --verbose_failures -c opt //:cilium-envoy
       install -m 755 bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
 
@@ -128,8 +138,96 @@ update:
     tag-filter-prefix: v1.16.
 
 test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - curl
+        - go-fips
+        - netcat-openbsd
+        - procps
+        - jq
   pipeline:
-    - runs: |
+    - name: "Verify binary installation"
+      runs: |
+        # Test cilium-envoy binary
         cilium-envoy --version
         cilium-envoy --help
+
+        # Test cilium-envoy-starter binary
+        cilium-envoy-starter --version
+        cilium-envoy-starter --help
+    - name: "Verify libcilium.so installation"
+      runs: |
+        # Check that the library exists
+        if [ ! -f /usr/lib/libcilium.so ]; then
+          echo "ERROR: /usr/lib/libcilium.so does not exist"
+          exit 1
+        fi
+
+        # Verify we can load the library
+        ldd /usr/lib/libcilium.so
     - uses: test/tw/ldd-check
+      with:
+        files: "/usr/bin/cilium-envoy /usr/bin/cilium-envoy-starter /usr/lib/libcilium.so"
+        verbose: true
+    - name: "Test Envoy admin interface startup"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: cilium-envoy --config-path /tmp/minimal.yaml --admin-address-path /tmp/admin.txt
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all clusters initialized
+        post: |
+          #!/bin/sh -e
+          # Get admin address
+          ADMIN_ADDR=$(cat /tmp/admin.txt)
+
+          # Test admin endpoints
+          curl -s "http://${ADMIN_ADDR}/server_info" | jq . || exit 1
+          curl -s "http://${ADMIN_ADDR}/stats" | grep envoy || exit 1
+          curl -s "http://${ADMIN_ADDR}/clusters" | jq . || exit 1
+    - name: "Test hot restart capability"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: cilium-envoy --config-path /tmp/minimal.yaml --restart-epoch 0
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all clusters initialized
+        post: |
+          #!/bin/sh -e
+          first_pid=$(pgrep -f "restart-epoch 0")
+          cilium-envoy --config-path /tmp/minimal.yaml --restart-epoch 1 > /dev/null 2>&1 &
+          sleep 2
+
+          # Verify both processes exist
+          if ! ps -p $first_pid > /dev/null; then
+            echo "Original Envoy process not found"
+            exit 1
+          fi

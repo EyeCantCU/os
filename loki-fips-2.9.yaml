@@ -1,0 +1,118 @@
+package:
+  name: loki-fips-2.9
+  version: 2.9.15
+  epoch: 1 # CVE-2025-47907
+  description: Like Prometheus, but for logs.
+  copyright:
+    - license: AGPL-3.0-or-later
+  dependencies:
+    provides:
+      - loki-fips=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go-fips-md5
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 7b805ba7c84366e11e8571c9e8c422739bb18684
+      repository: https://github.com/grafana/loki
+      tag: v${{package.version}}
+
+  - uses: patch
+    with:
+      patches: Makefile.patch
+
+  - uses: autoconf/make
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/usr/bin
+      mv cmd/loki/loki ${{targets.contextdir}}/usr/bin/loki
+
+      # Add the default config
+      mkdir -p ${{targets.contextdir}}/etc/loki
+      mv cmd/loki/loki-local-config.yaml ${{targets.contextdir}}/etc/loki/local-config.yaml
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-logcli
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv cmd/logcli/logcli ${{targets.contextdir}}/usr/bin/logcli
+    dependencies:
+      provides:
+        - logcli-fips=${{package.full-version}}
+    test:
+      pipeline:
+        - runs: |
+            logcli --version
+        - uses: test/go-fips-check
+
+  - name: ${{package.name}}-promtail
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv clients/cmd/promtail/promtail ${{targets.contextdir}}/usr/bin/promtail
+
+          mkdir -p ${{targets.contextdir}}/etc/promtail
+          mv clients/cmd/promtail/promtail-local-config.yaml ${{targets.contextdir}}/etc/promtail/config.yml
+    dependencies:
+      provides:
+        - promtail-fips=${{package.full-version}}
+    test:
+      pipeline:
+        - runs: |
+            promtail --version
+        - uses: test/go-fips-check
+
+  - name: ${{package.name}}-loki-canary
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv cmd/loki-canary/loki-canary ${{targets.contextdir}}/usr/bin/loki-canary
+    dependencies:
+      provides:
+        - loki-canary-fips=${{package.full-version}}
+    test:
+      pipeline:
+        - runs: |
+            loki-canary --version  | grep "${{package.version}}"
+        - uses: test/go-fips-check
+
+update:
+  enabled: true
+  github:
+    identifier: grafana/loki
+    strip-prefix: v
+    tag-filter: v2.9
+
+test:
+  pipeline:
+    - runs: |
+        loki --version | grep "${{package.version}}"
+    - uses: test/go-fips-check
+    - name: "Command structure tests"
+      runs: |
+        loki --help 2>&1| grep "Usage of config-file-loader"
+    - name: "Basic functionality test"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -ex
+          mkdir -p /tmp/loki
+        start: loki --config.file=/etc/loki/local-config.yaml
+        timeout: 30
+        expected_output: |
+          server listening on addresses
+        error_strings: |
+          ERROR
+          FATAL
+          panic
+          failed to start

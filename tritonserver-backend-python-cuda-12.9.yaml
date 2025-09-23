@@ -1,0 +1,156 @@
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+vars:
+  gcc-version: 14
+  py-version: 3.12
+  # Here's how do determine the tensorrt-version
+  # 1. Look at the requirements.txt file in TensorRT_LLM https://github.com/NVIDIA/TensorRT-LLM/blob/be9cd719f7d3149a5267c854284d83f717da0771/requirements.txt
+  # 2. This will be installing a pip file for TensorRT that is the version you want
+  # to use for the given version of TensorRT_LLM
+  # 3. The APK for TensorRT should be built at the same version as that pip
+  # The TRT version should be in the tar.gz of the TensorRT distribution you
+  # download.
+  tensorrt-version: 10.7.0.23
+  # 7f21b6702779b862e33a34880050f17f514bc20a is the commit for r25.04
+  # Becareful about changing the commit because you need to keep it in sync with the tags for the other repositories it pulls in.
+  # N.B. r25.04 is a branch; there doesn't appear to be specific tags. So I think potentially they could push a change to the
+  # branch and it would end up changing the commit we build but hopefully that's caught by expected commit
+  triton_python_backend_repo_commit: 78877a72417e27acc97557bd14e28ccc9fc6f226
+
+package:
+  name: tritonserver-backend-python-cuda-12.9
+  version: 25.07
+  epoch: 0
+  description: NVIDIA Triton Inference Server Python Backend
+  copyright:
+    - license: BSD-3-Clause
+  resources:
+    cpu: 64
+    memory: 128Gi
+  dependencies:
+    runtime:
+      - libarchive
+      - libstdc++-${{vars.gcc-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-cuda-cupti-${{vars.cuda-version}}
+      - py${{vars.py-version}}-numpy
+      - python-${{vars.py-version}}-base
+      - rapidjson
+      - zlib
+  options:
+    no-depends: true
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{vars.cuda-version}}
+    match: (\d+)\.\d+
+    replace: $1
+    to: cuda-major-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake-3
+      - cuda-toolkit-${{vars.cuda-version}}
+      - file
+      - gcc-${{vars.gcc-version}}
+      - gcc-${{vars.gcc-version}}-default
+      - git-lfs
+      - libarchive-dev
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+      - nvidia-cuda-cupti-${{vars.cuda-version}}
+      - nvidia-cuda-cupti-${{vars.cuda-version}}-dev
+      - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
+      - py${{vars.py-version}}-build-base-dev
+      - rapidjson-dev
+      - triton-inference-server-backend
+      - triton-inference-server-common
+      - triton-inference-server-core
+      - zlib-dev
+  environment:
+    INSTALLDIR: "/tmp/tritonbuild/python/install" # INSTALLDIR is the directory where the built artifacts are placed after running cmake install
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: ${{vars.triton_python_backend_repo_commit}}
+      repository: https://github.com/triton-inference-server/python_backend.git
+      branch: r${{package.version}}
+      destination: backend
+      recurse-submodules: true
+
+  - runs: |
+      # This is a bit of hack to fix the warnings
+      # See: https://github.com/chainguard-dev/extra-packages/pull/407#issuecomment-2223704174
+      sed -e 's/-Werror//g' -i /home/build/backend/CMakeLists.txt
+
+  # TRT_VERSION is set based on the instructions in the repository
+  # https://github.com/triton-inference-server/tensorrtllm_backend?tab=readme-ov-file#option-1-build-via-the-buildpy-script-in-server-repo
+  #
+  - runs: |
+      export PATH="$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin"
+      export BUILD_DIR="/home/build"
+      # CUDA detection needs path set to find nvcc so we  call cmake directly
+
+      mkdir output
+      cd output
+      cmake \
+        "-DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${{vars.cuda-version}}" \
+        "-DTRT_VERSION=${{vars.tensorrt-version}}" \
+        "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}" \
+        "-DVCPKG_TARGET_TRIPLET=${VCPKG_TARGET_TRIPLET}" \
+        "-DCMAKE_BUILD_TYPE=Release" \
+        "-DCMAKE_INSTALL_PREFIX:PATH=/tmp/tritonbuild/python/install" \
+        "-DTRITON_REPO_ORGANIZATION:STRING=file:///usr/src/triton-inference-server" \
+        "-DTRITON_COMMON_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/common.git && git branch --show-current)" \
+        "-DTRITON_CORE_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/core.git && git branch --show-current)" \
+        "-DTRITON_BACKEND_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/backend.git && git branch --show-current)" \
+        "-DTRITON_ENABLE_GPU:BOOL=ON" \
+        "-DTRITON_ENABLE_MALI_GPU:BOOL=OFF" \
+        "-DTRITON_ENABLE_STATS:BOOL=ON" \
+        "-DTRITON_ENABLE_METRICS:BOOL=ON" \
+        "-DTRITON_ENABLE_MEMORY_TRACKER:BOOL=ON" \
+        "-DCMAKE_CXX_FLAGS=\"-Wno-error=deprecated-declarations\""  \
+        /home/build/backend
+
+  - runs: |
+      # When this fails, we can presumably stop pinning cmake-3
+      find . -name CMakeLists.txt | \
+        xargs grep -E 'cmake_minimum_required\(VERSION 3(\.[0-4])[ \)]'
+
+  - runs: |
+      # N.B. I'm not sure how we would convert this to use the cmake/build pipeline
+      # https://github.com/chainguard-dev/melange/blob/main/pkg/build/pipelines/cmake/build.yaml
+      # Because it doesn't look like that lets us specify additional options.
+      cmake --build /home/build/output --config Release -j$(nproc) -t install
+
+      # Dest dir is the directory in final output where we should put the artifacts
+      # See https://github.com/triton-inference-server/server/issues/7410#issuecomment-2218856792
+      # If we don't put the python backend in the default location /opt/tritonserver/backends/python
+      # we have problems later on when trying to specify the location of the backend.
+      # So just use the default location.
+      export DESTDIR="${{targets.contextdir}}/opt/tritonserver"
+      mkdir -p ${DESTDIR}/backends
+      rm -fr ${DESTDIR}/backends/python
+      cp -r ${INSTALLDIR}/backends/python ${DESTDIR}/backends
+
+test:
+  pipeline:
+    - name: python dependency smoke test
+      runs: |
+        # Make sure the imports in this script don't fail
+        python${{vars.py-version}} /opt/tritonserver/backends/python/triton_python_backend_utils.py
+
+#Tritonserver backends doesn't use tags or releases, we can't use latest 25.05 branch as of now
+#The reason for that is that will need CUDA 12.8 bump of all the other packages and to unblock for now we are using 25.04 with more latest Python 3.12
+#Creating new package as the older one is based on python 3.10 which was requested by user
+#Not making it mainline till we have a more later branch ready to be shipped
+update:
+  enabled: false
+  exclude-reason: "upstream not using tags or releases"

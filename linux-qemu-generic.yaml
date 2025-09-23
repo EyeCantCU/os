@@ -1,6 +1,6 @@
 package:
   name: linux-qemu-generic
-  version: "6.15.4"
+  version: "6.16.8"
   epoch: 0
   description: "the QEMU generic linux kernel"
   copyright:
@@ -21,6 +21,9 @@ environment:
     KBUILD_BUILD_USER: noreply
     KBUILD_BUILD_HOST: chainguard.dev
     KBUILD_BUILD_VERSION: Chainguard
+  contents:
+    packages:
+      - bootc-dracut
 
 var-transforms:
   - from: ${{package.name}}
@@ -34,22 +37,40 @@ var-transforms:
   - from: ${{package.version}}
     match: '^(\d+[.]\d+)[.]0$'
     replace: '$1'
-    to: git-tag-version
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: '^(\d+\.\d+)\.\d+$'
+    replace: '$1'
+    to: mangled-kernel-major-version
 
 pipeline:
+  - uses: kernel/version-check
+    with:
+      moniker: stable
+
   - uses: git-checkout
     with:
       repository: https://github.com/gregkh/linux
-      tag: v${{vars.git-tag-version}}
-      expected-commit: e60eb441596d1c70e4a264d2bac726c6cd2da067
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 62dae019823123ce3baa50e680219e2beb9a63a5
 
-  - uses: kernel/patch
+  - uses: patch
+    with:
+      patches: 0001-crypto-reusable-jitterentropy-${{vars.mangled-kernel-major-version}}.patch 0001-random-use-jitterentropy-${{vars.mangled-kernel-major-version}}.patch 0001-crypto-fix-hkdf-tests-${{vars.mangled-kernel-major-version}}.patch
 
   - uses: kernel/config
     with:
       flavor: ${{vars.flavor}}
       make-targets: hardening.config
       version-flavor: ${{vars.version-flavor}}
+
+  # TODO: pin this to a certified
+  # jitterentropy version when we
+  # have one.
+  - uses: kernel/reusable-jitterentropy
+    with:
+      version: ${{vars.mangled-kernel-major-version}}
+      kernel-version: ${{vars.mangled-kernel-major-version}}
 
   - uses: kernel/build
     with:
@@ -73,6 +94,22 @@ subpackages:
         with:
           version-flavor: ${{vars.version-flavor}}
 
+  - name: "${{package.name}}-fips-boot-installed"
+    description: "FIPS Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - ${{package.name}}-modules=${{package.full-version}}
+        - chainguard-baselayout
+        - systemd-boot-installed
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          extra-args: fips=1
+
   - name: "${{package.name}}-modules"
     description: "Linux kernel modules"
     pipeline:
@@ -84,12 +121,46 @@ subpackages:
         - merged-lib
         - wolfi-baselayout
 
+  - name: "${{package.name}}-bootc-boot-installed"
+    description: "Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - ${{package.name}}-modules=${{package.full-version}}
+        - chainguard-baselayout
+        - merged-lib
+        - systemd-boot-installed
+        - wolfi-baselayout
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+      - uses: kernel/dracut
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          kmoddir: ${{targets.destdir}}-modules/usr/lib/modules/${{vars.version-flavor}}
+          output: ${{targets.subpkgdir}}/usr/lib/modules/${{vars.version-flavor}}/initramfs.img
+      - runs: |
+          kmodd=usr/lib/modules/${{vars.version-flavor}}
+          mkdir -p "${{targets.subpkgdir}}/$kmodd"
+          mv ${{targets.subpkgdir}}/boot/chainguard/${{vars.version-flavor}}/linux \
+             "${{targets.subpkgdir}}/$kmodd/vmlinuz"
+          rm -Rf ${{targets.subpkgdir}}/boot
+
 test:
   pipeline:
     - uses: kernel/test/kconfig/systemd
-    - uses: kernel/test/cloud-config-snippet
+    - uses: kernel/test/config-snippet
       with:
-        flavor: ${{vars.flavor}}
+        snippet: jitterentropy
+        # This is =y instead of =m for melange runner reasons
+        x86_64_exclude: CRYPTO_USER_API
+        aarch64_exclude: CRYPTO_USER_API
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: ${{vars.flavor}}
         # Depends on CONFIG_X86
         aarch64_exclude: VIRTIO_PCI_ADMIN_LEGACY
     - name: Test Basic Boot
@@ -108,6 +179,13 @@ test:
       uses: kernel/test/console_grep
       with:
         string: "Segment Routing with IPv6"
+    - uses: kernel/test/random_quality
+      with:
+        args: fips=1
+    - name: Test for reusable jent
+      uses: kernel/test/console_grep
+      with:
+        string: "jitterentropy built from ${{vars.mangled-kernel-major-version}}"
 
 update:
   enabled: true

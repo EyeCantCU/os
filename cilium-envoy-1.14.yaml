@@ -2,7 +2,7 @@
 package:
   name: cilium-envoy-1.14
   version: "1.14.19"
-  epoch: 5
+  epoch: 10
   description: Envoy with additional cilium plugins
   copyright:
     - license: Apache-2.0
@@ -12,6 +12,12 @@ package:
   dependencies:
     provides:
       - cilium-envoy=${{package.full-version}}
+
+capabilities:
+  add:
+    - CAP_NET_ADMIN
+    - CAP_SYS_ADMIN
+    - CAP_BPF
 
 environment:
   contents:
@@ -23,19 +29,17 @@ environment:
       - busybox
       - ca-certificates-bundle
       - clang-17
-      - clang-17-dev
       - cmake
       - coreutils # for GNU install
       - git
-      - go
+      - go-1.24
       - isl-dev
+      - libcxx1-17-dev
       - libtool
-      - llvm-libcxx-17
-      - llvm-libcxx-17-dev
-      - llvm-libcxxabi-17
-      - llvm-lld-17
-      - llvm17
-      - llvm17-dev
+      - lld-17
+      - lld-17-dev
+      - llvm-17
+      - llvm-17-dev
       - openjdk-11
       - patch
       - python3-dev
@@ -138,8 +142,96 @@ update:
     tag-filter-prefix: v1.14.
 
 test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - curl
+        - go-fips
+        - netcat-openbsd
+        - procps
+        - jq
   pipeline:
-    - runs: |
+    - name: "Verify binary installation"
+      runs: |
+        # Test cilium-envoy binary
         cilium-envoy --version
         cilium-envoy --help
+
+        # Test cilium-envoy-starter binary
+        cilium-envoy-starter --version
+        cilium-envoy-starter --help
+    - name: "Verify libcilium.so installation"
+      runs: |
+        # Check that the library exists
+        if [ ! -f /usr/lib/libcilium.so ]; then
+          echo "ERROR: /usr/lib/libcilium.so does not exist"
+          exit 1
+        fi
+
+        # Verify we can load the library
+        ldd /usr/lib/libcilium.so
     - uses: test/tw/ldd-check
+      with:
+        files: "/usr/bin/cilium-envoy /usr/bin/cilium-envoy-starter /usr/lib/libcilium.so"
+        verbose: true
+    - name: "Test Envoy admin interface startup"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: cilium-envoy --config-path /tmp/minimal.yaml --admin-address-path /tmp/admin.txt
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all clusters initialized
+        post: |
+          #!/bin/sh -e
+          # Get admin address
+          ADMIN_ADDR=$(cat /tmp/admin.txt)
+
+          # Test admin endpoints
+          curl -s "http://${ADMIN_ADDR}/server_info" | jq . || exit 1
+          curl -s "http://${ADMIN_ADDR}/stats" | grep envoy || exit 1
+          curl -s "http://${ADMIN_ADDR}/clusters" | jq . || exit 1
+    - name: "Test hot restart capability"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: cilium-envoy --config-path /tmp/minimal.yaml --restart-epoch 0
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all clusters initialized
+        post: |
+          #!/bin/sh -e
+          first_pid=$(pgrep -f "restart-epoch 0")
+          cilium-envoy --config-path /tmp/minimal.yaml --restart-epoch 1 > /dev/null 2>&1 &
+          sleep 2
+
+          # Verify both processes exist
+          if ! ps -p $first_pid > /dev/null; then
+            echo "Original Envoy process not found"
+            exit 1
+          fi

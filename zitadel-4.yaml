@@ -1,0 +1,164 @@
+package:
+  name: zitadel-4
+  version: "4.2.2"
+  epoch: 0
+  description: Identity infrastructure, simplified for you.
+  resources:
+    cpu: 33
+    memory: 64Gi
+  copyright:
+    - license: AGPL-3.0
+  dependencies:
+    provides:
+      - zitadel=${{package.full-version}}
+
+vars:
+  py-version: 3.13
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - go
+      - node-gyp
+      - nodejs
+      - npm
+      - pnpm # for arm64 builds
+      - py3-setuptools # To fix `No module named 'distutils'`
+      - python3
+  environment:
+    CGO_ENABLED: "0"
+    # PNPM_HOME cannot be in the same directory as the package.json. Otherwise, pnpm can
+    # get in an infite loop of trying to update itself.
+    PNPM_HOME: /home
+    PATH: /usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin:home/build/.cache/go/bin
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: a3c0d53c79f671bf2c11179ab5e900b146847371
+      repository: https://github.com/zitadel/zitadel
+      tag: v${{package.version}}
+
+  - name: Generate coreapi
+    # Use sed to update Makefile to use our pnpm version instead of installing with npx
+    runs: |
+      npm install -g sass
+      v=$(pnpm --version)
+      sed -i -E "s/(\"packageManager\"*: *\"pnpm@)[^\"]+\"/\1${v}\"/" package.json
+      sed -i -E "s/npx pnpm/pnpm/g" Makefile
+      export GOBIN="$GOPATH/bin"
+      export PATH="$PATH:/home/build/.cache/go/bin"
+      make core_api
+
+  - name: Build dependencies
+    runs: |
+      export GOBIN="$GOPATH/bin"
+      export PATH="$PATH:/home/build/.cache/go/bin"
+      make core_build
+      make console_build
+
+  - runs: |
+      mkdir -p internal/api/ui/console/static
+      cp -r console/dist/console/* internal/api/ui/console/static
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-viper/mapstructure/v2@v2.4.0
+
+  - uses: go/build
+    with:
+      output: zitadel
+      packages: .
+      ldflags: |-
+        -X github.com/zitadel/zitadel/cmd/build.version=v${{package.version}}
+        -X github.com/zitadel/zitadel/cmd/build.date=$(TZ="UTC" date +"%Y-%m-%dT%TZ")
+        -X github.com/zitadel/zitadel/cmd/build.commit=$(git rev-parse HEAD)
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - ca-certificates-bundle
+      provides:
+        - zitadel-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          install -d ${{targets.contextdir}}/app
+          ln -s /usr/bin/zitadel ${{targets.contextdir}}/app/zitadel
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  manual: false
+  github:
+    identifier: zitadel/zitadel
+    strip-prefix: v
+    tag-filter: v4
+    use-tag: true
+
+test:
+  environment:
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test"
+      DIRECT_URL: "postgresql://postgres:postgres@localhost:5432/test"
+      ZITADEL_DATABASE_POSTGRES_HOST: localhost
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: test
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: postgres
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_EXTERNALSECURE: false
+    contents:
+      packages:
+        - postgresql
+        - postgresql-client
+        - ca-certificates-bundle
+        - procps
+    accounts:
+      groups:
+        - groupname: build
+          gid: 65532
+      users:
+        - username: build
+          gid: 65532
+          uid: 65532
+  pipeline:
+    - name: Verify zitadel installation
+      runs: |
+        zitadel -v | grep -q "v${{package.version}}" || exit 1
+        zitadel --help
+    - name: "Install and start postgres"
+      working-directory: /app
+      runs: |
+        mkdir -p /var/lib/postgresql/data
+        chown build:build /var/lib/postgresql/data
+
+        mkdir -p /var/run/postgresql
+        chown build:build /var/run/postgresql
+
+        su build -c "initdb -D /var/lib/postgresql/data" > /dev/null 2>&1
+        su build -c "pg_ctl -D /var/lib/postgresql/data -o '-k /var/run/postgresql' start" > /dev/null 2>&1
+
+        su build -c "/usr/bin/psql \
+          -h /var/run/postgresql \
+          -d postgres \
+          -v ON_ERROR_STOP=1 <<-EOSQL
+            CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres';
+            CREATE DATABASE test OWNER postgres;
+        EOSQL" > /dev/null 2>&1
+    - pipeline:
+        - name: "Run Zitadel"
+          uses: test/daemon-check-output
+          with:
+            start: zitadel start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled 2>&1 &
+            timeout: 30
+            expected_output: |
+              server is listening on

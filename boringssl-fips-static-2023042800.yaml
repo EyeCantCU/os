@@ -1,10 +1,13 @@
 package:
   name: boringssl-fips-static-2023042800
   version: 2023042800
-  epoch: 1
+  epoch: 5
   description: FIPS validated BoringSSL static libraries
   copyright:
     - license: Apache-2.0
+  dependencies:
+    provides:
+      - ${{package.name}}-compat
 
 environment:
   contents:
@@ -16,6 +19,8 @@ environment:
       - curl
       - gcc-12-default
       - git
+      # note not used during boring build, only for end-user tools
+      - go-fips
       - libstdc++-12-dev
       - libtool
       # Even though this is the latest version, our solver does not pick it up.
@@ -166,7 +171,7 @@ pipeline:
 
       # Build BoringSSL.
       cd boringssl
-      mkdir build && cd build && cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib -GNinja -DCMAKE_TOOLCHAIN_FILE=${HOME}/toolchain -DFIPS=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+      mkdir build && cd build && cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib/boringssl-fips-static -DCMAKE_INSTALL_INCLUDEDIR=lib/boringssl-fips-static/include -GNinja -DCMAKE_TOOLCHAIN_FILE=${HOME}/toolchain -DFIPS=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
       ninja
 
       ninja run_tests
@@ -183,21 +188,48 @@ pipeline:
       ./util/fipstools/test_fips | grep '^Module version: ${{package.version}}$'
 
       DESTDIR=${{targets.destdir}} ninja install
+      rm -rf ${{targets.contextdir}}/usr/lib/cmake
+
+      cp util/fipstools/test_fips ${{targets.contextdir}}/usr/bin/bssl-test_fips
+
+      cp ../../BUILD ../../WORKSPACE ${{targets.contextdir}}/usr/lib/boringssl-fips-static
+
+      cd ../
+      # Use system go for end-user tooling, uses standard library only thus no need to keep symbols
+      env -u GOROOT -u GOPATH PATH=/usr/bin go build -ldflags "-w" -o ${{targets.contextdir}}/usr/bin/ ./util/fipstools/break-hash.go
+      env -u GOROOT -u GOPATH PATH=/usr/bin go build -ldflags "-w" -o ${{targets.contextdir}}/usr/bin/ ./util/fipstools/break-kat.go
+
+      # Start building patched libssl, all changes outside of the FIPS boundary
+      patch -p1 < ../0001-Align-Kyber-names-with-draft-tls-westerbaan-xyber768.patch
+      patch -p1 < ../0002-Add-APIs-to-query-a-list-of-possible-strings-for-TLS.patch
+      patch -p1 < ../0003-Use-a-helper-function-to-implement-get_all_foo_names.patch
+      patch -p1 < ../0004-Remove-SSL_CIPHER_get_value.patch
+      patch -p1 < ../0005-Align-on-using-the-group-over-curve-for-ECDH-in-TLS.patch
+      patch -p1 < ../0006-Align-remaining-TLS-ECDH-APIs-on-group-terminology.patch
+      patch -p1 < ../0007-Align-NIDs-vs-group-IDs-in-TLS-group-APIs.patch
+      patch -p1 < ../0008-Add-SSL_CIPHER_get_handshake_digest.patch
+      patch -p1 < ../0009-Replace-byteBuilder-and-byteReader-with-cryptobyte.patch
+      patch -p1 < ../0010-Add-support-for-the-new-ALPS-codepoint.patch
+      patch -p1 < ../0011-Add-BN_bn2lebinpad-and-BN_lebin2bn.patch
+      cd build
+      ninja
+      ninja run_tests
+      DESTDIR=${{targets.outdir}}/${{package.name}}-newapi ninja install
+
+      # Moment of truth, is the FIPS module inside libcrypto still the
+      # same after libssl was patched, or not
+      # Break hash of the original bssl-test_fips
+      ${{targets.contextdir}}/usr/bin/break-hash ${{targets.contextdir}}/usr/bin/bssl-test_fips original.test_fips
+      # Break hash of the patched bssl-test_fips
+      ${{targets.contextdir}}/usr/bin/break-hash util/fipstools/test_fips patched.test_fips
+      # They should both have identical expected & broken module hash
+      ./original.test_fips 2>&1 | tee original.txt || true
+      ./patched.test_fips 2>&1 | tee patched.txt || true
+      grep -q 'Expected:' original.txt
+      diff -u original.txt patched.txt
+      echo FIPS boundary is unchanged
 
 subpackages:
-  # Since the location of crypto/libcrypto.a and ssl/libssl.a overlaps
-  # with what openssl-dev provides, in some cases we want to put them
-  # in a different location (for example cilium-fips) to avoid conflicts.
-  - name: ${{package.name}}-compat
-    description: "crypto/libcrypto.a and ssl/libssl.a in non-default locations"
-    pipeline:
-      - runs: |
-          mkdir -p ${{targets.subpkgdir}}/usr/lib/boringssl-fips-static
-          cp -r ${{targets.destdir}}/usr/include ${{targets.subpkgdir}}/usr/lib/boringssl-fips-static
-          cp -r ${{targets.destdir}}/usr/lib/libcrypto.a ${{targets.subpkgdir}}/usr/lib/boringssl-fips-static
-          cp -r ${{targets.destdir}}/usr/lib/libssl.a ${{targets.subpkgdir}}/usr/lib/boringssl-fips-static
-          cp BUILD WORKSPACE ${{targets.subpkgdir}}/usr/lib/boringssl-fips-static
-
   - name: ${{package.name}}-tools
     description: "ship test tools"
     pipeline:
@@ -205,6 +237,17 @@ subpackages:
           mkdir -p ${{targets.subpkgdir}}/usr
           mv ${{targets.destdir}}/usr/bin ${{targets.subpkgdir}}/usr
           cp boringssl/build/util/fipstools/test_fips ${{targets.subpkgdir}}/usr/bin/bssl-test_fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+
+  - name: ${{package.name}}-newapi
+    description: "libssl with upgraded APIs outside of the boundary"
+    pipeline:
+      - runs: |
+          cp BUILD WORKSPACE ${{targets.contextdir}}/usr/lib/boringssl-fips-static
+          rm -rf ${{targets.contextdir}}/usr/bin
+          rm -rf ${{targets.contextdir}}/usr/lib/cmake
 
 test:
   pipeline:

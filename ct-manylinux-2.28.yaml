@@ -1,7 +1,7 @@
 package:
   name: ct-manylinux-2.28
-  version: 1
-  epoch: 10
+  version: "1.28.0"
+  epoch: 2
   description: "the cross native toolchain for manylinux 2.28"
   copyright:
     - license: GPL-3.0-or-later
@@ -11,24 +11,36 @@ package:
     cpu: 16
     memory: 16Gi
   dependencies:
+    runtime:
+      - ${{package.name}}-gcc-${{vars.gcc-default-version}}
     replaces:
       # because we must replace the empty clang config file
       - openssf-compiler-options
+      # because we must replace its replacement clang config file
+      - oldglibc-2.28
       # because we want system fallback linker scripts point to us too
       - glibc-dev
       # because intrisics are gcc specific, and there is no gcc-15 support in crosstool-ng yet
-      - gcc-14-default
+      - gcc-${{vars.gcc-default-version}}-default
 
 environment:
   contents:
     packages:
       - build-base
-      - crosstool-ng
-      - gcc-14-default
+      # When bumping crosstool-ng, ct-manylinux-2.28/upgrade-configs.sh
+      # can be used to bump configs
+      - crosstool-ng~${{package.version}}
+      - gcc-${{vars.gcc-default-version}}-default
 
 vars:
-  # note also update the ct configs
-  gcc-version: 14
+  gcc-default-version: 14
+
+# note also update the ct configs and patches
+data:
+  - name: gcc-versions
+    items:
+      13:
+      14:
 
 pipeline:
   # Note ct-ng has all mirrors and checksums built-in, but doing fetch
@@ -44,8 +56,15 @@ pipeline:
   - uses: fetch
     working-directory: src
     with:
-      uri: https://ftpmirror.gnu.org/gnu/gcc/gcc-14.2.0/gcc-14.2.0.tar.xz
-      expected-sha256: a7b39bc69cbf9e25826c5a60ab26477001f7c08d85cec04bc0e29cabed6f3cc9
+      uri: https://ftpmirror.gnu.org/gnu/gcc/gcc-14.3.0/gcc-14.3.0.tar.xz
+      expected-sha256: e0dc77297625631ac8e50fa92fffefe899a4eb702592da5c32ef04e2293aca3a
+      extract: false
+
+  - uses: fetch
+    working-directory: src
+    with:
+      uri: https://ftpmirror.gnu.org/gnu/gcc/gcc-13.4.0/gcc-13.4.0.tar.xz
+      expected-sha256: 9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5
       extract: false
 
   - uses: fetch
@@ -86,8 +105,8 @@ pipeline:
   - uses: fetch
     working-directory: src
     with:
-      uri: https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.tar.xz
-      expected-sha256: e79dcc6eb86695c6babfb07c2861912b635d5075c6cd1cd0567d1ea155f80d6e
+      uri: https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.12.tar.xz
+      expected-sha256: 611fbb669cf5539da48137a9c052becd499f3f862afaf21ab84cea3966221242
       extract: false
 
   - uses: fetch
@@ -107,8 +126,8 @@ pipeline:
   - uses: fetch
     working-directory: src
     with:
-      uri: https://ftpmirror.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz
-      expected-sha256: 277807353a6726978996945af13e52829e3abd7a9a5b7fb2793894e18f1fcbb2
+      uri: https://ftpmirror.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.xz
+      expected-sha256: b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01
       extract: false
 
   - uses: fetch
@@ -133,77 +152,24 @@ pipeline:
       extract: false
 
   - runs: |
-      # setup config
-      mv config.${{build.arch}} .config
-
-      # consistency check
-      grep -q 'CT_GCC_VERSION="${{vars.gcc-version}}.' .config
-
-      # parallel build
-      ct-ng build.0
-
       # Setup usr-merge
       mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr/lib
       ln -s usr/lib ${{targets.destdir}}/usr/lib/oldglibc/lib
       ln -s usr/lib ${{targets.destdir}}/usr/lib/oldglibc/lib64
       ln -s lib ${{targets.destdir}}/usr/lib/oldglibc/usr/lib64
 
-      # start building the frankenstein's monster
-      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr
-      mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-      mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-      cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include ${{targets.destdir}}/usr/lib/oldglibc/usr/
-      mv x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-version}}/*.a ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-
-      # ship gcc built-in headers that sometimes mask or reference glibc headers, without merging them into /usr/lib/oldglibc/usr/include/
-      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}
-      cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-version}}/include ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}
-      cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-version}}/include-fixed ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}
-      cp -vr x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/
-
-      prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
-      # Fix aarch64 non-linker script libm
-      if [ "${{build.arch}}" = "aarch64" ]; then
-        rm -f $prefix/libm.so
-        ln -s libm.so.6 $prefix/libm.so
-        # New glibc on aarch64 has libmvec and has linker scripts, but 2.28 on
-        # aarch64 did not, hence create custom public linker scripts to
-        # override modern glibc on aarch64 linker scripts
-        cat <<EOF >${{targets.destdir}}/usr/lib/libm.a
-      /* GNU ld script
-      */
-      OUTPUT_FORMAT(elf64-littleaarch64)
-      GROUP ( /usr/lib/oldglibc/usr/lib/libm.a )
-      EOF
-        cat <<EOF >${{targets.destdir}}/usr/lib/libm.so
-      /* GNU ld script
-      */
-      OUTPUT_FORMAT(elf64-littleaarch64)
-      GROUP ( /usr/lib/oldglibc/usr/lib/libm.so.6 )
-      EOF
-      fi
-      # fixup glibc linker scripts due to relocation
-      case "${{build.arch}}" in
-        x86_64)
-          linker_files="$prefix/libc.so $prefix/libm.so $prefix/libm.a"
-          ;;
-        aarch64)
-          linker_files="$prefix/libc.so"
-          ;;
-      esac
-      sed -i 's| /lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-      sed -i 's| /usr/lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-      sed -i 's| /lib/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-
-      # override system linker scripts too
-      cp $linker_files ${{targets.destdir}}/usr/lib
-
-      # make single_threaded.h header from system glibc error out, as
-      # not supported on glibc 2.28 builds, and yet autoconf manages
-      # to find it
+  - runs: |
+      # make all unsupported headers from system glibc error out, as
+      # not supported on glibc 2.28 builds. This stops autoconf from
+      # finding them, and apps using them and failing to link.
       mkdir -p ${{targets.destdir}}/usr/include/sys
-      echo '#error Not supported on 2.28 builds' > ${{targets.destdir}}/usr/include/sys/single_threaded.h
+      for header in features-time64.h stdbit.h sys/pidfd.h sys/rseq.h sys/single_threaded.h
+      do
+        echo '#error Not supported on 2.28 builds' > ${{targets.destdir}}/usr/include/$header
+      done
 
+  - name: Toolchain integration - gcc
+    runs: |
       # Toolchain integration. Ideally I want to use sysroot but still
       # somehow also allow using public things. This is the next best
       # thing.
@@ -212,29 +178,133 @@ pipeline:
       + -pthread
 
       *cc1plus:
-      + -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}} -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/backward -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include-fixed -I/usr/lib/oldglibc/usr/include -I/usr/include
+      + %{!nostdinc:%{!nostdinc++:-nostdinc++ -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include/c++/%:getenv(OLDGLIBC_GCC_MAJOR_VER /)) -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include/c++/%:getenv(OLDGLIBC_GCC_MAJOR_VER /${{build.arch}}-linux-gnu)) -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include/c++/%:getenv(OLDGLIBC_GCC_MAJOR_VER /backward))}}
 
       *cpp:
-      + -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include-fixed -I/usr/lib/oldglibc/usr/include -I/usr/include
+      + %{!nostdinc:-nostdinc -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include) -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include-fixed) -idirafter /usr/lib/oldglibc/usr/include -idirafter /usr/include}
 
       *link:
-      + -L/usr/lib/oldglibc/usr/lib -ldl -lutil -lanl --unresolved-symbols=ignore-in-shared-libs
+      + -L/usr/lib/oldglibc/usr/lib -ldl -lutil -lanl --allow-shlib-undefined
       EOF
 
+  - name: Toolchain integration - clang
+    runs: |
       mkdir -p ${{targets.destdir}}/etc/clang
       cat <<EOF >${{targets.destdir}}/etc/clang/oldglibc.cfg
-      -I/usr/lib/oldglibc/usr/include
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}/backward
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}/${{build.arch}}-linux-gnu
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}/backward
       -L/usr/lib/oldglibc/usr/lib
       -ldl -lutil -lanl
-      -Wl,--unresolved-symbols=ignore-in-shared-libs
+      -Wl,--allow-shlib-undefined
       EOF
 
-      # override gcc-wrapper to statically link libgcc and libstdc++ which are of higher ABI than allowed by manylinux 2.28
+  - name: override gcc-wrapper to statically link libgcc and libstdc++ which are of higher ABI than allowed by manylinux 2.28
+    runs: |
       mkdir -p ${{targets.destdir}}/usr/local/bin/
       cp gcc-wrapper ${{targets.destdir}}/usr/local/bin/
+
+  - name: add a clang-wrapper for things we can't do via config files
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/bin
+      cp clang-wrapper ${{targets.destdir}}/usr/lib/oldglibc/bin
+      ln -s ../../lib/oldglibc/bin/clang-wrapper \
+        ${{targets.destdir}}/usr/local/bin/clang
+      ln -s ../../lib/oldglibc/bin/clang-wrapper \
+        ${{targets.destdir}}/usr/local/bin/clang++
+
+subpackages:
+  - range: gcc-versions
+    name: ${{package.name}}-gcc-${{range.key}}
+    description: "gcc-${{range.key}} for manylinux 2.28"
+    dependencies:
+      runtime:
+        - ${{package.name}}=${{package.full-version}}
+    pipeline:
+      # start building the frankenstein's monster
+      - runs: |
+          cp config.${{build.arch}}-gcc-${{range.key}} .config
+          # consistency check
+          grep -q "CT_GCC_VERSION=\"${{range.key}}." .config
+      - runs: |
+          # FIXME: avoid doing a full bootstrap for each version
+          # (abusing ct-ng STOP/RESTART doesn't work because it checks that the config did not change)
+          ct-ng build.0
+      - name: common files should come from the default gcc build
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+
+          mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+          mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+          cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include ${{targets.destdir}}/usr/lib/oldglibc/usr/
+          mv x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/*.a ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+      - name: Fix aarch64 non-linker script libm
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+          [ "${{build.arch}}" = "aarch64" ] || exit 0
+
+          prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
+          rm -f $prefix/libm.so
+          ln -s libm.so.6 $prefix/libm.so
+          # New glibc on aarch64 has libmvec and has linker scripts, but 2.28 on
+          # aarch64 did not, hence create custom public linker scripts to
+          # override modern glibc on aarch64 linker scripts
+          cat <<EOF >${{targets.destdir}}/usr/lib/libm.a
+          /* GNU ld script
+          */
+          OUTPUT_FORMAT(elf64-littleaarch64)
+          GROUP ( /usr/lib/oldglibc/usr/lib/libm.a )
+          EOF
+          cat <<EOF >${{targets.destdir}}/usr/lib/libm.so
+          /* GNU ld script
+          */
+          OUTPUT_FORMAT(elf64-littleaarch64)
+          GROUP ( /usr/lib/oldglibc/usr/lib/libm.so.6 )
+          EOF
+      - name: fixup glibc linker scripts due to relocation
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+
+          prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
+          case "${{build.arch}}" in
+            x86_64)
+              linker_files="$prefix/libc.so $prefix/libm.so $prefix/libm.a"
+              ;;
+            aarch64)
+              linker_files="$prefix/libc.so"
+              ;;
+          esac
+          sed -i 's| /lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+          sed -i 's| /usr/lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+          sed -i 's| /lib/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+
+          # override system linker scripts too
+          cp $linker_files ${{targets.destdir}}/usr/lib
+      - name: gcc-specific files
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/
+          # ship gcc built-in headers that sometimes mask or reference glibc headers, without merging them into /usr/lib/oldglibc/usr/include/
+          mkdir -p ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/include ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/include-fixed ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/include/
+    test:
+      environment:
+        contents:
+          packages:
+            - gcc-${{range.key}}
+      pipeline:
+        - uses: test/compiler/smoke
+          with:
+            cc: gcc-${{range.key}}
+            cxx: g++-${{range.key}}
+        - uses: test/compiler/hardening-check
+          with:
+            cc: gcc-${{range.key}}
+        - uses: test/compiler/oldglibc
+          with:
+            cc: gcc-${{range.key}}
+            cxx: g++-${{range.key}}
 
 test:
   environment:
@@ -248,10 +318,11 @@ test:
         - aom
         - aom-dev
         - aom-libs
+        - clang
         - dav1d-dev
         - expat-dev
         - fontconfig-dev
-        - gcc-14-default
+        - gcc-${{vars.gcc-default-version}}-default
         - harfbuzz-dev
         - lame-dev
         - libogg-dev
@@ -276,6 +347,17 @@ test:
         - yasm
         - zeromq-dev
   pipeline:
+    - uses: test/compiler/smoke
+      with:
+        cc: clang
+        cxx: clang++
+    - uses: test/compiler/hardening-check
+      with:
+        cc: clang
+    - uses: test/compiler/oldglibc
+      with:
+        cc: clang
+        cxx: clang++
     - uses: git-checkout
       with:
         destination: openssl
@@ -334,10 +416,11 @@ test:
         ./configure
         make -j
 
+# This cross toolchain configs depend on upstream crosstool support,
+# thus make this package track update of crosstool-ng project and
+# package.
 update:
-  enabled: false
-  exclude-reason: |
-    need to figure out how to continiously rebuild/upgrade
-    config. However this toolchain is attempted to bootstrap all the
-    toolchain runtime libraries with a lower glibc, without need to
-    redistribute these binaries.
+  enabled: true
+  github:
+    identifier: crosstool-ng/crosstool-ng
+    strip-prefix: crosstool-ng-

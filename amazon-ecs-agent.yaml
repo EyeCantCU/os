@@ -1,0 +1,95 @@
+package:
+  name: amazon-ecs-agent
+  version: "1.99.0"
+  epoch: 0
+  description: Amazon ECS Container Agent
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - amazon-ecs-cni-plugins
+      - amazon-ssm-agent
+      - amazon-ssm-agent-ecs-exec
+      - amazon-vpc-cni-plugins
+      - ca-certificates-bundle-ecs
+      - docker
+      - iptables
+      - procps
+      - systemd
+
+environment:
+  environment:
+    # See https://github.com/wolfi-dev/os/issues/34568
+    GCC_SPEC_FILE: /home/build/openssf.spec
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aws/amazon-ecs-agent
+      tag: v${{package.version}}
+      expected-commit: ad700257e5b3461944a49a0bd9a261af38e1ef80
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/docker/docker@v28.3.3
+      modroot: ./ecs-init
+
+  - uses: patch
+    with:
+      patches: chainguard-config.patch
+
+  - runs: |
+      gccdir="$(GCC_SPEC_FILE=/dev/null gcc --print-search-dirs | grep ^install: | cut -d' ' -f2)"
+      sed -r 's/-z now//' < "$gccdir/openssf.spec" > /home/build/openssf.spec
+
+  - runs: |
+      find -type d -name "vendor" -print -exec rm -rf '{}' +
+
+  - uses: go/build
+    with:
+      ldflags: -X ecs-init/version.Version=${{package.version}} -X ecs-init/version.GitShortHash=$(git rev-parse --short=8 HEAD)
+      modroot: ./ecs-init
+      output: amazon-ecs-init
+      packages: ./
+      tags: chainguard
+
+  - uses: go/build
+    with:
+      ldflags: -X ecs-init/version.Version=${{package.version}} -X ecs-init/version.GitShortHash=$(git rev-parse --short=8 HEAD)
+      modroot: ./ecs-init
+      output: amazon-ecs-volume-plugin
+      packages: ./volumes/amazon-ecs-volume-plugin
+      tags: chainguard
+
+  # Generic systemd units modified from Amazon Linux and needed directories and files
+  - runs: |
+      mkdir -p ${{targets.destdir}}/etc/ecs
+      touch ${{targets.destdir}}/etc/ecs/ecs.config
+      mkdir -p ${{targets.destdir}}/usr/lib/systemd/system
+      mkdir -p ${{targets.destdir}}/var/lib/ecs/data
+      mkdir -p ${{targets.destdir}}/var/log/ecs
+      find ./packaging/amazon-linux-ami-integrated/ -name "*.service" -exec sed -i 's:/usr/libexec:/usr/bin:' {} \;
+      find ./packaging/amazon-linux-ami-integrated/ -name "*.socket" -exec sed -i 's:/var/run:/run:' {} \;
+      install -Dm644 ./packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.service ${{targets.destdir}}/usr/lib/systemd/system
+      install -Dm644 ./packaging/amazon-linux-ami-integrated/amazon-ecs-volume-plugin.socket ${{targets.destdir}}/usr/lib/systemd/system
+      install -Dm644 ./packaging/amazon-linux-ami-integrated/ecs.service ${{targets.destdir}}/usr/lib/systemd/system
+
+test:
+  environment:
+    contents:
+      packages:
+        - systemd
+  pipeline:
+    - runs: |
+        amazon-ecs-init -help
+        [ -z "$(systemd-analyze verify amazon-ecs-volume-plugin.socket 2>&1)" ]
+        [ -z "$(systemd-analyze verify amazon-ecs-volume-plugin.service 2>&1)" ]
+        [ -z "$(systemd-analyze verify ecs.service 2>&1)" ]
+
+update:
+  enabled: true
+  github:
+    identifier: aws/amazon-ecs-agent
+    strip-prefix: v
+    tag-filter: v

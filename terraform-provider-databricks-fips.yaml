@@ -1,0 +1,83 @@
+package:
+  name: terraform-provider-databricks-fips
+  version: "1.90.0"
+  epoch: 0
+  description: Terraform Databricks provider
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  provider: 'databricks'
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 5979dcdb0e321f698c1d2bb9effc4f7ebaf7a601
+      repository: https://github.com/databricks/terraform-provider-databricks
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      output: terraform-provider-${{vars.provider}}
+      packages: .
+      vendor: "true"
+      go-package: go-fips
+      ldflags: |
+        -X github.com/databricks/databricks-terraform/common.version=${{package.version}}
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/terraform/provider-mirror/registry.terraform.io/databricks/${{vars.provider}}/${{package.version}}/linux_${{build.goarch}}/
+      ln -s /usr/bin/terraform-provider-${{vars.provider}} \
+          ${{targets.contextdir}}/terraform/provider-mirror/registry.terraform.io/databricks/${{vars.provider}}/${{package.version}}/linux_${{build.goarch}}/terraform-provider-${{vars.provider}}_v${{package.version}}
+
+subpackages:
+  - name: ${{package.name}}-cli-compat
+    description: "Provides the Databricks terraform provider in the local repository used by the Databricks CLI"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/app/providers/registry.terraform.io/databricks/${{vars.provider}}/${{package.version}}/linux_${{build.goarch}}
+          ln -s /usr/bin/terraform-provider-${{vars.provider}} \
+            ${{targets.contextdir}}/app/providers/registry.terraform.io/databricks/${{vars.provider}}/${{package.version}}/linux_${{build.goarch}}/terraform-provider-databricks_v${{package.version}}
+    test:
+      pipeline:
+        - runs: |
+            link="$(readlink -fv /app/providers/registry.terraform.io/databricks/${{vars.provider}}/${{package.version}}/linux_${{build.goarch}}/terraform-provider-${{vars.provider}}_v${{package.version}})"
+            if [ "$link" != "/usr/bin/terraform-provider-${{vars.provider}}" ]; then
+              echo "Found invalid symlink!"
+              echo "Expected path: /usr/bin/terraform-provider-${{vars.provider}}"
+              echo "Found: $link"
+              exit 1
+            fi
+
+update:
+  enabled: true
+  # Github backend cannot be used as the databricks org has our CI on their IP block list :(
+  git:
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - terraform-fips
+        - terraform-local-provider-config
+    environment:
+      TF_CLI_CONFIG_FILE: /terraform/.terraformrc
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        set -oue pipefail
+
+        # Initialize project with provider
+        terraform init | grep "customized provider installation"
+
+        # Validate provider is present
+        terraform providers | grep "provider\[registry.terraform.io/databricks/databricks\]"
+
+        # Validate remote provider wasn't retrieved
+        if stat .terraform/providers/registry.terraform.io/databricks/databricks/${{package.version}}/linux_${{build.arch}}/${{vars.provider}}_v${{package.version}}; then
+          echo "Remote terraform provider found! Please ensure .terraformrc is correct and enforced." && exit 1
+        fi

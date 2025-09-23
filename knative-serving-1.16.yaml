@@ -1,13 +1,22 @@
 package:
   name: knative-serving-1.16
   version: "1.16.3"
-  epoch: 5
+  epoch: 9 # GHSA-4vq8-7jfc-9cvp
   description: Kubernetes-based, scale-to-zero, request-driven compute
   copyright:
     - license: Apache-2.0
   dependencies:
     provides:
       - knative-serving=${{package.full-version}}
+
+data:
+  - name: components
+    items:
+      queue: queue
+      activator: activator
+      autoscaler: autoscaler
+      controller: controller
+      webhook: webhook
 
 pipeline:
   - uses: git-checkout
@@ -21,25 +30,25 @@ pipeline:
       deps: |-
         golang.org/x/oauth2@v0.27.0
         golang.org/x/net@v0.38.0
+        github.com/cert-manager/cert-manager@v1.15.4
+        github.com/golang-jwt/jwt/v4@v4.5.2
+        github.com/docker/docker@v28.0.0
 
 subpackages:
-  - name: ${{package.name}}-queue
-    description: "Queue component for Knative serving"
+  - range: components
+    name: "${{package.name}}-${{range.key}}"
     dependencies:
       provides:
-        - knative-serving-queue=${{package.full-version}}
+        - knative-serving-${{range.key}}=${{package.full-version}}
     pipeline:
       - uses: go/build
         with:
-          output: queue
-          packages: ./cmd/queue
+          output: ${{range.value}}
+          packages: ./cmd/${{range.value}}
     test:
       environment:
-        contents:
-          packages:
-            - wait-for-it
         environment:
-          ## dummy environment variables for testing copied over: https://github.com/knative/serving/blob/d4766bee6f56bbcde9af538230562b8cf5a6751b/pkg/reconciler/revision/resources/deploy_test.go#L112
+          WEBHOOK_NAME: test
           SERVING_NAMESPACE: foo
           SERVING_SERVICE: ""
           SERVING_CONFIGURATION: ""
@@ -63,7 +72,7 @@ subpackages:
           TRACING_CONFIG_DEBUG: false
           TRACING_CONFIG_SAMPLE_RATE: 0
           USER_PORT: 8080
-          SYSTEM_NAMESPACE: default-system-namespace
+          SYSTEM_NAMESPACE: knative-serving
           METRICS_DOMAIN: default-metrics-domain
           SERVING_READINESS_PROBE: '{"tcpSocket":{"port":8080,"host":"127.0.0.1"}}'
           ENABLE_PROFILING: false
@@ -74,24 +83,53 @@ subpackages:
           ENABLE_HTTP_FULL_DUPLEX: false
           ROOT_CA: ""
           ENABLE_MULTI_CONTAINER_PROBES: false
+          POD_NAME: default-pod
+          POD_IP: 192.168.1.200
       pipeline:
         - runs: |
-            # Define the log file path
-            # Start the queue and redirect logs to the file
-            echo "Starting the queue and redirecting logs to /tmp/queue.log"
-            queue > "/tmp/queue.log" 2>&1 &
-            wait-for-it -t 30 localhost:8012
-            grep -q "Starting http server main:8012" /tmp/queue.log
+            # queue binary just runs the server on help
+            [[ ${{range.key}} != 'queue' ]] && ${{range.value}} --help
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: "start daemon on localhost for ${{range.key}}"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace knative-serving || true
+              kubectl apply -f https://github.com/knative/serving/releases/download/knative-v${{package.version}}/serving-crds.yaml
+              kubectl apply -f https://github.com/knative/serving/releases/download/knative-v${{package.version}}/serving-core.yaml
+              kubectl wait --for=condition=Available deploy/autoscaler -n knative-serving --timeout=90s
+            start: "${{range.value}}"
+            timeout: 60
+            # Omit 'ERROR':
+            # * webhook: throws "please apply your changes to the latest version and try again" FP error
+            # * activator: throws "Websocket connection could not be established" error, possibly due to kwok or some other issue
+            error_strings: |
+              FATAL
+              FAIL
+              Traceback.*most.recent.call
+              Exception in thread
+              panic
+              command not found
+            expected_output: |
+              Starting
+        - name: "Destroy kwok cluster"
+          runs: |
+            kwokctl delete cluster --all --force
 
-  - name: ${{package.name}}-queue-compat
-    description: "To match with the upstream image entrypoint"
+  - range: components
+    name: "${{package.name}}-${{range.key}}-compat"
+    dependencies:
+      provides:
+        - knative-serving-${{range.key}}-compat=${{package.full-version}}
     pipeline:
       - runs: |
           mkdir -p ${{targets.contextdir}}/ko-app
-          ln -sf /usr/bin/queue ${{targets.contextdir}}/ko-app/queue
-    dependencies:
-      provides:
-        - knative-serving-queue-compat=${{package.full-version}}
+          ln -sf /usr/bin/${{range.value}} ${{targets.contextdir}}/ko-app/${{range.value}}
+    test:
+      pipeline:
+        - runs: test "$(readlink /ko-app/${{range.value}})" = "/usr/bin/${{range.value}}"
 
 update:
   enabled: true

@@ -1,0 +1,169 @@
+package:
+  name: openvino
+  version: "2025.3.0"
+  epoch: 0
+  description: OpenVINO™ is an open source toolkit for optimizing and deploying AI inference
+  resources:
+    cpu: 20
+    memory: 50Gi
+  copyright:
+    # https://src.fedoraproject.org/rpms/openvino/blob/rawhide/f/openvino.spec#_13
+    - license: Apache-2.0 AND MIT AND BSL-1.0 AND HPND AND BSD-3-Clause AND (GPL-2.0-only OR BSD-3-Clause)
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - flatbuffers
+      - flatbuffers-dev
+      - gflags-dev
+      - gtest-dev
+      - level-zero-dev
+      - libtbb-dev
+      - opencl-dev
+      - protobuf-dev
+      - pugixml-dev
+      - scons
+      - snappy-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/openvinotoolkit/openvino.git
+      tag: ${{package.version}}
+      expected-commit: 44526285f241251e9543276572676365fbe542a4
+      recurse-submodules: true
+
+  - uses: patch
+    with:
+      # We need this to get a reasonable file structure from openvino
+      # Usually it puts everything under `/usr/runtime`, `/usr/python`, (...)
+      # This makes it so we get a FHS compliant file structure.
+      # Fetched from: https://src.fedoraproject.org/rpms/openvino/blob/rawhide/f/openvino-fedora.patch
+      patches: |
+        openvino-systemwide.patch
+        fix-onnx-abseil-linking.patch
+
+  # Ensures we are using system-wide dependencies, cuts down on a lot of build time
+  - working-directory: thirdparty
+    runs: |
+      rm -r \
+        flatbuffers \
+        gtest \
+        protobuf \
+        level_zero \
+        snappy
+
+  - uses: cmake/configure
+    with:
+      # JAX frontend seems to be enabled by default and causes libopenvino to depend on the jax frontend (which makes it fail to install)
+      # Version comes up as "OpenVINO version is 2025.3.0 (Build 1)" for 2025.03.0 epoch 0
+      opts: |
+        -DBUILD_SHARED_LIBS=ON \
+        -DENABLE_HETERO=ON \
+        -DENABLE_INTEL_CPU=ON \
+        -DENABLE_INTEL_GPU=ON \
+        -DENABLE_INTEL_NPU=ON \
+        -DENABLE_MLAS_FOR_CPU_DEFAULT=ON \
+        -DENABLE_MLAS_FOR_CPU=ON \
+        -DENABLE_MULTI=ON \
+        -DENABLE_NPU_PLUGIN_ENGINE=ON \
+        -DENABLE_ONEDNN_FOR_GPU=OFF \
+        -DENABLE_OV_IR_FRONTEND=ON \
+        -DENABLE_OV_JAX_FRONTEND=OFF \
+        -DENABLE_OV_ONNX_FRONTEND=ON \
+        -DENABLE_OV_PADDLE_FRONTEND=ON \
+        -DENABLE_OV_PYTORCH_FRONTEND=ON \
+        -DENABLE_OV_TF_FRONTEND=ON \
+        -DENABLE_OV_TF_LITE_FRONTEND=ON \
+        -DENABLE_PROXY=ON \
+        -DENABLE_PYTHON=OFF \
+        -DENABLE_SYSTEM_FLATBUFFERS=ON \
+        -DENABLE_SYSTEM_LEVEL_ZERO=ON \
+        -DENABLE_SYSTEM_LIBS_DEFAULT=ON \
+        -DENABLE_SYSTEM_OPENCL=ON \
+        -DENABLE_SYSTEM_PROTOBUF=ON \
+        -DENABLE_SYSTEM_PUGIXML=ON \
+        -DENABLE_SYSTEM_SNAPPY=ON \
+        -DENABLE_SYSTEM_TBB=ON \
+        -DENABLE_TEMPLATE=ON \
+        -DENABLE_WHEEL=OFF \
+        -DProtobuf_INCLUDE_DIRS=/usr/include \
+        -DProtobuf_LIBRARIES=/usr/lib \
+        -DProtobuf_USE_STATIC_LIBS=OFF \
+        -DProtobuf_LIBRARY=/usr/lib/libprotobuf.so \
+        -DCI_BUILD_NUMBER=${{package.version}}.0-${{package.epoch}}-$(git rev-parse --short HEAD) \
+        -DENABLE_NCC_STYLE=OFF \
+        -DTHREADING=TBB
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+subpackages:
+  - name: ${{package.name}}-doc
+    description: ${{package.name}} samples and documentation
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/share/doc/openvino/"
+          mv "${{targets.destdir}}/usr/samples" "${{targets.subpkgdir}}/usr/share/doc/openvino/"
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  github:
+    identifier: openvinotoolkit/openvino
+
+test:
+  environment:
+    contents:
+      packages:
+        - pugixml-dev
+        - openvino-dev
+        - build-base
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Ensure libraries link and are functional
+      runs: |
+        tee ovtest.cpp <<'EOF'
+        #include "openvino/openvino.hpp"
+        #include "openvino/frontend/manager.hpp"
+
+        int main(int argc, char* argv[]) {
+            std::cout << ov::get_openvino_version();
+
+            ov::Core core;
+            std::vector<std::string> availableDevices = core.get_available_devices();
+            for (auto&& device : availableDevices) {
+              std::cout << device << std::endl;
+            }
+
+            ov::frontend::FrontEndManager manager;
+            std::vector<std::string> availableFrontends = manager.get_available_front_ends();
+
+            for (auto&& frontend : availableFrontends) {
+              std::cout << frontend << std::endl;
+            }
+
+            return 0;
+        }
+        EOF
+        c++ ovtest.cpp -o ov_version $(pkgconf --libs openvino)
+        ldd ./ov_version | grep -F -e "libopenvino"
+        ./ov_version | tee ov_out.txt
+        grep -F -e "${{package.version}}" -e "CPU" ./ov_out.txt
+        for frontend in onnx paddle pytorch tf tflite; do
+          grep -F -e "${frontend}" ./ov_out.txt
+        done

@@ -1,0 +1,160 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: tritonserver-backend-onnxruntime-cuda-12.9
+  version: "25.07"
+  epoch: 2
+  description: The Triton backend for the ONNX Runtime.
+  copyright:
+    - license: BSD-3-Clause
+  options:
+    no-depends: true
+  dependencies:
+    runtime:
+      # No onnxruntime here as you can either use onnxruntime or onnxruntime-cuda-${{vars.cuda-version}} at runtime
+      - cuda-toolkit-${{vars.cuda-version}}
+      - openvino
+      - tensorrt-cuda-${{vars.cuda-major-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - nvidia-cuda-nvcc-gcc-${{vars.cuda-version}}
+      - onnxruntime
+      - onnxruntime-dev
+      - openvino-dev
+      - python3-dev
+      - rapidjson-dev
+      - tensorrt-cuda-${{vars.cuda-major-version}}
+      - tensorrt-cuda-${{vars.cuda-major-version}}-dev
+      - triton-inference-server-backend
+      - triton-inference-server-common
+      - triton-inference-server-core
+
+vars:
+  # Arbitrary output dir so installing the backend doesn't need to be hardcoded
+  output-dir: /home/build/output
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/triton-inference-server/onnxruntime_backend.git
+      branch: r${{package.version}}
+      expected-commit: 604ee7ae2d75d0204ec756aaf7d7edf5317e7dcc
+      recurse-submodules: true
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DTRITON_COMMON_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/common.git && git branch --show-current) \
+        -DTRITON_CORE_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/core.git && git branch --show-current) \
+        -DTRITON_BACKEND_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/backend.git && git branch --show-current) \
+        -DTRITON_ONNXRUNTIME_DOCKER_BUILD=OFF \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc \
+        -DCMAKE_INSTALL_PREFIX:PATH=/opt/tritonserver \
+        -DTRITON_ONNXRUNTIME_INCLUDE_PATHS=/usr/include/onnxruntime \
+        -DTRITON_ONNXRUNTIME_LIB_PATHS=/usr/lib \
+        -DTRITON_ENABLE_ONNXRUNTIME_TENSORRT=ON \
+        -DTRITON_ENABLE_ONNXRUNTIME_OPENVINO=ON
+
+  - uses: cmake/build
+    with:
+      output-dir: ${{vars.output-dir}}
+
+  # By default this backend builds tritonserver + stub libraries that conflict with `tritonserver` and other backends
+  - runs: |
+      DESTDIR=${{vars.output-dir}} cmake --install ${{vars.output-dir}}
+      install -Dpm0755 -t ${{targets.destdir}}/opt/tritonserver/backends/onnxruntime/ ${{vars.output-dir}}/opt/tritonserver/backends/onnxruntime/*
+
+update:
+  enabled: false
+  exclude-reason: "Upstream does not maintain tags or releases, instead, it uses branches as releases"
+
+test:
+  environment:
+    environment:
+      TRITON_HTTP_PORT: 8080
+      TRITON_GRPC_PORT: 8081
+      MODELS_PATH: /tmp/models
+      SAMPLE_MODEL_NAME: sampleonnx
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+        - onnxruntime
+        - tritonserver-cuda-${{vars.cuda-version}}
+        - openvino
+  pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/opt/tritonserver/lib"
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p "${MODELS_PATH}/${SAMPLE_MODEL_NAME}/1"
+          tee ${MODELS_PATH}/${SAMPLE_MODEL_NAME}/config.pbtxt <<EOF
+          name: "${SAMPLE_MODEL_NAME}"
+          platform: "onnxruntime_onnx"
+          optimization { execution_accelerators {
+            cpu_execution_accelerator : [ {
+              name : "openvino"
+            }],
+            gpu_execution_accelerator : [ {
+              name : "tensorrt"
+              parameters { key: "trt_engine_cache_enable" value: "1" }
+              parameters { key: "precision_mode" value: "FP16" }
+              parameters { key: "max_workspace_size_bytes" value: "1073741824" }
+            }]
+          }}
+          max_batch_size: 0
+          input [
+            {
+              name: "INPUT"
+              data_type: TYPE_FP32
+              dims: [5, 5]
+            },
+            {
+              name: "INITIALIZER"
+              data_type: TYPE_FP32
+              dims: [5, 5]
+              optional: true
+            }
+          ]
+          output [
+            {
+              name: "OUTPUT"
+              data_type: TYPE_FP32
+              dims: [5, 5]
+            }
+          ]
+          EOF
+
+          curl -fSLo "${MODELS_PATH}/${SAMPLE_MODEL_NAME}/1/model.onnx" "https://github.com/triton-inference-server/onnxruntime_backend/raw/604ee7ae2d75d0204ec756aaf7d7edf5317e7dcc/test/initializer_as_input/models/add_with_initializer/1/model.onnx"
+        start: |
+          /opt/tritonserver/bin/tritonserver \
+            --model-repository=${MODELS_PATH} \
+            --http-port="${TRITON_HTTP_PORT}" \
+            --grpc-port="${TRITON_GRPC_PORT}" \
+            --http-address="0.0.0.0"
+        expected_output: |
+          DCGM unable to get device info and count, GPU metrics will not be available
+          Collecting CPU metrics
+          TRITONBACKEND_ModelInitialize:
+          /opt/tritonserver/backends/onnxruntime/libtriton_onnxruntime.so
+          (CPU device 0)
+          openvino
+          Started HTTPService at 0.0.0.0
+        timeout: 60
+        post: curl localhost:${TRITON_HTTP_PORT} | grep -F -i -e "error" -e "not found"

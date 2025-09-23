@@ -1,0 +1,101 @@
+# We need bcprov-version as it might have to be later bumped when the upstream updates it
+# Our bcfips jars are symlinked to it and unfortunately the Keycloak Operator will not recognise if we rename it to.
+# We can't use Chainguard Librarires here as the build fails with it
+vars:
+  java-version: 21
+  bc-version: 1.81
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+package:
+  name: keycloak-operator-fips
+  version: "26.3.4"
+  epoch: 0 # GHSA-fghv-69vj-qj49
+  description: A Kubernetes Operator based on the Operator SDK for installing and managing Keycloak.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      # The operator depends on Keycloak which currently depends on the full JDK
+      - openjdk-21-default-jdk # TODO: Switch to JRE
+
+# bump whenever we have newer bcfips, for now 2.1 is latest
+environment:
+  contents:
+    packages:
+      - bash
+      - bouncycastle-fips~2.1
+      - busybox
+      - ca-certificates-bundle
+      - openjdk-21-default-jdk
+      - wolfi-base
+      - wolfi-baselayout
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-21-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/keycloak/keycloak
+      tag: ${{package.version}}
+      expected-commit: fc23f6fc8582462d056af7bf8ce4a201a9babdc1
+
+  - uses: maven/pombump
+
+  - runs: |
+      cd operator
+      ../mvnw clean package
+      mkdir -p "${{targets.destdir}}"/usr/share/java
+      cp -r target/quarkus-app "${{targets.destdir}}"/usr/share/java/
+
+  - name: Symlink BCFIPS JAR into the application classpath
+    runs: |
+      # Get bcprov-version from the files available in the quarkus-app/lib/main directory
+      bc_version=$(find "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main" -name 'org.bouncycastle.bcprov-jdk18on-*.jar' | sed -E 's/.*-(.*)\.jar/\1/')
+
+      if [ -z "${bc_version}" ]; then
+        echo "ERROR: Could not determine BouncyCastle version from the JARs in quarkus-app/lib/main"
+        exit 1
+      elif [ "${{vars.bc-version}}" != "${bc_version}" ]; then
+        echo "ERROR: BouncyCastle version mismatch: expected ${{vars.bc-version}}, found ${bc_version}"
+        exit 1
+      fi
+
+      echo "Found BouncyCastle version: ${bc_version}"
+
+      # Remove existing BouncyCastle JARs
+      find "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main" -type f -name 'org.bouncycastle.bc*jdk*.jar' -delete
+
+      # Symlink BCFIPS JAR into the application classpath
+      # Please note that we can't get rid of this symlink as that is how the Keycloak Operator is built.
+      ln -s /usr/share/java/bouncycastle-fips/bc-fips.jar "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main/org.bouncycastle.bcprov-jdk18on-${{vars.bc-version}}.jar"
+      ln -s /usr/share/java/bouncycastle-fips/bcpkix-fips.jar "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main/org.bouncycastle.bcpkix-jdk18on-${{vars.bc-version}}.jar"
+      ln -s /usr/share/java/bouncycastle-fips/bcutil-fips.jar "${{targets.destdir}}/usr/share/java/quarkus-app/lib/main/org.bouncycastle.bcutil-jdk18on-${{vars.bc-version}}.jar"
+
+subpackages:
+  - name: keycloak-operator-fips-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/opt/
+          ln -s /usr/share/java/quarkus-app/ "${{targets.subpkgdir}}"/opt/keycloak
+
+test:
+  pipeline:
+    - runs: |
+        # This only runs in k8s with bcfks keystore creation and module getting loaded, hence covered in image tests but make sure it errors correctly
+        java -Djava.util.logging.manager=org.jboss.logmanager.LogManager -jar /usr/share/java/quarkus-app/quarkus-run.jar 2>&1 | grep "PKIX TrustManagerFactory not available"
+
+update:
+  # The upstream repos releases contains a 'nightly' release. Which we want to
+  # exclude from discovery.
+  ignore-regex-patterns:
+    - '.*nightly.*'
+  enabled: true
+  github:
+    identifier: keycloak/keycloak

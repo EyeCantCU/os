@@ -4,10 +4,13 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 import java.security.*;
 import java.util.Arrays;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Stream;
+import java.util.Base64;
 
 public class Test {
     final static List<String> UNSUPPORTED_TLS_CIPHERS = Collections.unmodifiableList(Arrays.asList(
@@ -43,7 +46,6 @@ public class Test {
             "TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256" // OpenSSL: RSA-PSK-CHACHA20-POLY1305
     ));
 
-    
     final static Map<String,String> UNSUPPORTED_CIPHER_MODES = Map.ofEntries(
         Map.entry("Blowfish", "Blowfish/CBC/PKCS5Padding"),
         Map.entry("AES in EAX Mode", "AES/EAX/NoPadding"),
@@ -225,6 +227,69 @@ public class Test {
         }
     }
 
+    private static void testSecureRandomSource() throws NoSuchAlgorithmException {
+        SecureRandom secureRandom = SecureRandom.getInstanceStrong();
+
+        System.out.println("SecureRandom Algorithm: " + secureRandom.getAlgorithm());
+        System.out.println("SecureRandom Provider: " + secureRandom.getProvider().getName());
+
+        String expectedAlgorithm = "ENTROPY";
+        String expectedProvider = "BCRNG";
+        String environmentSetting = System.getenv("ENTROPY");
+        if (environmentSetting != null && environmentSetting.equals("KERNEL")) {
+                expectedAlgorithm = "NativePRNGBlocking";
+                expectedProvider = "SUN";
+        }
+
+        // Validate BC RNG JENT configuration
+        if (!expectedAlgorithm.equals(secureRandom.getAlgorithm())) {
+            System.err.println("SecureRandom algorithm should be " + expectedAlgorithm);
+            System.exit(1);
+        }
+        if (!expectedProvider.equals(secureRandom.getProvider().getName())) {
+            System.err.println("SecureRandom provider should be " + expectedProvider);
+            System.exit(1);
+        }
+        System.out.println("SecureRandom configuration test passed");
+
+        // Test for uniqueness
+        // Generate many RSA keys, all of which should be unique
+        //
+        // FIPS compliant key generation uses FIPS methods to generate
+        // keys, which are expected to automatically handle DRBG
+        // inputs and their reseeding.
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+
+        Set<String> keys = new HashSet<>();
+        for (int i = 0; i < 125; i++) {
+            KeyPair keyPair = kpg.generateKeyPair();
+            PrivateKey privateKey = keyPair.getPrivate();
+            String encodedKey = Base64.getMimeEncoder().encodeToString(privateKey.getEncoded());
+            if (!keys.add(encodedKey)) {
+                System.out.println("SecureRandom generated private key collision");
+                System.exit(1);
+            }
+        }
+        System.out.println("SecureRandom uniqueness test passed");
+        // Test seed independence
+        SecureRandom sr1 = SecureRandom.getInstanceStrong();
+        SecureRandom sr2 = SecureRandom.getInstanceStrong();
+
+        boolean identical = true;
+        for (int i = 0; i < 10; i++) {
+            if (sr1.nextInt() != sr2.nextInt()) {
+                identical = false;
+                break;
+            }
+        }
+        if (identical) {
+            System.err.println("SecureRandom instances should not produce identical sequences");
+            System.exit(1);
+        }
+        System.out.println("SecureRandom seed independence test passed");
+    }
+
     public static void main(String[] args) throws Exception {
         if (!org.bouncycastle.crypto.fips.FipsStatus.isReady()) {
             System.err.println("fips status is not ready");
@@ -235,5 +300,6 @@ public class Test {
 
         testMessageDigestsAndCiphers();
         testSSLCiphers();
+        testSecureRandomSource();
     }
 }

@@ -1,0 +1,95 @@
+package:
+  name: livekit-server-fips
+  version: "1.9.1"
+  epoch: 1
+  description: End-to-end realtime stack for connecting humans and AI
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/livekit/livekit
+      tag: v${{package.version}}
+      expected-commit: 2f43a575db6db5d1293e112b0fbc92ca096e9903
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/server
+      output: livekit-server
+      ldflags: |
+        -X github.com/livekit/livekit/version.Version=${{package.version}}
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binary in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          ln -sf /usr/bin/livekit-server ${{targets.contextdir}}/livekit-server
+    test:
+      pipeline:
+        - name: "Test compat symlink"
+          runs: |
+            test -L /livekit-server
+            test "$(readlink /livekit-server)" = "/usr/bin/livekit-server"
+
+update:
+  enabled: true
+  github:
+    identifier: livekit/livekit
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+        - livekit-cli
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Binary checks"
+      runs: |
+        livekit-server --version | grep "${{package.version}}"
+        livekit-server --help
+    - name: "Command tests"
+      runs: |
+        livekit-server generate-keys --help | grep "generates an API key and secret pair"
+        livekit-server ports --help | grep "print ports that server is configured to use"
+        livekit-server list-nodes --help | grep "list all nodes"
+    - name: "Server startup test with CLI integration"
+      uses: test/daemon-check-output
+      with:
+        # Use --dev for package testing: provides placeholder API keys and basic config
+        # Production uses full config with real API keys, TLS certs, and production settings
+        start: livekit-server --dev
+        timeout: 30
+        expected_output: |
+          starting in development mode
+          starting LiveKit server
+          starting relay signal server
+        post: |
+          wait-for-it localhost:7880 -t 15
+          curl -fsSL http://localhost:7880 | grep -q "OK"
+
+          # token creation
+          lk token create \
+            --api-key devkey \
+            --api-secret secret \
+            --join \
+            --room test-room \
+            --identity test-user \
+            --valid-for 15m | grep -q "Access token:"
+
+          # project setup
+          lk project add test-local \
+            --url ws://localhost:7880 \
+            --api-key devkey \
+            --api-secret secret \
+            --default | grep -q "Saved CLI config to"
+
+          # Verify project creation
+          lk project list | grep -q "test-local"

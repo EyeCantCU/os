@@ -1,0 +1,129 @@
+package:
+  name: onnxruntime
+  version: "1.22.2"
+  epoch: 3
+  description: Cross-platform, high performance ML inferencing and training accelerator
+  copyright:
+    - license: MIT
+  resources:
+    cpu: 20
+    memory: 50Gi
+
+environment:
+  contents:
+    packages:
+      - abseil-cpp-dev
+      - eigen-dev
+      - openvino
+      - openvino-dev
+      - protobuf
+      - protobuf-dev
+      - py3-build-base-dev
+      - py3.13-numpy-2.2
+      - python3
+      - re2-dev
+      - zlib-dev
+  environment:
+    # This seems to be required to compile `abseil`
+    # FIXME: remove this eventually
+    CXXFLAGS: "-fdelete-null-pointer-checks"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/microsoft/onnxruntime.git
+      tag: v${{package.version}}
+      expected-commit: 5630b081cd25e4eccc7516a652ff956e51676794
+
+  - runs: |
+      # Find system abseil-cpp
+      sed 's|ABSL_PATCH_COMMAND}|&\n\ \ \ \ \FIND_PACKAGE_ARGS NAMES absl|g' \
+        -i cmake/external/abseil-cpp.cmake
+
+      # Allow building with GCC 15, FIXME: remove this from this package
+      # This line got fixed on https://github.com/microsoft/onnxruntime/commit/f7619dc93f592ddfc10f12f7145f9781299163a0
+      sed -i 's|#include <unordered_set>|&\n#include <cstdint>|' onnxruntime/core/optimizer/transpose_optimization/optimizer_api.h
+
+  - uses: cmake/configure
+    with:
+      output-dir: build
+      opts: |
+        -Wno-dev \
+        --compile-no-warning-as-error \
+        -S cmake \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_BUILD_TYPE=None \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -Donnxruntime_ENABLE_PYTHON=ON \
+        -Donnxruntime_BUILD_SHARED_LIB=ON \
+        -Donnxruntime_BUILD_UNIT_TESTS=OFF \
+        -DBUILD_TESTING=OFF \
+        -Donnxruntime_ENABLE_TRAINING=ON \
+        -Donnxruntime_ENABLE_LAZY_TENSOR=OFF \
+        -Donnxruntime_USE_MPI=ON \
+        -Donnxruntime_USE_DNNL=OFF \
+        -Donnxruntime_USE_PREINSTALLED_EIGEN=ON \
+        -DCMAKE_CXX_STANDARD=17 \
+        -Donnxruntime_USE_OPENVINO=ON \
+        -Donnxruntime_USE_OPENVINO_GPU=ON \
+        -Donnxruntime_USE_OPENVINO_CPU=ON \
+        -Donnxruntime_USE_OPENVINO_NPU=ON
+
+  - uses: cmake/build
+    with:
+      output-dir: build
+
+  - working-directory: build/_deps
+    runs: |
+      install -Dpm0644 -t ./date-build/ date-subbuild/cmake_install.cmake
+      install -Dpm0644 -t ./cxxopts-build/ cxxopts-subbuild/cmake_install.cmake
+
+  - uses: cmake/install
+    with:
+      output-dir: build
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+update:
+  enabled: true
+  github:
+    identifier: microsoft/onnxruntime
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-dev
+        - build-base
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Ensure libraries link and are functional
+      runs: |
+        set -o pipefail
+        tee orttest.cpp <<'EOF'
+        #include <iostream>
+        #include "onnxruntime_cxx_api.h"
+        int main(){
+          //check providers
+          auto providers = Ort::GetAvailableProviders();
+          for (auto provider : providers) {
+            std::cout << provider << std::endl;
+          }
+          std::cout <<  Ort::GetVersionString() << std::endl;
+          return 0;
+        }
+        EOF
+        c++ orttest.cpp -o ort_version $(pkgconf --libs libonnxruntime) $(pkgconf --cflags libonnxruntime)
+        ldd ./ort_version | grep -F -e "libonnxruntime"
+        ./ort_version | grep -F -e "${{package.version}}" -e "CPU"

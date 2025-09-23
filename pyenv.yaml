@@ -1,0 +1,150 @@
+package:
+  name: pyenv
+  version: "2.6.8"
+  epoch: 0
+  description: Simple Python version management
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      # error: please install `aria2c`, `curl`, or `wget` and try again
+      - curl
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pyenv/pyenv.git
+      tag: v${{package.version}}
+      expected-commit: 519ce9dbf0d1ce810050cfab1ae5a7c40df9fb34
+
+  - working-directory: src
+    uses: autoconf/configure
+
+  - working-directory: src
+    uses: autoconf/make
+
+  - runs: |
+      install -Dpm0755 -t "${{targets.destdir}}"/usr/bin libexec/*
+
+      install -d "${{targets.destdir}}/usr/share/${{package.name}}/"
+      cp -r ./pyenv.d "${{targets.destdir}}/usr/share/${{package.name}}/"
+
+      # plugin
+      install -Dpm0755 -t "${{targets.destdir}}/usr/share/${{package.name}}/plugins/python-build/bin" plugins/python-build/bin/*
+      for bin in pyenv-install pyenv-uninstall python-build ; do
+        ln -s "../share/${{package.name}}/plugins/python-build/bin/${bin}" "${{targets.destdir}}/usr/bin/${bin}"
+      done
+      cp -av plugins/python-build/share "${{targets.destdir}}/usr/share/${{package.name}}/plugins/python-build"
+
+  - uses: strip
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    # Old versioning scheme
+    - '.*201\d[0-3]\d.*'
+  git:
+    strip-prefix: v
+
+subpackages:
+  - name: ${{package.name}}-bash-completion
+    description: Bash completion for ${{package.name}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: install -Dpm0644 completions/*.bash "${{targets.destdir}}/usr/share/bash-completion/completions/${{package.name}}"
+    test:
+      pipeline:
+        - runs: stat /usr/share/bash-completion/completions/${{package.name}} | grep -F -e "0644"
+
+  - name: ${{package.name}}-fish-completion
+    description: Fish completion for ${{package.name}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: install -Dpm0644 -t "${{targets.destdir}}/usr/share/fish/vendor_completions.d/" completions/*.fish
+    test:
+      pipeline:
+        - runs: stat /usr/share/fish/vendor_completions.d/${{package.name}}.fish | grep -F -e "0644"
+
+  - name: ${{package.name}}-zsh-completion
+    description: Zsh completion for ${{package.name}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: install -Dpm0644 completions/*.zsh "${{targets.destdir}}/usr/share/zsh/site-functions/_${{package.name}}"
+    test:
+      pipeline:
+        - runs: stat /usr/share/zsh/site-functions/_${{package.name}} | grep -F -e "0644"
+
+  - name: ${{package.name}}-doc
+    description: Manpages and documentantion for ${{package.name}}
+    pipeline:
+      - runs: |
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/licenses/${{package.name}}" LICENSE
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/licenses/${{package.name}}/plugins/python-build/" plugins/python-build/LICENSE
+
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/man/man1/" man/man1/*.1
+
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/doc/${{package.name}}" ./*.md
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/doc/${{package.name}}/plugins/python-build/" plugins/python-build/*.md
+    test:
+      pipeline:
+        - uses: test/docs
+
+test:
+  environment:
+    environment:
+      TESTING_PYTHON_VERSION: pypy3
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/symlink-check
+    - runs: |
+        set -o pipefail
+        pyenv --help | grep -F -e "Usage: pyenv <command>"
+        pyenv --version | grep -F -e "${{package.name}}"
+
+        for COMMAND in $(pyenv commands | grep -v shell) ; do
+          stat "/usr/bin/pyenv-${COMMAND}" | grep -F -e "755" -e "777"
+          test -x "/usr/bin/pyenv-${COMMAND}"
+        done
+        stat "/usr/bin/pyenv-sh-shell" | grep -F -e "755" -e "777"
+        test -x "/usr/bin/pyenv-sh-shell"
+
+        pyenv global | grep -F -e "system"
+        pyenv install "${TESTING_PYTHON_VERSION}"
+        bash <<EOF
+        export PATH="$HOME/.pyenv/bin:$PATH"
+        eval "$(pyenv init -)"
+        set -xeuo pipefail
+        pyenv global ${TESTING_PYTHON_VERSION}
+        pyenv global | grep -F -e "${TESTING_PYTHON_VERSION}"
+        EOF
+
+        pyenv exec "${TESTING_PYTHON_VERSION}" --help | grep -F -e "Options and arguments"
+        pyenv which "${TESTING_PYTHON_VERSION}" | grep -e "${HOME}/.pyenv/versions/${TESTING_PYTHON_VERSION}.*/bin/${TESTING_PYTHON_VERSION}"
+        pyenv whence "${TESTING_PYTHON_VERSION}" | grep -e "${TESTING_PYTHON_VERSION}.*-.*"
+        pyenv latest "${TESTING_PYTHON_VERSION}" | grep -e "${TESTING_PYTHON_VERSION}.*-.*"
+        pyenv versions | grep -F -e "${TESTING_PYTHON_VERSION}"
+        pyenv root | grep -F -e "${HOME}/.pyenv"
+
+        TEST_DIR_1="$(mktemp -d)"
+        cd "${TEST_DIR_1}"
+        pyenv local ${TESTING_PYTHON_VERSION}
+        pyenv local | grep -F -e "${TESTING_PYTHON_VERSION}"
+        cd
+        {
+          pyenv local 2>&1 || true
+        } | grep -F -e "local version configured"
+        pyenv prefix | grep -e "${HOME}/.pyenv/versions/${TESTING_PYTHON_VERSION}.*"
+        pyenv shims | grep -F -e "${HOME}/.pyenv/shims/pip"

@@ -1,7 +1,7 @@
 package:
   name: harbor-fips-2.12
   version: "2.12.4"
-  epoch: 1
+  epoch: 11
   description: An open source trusted cloud native registry project that stores, signs, and scans content
   copyright:
     - license: Apache-2.0
@@ -12,6 +12,8 @@ package:
       - ca-certificates-bundle
 
 environment:
+  environment:
+    GCC_SPEC_FILE: "no-hardening.spec"
   contents:
     packages:
       - nodejs
@@ -43,6 +45,7 @@ pipeline:
       deps: |-
         golang.org/x/oauth2@v0.27.0
         github.com/gorilla/csrf@v1.7.3
+        helm.sh/helm/v3@v3.18.5
       modroot: ./src
 
   - uses: go/build
@@ -51,7 +54,7 @@ pipeline:
       output: harbor-core
       modroot: ./src
       deps: github.com/go-openapi/errors github.com/go-openapi/runtime
-      go-package: go-fips
+      go-package: go-fips~1.24
 
   - runs: ln -sf /usr/bin/harbor-core ${{targets.destdir}}/harbor/harbor_core
 
@@ -121,12 +124,15 @@ subpackages:
           packages: ./jobservice
           output: harbor-jobservice
           modroot: ./src
-          go-package: go-fips
+          go-package: go-fips~1.24
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/harbor
           ln -sf /usr/bin/harbor-jobservice ${{targets.subpkgdir}}/harbor/harbor_jobservice
     test:
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: harbor-fips-2.12-jobservice
         - runs: |
             # jobservice fails outside environment, verify adaptor for harbor registered
             /harbor/harbor_jobservice 2>/dev/null | grep "harbor registered"
@@ -197,18 +203,85 @@ subpackages:
           packages: ./registryctl
           output: harbor-registryctl
           modroot: ./src
-          go-package: go-fips
+          go-package: go-fips~1.24
+          tags: include_oss,include_gcs
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/etc/registryctl
           mkdir -p ${{targets.subpkgdir}}/harbor
           ln -sf /usr/bin/harbor-registryctl ${{targets.subpkgdir}}/harbor/harbor_registryctl
     test:
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: harbor-fips-2.12-registryctl
         - runs: |
             harbor-registryctl --help
 
+  - name: ${{package.name}}-exporter
+    description: harbor exporter
+    dependencies:
+      provides:
+        - harbor-fips-exporter=${{package.full-version}}
+      runtime:
+        - bash-binsh
+        - grep
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/exporter
+          output: harbor_exporter
+          modroot: ./src
+          go-package: go-fips~1.24
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/harbor
+          ln -sf /usr/bin/harbor_exporter ${{targets.subpkgdir}}/harbor/harbor_exporter
+          install -Dm755 make/photon/exporter/entrypoint.sh ${{targets.subpkgdir}}/harbor/
+          install -Dm755 make/photon/common/install_cert.sh ${{targets.subpkgdir}}/harbor/
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: harbor-fips-2.12-exporter
+        - runs: test "$(readlink /harbor/harbor_exporter)" = "/usr/bin/harbor_exporter"
+        - name: "Test entrypoint /harbor/entrypoint.sh"
+          runs: |
+            stat /harbor/entrypoint.sh
+            test -x /harbor/entrypoint.sh
+        - name: "Test exporter"
+          uses: test/daemon-check-output
+          with:
+            start: harbor_exporter
+            timeout: 15
+            # Overriding error strings as it needs a real Harbor registry to be up and running
+            error_strings: |
+              FAIL
+              FATAL
+              Error
+            expected_output: |
+              artifact annotation version v1alpha1 registered
+              Registering database: type-PostgreSQL
+
+  - name: ${{package.name}}-redis-compat
+    description: Compat package for running redis with harbor
+    dependencies:
+      provides:
+        - harbor-redis-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mkdir -p ${{targets.subpkgdir}}/etc
+
+          cp ./make/photon/redis/docker-healthcheck ${{targets.subpkgdir}}/usr/bin/
+          cp ./make/photon/redis/redis.conf ${{targets.subpkgdir}}/etc/
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/docker-healthcheck
+            stat /etc/redis.conf
+
 test:
   pipeline:
+    - uses: test/go-fips-check
     - runs: |
         harbor-core --help
 

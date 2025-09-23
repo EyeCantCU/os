@@ -1,0 +1,93 @@
+package:
+  name: terraform-ls
+  version: "0.38.0"
+  epoch: 0
+  copyright:
+    - license: MPL-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/hashicorp/terraform-ls
+      tag: v${{package.version}}
+      expected-commit: 48f1c3b4b97c90206b236aa48c232d1d18ba747e
+
+  - uses: go/build
+    with:
+      packages: .
+      output: terraform-ls
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+  pipeline:
+    - runs: terraform-ls version | grep -q ${{package.version}}
+    - runs: |
+        # Tiny TF project
+        cat > main.tf <<'EOF'
+        resource "null_resource" "test" {}
+        EOF
+
+        # LSP request bodies
+        printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":"file:///home/build","capabilities":{}}}' > init.json
+        printf '{"jsonrpc":"2.0","id":3,"method":"shutdown","params":null}' > shutdown.json
+        # Sending an exit signal by closing the server stdin pipe, since using stdio
+
+        # Frame helper
+        make_msg() {
+          len=$(wc -c <"$1")
+          printf 'Content-Length: %s\r\n\r\n' "$len"
+          cat "$1"
+        }
+
+        mkfifo in
+
+        terraform-ls serve <in >out 2>err &
+        pid=$!
+
+        # Keep write end open with a FD
+        exec 3>in
+
+        # Send initialize first
+        make_msg init.json >in
+
+        # Wait up to 30s for initialize result
+        found=0
+        i=0
+        while [ $i -lt 30 ]; do
+          # Check that there is a response to the initialization request (id=1)
+          if test "$(tail -1 out | jq .id)" == "1" && grep 'Response to "initialize" (ID 1)' err; then
+            found=1
+            break
+          fi
+          i=$((i+1))
+          sleep 1
+        done
+        if [ "$found" -ne 1 ]; then
+          echo "No initialize result"
+          cat out || true
+          cat err || true
+          exec 3>&- 2>/dev/null || true # Try to close the write end pipe
+          exit 1
+        fi
+
+        # Send shutdown
+        make_msg shutdown.json >in
+
+        # Check that there is a response to the shutdown request (id=3)
+        test "$(tail -1 out | jq .id)" == "3"
+
+        # Send exit
+        exec 3>&- # Close the client write end pipe
+        sleep 1
+        pgrep terraform-ls && { echo "Server did not exit."; exit 1; }
+
+        cat out err
+
+update:
+  enabled: true
+  github:
+    identifier: hashicorp/terraform-ls
+    strip-prefix: v

@@ -1,0 +1,126 @@
+package:
+  name: geoip-api
+  version: "2025.38"
+  epoch: 0
+  description: A JSON REST API for Maxmind GeoIP databases
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openjdk-${{vars.java-version}}-default-jdk
+
+var-transforms:
+  - from: ${{package.version}}
+    match: \.
+    replace: "-"
+    to: mangled-package-version
+
+vars:
+  java-version: "21" # https://github.com/observabilitystack/geoip-api/blob/3d5c2e71d470f39ca9f60d1840dc955bc9b01eb6/Dockerfile#L4
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - graalvm-23 # we used graalvm-23 because it didn't build with graalvm-24
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/observabilitystack/geoip-api
+      tag: ${{vars.mangled-package-version}}
+      expected-commit: 3d5c2e71d470f39ca9f60d1840dc955bc9b01eb6
+
+  - name: Build
+    runs: |
+      export GRAALVM_HOME=/usr/lib/jvm/java-23-graalvm
+      mvn -B native:compile -P native --no-transfer-progress -DskipTests=true
+      mkdir -p ${{targets.contextdir}}/usr/bin
+      install -Dm755 target/geoip-api ${{targets.contextdir}}/usr/bin/geoip-api
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          # The helm chart expects the binary to be in / instead of /usr/bin
+          mkdir -p "${{targets.contextdir}}/srv"
+          ln -sf /usr/bin/geoip-api ${{targets.contextdir}}/srv/geoip-api
+    test:
+      pipeline:
+        - name: "Verify the symlink"
+          runs: |
+            test "$(readlink /srv/geoip-api)" = "/usr/bin/geoip-api"
+
+update:
+  enabled: true
+  github:
+    identifier: observabilitystack/geoip-api
+  version-transform:
+    - match: '-'
+      replace: '.'
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+    environment:
+      CITY_DB_FILE: GeoLite2-City.mmdb
+      ASN_DB_FILE: GeoLite2-ASN.mmdb
+  pipeline:
+    - name: "Test geoip-api service"
+      uses: test/daemon-check-output
+      with:
+        start: geoip-api
+        timeout: 30
+        expected_output: |
+          Tomcat started on port
+          Started GeoIpApi
+        post: |
+          set -ueo pipefail
+          # Test GET endpoint for single IP lookup
+          echo "Testing GET endpoint for single IP lookup..."
+
+          # Test with Google DNS IP
+          RESPONSE=$(curl -f -s "http://localhost:8080/8.8.8.8")
+          echo "Response for 8.8.8.8:"
+          echo "$RESPONSE" | jq .
+
+          # Validate response structure and content
+          echo "$RESPONSE" | jq -e ".country == \"US\""
+          echo "$RESPONSE" | jq -e ".continent == \"NA\""
+          echo "$RESPONSE" | jq -e ".asn == 15169"
+          echo "$RESPONSE" | jq -e ".asnOrganization == \"GOOGLE\""
+          echo "$RESPONSE" | jq -e ".latitude and .longitude and .timezone"
+
+          # Test with Cloudflare DNS IP
+          RESPONSE=$(curl -f -s "http://localhost:8080/1.1.1.1")
+          echo -e "\nResponse for 1.1.1.1:"
+          echo "$RESPONSE" | jq .
+
+          # Validate Cloudflare response
+          echo "$RESPONSE" | jq -e ".asn == 13335"
+
+          # Test with private IP (should return minimal or error response)
+          echo -e "\nTesting with private IP 192.168.1.1..."
+          if curl -f -s "http://localhost:8080/192.168.1.1" > /dev/null 2>&1; then
+              RESPONSE=$(curl -f -s "http://localhost:8080/192.168.1.1")
+              echo "$RESPONSE" | jq .
+          else
+              echo "Private IP returned error (expected behavior)"
+          fi
+
+          # Test with invalid IP
+          echo -e "\nTesting with invalid IP..."
+          if ! curl -f -s "http://localhost:8080/invalid.ip.address" > /dev/null 2>&1; then
+              echo "Invalid IP returned error (expected behavior)"
+          else
+              echo "WARNING: Invalid IP did not return error"
+              exit 1
+          fi
+
+          echo -e "\nGET endpoint tests passed!"

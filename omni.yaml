@@ -1,0 +1,94 @@
+package:
+  name: omni
+  version: "1.1.4"
+  description: "SaaS-simple deployment of Kubernetes - on your own hardware"
+  epoch: 0
+  copyright:
+    - license: BUSL-1.1
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/siderolabs/omni
+      tag: v${{package.version}}
+      expected-commit: 5439794182eb48844f38f756b21b5b78e29664a1
+
+  - uses: go/build
+    with:
+      packages: ./cmd/omni
+      output: omni
+      ldflags: |
+        -X github.com/siderolabs/omni/version.Version=${{package.version}}
+        -X github.com/siderolabs/omni/version.Revision=r${{package.epoch}}
+        -X github.com/siderolabs/omni/version.Package=github.com/siderolabs/omni
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package for the ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/
+          ln -sf /usr/bin/omni ${{targets.contextdir}}/omni
+    test:
+      pipeline:
+        - runs: |
+            stat /omni
+            test "$(readlink /omni)" = "/usr/bin/omni"
+
+  - name: omnictl
+    description: omni control tool
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/omnictl
+          output: omnictl
+          ldflags: |
+            -X github.com/siderolabs/omni/version.Version=${{package.version}}
+            -X github.com/siderolabs/omni/version.Revision=r${{package.epoch}}
+            -X github.com/siderolabs/omni/version.Package=github.com/siderolabs/omni
+    test:
+      pipeline:
+        - runs: |
+            omnictl --version | grep ${{package.version}}
+            omnictl --help
+
+update:
+  enabled: true
+  github:
+    identifier: siderolabs/omni
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - gpg
+        - gpg-agent
+  pipeline:
+    - name: Binary check
+      runs: |
+        omni --version | grep ${{package.version}}
+    - name: Test server startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          export GNUPGHOME=/tmp/gnupg
+          mkdir -p $GNUPGHOME
+          chmod 700 $GNUPGHOME
+          gpg-agent --daemon > /dev/null 2>&1 || true
+          gpg --batch --generate-key <<EOF
+          %no-protection
+          Key-Type: RSA
+          Key-Length: 4096
+          Name-Real: Omni Test
+          Name-Email: test@example.com
+          Expire-Date: 0
+          %commit
+          EOF
+          sleep 2
+          gpg --export-secret-key --armor test@example.com > /tmp/omni-test.asc
+        start: omni --etcd-embedded --private-key-source=file:///tmp/omni-test.asc --bind-addr=127.0.0.1:8080 --create-initial-service-account --auth-saml-enabled=true --auth-saml-url=https://test.example.com/saml/metadata --advertised-api-url=https://localhost:8080
+        timeout: 30
+        expected_output: |
+          starting embedded etcd server
+          all migrations completed

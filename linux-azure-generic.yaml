@@ -1,6 +1,6 @@
 package:
   name: linux-azure-generic
-  version: "6.15.4"
+  version: "6.16.8"
   epoch: 0
   description: "the Azure generic linux kernel"
   copyright:
@@ -34,22 +34,40 @@ var-transforms:
   - from: ${{package.version}}
     match: '^(\d+[.]\d+)[.]0$'
     replace: '$1'
-    to: git-tag-version
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: '^(\d+\.\d+)\.\d+$'
+    replace: '$1'
+    to: mangled-kernel-major-version
 
 pipeline:
+  - uses: kernel/version-check
+    with:
+      moniker: stable
+
   - uses: git-checkout
     with:
       repository: https://github.com/gregkh/linux
-      tag: v${{vars.git-tag-version}}
-      expected-commit: e60eb441596d1c70e4a264d2bac726c6cd2da067
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 62dae019823123ce3baa50e680219e2beb9a63a5
 
-  - uses: kernel/patch
+  - uses: patch
+    with:
+      patches: 0001-crypto-reusable-jitterentropy-${{vars.mangled-kernel-major-version}}.patch 0001-random-use-jitterentropy-${{vars.mangled-kernel-major-version}}.patch 0001-crypto-fix-hkdf-tests-${{vars.mangled-kernel-major-version}}.patch
 
   - uses: kernel/config
     with:
       flavor: ${{vars.flavor}}
       make-targets: hardening.config
       version-flavor: ${{vars.version-flavor}}
+
+  # TODO: pin this to a certified
+  # jitterentropy version when we
+  # have one.
+  - uses: kernel/reusable-jitterentropy
+    with:
+      version: ${{vars.mangled-kernel-major-version}}
+      kernel-version: ${{vars.mangled-kernel-major-version}}
 
   - uses: kernel/build
     with:
@@ -79,6 +97,28 @@ subpackages:
         with:
           version-flavor: ${{vars.version-flavor}}
           extra-args: "earlyprintk=ttyAMA0"
+
+  - name: "${{package.name}}-fips-boot-installed"
+    description: "FIPS Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - ${{package.name}}-modules=${{package.full-version}}
+        - chainguard-baselayout
+        - systemd-boot-installed
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - if: ${{build.arch}} == 'x86_64'
+        uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          extra-args: "fips=1 earlyprintk=ttyS0"
+      - if: ${{build.arch}} == 'aarch64'
+        uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          extra-args: "fips=1 earlyprintk=ttyAMA0"
 
   - name: "${{package.name}}-modules"
     description: "Linux kernel modules"
@@ -130,9 +170,12 @@ subpackages:
 test:
   pipeline:
     - uses: kernel/test/kconfig/systemd
-    - uses: kernel/test/cloud-config-snippet
+    - uses: kernel/test/config-snippet
       with:
-        flavor: ${{vars.flavor}}
+        snippet: jitterentropy
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: ${{vars.flavor}}
         aarch64_exclude: |
           # Defined only for x86
           KVM_HYPERV
@@ -155,6 +198,13 @@ test:
       uses: kernel/test/console_grep
       with:
         string: "Segment Routing with IPv6"
+    - uses: kernel/test/random_quality
+      with:
+        args: fips=1
+    - name: Test for reusable jent
+      uses: kernel/test/console_grep
+      with:
+        string: "jitterentropy built from ${{vars.mangled-kernel-major-version}}"
 
 update:
   enabled: true

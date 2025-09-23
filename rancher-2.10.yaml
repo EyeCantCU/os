@@ -1,7 +1,7 @@
 package:
   name: rancher-2.10
-  version: "2.10.6"
-  epoch: 1
+  version: "2.10.9"
+  epoch: 1 # GHSA-4x4m-3c2p-qppc
   description: Complete container management platform
   copyright:
     - license: Apache-2.0
@@ -31,7 +31,7 @@ package:
       - ipset
       - iptables-xtables-privileged
       - jq
-      - k3s-multicall~${{vars.k3s-version}}
+      - k3s-multicall-${{vars.k3s-major-minor-version}}
       - kustomize
       - losetup
       - mount
@@ -75,11 +75,12 @@ environment:
       - btrfs-progs-dev
       - cdrkit
       - curl
+      - gcc-14-default
       - gpgme-dev
 
 vars:
   py-version: 3.13
-  k3s-version: 1.31.1
+  k3s-major-minor-version: 1.31
 
 var-transforms:
   - from: ${{package.version}}
@@ -92,7 +93,7 @@ pipeline:
     with:
       repository: https://github.com/rancher/rancher
       tag: v${{package.version}}
-      expected-commit: c15873fd84370040ca40f555e44fb24b09e69837
+      expected-commit: fbff60f597b4d4e77ef86594594506ad8f6c95cf
 
   - name: Create directories
     runs: |
@@ -111,6 +112,11 @@ pipeline:
       mkdir -p ${{targets.contextdir}}/var/lib/cattle
       mkdir -p ${{targets.contextdir}}/opt/jail
       mkdir -p /var/tmp
+
+  - uses: go/bump
+    with:
+      deps: |-
+        k8s.io/kubernetes@v1.31.12
 
   - uses: go/build
     with:
@@ -154,20 +160,17 @@ pipeline:
 
   - name: Export k3s images
     runs: |
-      # Determine compatible K3S version for this Rancher release
       CATTLE_K3S_VERSION="$(
         curl -fsSL --retry 5 --retry-connrefused "https://github.com/rancher/rancher/raw/refs/tags/v${{package.version}}/package/Dockerfile" \
           | grep -m1 '^ENV CATTLE_K3S_VERSION' \
-          | sed 's/ENV CATTLE_K3S_VERSION //'
+          | sed 's/ENV CATTLE_K3S_VERSION=//' \
+          | tr -d ' '
       )"
-      if [ -z "$CATTLE_K3S_VERSION" ]; then
-        echo "ERROR: Failed to determine K3S version for Rancher ${{package.version}}"
-        exit 1
-      fi
 
-      CATTLE_K3S_VERSION_CLEAN=$(echo "$CATTLE_K3S_VERSION" | sed 's/^v\([^+]*\).*/\1/')
-      if [ ${{vars.k3s-version}} != "$CATTLE_K3S_VERSION_CLEAN" ]; then
-        echo "WARNING: The K3S version in the package vars k3s-version: (${{vars.k3s-version}}) does not match the version determined from the Dockerfile ($CATTLE_K3S_VERSION_CLEAN)."
+      # Extract major.minor version from CATTLE_K3S_VERSION (e.g., v1.31.1+k3s1 -> 1.31) and match with runtime k3s version
+      CATTLE_K3S_MAJOR_MINOR="$(echo "$CATTLE_K3S_VERSION" | sed 's/^v//' | cut -d. -f1,2)"
+      if [[ ${{vars.k3s-major-minor-version}} != "$CATTLE_K3S_MAJOR_MINOR" ]]; then
+        echo "ERROR: The K3S major.minor version in vars does not match the one in the Dockerfile. Expected: ${{vars.k3s-major-minor-version}}, Found: $CATTLE_K3S_MAJOR_MINOR (from $CATTLE_K3S_VERSION)"
         exit 1
       fi
 
@@ -288,7 +291,8 @@ test:
         mkdir -p /tmp/k3s-airgap-images
         tar -xf /var/lib/rancher/k3s/agent/images/k3s-airgap-images.tar -C /tmp/k3s-airgap-images
         stat /tmp/k3s-airgap-images/repositories /tmp/k3s-airgap-images/manifest.json
-    - name: "start daemon on localhost"
+    - if: ${{build.arch}} == 'x86_64' # skip the test for aarch64 as it fails onn CI as in Docker runner k3s cant be run. and our current arm ci uses docker instead
+      name: "start daemon on localhost"
       uses: test/daemon-check-output
       with:
         start: "rancher --trace --debug" # We can't use `entrypoint.sh` here since it needs `/run/secrets/kubernetes.io/serviceaccount` and `/dev/kmsg` to be mounted

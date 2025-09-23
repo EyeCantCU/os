@@ -1,0 +1,77 @@
+package:
+  name: longhorn-ui-1.7
+  version: 1.7.3
+  epoch: 0
+  description: ui component for Longhorn, a cloud-native distributed block storage system for Kubernetes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - longhorn-ui=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - gettext
+      - nodejs-22
+      - npm
+  environment:
+    VERSION: "v${{package.version}}"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/longhorn/longhorn-ui.git
+      tag: v${{package.version}}
+      expected-commit: 3bf4baeb6df7cfc1f13a3ef636b2e4aa5f60c5e3
+
+  - uses: patch
+    with:
+      patches: webpack-crypto.patch
+
+  - name: Build
+    runs: |
+      npm ci
+      npm install terser-webpack-plugin@4 --save-dev
+      envsubst '${VERSION}' < src/utils/config.js > src/utils/config.js.subst
+      mv src/utils/config.js.subst src/utils/config.js
+      npm run build
+
+  - name: Install
+    runs: |
+      mkdir -p ${{targets.destdir}}/web
+      mkdir -p ${{targets.destdir}}/etc/nginx
+      cp -r dist ${{targets.destdir}}/web/
+      install -Dm644 nginx.conf.template ${{targets.destdir}}/etc/nginx/nginx.conf.template
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v1.7
+  ignore-regex-patterns:
+    - .*-rc[0-9]$ # Ignore RC tags like v1.9.1-rc1
+    - .*dev.* # Ignore dev tags like v1.10.0-dev-20250713
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - nodejs-22
+        - npm
+        - wait-for-it
+  pipeline:
+    - name: "Test Longhorn UI"
+      uses: test/daemon-check-output
+      with:
+        start: "npx http-server /web/dist -p 8080"
+        timeout: 60
+        expected_output: |
+          serving
+          Available on
+        post: |
+          wait-for-it -t 10 --strict localhost:8080 -- echo "Server is up"
+          curl -f http://localhost:8080/index.html | grep "DOCTYPE html" # dynamically loads content with react, so we just check that something exists

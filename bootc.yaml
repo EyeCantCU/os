@@ -1,0 +1,128 @@
+#nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
+package:
+  name: bootc
+  # FIXME: the last tag from main merged to the composefs-backend branch
+  # git show -s --format=%cd --date=format:'_git%Y%m%d%H%M%S' $commit
+  version: 1.8.0_git20250912121635
+  epoch: 0
+  description: Boot and upgrade via container images
+  copyright:
+    - license: Apache-2.0 AND MIT
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cargo-auditable
+      - ostree-dev
+      - rust
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/bootc-dev/bootc
+      branch: composefs-backend
+      #tag: v${{package.version}}
+      expected-commit: a7185978787932d4b3f85acb01e45ba1551d7a5c
+
+  - name: build
+    runs: |
+      cargo auditable build --target-dir=target --release --bins \
+          --features composefs-backend
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-initramfs-setup
+    pipeline:
+      - runs: |
+          dest="${{targets.contextdir}}"
+          mkdir -p $dest/usr/lib/bootc
+          cp ./target/release/bootc-initramfs-setup $dest/usr/lib/bootc/initramfs-setup
+    test:
+      pipeline:
+        - name: verify initramfs-setup installed
+          runs: |
+            p=/usr/lib/bootc/initramfs-setup
+            [ -x "$p" ] && [ -x "$p" ] &&
+               echo "PASS: $p is executable file" ||
+               { echo "FAIL: $p is not executable file"; exit 1; }
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-binary
+    description: bootc binary
+    pipeline:
+      - runs: |
+          dest=${{targets.contextdir}}
+          install -Dpm0755 -t "$dest/usr/bin" \
+              ./target/release/bootc \
+              ./target/release/system-reinstall-bootc
+    test:
+      pipeline:
+        - runs: |
+            set -o pipefail
+            semver=$(echo "${{package.version}}" | sed 's,_.*,,') # drop any _git suffix.
+            bootc --version | grep -F -e "$semver"
+            bootc --help | grep -F -e "Deploy and transactionally in-place with bootable container images."
+
+  - name: ${{package.name}}-dracut
+    description: Dracut modules for composefs
+    dependencies:
+      runtime:
+        - ${{package.name}}-initramfs-setup
+    pipeline:
+      - runs: |
+          dest="${{targets.contextdir}}"
+          install -Dpm0755 -t $dest/usr/lib/dracut/modules.d/37composefs/ ./crates/initramfs/dracut/module-setup.sh
+          install -Dpm0644 -t $dest/usr/lib/systemd/system/ ./crates/initramfs/bootc-root-setup.service
+
+  - name: ${{package.name}}-install
+    description: bootc dependencies in order to run install
+    dependencies:
+      runtime:
+        - ${{package.name}}-binary
+        - bootupd
+        - btrfs-progs
+        - coreutils
+        - dosfstools
+        - e2fsprogs
+        - findmnt
+        - findutils
+        - fstrim
+        - losetup
+        - lsblk
+        - mount
+        - sfdisk
+        - skopeo
+        - systemd
+        - umount
+        - util-linux-misc # fsfreeze
+        - wipefs
+        - xfsprogs
+    pipeline:
+      - runs: |
+          dest=${{targets.contextdir}}
+          install -Dpm0755 -t $dest/usr/lib/ostree prepare-root.conf
+
+  - name: ${{package.name}}-system
+    description: bootc dependencies for bootc system
+    dependencies:
+      runtime:
+        - ${{package.name}}-binary
+        - bootupd
+        - dbus
+        - systemd-boot
+        - systemd-init
+        - systemd-logind-service
+        - udev
+    pipeline:
+      - runs: |
+          dest=${{targets.contextdir}}
+
+update:
+  enabled: false
+  exclude-reason: Currently tracking a branch that does not have full release process
+  github:
+    identifier: bootc-dev/bootc
+    strip-prefix: v

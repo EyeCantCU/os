@@ -1,0 +1,127 @@
+package:
+  name: py3.10-onnxruntime
+  version: "1.22.2"
+  epoch: 0
+  description: Cross-platform, high performance ML inferencing and training accelerator
+  resources:
+    cpu: 20
+    memory: 50Gi
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - py${{vars.py-version}}-coloredlogs
+      - py${{vars.py-version}}-flatbuffers
+      - py${{vars.py-version}}-numpy
+      - py${{vars.py-version}}-packaging
+      - py${{vars.py-version}}-protobuf
+      - py${{vars.py-version}}-sympy
+
+vars:
+  pypi-package: onnxruntime
+
+environment:
+  contents:
+    packages:
+      - abseil-cpp-dev
+      - eigen-dev
+      - protobuf
+      - protobuf-dev
+      - py${{vars.py-version}}-build-base-dev
+      - py${{vars.py-version}}-numpy
+      - python-${{vars.py-version}}
+      - re2-dev
+      - zlib-dev
+  environment:
+    # This seems to be required to compile `abseil`
+    # FIXME: remove this eventually
+    CXXFLAGS: "-fdelete-null-pointer-checks"
+
+var-transforms:
+  - from: ${{package.name}}
+    match: 'py(\d+\.\d+)-.*'
+    replace: '$1'
+    to: py-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/microsoft/onnxruntime.git
+      tag: v${{package.version}}
+      expected-commit: 5630b081cd25e4eccc7516a652ff956e51676794
+
+  - runs: |
+      # Find system abseil-cpp
+      sed 's|ABSL_PATCH_COMMAND}|&\n\ \ \ \ \FIND_PACKAGE_ARGS NAMES absl|g' \
+        -i cmake/external/abseil-cpp.cmake
+
+      # Allow building with GCC 15, FIXME: remove this from this package
+      # This line got fixed on https://github.com/microsoft/onnxruntime/commit/f7619dc93f592ddfc10f12f7145f9781299163a0
+      sed -i 's|#include <unordered_set>|&\n#include <cstdint>|' onnxruntime/core/optimizer/transpose_optimization/optimizer_api.h
+
+  - uses: cmake/configure
+    with:
+      output-dir: build
+      opts: |
+        --compile-no-warning-as-error \
+        -S cmake \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_BUILD_TYPE=None \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -Donnxruntime_ENABLE_PYTHON=ON \
+        -Donnxruntime_BUILD_SHARED_LIB=ON \
+        -Donnxruntime_BUILD_UNIT_TESTS=OFF \
+        -DBUILD_TESTING=OFF \
+        -Donnxruntime_ENABLE_TRAINING=ON \
+        -Donnxruntime_ENABLE_LAZY_TENSOR=OFF \
+        -Donnxruntime_USE_MPI=ON \
+        -Donnxruntime_USE_DNNL=OFF \
+        -Donnxruntime_USE_PREINSTALLED_EIGEN=ON \
+        -DCMAKE_CXX_STANDARD=17 \
+        -DPython_EXECUTABLE=/usr/bin/python${{vars.py-version}}
+
+  - uses: cmake/build
+    with:
+      output-dir: build
+
+  - name: Fix Python build
+    runs: |
+      # Manually fix https://github.com/microsoft/onnxruntime/issues/24570
+      mkdir onnxruntime/capi
+      python setup.py --help # We have to call it like this once to generate the file we need.
+      cp -r build/onnxruntime/* onnxruntime
+
+  - uses: py/pip-build-install
+    with:
+      python: python${{vars.py-version}}
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: microsoft/onnxruntime
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - python-${{vars.py-version}}
+        - py${{vars.py-version}}-pip
+        - py${{vars.py-version}}-${{vars.pypi-package}}
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/pip-check
+      with:
+        python: python${{vars.py-version}}
+    - uses: python/import
+      with:
+        python: python${{vars.py-version}}
+        import: ${{vars.pypi-package}}
+    - runs: |
+        python3 <<'EOF' | grep -F -e "${{package.version}}" -e "CPU"
+        import onnxruntime
+        print(onnxruntime.version)
+        print(onnxruntime.get_device())
+        EOF
