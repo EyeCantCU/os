@@ -76,7 +76,13 @@ func setupCmd() *cobra.Command {
 					},
 				},
 			}, nil)
-			nsgResp, _ := nsgPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to start NSG creation: %v", err)
+			}
+			nsgResp, err := nsgPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to create NSG: %v", err)
+			}
 			log.Printf("Created NSG: %s", *nsgResp.ID)
 
 			// Create Route Table
@@ -99,7 +105,13 @@ func setupCmd() *cobra.Command {
 					},
 				},
 			}, nil)
-			rtResp, _ := rtPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to start route table creation: %v", err)
+			}
+			rtResp, err := rtPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to create route table: %v", err)
+			}
 			log.Printf("Created Route Table: %s", *rtResp.ID)
 
 			// Create VNet
@@ -113,7 +125,13 @@ func setupCmd() *cobra.Command {
 					},
 				},
 			}, nil)
-			vnetResp, _ := vnetPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to start VNet creation: %v", err)
+			}
+			vnetResp, err := vnetPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to create VNet: %v", err)
+			}
 			log.Printf("Created VNet: %s", *vnetResp.ID)
 
 			// Create Subnet and associate NSG and Route Table
@@ -126,7 +144,13 @@ func setupCmd() *cobra.Command {
 					RouteTable:           &armnetwork.RouteTable{ID: rtResp.ID},
 				},
 			}, nil)
-			subnetResp, _ := subnetPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to start subnet creation: %v", err)
+			}
+			subnetResp, err := subnetPoller.PollUntilDone(ctx, nil)
+			if err != nil {
+				log.Fatalf("failed to create subnet: %v", err)
+			}
 			log.Printf("Created Subnet with NSG and Route Table association: %s", *subnetResp.ID)
 
 			log.Println("Azure network setup complete.")
