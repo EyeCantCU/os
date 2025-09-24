@@ -1,10 +1,25 @@
 package:
   name: volsync
   version: "0.13.0"
-  epoch: 0
+  epoch: 2
   description: Asynchronous data replication for Kubernetes volumes
   copyright:
     - license: AGPL-3.0-or-later
+  dependencies:
+    runtime:
+      - acl
+      - openssh
+      - openssh-client
+      - openssh-server
+      - openssl
+      - perl
+      - rsync
+      - stunnel # rclone, restic, syncthing will be added at image level since those are not required at runtime for volsync to work
+
+environment:
+  contents:
+    packages:
+      - rsync
 
 pipeline:
   - uses: git-checkout
@@ -24,7 +39,86 @@ pipeline:
       packages: ./cmd
       output: manager
 
+  - name: "copy mover scripts"
+    runs: |
+      mkdir -p ${{targets.contextdir}}/mover-rclone \
+               ${{targets.contextdir}}/mover-restic \
+               ${{targets.contextdir}}/mover-rsync \
+               ${{targets.contextdir}}/mover-rsync-tls \
+               ${{targets.contextdir}}/mover-syncthing
+
+      # copy rclone scripts
+      cp mover-rclone/active.sh ${{targets.contextdir}}/mover-rclone/
+      chmod a+rx ${{targets.contextdir}}/mover-rclone/*.sh
+
+      # copy restic scripts
+      cp mover-restic/entry.sh ${{targets.contextdir}}/mover-restic/
+      chmod a+rx ${{targets.contextdir}}/mover-restic/*.sh
+
+      # copy rsync(ssh) scripts
+      cp mover-rsync/source.sh ${{targets.contextdir}}/mover-rsync/
+      cp mover-rsync/destination.sh ${{targets.contextdir}}/mover-rsync/
+      cp mover-rsync/destination-command.sh ${{targets.contextdir}}/mover-rsync/
+      chmod a+rx ${{targets.contextdir}}/mover-rsync/*.sh
+
+      mkdir -p "${{targets.contextdir}}/etc/ssh/sshd_config.d" \
+             "${{targets.contextdir}}/usr/local/bin"
+
+      install -m0755 /usr/bin/rrsync "${{targets.contextdir}}/usr/local/bin/rrsync" && \
+
+      cat > "${{targets.contextdir}}/etc/ssh/sshd_config.d/volsync.conf" <<EOF
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      AllowTcpForwarding no
+      X11Forwarding no
+      PermitTunnel no
+      PidFile /tmp/sshd.pid
+      UsePAM no
+      HostKey /etc/ssh/ssh_host_rsa_key
+      EOF
+
+      # copy rsync-tls scripts
+      cp mover-rsync-tls/client.sh ${{targets.contextdir}}/mover-rsync-tls/
+      cp mover-rsync-tls/server.sh ${{targets.contextdir}}/mover-rsync-tls/
+      chmod a+rx ${{targets.contextdir}}/mover-rsync-tls/*.sh
+
+      # copy syncthing scripts + templates
+      cp mover-syncthing/config-template.xml ${{targets.contextdir}}/mover-syncthing/
+      cp mover-syncthing/stignore-template ${{targets.contextdir}}/mover-syncthing/
+      cp mover-syncthing/entry.sh ${{targets.contextdir}}/mover-syncthing/
+      chmod a+r ${{targets.contextdir}}/mover-syncthing/config-template.xml
+      chmod a+r ${{targets.contextdir}}/mover-syncthing/stignore-template
+      chmod a+rx ${{targets.contextdir}}/mover-syncthing/*.sh
+
+  - name: "test"
+    runs: |
+      test -f "${{targets.contextdir}}/etc/ssh/sshd_config.d/volsync.conf"
+      test -x "${{targets.contextdir}}/mover-rclone/active.sh"
+      test -x "${{targets.contextdir}}/mover-restic/entry.sh"
+      test -x "${{targets.contextdir}}/mover-rsync/source.sh"
+      test -x "${{targets.contextdir}}/mover-rsync/destination.sh"
+      test -x "${{targets.contextdir}}/mover-rsync/destination-command.sh"
+      test -x "${{targets.contextdir}}/mover-rsync-tls/client.sh"
+      test -x "${{targets.contextdir}}/mover-rsync-tls/server.sh"
+      test -x "${{targets.contextdir}}/mover-syncthing/entry.sh"
+
 subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream helm charts"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"
+          ln -s ./usr/bin/manager "${{targets.contextdir}}/manager"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
   - name: ${{package.name}}-cli
     description: CLI for volsync
     pipeline:
