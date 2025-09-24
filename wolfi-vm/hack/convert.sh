@@ -9,7 +9,7 @@ EXTRA_REPOS=(
 )
 
 EXTRA_PKGS=(
-    "linux-boot-configuration"
+    "linux-qemu-generic-boot-installed"
     "mattmoor-chainit-init"
 )
 

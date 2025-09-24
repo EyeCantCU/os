@@ -1,0 +1,136 @@
+package:
+  name: camunda-zeebe-8.3
+  version: "8.3.22"
+  epoch: 8 # GHSA-prj3-ccx8-p6x4
+  description: Process Orchestration Framework
+  copyright:
+    - license: Apache-2.0
+    - license: LicenseRef-Zeebe-Community-License-1.1
+      license-path: licenses/ZEEBE-COMMUNITY-LICENSE-1.1.txt
+    - license: LicenseRef-Clarification-On-gRPC-Code-Generation
+      license-path: licenses/Clarification-on-gRPC-code-generation.txt
+  dependencies:
+    provides:
+      - camunda-zeebe=${{package.full-version}}
+    runtime:
+      - libstdc++
+      - openjdk-${{vars.java-version}}-default-jvm
+
+vars:
+  artifact: camunda-zeebe
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - protoc
+  environment:
+    LANG: en_US.UTF-8
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/camunda/camunda
+      tag: ${{package.version}}
+      expected-commit: 9491b7cc2d65f6aff3ad31dd89d23619afbbec47
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties-parent.yaml
+      pom: parent/pom.xml
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+
+      mvn dependency:get -B \
+        -DremoteRepositories="https://artifacts.camunda.com/artifactory/zeebe-io/" \
+        -DgroupId="io.camunda" -DartifactId="${{vars.artifact}}" \
+        -Dversion="${{package.version}}" -Dpackaging="tar.gz" -Dtransitive=false
+
+      mvn dependency:copy -B \
+        -Dartifact="io.camunda:${{vars.artifact}}:${{package.version}}:tar.gz" \
+        -DoutputDirectory=./ \
+        -Dmdep.stripVersion=true
+
+      ./mvnw -B -am -pl dist package -T1C -D skipChecks -D skipTests
+
+      mkdir -p ${{targets.destdir}}/usr/share/java
+      unzip -d ${{targets.destdir}}/usr/share/java dist/target/${{vars.artifact}}-*.zip
+
+      # Remove windows jar/DLLs from boringssl
+      find ${{targets.destdir}}/usr/share/java/ -name '*boringssl*windows*' -exec rm {} \;
+
+      mv ${{targets.destdir}}/usr/share/java/${{vars.artifact}}-* ${{targets.destdir}}/usr/share/java/${{vars.artifact}}
+
+      mkdir -p ${{targets.destdir}}/usr/share/java/${{vars.artifact}}/data
+      mkdir -p ${{targets.destdir}}/usr/share/java/${{vars.artifact}}/logs
+
+      # symlink every file in the bin directory to /usr/bin
+      for file in "${{targets.destdir}}"/usr/share/java/${{vars.artifact}}/bin/*; do
+        ln -sf /usr/share/java/${{vars.artifact}}/bin/$(basename $file) ${{targets.destdir}}/usr/bin/$(basename $file)
+      done
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Provides compatibility with Camunda's Zeebe image
+    dependencies:
+      provides:
+        - ${{vars.artifact}}-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - tini
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/bin
+          mkdir -p "${{targets.contextdir}}"/usr/local/bin
+          install -Dm755 docker/utils/startup.sh "${{targets.contextdir}}"/usr/bin/startup.sh
+          ln -sf /usr/bin/startup.sh ${{targets.contextdir}}/usr/local/bin/startup.sh
+          ln -sf /usr/share/java/${{vars.artifact}} ${{targets.contextdir}}/usr/local/zeebe
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: ${{vars.artifact}}-compat
+            real-pkg-name: ${{subpkg.name}}
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - "operate-"
+  git:
+    tag-filter-prefix: 8.3.
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+  pipeline:
+    # https://github.com/camunda/camunda/blob/main/zeebe/docker/utils/startup.sh
+    - name: "test gateway"
+      uses: test/daemon-check-output
+      with:
+        start: "/usr/local/zeebe/bin/gateway"
+        timeout: 60
+        expected_output: |
+          Started StandaloneGateway
+          started on port
+    - name: "test broker"
+      uses: test/daemon-check-output
+      with:
+        start: "/usr/local/zeebe/bin/broker"
+        timeout: 60
+        expected_output: |
+          TCP server listening for connections
+          Started cluster membership service
+          Started messaging service
+          Server successfully bootstrapped
+          All partitions are installed
+    - name: "test restore"
+      runs: |
+        set -e
+        /usr/local/zeebe/bin/restore | grep "No backup store configured, cannot restore from backup."

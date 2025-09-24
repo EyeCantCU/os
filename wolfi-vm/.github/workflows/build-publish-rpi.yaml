@@ -1,0 +1,149 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Build Raspberry Pi Images and Upload to GCS"
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      notify-slack:
+        type: boolean
+        required: false
+        default: false
+        description: Notify slack when the workflow finishes.
+      notify-slack-success:
+        type: boolean
+        required: false
+        default: true
+        description: Send notifications on success as well as failure.
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+# Allow only one workflow run at a time
+concurrency:
+  group: 'rpi-build-gcs'
+  cancel-in-progress: false
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M%S") >> "$GITHUB_OUTPUT"
+
+  rpi-build-upload:
+    runs-on: ubuntu-8-core
+    needs:
+      - init
+
+    permissions:
+      id-token: write # for GCS authentication
+      contents: read # read repo
+
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_CLOUD: "rpi"
+
+    steps:
+      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit
+
+      - uses: chainguard-dev/actions/apt-faster@cd899cc96227b82170571cad1c3d6378d8cba678 # v1.4.15
+
+      - name: Checkout source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # Setup authentication for package registry
+      - uses: chainguard-dev/setup-chainctl@be0acd273acf04bfdf91f51198327e719f6af978 # v0.4.0
+        with:
+          identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+
+      - name: Get apk.cgr.dev token
+        run: |
+          chainctl auth login --identity=ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20 --audience=apk.cgr.dev
+          cred=$(chainctl auth token --audience=apk.cgr.dev)
+          echo "HTTP_AUTH=basic:apk.cgr.dev:user:$cred" >> $GITHUB_ENV
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Install system dependencies
+        run: |
+          make install-deps
+
+      - name: Clean previous builds
+        run: |
+          make clean
+
+      - name: Build apkoaas tool
+        run: |
+          make apkoaas
+
+      - name: Build RPi builder
+        run: |
+          make builder ARCH=aarch64 BUILDER=builder-rpi
+
+      - name: Build RPi Base Image
+        run: |
+          echo "Building Raspberry Pi base image..."
+          make disk-rpi-generic-base ARCH=aarch64 BUILDER=builder-rpi
+          if [ ! -f "output/aarch64/rpi-generic-base/disk.raw" ]; then
+            echo "Error: Base image was not created"
+            exit 1
+          fi
+
+      - name: Build RPi Docker Image
+        run: |
+          echo "Building Raspberry Pi Docker image..."
+          make disk-rpi-generic-docker ARCH=aarch64 BUILDER=builder-rpi
+          if [ ! -f "output/aarch64/rpi-generic-docker/disk.raw" ]; then
+            echo "Error: Docker image was not created"
+            exit 1
+          fi
+
+      - name: "Setup GCP Creds for GCS Publishing"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: 'projects/212178706475/locations/global/workloadIdentityPools/ci-pool/providers/ci-provider'
+          service_account: 'github-ci@wolfi-vm.iam.gserviceaccount.com'
+      - name: "Install GCP Deps"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: wolfi-vm
+
+      - name: "Configure gcloud"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          gcloud config set storage/parallel_composite_upload_enabled True
+
+      - name: "Publish rpi images to GCS"
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          make -j$(nproc) --output-sync=recurse publish-rpi PREFIX=chainguard PUBLISH_TARGET=staging ARCH=aarch64 BUILDER=builder-rpi
+
+      - uses: './.github/actions/notify-slack'
+        if: ${{ (inputs.notify-slack-success || failure()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
+          title: ${{ github.workflow }} ${{ job.status }}
+          message-color: ${{ job.status == 'success' && '#3fb950' || '#f85149'}}
+          text: |
+            For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Or run ./hack/fetch-test-result -c ${{ env.VM_CLOUD }} -r ${{ github.run_id }} -a ${{matrix.arch}}
+          unfurl-links: true
