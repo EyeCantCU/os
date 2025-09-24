@@ -129,13 +129,9 @@ func TestGenerateCISBenchmarkComplianceReport(t *testing.T) {
 	}
 	t.Logf("CIS benchmark compliance report generated: %s", reportFile)
 
-	// Store test artifacts. Keep the profile used for scanning attached
-	// to the results only. The guide itself is profile-agnostic.
+	// Store test artifacts.
 	meta := map[string]any{"scap_profile": profileName}
 	var content []byte
-
-	content, err = os.ReadFile(ssgFile)
-	artifacts.File(t, files.ComplianceSCAPSecurityGuide, content, err, nil)
 
 	content, err = os.ReadFile(resultsFile)
 	artifacts.File(t, files.ComplianceXMLResults, content, err, meta)
