@@ -1,8 +1,10 @@
 package:
-  name: beats-fips-9.1
-  version: "9.1.4"
+  name: beats-8.17
+  version: "8.17.10"
   epoch: 0
-  description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
+  description: >
+    The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (logs, metrics, network data). They send the data to Elasticsearch directly or via Logstash.
+
   resources:
     cpu: 16
     memory: 32Gi
@@ -20,7 +22,6 @@ environment:
   contents:
     packages:
       - mage
-      - openssl-config-fipshardened
       - rsync
 
 pipeline:
@@ -28,43 +29,33 @@ pipeline:
     with:
       repository: https://github.com/elastic/beats
       tag: v${{package.version}}
-      expected-commit: c50e2cc4adfaed4367b3fba44d27db0222123cec
-
-  - uses: go/bump
-    with:
-      deps: |-
-        github.com/go-viper/mapstructure/v2@v2.4.0
-        github.com/docker/docker@v28.3.3
+      expected-commit: fbc92566fe827bd2cee710f02287694bba63efdd
 
 subpackages:
-  - name: auditbeat-fips-${{vars.major-minor-version}}
+  - name: auditbeat-${{vars.major-minor-version}}
     dependencies:
       provides:
-        - auditbeat-fips=${{package.full-version}}
+        - auditbeat=${{package.full-version}}
     pipeline:
-      - uses: go/build
-        with:
-          go-package: go-fips-md5
-          ldflags: |
-            -X github.com/elastic/beats/v7/libbeat/version.commit=$(git rev-parse HEAD)
-            -X github.com/elastic/beats/v7/libbeat/version.buildTime=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
-          output: auditbeat
-          packages: ./auditbeat
-      - runs: |
+      - name: Build auditbeat
+        runs: |
           mkdir -p \
             ${{targets.subpkgdir}}/usr/bin \
             ${{targets.subpkgdir}}/usr/share/auditbeat \
             ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d \
             ${{targets.subpkgdir}}/usr/share/auditbeat/data \
-            ${{targets.subpkgdir}}/usr/share/auditbeat/logs \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/logs
 
           cd auditbeat
+
+          mage build
           mage fields
 
           cp -r auditbeat.docker.yml auditbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
           cp module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
           mv ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.docker.yml ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.yml
 
+          mv auditbeat ${{targets.subpkgdir}}/usr/bin/
           ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
 
           # Match the dashboards on the counterpart image
@@ -97,12 +88,8 @@ subpackages:
             - wait-for-it
         environment:
           ELASTICSEARCH_HOSTS: localhost:9200
-          ES_JAVA_HOME: /usr/lib/jvm/java-24-openjdk
-          NODE_OPTIONS: "--openssl-config=/dev/null"
+          ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
       pipeline:
-        - uses: test/go-fips-check
-          with:
-            package-match: "auditbeat-fips-${{vars.major-minor-version}}"
         - name: Test build
           runs: auditbeat version | grep ${{package.version}}
         - name: Test exporting
@@ -158,8 +145,53 @@ subpackages:
               cd /usr/share/auditbeat
               auditbeat setup
               auditbeat test output
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: auditbeat
+            real-pkg-name: ${{subpkg.name}}
 
-  - name: metricbeat-fips-${{vars.major-minor-version}}
+  - name: auditbeat-${{vars.major-minor-version}}-oci-entrypoint
+    dependencies:
+      provides:
+        - auditbeat-oci-entrypoint=${{package.full-version}}
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd auditbeat
+          sed 's/{{ \.BeatName }}/auditbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      environment:
+        contents:
+          packages:
+            - auditbeat-${{vars.major-minor-version}}
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: stat /usr/local/bin/docker-entrypoint
+        - name: Test auditbeat startup through docker entrypoint
+          uses: test/daemon-check-output
+          working-directory: /usr/share/auditbeat
+          with:
+            start: /usr/local/bin/docker-entrypoint --environment container > /dev/null 2>&1 &
+            # auditbeat container requires privileged access...just confirming this entrypoint would work
+            expected_output: |
+              Syscall filter successfully installed
+            error_strings: |
+              Error:
+              denied
+              "not found"
+              "no such file or directory"
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: auditbeat-oci-entrypoint
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: metricbeat-${{vars.major-minor-version}}
     dependencies:
       runtime:
         - bash
@@ -170,7 +202,7 @@ subpackages:
         - findutils
         - procps
       provides:
-        - metricbeat-fips=${{package.full-version}}
+        - metricbeat=${{package.full-version}}
     pipeline:
       - uses: go/bump
         with:
@@ -180,7 +212,6 @@ subpackages:
         with:
           packages: ./x-pack/metricbeat
           output: metricbeat
-          go-package: go-fips
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/modules.d
@@ -197,7 +228,7 @@ subpackages:
           mage dashboards
           mv build/kibana "${{targets.subpkgdir}}"/usr/share/metricbeat/
 
-          ln -sf /usr/bin/metricbeat  "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat
+          ln -sf /usr/bin/metricbeat "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat
           mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/data "${{targets.subpkgdir}}"/usr/share/metricbeat/logs
           chown -R root:root "${{targets.subpkgdir}}"/usr/share/metricbeat && \
             find "${{targets.subpkgdir}}"/usr/share/metricbeat -type d -exec chmod 0755 {} \; && \
@@ -208,16 +239,36 @@ subpackages:
       - uses: strip
     test:
       pipeline:
-        - uses: test/go-fips-check
-          with:
-            package-match: "metricbeat-fips-${{vars.major-minor-version}}"
         - runs: |
             metricbeat version
             cd /usr/share/metricbeat
             metricbeat modules list
             metricbeat --help
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: metricbeat
+            real-pkg-name: ${{subpkg.name}}
 
-  - name: filebeat-fips-${{vars.major-minor-version}}
+  - name: metricbeat-${{vars.major-minor-version}}-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd metricbeat
+          sed 's/{{ \.BeatName }}/metricbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
+  - name: filebeat-${{vars.major-minor-version}}
     dependencies:
       runtime:
         - bash
@@ -228,13 +279,12 @@ subpackages:
         - findutils
         - procps
       provides:
-        - filebeat-fips=${{package.full-version}}
+        - filebeat=${{package.full-version}}
     pipeline:
       - uses: go/build
         with:
           packages: ./filebeat
           output: filebeat
-          go-package: go-fips
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d
@@ -247,8 +297,7 @@ subpackages:
           cp README.md "${{targets.subpkgdir}}"/usr/share/filebeat/README.md
           mv ../x-pack/filebeat/module/ "${{targets.subpkgdir}}"/usr/share/filebeat/
           mv ../x-pack/filebeat/modules.d/ "${{targets.subpkgdir}}"/usr/share/filebeat/
-
-          ln -sf /usr/bin/filebeat  "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat
+          ln -sf /usr/bin/filebeat "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat
           mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/data "${{targets.subpkgdir}}"/usr/share/filebeat/logs
           chown -R root:root "${{targets.subpkgdir}}"/usr/share/filebeat && \
             find "${{targets.subpkgdir}}"/usr/share/filebeat -type d -exec chmod 0755 {} \; && \
@@ -259,33 +308,44 @@ subpackages:
       - uses: strip
     test:
       pipeline:
-        - uses: test/go-fips-check
-          with:
-            package-match: "filebeat-fips-${{vars.major-minor-version}}"
         - runs: |
             filebeat version
             cd /usr/share/filebeat
             filebeat modules list
             filebeat --help
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: filebeat
+            real-pkg-name: ${{subpkg.name}}
 
-  - name: heartbeat-fips-${{vars.major-minor-version}}
+  - name: filebeat-${{vars.major-minor-version}}-oci-entrypoint
     dependencies:
       runtime:
-        - bash
-        - gawk
-        - sed
-        - coreutils
-        - grep
-        - findutils
-        - procps
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd filebeat
+          sed 's/{{ \.BeatName }}/filebeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
+  - name: heartbeat-${{vars.major-minor-version}}
+    dependencies:
       provides:
-        - heartbeat-fips=${{package.full-version}}
+        - heartbeat=${{package.full-version}}
     pipeline:
       - uses: go/build
         with:
           packages: ./x-pack/heartbeat
           output: heartbeat
-          go-package: go-fips
       - name: Build heartbeat
         runs: |
           mkdir -p \
@@ -297,6 +357,7 @@ subpackages:
           cd heartbeat
 
           mage fields
+
           ln -sf /usr/bin/heartbeat "${{targets.subpkgdir}}"/usr/share/heartbeat/heartbeat
 
           cp -r heartbeat.docker.yml heartbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/heartbeat/
@@ -327,11 +388,7 @@ subpackages:
             - sudo
             - openssl
       pipeline:
-        - uses: test/go-fips-check
-          with:
-            package-match: "heartbeat-fips-${{vars.major-minor-version}}"
         - runs: |
-            set -eu -o pipefail
             cd /usr/share/heartbeat
             heartbeat export config >/dev/null
             heartbeat test config
@@ -384,8 +441,12 @@ subpackages:
                 cat /tmp/nginx.log
                 exit 1
               fi
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: heartbeat
+            real-pkg-name: ${{subpkg.name}}
 
-  - name: heartbeat-fips-${{vars.major-minor-version}}-oci-entrypoint
+  - name: heartbeat-${{vars.major-minor-version}}-oci-entrypoint
     dependencies:
       runtime:
         - tini
@@ -404,6 +465,10 @@ subpackages:
           runs: |
             stat /usr/local/bin/docker-entrypoint
 
+test:
+  pipeline:
+    - uses: test/emptypackage
+
 update:
   enabled: true
   ignore-regex-patterns:
@@ -413,10 +478,5 @@ update:
     - .*\+build[0-9]*$
   github:
     strip-prefix: v
-    tag-filter: v9.1.
+    tag-filter: v8.17.
     identifier: elastic/beats
-
-# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
-test:
-  pipeline:
-    - uses: test/emptypackage
