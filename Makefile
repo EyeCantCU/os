@@ -319,7 +319,7 @@ publish-vmware: $(foreach name,$(disks_vmware),publish-$(name))
 $(foreach name,$(disks_vmware),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk
+$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk $(ARCH_OUT_D)/%/disk-flat.vmdk
 	@mkdir -p $(dir $@)
 	@echo "Publishing VMWARE images for $* ($(ARCH))"
 	@artifact_name="$(VMWARENAME).raw"; \
@@ -330,7 +330,11 @@ $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_
 	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
 	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
 	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	@artifact_name="$(VMWARENAME)-flat.vmdk"; \
+    gcs_vmdk_flat_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+    echo "Uploading $(dir $@)disk-flat.vmdk to $$gcs_vmdk_flat_path"; \
+    gcloud storage cp "$(dir $@)disk-flat.vmdk" "$$gcs_vmdk_flat_path"
+	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"vmdk\": \"$$gcs_vmdk_flat_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 .PHONY: publish-rpi
 publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
@@ -399,7 +403,7 @@ show-vars:
 	@echo ALL_DISKS=$(ALL_DISKS)
 	@echo names=$(names)
 
-.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
+.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk-flat.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%/build.yaml builder/ovmf-%.fd
 
 arches = aarch64 x86_64
