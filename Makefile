@@ -107,6 +107,10 @@ $(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
 %.qcow2: %.raw
 	./tools/convert-image $< $@
 
+# VMware-specific VMDK conversion (monolithicFlat for ESXi compatibility)
+$(ARCH_OUT_D)/vmware-%/disk.vmdk: $(ARCH_OUT_D)/vmware-%/disk.raw
+	./tools/convert-image --vmdk-format monolithicFlat $< $@
+
 %.vmdk: %.raw
 	./tools/convert-image $< $@
 
