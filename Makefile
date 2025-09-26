@@ -199,26 +199,26 @@ ifeq ($(PUBLISH_TARGET),dev)
   AZRESOURCEGROUP = chainguard-vms
   GCPPROJECT = $(shell gcloud config get project)
   GCPBUCKET = $(GCPPROJECT)
-  QEMUBUCKET = gs://$(GCPPROJECT)
-  VMWAREBUCKET = gs://$(GCPPROJECT)
-  RPIBUCKET = gs://$(GCPPROJECT)
+  QEMU_GCSBUCKET = gs://$(GCPPROJECT)
+  VMWARE_GCSBUCKET = gs://$(GCPPROJECT)
+  RPI_GCSBUCKET = gs://$(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
   AZGALLERY = chainguard_vms_staging
   AZRESOURCEGROUP = chainguard-vms-staging
   GCPPROJECT = staging-vms-h8zx
   GCPBUCKET = wolfi-vm-images-workloads
-  QEMUBUCKET = gs://wolfi-vm-images-workloads
-  VMWAREBUCKET = gs://wolfi-vm-images-workloads
-  RPIBUCKET = gs://wolfi-vm-images-workloads
+  QEMU_GCSBUCKET = gs://wolfi-vm-images-workloads
+  VMWARE_GCSBUCKET = gs://wolfi-vm-images-workloads
+  RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
   AZGALLERY = eap_chainguard_vms
   AZRESOURCEGROUP = chainguard-vms-prod
   GCPPROJECT = chainguard-vms-eap
   GCPBUCKET = wolfi-vm-images-workloads
-  QEMUBUCKET = gs://chainguard-vms-eap
-  VMWAREBUCKET = gs://chainguard-vms-eap
-  RPIBUCKET = gs://wolfi-vm-images-workloads
+  QEMU_GCSBUCKET = gs://chainguard-vms-eap
+  VMWARE_GCSBUCKET = gs://chainguard-vms-eap
+  RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),production)
   AZGALLERY = chainguard_vms
   AZRESOURCEGROUP = chainguard-vms-prod
@@ -226,12 +226,14 @@ else ifeq ($(PUBLISH_TARGET),production)
 # TODO: Move production workstation images to the chainguard-workstations project.
   GCPPROJECT = wolfi-vm
   GCPBUCKET = wolfi-vm-images-workloads
-  QEMUBUCKET = gs://wolfi-vm-images-workloads
-  VMWAREBUCKET = gs://wolfi-vm-images-workloads
-  RPIBUCKET = gs://wolfi-vm-images-workloads
+  QEMU_GCSBUCKET = gs://wolfi-vm-images-workloads
+  VMWARE_GCSBUCKET = gs://wolfi-vm-images-workloads
+  RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
 else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
+QEMU_AZSTORAGEACCOUNT = chainguardvms$(PUBLISH_TARGET)
+QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
 
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
@@ -296,64 +298,47 @@ $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
 publish-qemu: $(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name)))
 $(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name))): publish-qemu-%: $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: QEMUNAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
 $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/disk.raw $(ARCH_OUT_D)/generic-%/disk.qcow2
 	@mkdir -p $(dir $@)
-	@echo "Publishing QEMU images for $* ($(ARCH))"
-	@artifact_name="$(QEMUNAME).raw"; \
-	gcs_raw_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
-	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
-	@artifact_name="$(QEMUNAME).qcow2"; \
-	gcs_qcow2_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.qcow2 to $$gcs_qcow2_path"; \
-	gcloud storage cp "$(dir $@)disk.qcow2" "$$gcs_qcow2_path"
-	@echo "Generating signed URLs for uploaded artifacts"; \
-	gcs_raw_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).raw"; \
-	gcs_qcow2_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).qcow2"; \
-	raw_signed_url=$$(gcloud storage sign-url "$$gcs_raw_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
-	qcow2_signed_url=$$(gcloud storage sign-url "$$gcs_qcow2_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"qcow2\": \"$$gcs_qcow2_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"qcow2_signed_url\": \"$$qcow2_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	$(call capture_stdout,$@, ./tools/generic-image-upload \
+		--name generic-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--gcs-bucket $(QEMU_GCSBUCKET) \
+		--azure-account $(QEMU_AZSTORAGEACCOUNT) \
+		--azure-container $(QEMU_AZSTORAGECONTAINER) \
+		--raw-path $(dir $@)disk.raw \
+		--qcow2-path $(dir $@)disk.qcow2 \
+		--signed-urls)
 
 .PHONY: publish-vmware
 publish-vmware: $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name)))
 $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name))): publish-vmware-%: $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
 $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.vmdk $(ARCH_OUT_D)/vmware-%/disk-flat.vmdk
 	@mkdir -p $(dir $@)
-	@echo "Publishing VMWARE images for $* ($(ARCH))"
-	@artifact_name="$(VMWARENAME).raw"; \
-	gcs_raw_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
-	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
-	@artifact_name="$(VMWARENAME).vmdk"; \
-	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	sed -i "s/disk-flat.vmdk/$(VMWARENAME)-flat.vmdk/" $(dir $@)disk.vmdk; \
-	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
-	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
-	@artifact_name="$(VMWARENAME)-flat.vmdk"; \
-	gcs_vmdk_flat_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk-flat.vmdk to $$gcs_vmdk_flat_path"; \
-	gcloud storage cp "$(dir $@)disk-flat.vmdk" "$$gcs_vmdk_flat_path"
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"vmdk\": \"$$gcs_vmdk_flat_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	$(call capture_stdout,$@, ./tools/generic-image-upload \
+		--name vmware-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--gcs-bucket $(VMWARE_GCSBUCKET) \
+		--raw-path $(dir $@)disk.raw \
+		--vmdk-path $(dir $@)disk.vmdk \
+		--vmdk-flat-path $(dir $@)disk-flat.vmdk)
 
 .PHONY: publish-rpi
 publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
 $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name))): publish-rpi-%: $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: RPINAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
 $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-generic-%/disk.raw
 	@mkdir -p $(dir $@)
-	@echo "Publishing RPI images for $* ($(ARCH))"
-	@artifact_name="$(RPINAME).raw"; \
-	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
-	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
-	@echo "Generating signed URLs for uploaded artifacts"; \
-	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$(RPINAME).raw"; \
-	raw_signed_url=$$(gcloud storage sign-url "$$gcs_raw_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	$(call capture_stdout,$@, ./tools/generic-image-upload \
+		--name rpi-generic-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--gcs-bucket $(RPI_GCSBUCKET) \
+		--raw-path $(dir $@)disk.raw \
+		--signed-urls)
 
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
