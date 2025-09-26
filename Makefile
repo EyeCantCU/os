@@ -328,12 +328,13 @@ $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_
 	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
 	@artifact_name="$(VMWARENAME).vmdk"; \
 	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	sed -i "s/disk-flat.vmdk/$(VMWARENAME)-flat.vmdk/" $(dir $@)disk.vmdk; \
 	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
 	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
 	@artifact_name="$(VMWARENAME)-flat.vmdk"; \
-    gcs_vmdk_flat_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-    echo "Uploading $(dir $@)disk-flat.vmdk to $$gcs_vmdk_flat_path"; \
-    gcloud storage cp "$(dir $@)disk-flat.vmdk" "$$gcs_vmdk_flat_path"
+	gcs_vmdk_flat_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	echo "Uploading $(dir $@)disk-flat.vmdk to $$gcs_vmdk_flat_path"; \
+	gcloud storage cp "$(dir $@)disk-flat.vmdk" "$$gcs_vmdk_flat_path"
 	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"vmdk\": \"$$gcs_vmdk_flat_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 .PHONY: publish-rpi
