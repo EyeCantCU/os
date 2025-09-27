@@ -1,7 +1,7 @@
 package:
-  name: beats-fips-8
-  version: "8.19.4"
-  epoch: 0
+  name: beats-fips-9.0
+  version: "9.0.7"
+  epoch: 1
   description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
   resources:
     cpu: 16
@@ -11,10 +11,10 @@ package:
     - license: Elastic-2.0
 
 var-transforms:
-  - from: ${{package.name}}
-    match: ^beats-fips-(\d).*
-    replace: $1
-    to: beats_version
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
 
 environment:
   contents:
@@ -28,10 +28,17 @@ pipeline:
     with:
       repository: https://github.com/elastic/beats
       tag: v${{package.version}}
-      expected-commit: 4a47d3ca0f695b7d63b05a965901afca5052ff0d
+      expected-commit: 08108dcd073534dcac76a039d643100ed0ade7a0
+      cherry-picks: |
+        9.0/01d2ce01a27355482d6f97428993e62c9967da15: Upgrade docker to 28.x, fixes GHSA-4vq8-7jfc-9cvp
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-viper/mapstructure/v2@v2.4.0
 
 subpackages:
-  - name: auditbeat-fips-${{vars.beats_version}}
+  - name: auditbeat-fips-${{vars.major-minor-version}}
     dependencies:
       provides:
         - auditbeat-fips=${{package.full-version}}
@@ -84,18 +91,19 @@ subpackages:
           packages:
             - bash
             - curl
-            - elasticsearch-${{vars.beats_version}}
+            - elasticsearch-${{vars.major-minor-version}}
             - jq
-            - kibana-${{vars.beats_version}}
+            - kibana-${{vars.major-minor-version}}
             - sudo
             - wait-for-it
         environment:
           ELASTICSEARCH_HOSTS: localhost:9200
-          ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+          ES_JAVA_HOME: /usr/lib/jvm/java-24-openjdk
+          NODE_OPTIONS: "--openssl-config=/dev/null"
       pipeline:
         - uses: test/go-fips-check
           with:
-            package-match: "auditbeat-fips-${{vars.beats_version}}"
+            package-match: "auditbeat-fips-${{vars.major-minor-version}}"
         - name: Test build
           runs: auditbeat version | grep ${{package.version}}
         - name: Test exporting
@@ -113,61 +121,46 @@ subpackages:
             auditbeat keystore list | grep FOO
             auditbeat keystore remove FOO | grep "successfully removed key: FOO"
         - name: Test auditbeat setup and test
-          working-directory: /usr/share/auditbeat
-          runs: |
-            set -eu -o pipefail
-            chown -R elasticsearch:root /usr/share/elasticsearch
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              chown -R elasticsearch:root /usr/share/elasticsearch
+              touch /tmp/elasticsearch.pid
+              chown -R elasticsearch:root /tmp/elasticsearch.pid
 
-            # Start up Elasticsearch with no username/password
-            sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
-              -Ediscovery.type=single-node \
-              -Expack.security.enabled=false \
-              -p /tmp/elasticsearch.pid > {{package.name}}.log 2>&1 &
+              # Start up Elasticsearch with no username/password
+              sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+                -Ediscovery.type=single-node \
+                -Expack.security.enabled=false \
+                -p /tmp/elasticsearch.pid
 
-            wait-for-it localhost:9200 --timeout=60
+              wait-for-it localhost:9200 --timeout=120
 
-            # Confirm Elasticsearch status before continuing
-            es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
-            echo "Elasticsearch status: $es_status"
+              # Confirm Elasticsearch status before continuing
+              curl --retry 10 -sf -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status' | grep "green"
 
-            timer_start=$(date +%s)
-            while [ $es_status != "green" ]
-            do
-              timer_now=$(date +%s)
-              es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
-              echo "Elasticsearch status: $es_status"
-              if [ $(( timer_now - timer_start )) -gt 60 ]
-              then
-                echo "Timed out waiting for Elasticsearch!"
-                exit 1
-              fi
-              sleep 2
-            done
+              echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+            start: /usr/share/kibana/bin/kibana --config kibana.yml --allow-root
+            expected_output: |
+              http server running
+              Task Manager is healthy
+              Kibana is now available
+            error_strings: |
+              FAIL
+              FATAL
+              Traceback.*most.recent.call
+              Exception in thread
+              java.lang.*Exception
+              Gem::MissingSpecError
+              command not found
+            timeout: 120
+            post: |
+              wait-for-it localhost:5601 --timeout=120
+              cd /usr/share/auditbeat
+              auditbeat setup
+              auditbeat test output
 
-
-            # prevent node from running in FIPS mode, otherwise kibana will need to be run in FIPS mode too
-            # and we don't seem to have a license for that.
-            export NODE_OPTIONS="--openssl-config=/dev/null"
-
-            # Run Kibana
-            echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
-            /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
-            wait-for-it localhost:5601 --timeout=60
-
-            # Test auditbeat setup with default Elasticsearch and Kibana services running
-            for try in $(seq 1 5)
-            do
-              if ! auditbeat setup
-              then
-                sleep 5
-              else
-                break
-              fi
-            done
-
-            auditbeat test output
-
-  - name: metricbeat-fips-${{vars.beats_version}}
+  - name: metricbeat-fips-${{vars.major-minor-version}}
     dependencies:
       runtime:
         - bash
@@ -218,14 +211,14 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
           with:
-            package-match: "metricbeat-fips-${{vars.beats_version}}"
+            package-match: "metricbeat-fips-${{vars.major-minor-version}}"
         - runs: |
             metricbeat version
             cd /usr/share/metricbeat
             metricbeat modules list
             metricbeat --help
 
-  - name: filebeat-fips-${{vars.beats_version}}
+  - name: filebeat-fips-${{vars.major-minor-version}}
     dependencies:
       runtime:
         - bash
@@ -269,14 +262,14 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
           with:
-            package-match: "filebeat-fips-${{vars.beats_version}}"
+            package-match: "filebeat-fips-${{vars.major-minor-version}}"
         - runs: |
             filebeat version
             cd /usr/share/filebeat
             filebeat modules list
             filebeat --help
 
-  - name: heartbeat-fips-${{vars.beats_version}}
+  - name: heartbeat-fips-${{vars.major-minor-version}}
     dependencies:
       runtime:
         - bash
@@ -337,7 +330,7 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
           with:
-            package-match: "heartbeat-fips-${{vars.beats_version}}"
+            package-match: "heartbeat-fips-${{vars.major-minor-version}}"
         - runs: |
             set -eu -o pipefail
             cd /usr/share/heartbeat
@@ -383,17 +376,15 @@ subpackages:
               # kill the nginx processes
               pkill nginx
               if ! grep "/test\\.html" /tmp/nginx.log ; then
-                echo "Heartbeat http request not found in nginx log:"
-                cat /tmp/nginx.log
+                echo "Heartbeat http request not found in nginx log"
                 exit 1
               fi
               if ! grep "/test-tls\\.html" /tmp/nginx.log ; then
-                echo "Heartbeat https request not found in nginx log:"
-                cat /tmp/nginx.log
+                echo "Heartbeat https request not found in nginx log"
                 exit 1
               fi
 
-  - name: heartbeat-fips-${{vars.beats_version}}-oci-entrypoint
+  - name: heartbeat-fips-${{vars.major-minor-version}}-oci-entrypoint
     dependencies:
       runtime:
         - tini
@@ -421,7 +412,7 @@ update:
     - .*\+build[0-9]*$
   github:
     strip-prefix: v
-    tag-filter: v8.
+    tag-filter: v9.0.
     identifier: elastic/beats
 
 # Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
