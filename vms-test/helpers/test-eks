@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2039,SC2166,SC3043,SC2317,SC2329
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+
 VERBOSITY=0
 TEMP_D=""
 DEF_VERSION="1.32"
@@ -12,30 +15,6 @@ AWS_REGION=${AWS_REGION:-$DEF_AWS_REGION}
 
 TEARDOWN_NODEGROUP=""
 CLUSTER_NAME=""
-
-stderr() { echo "$@" 1>&2; }
-failrc() { local rc=$1; shift; stderr "$@"; exit "$rc"; }
-fail() { local r=$?;  [ "$r" -eq 0 ] && r=1; failrc "$r" "$@"; }
-
-parse_awspubins() {
-    local i="" f="" n=0
-    for i in "$@"; do
-        if [ -d "$i" ]; then
-            for f in "$i"/*.json; do
-                dump_awspubin "$f" || { stderr "failed reading $f in $i"; return 1; }
-                n=$((n+1))
-            done
-        elif [ -f "$i" ]; then
-            dump_awspubin "$i" || { stderr "failed reading $f"; return 1; }
-            n=$((n+1))
-        else
-            stderr "$f: not a file"
-            return 1
-        fi
-    done
-    [ "$n" -ne 0 ] || { stderr "did not process any files"; return 1; }
-    return 0
-}
 
 Usage_dump_awspubin() {
     cat <<EOF
@@ -56,31 +35,6 @@ Usage: ${0##*/} dump-awspubin awspubfile
       - localname: (e.g. aws-docker-dev)
 
 EOF
-}
-
-dump_awspubin() {
-    local f="$1" out="" arch="" localname=""
-    out=$(jq -r '.images | to_entries[] | . as $entry | $entry.value |
-        to_entries[] | "\(.key) \(.value) \($entry.key)"' < "$f")
-    localname="${f##*/}"
-    localname="${localname/.json/}"
-    # shellcheck disable=SC2162
-    echo "$out" |
-        while read region ami name ; do
-            # 'name' looks like chainguard-docker-x86_64-20250501-1545
-            case "$name" in
-                *-arm64-*)
-                    arch=aarch64
-                    family=${name%-arm64-*}
-                    ;;
-                *-x86_64-*)
-                    arch=x86_64
-                    family=${name%-x86_64-*}
-                    ;;
-                *) stderr "could not find arch in $name"; return 1;;
-            esac
-            echo "$region $ami $arch $family $localname"
-        done
 }
 
 Usage_get_pubin_region_ami() {
@@ -112,9 +66,9 @@ get_pubin_region_ami() {
     tmpf && pfile="$_RET" || return 1
     parse_awspubins "$@" > "$pfile" ||
         { stderr "Failed to parse aws pubins '$*'"; return 1; }
-    local region ami arch family localname found="" fregion=""
+    local region ami family found="" fregion=""
     # shellcheck disable=SC2162
-    while read region ami arch family localname; do
+    while read region ami _ family _; do
         case "$family" in
             # match eks-X.Y-dev
             *eks-[0-9].[0-9]*-dev)
@@ -150,48 +104,9 @@ cleanup() {
     [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
 }
 
-log() {
-    local now=""
-    now=$(date '+%Y/%m/%d %H:%M:%S')
-    [ -z "$LOG" ] || echo "$now" "$@" >> "$LOG"
-    stderr "$now" "$@"
-}
-
 debug() {
     [ "$VERBOSITY" -ge 1 ] || return 0
     log "[DEBUG]" "$@"
-}
-
-# vr(cmd) - run cmd, log execution and result. stdout and stderr unmodified.
-vr() {
-    local rc="" sstart=$SECONDS
-    log "execute: $*"
-    "$@"
-    rc=$?
-    log ":: exit $rc [$((SECONDS-sstart))s]"
-    return "$rc"
-}
-
-# vrl(output, cmd) - verbose run log.
-#   run cmd with output to output.stdout and output.stderr
-vrl() {
-    local output="$1" rc="" sstart=$SECONDS
-    shift
-    log "execute: $*"
-    "$@" >"$output.stdout" 2>"$output.stderr"
-    rc=$?
-    log ":: exit $rc [$((SECONDS-sstart))s]"
-    return "$rc"
-}
-
-# rq(cmd) - run cmd quietly unless it fails
-rq() {
-    local rc="" out=""
-    out=$("$@" 2>&1) && return 0
-    rc=$?
-    stderr "failed [$rc]: $*"
-    printf "%s\n" "$out" | sed -e 's,^,> ,' 1>&2
-    return "$rc"
 }
 
 Usage_cluster_list() {
@@ -545,6 +460,8 @@ run_test() {
     TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
         { stderr "mktemp failed"; return 1; }
     trap cleanup EXIT
+
+    # shellcheck disable=SC2034  # (used by log() in lib.sh)
     LOG="$outd/test-eks.log"
 
     if [ -z "$amiid" ] && [ -z "$pubin" ]; then
