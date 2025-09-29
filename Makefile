@@ -134,9 +134,10 @@ $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$
 debug_shell_targets = $(foreach name,$(names),debug-shell-$(name))
 .PHONY: $(debug_shell_targets)
 $(debug_shell_targets): debug-shell-%:
-	@echo "::: Make sure you have a 'run-debug-$*' session running or this wont work"
-	@echo "[hit enter]"
-	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
+	@command -v socat >/dev/null 2>&1 || { echo "$* target requires 'socat' installed." 1>&2; exit 1; }
+	@echo "::: Make sure you have a 'run-debug-$*' session running or this will not work"
+	@echo "[hit enter for shell prompt. ctrl-e to exit]"
+	@socat STDIO,cfmakeraw,isig=1,escape=0x05 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
 
 configs/%/build.yaml:
 	@mkdir -p $(dir $@)
