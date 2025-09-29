@@ -1,0 +1,247 @@
+package:
+  name: elasticsearch-7.17
+  version: "7.17.29"
+  epoch: 0
+  description:
+  copyright:
+    - license: SSPL-1.0 AND Elastic-2.0
+  resources:
+    cpu: 6
+    memory: 30Gi
+  dependencies:
+    runtime:
+      - bash # some helper scripts use bash
+      - coreutils # eck operator init container runs date with iso format
+      - curl # eck operator init container does a health check
+      - elasticsearch-config
+      - merged-usrsbin
+      - openjdk-17-default-jdk
+      - wolfi-baselayout
+    provides:
+      - elasticsearch-${{vars.major-version}}=${{package.full-version}}
+      - elasticsearch=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - gradle
+      - libudev
+      - openjdk-17-default-jdk
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/elasticsearch
+      tag: v${{package.version}}
+      expected-commit: 580aff1a0064ce4c93293aaab6fcc55e22c10d1c
+
+  - uses: patch
+    with:
+      # x-pack-plugin-ml-build-gradle patch is necessary to work around upstream deleting required dependencies.
+      # See https://github.com/chainguard-dev/enterprise-packages/pull/7334
+      # note that because of upstream removes the latest version after 30 days but leaves it in their s3 for longer
+      patches: |
+        2025-02-20-CVEs.patch
+
+  - uses: patch
+    with:
+      # ml-dep-resolve.patch: "foo-SNAPSHOT.jar" artifacts are not being hosted as long as non snapshot variants. The logic for determining if
+      # the snapshot suffix exists then changing artifact repositories has been replaced with the updated logic seen here
+      # from more recent major versions: https://github.com/elastic/elasticsearch/blob/v9.1.3/x-pack/plugin/ml/build.gradle#L21-L42
+      # More information on this issue can be found in the 7334 PR url above.
+      patches: |
+        GHSA-h46c-h94j-95f3.patch
+        ml-dep-resolve.patch
+
+  - runs: |
+      export LANG=en_US.UTF-8
+      rm -rf /gradle/verification-metadata.xml
+      ./gradlew clean
+      ./gradlew --write-verification-metadata sha256
+
+      touch license.key
+
+      ./gradlew -Dbuild.snapshot=false -Dlicense.key=license.key localDistro
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/logs
+
+      # https://github.com/elastic/elasticsearch/blob/d87b93f3174e82a86f4fad0ea8b85ac7b454f96d/plugins/examples/settings.gradle#L59-L76
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        BUILD_DIR="linux-aarch64-tar"
+      else
+        BUILD_DIR="linux-tar"
+      fi
+
+      find distribution/archives
+      install -dm777 ${{targets.destdir}}/usr/share/elasticsearch/
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/bin ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/lib ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/config ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/modules ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
+      cp distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
+
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
+      mkdir -p ${{targets.destdir}}/usr/local/bin/
+      ln -sf /usr/share/elasticsearch/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/local/bin/
+
+      # Set permissions to read/write the config dir
+      chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
+        name=$(basename $i)
+        ln -sf /usr/share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+      done
+
+      # We get this from elasticsearch-config
+      mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
+      sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
+
+      # Copy the elasticsearch license into the image. Note the ECK operator
+      # expects to find this, otherwise it'll fail to deploy:
+      cp licenses/ELASTIC-LICENSE-2.0.txt ${{targets.destdir}}/usr/share/elasticsearch/LICENSE.txt
+
+subpackages:
+  - name: ${{package.name}}-iamguarded
+    description: ElasticSearch for Iamguarded
+    dependencies:
+      provides:
+        - elasticsearch-iamguarded=${{package.full-version}}
+      runtime:
+        - bash # some helper scripts use bash
+        - busybox
+        - coreutils # eck operator init container runs date with iso format
+        - curl # eck operator init container does a health check
+        - merged-usrsbin
+        - openjdk-17-default-jdk
+        - posix-libc-utils # required for helm install
+        - wolfi-baselayout
+        - yq
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: elasticsearch
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/elasticsearch
+
+          # I know this is awful, but iamguarded init scripts do not like symlinks
+          cp -r ${{targets.destdir}}/usr/share/elasticsearch/* /opt/iamguarded/elasticsearch
+
+          mkdir -p /opt/iamguarded/elasticsearch/config.default
+          cp -r /opt/iamguarded/elasticsearch/config/* \
+            /opt/iamguarded/elasticsearch/config.default/
+
+          bash /opt/iamguarded/scripts/elasticsearch/postunpack.sh
+
+          # Set java home
+          sed -i 's|export JAVA_HOME=/opt/iamguarded/java|export JAVA_HOME=/usr/lib/jvm/java-17-openjdk|' /opt/iamguarded/scripts/elasticsearch/run.sh
+          sed -i 's|export ES_JAVA_HOME=/opt/iamguarded/java|export ES_JAVA_HOME=/usr/lib/jvm/java-17-openjdk|' /opt/iamguarded/scripts/elasticsearch/run.sh
+
+          # Set wide permissions
+          chmod -R 775 /opt/iamguarded/elasticsearch
+
+          # Remove non-iamguarded entrypoint script
+          rm /opt/iamguarded/elasticsearch/bin/docker-entrypoint.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for i in /opt/iamguarded/elasticsearch/bin/*; do
+            name=$(basename $i)
+            ln -sf /opt/iamguarded/elasticsearch/bin/$name ${{targets.contextdir}}/usr/bin/$name
+          done
+
+          mkdir -p /iamguarded/elasticsearch/data
+          mkdir -p /iamguarded/elasticsearch/plugins
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+      - uses: iamguarded/finalize-compat
+        with:
+          package: elasticsearch
+          version: ${{vars.major-version}}
+    # TODO: convert tests to make use of "daemon-check-output"
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - busybox
+            - coreutils
+            - openjdk-17-default-jvm
+            - yq
+            - shadow
+            - sudo
+            - wolfi-base
+        environment:
+          ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+          ES_USER: elasticsearch
+      pipeline:
+        - name: "Setup Elasticsearch configuration for Iamguarded"
+          runs: |
+            set -x
+
+            useradd $ES_USER
+            chown -R "${ES_USER}:${ES_USER}" /opt/iamguarded/elasticsearch
+
+            # Run the iamguarded elasticsearch binary
+            sudo -E -u $ES_USER /opt/iamguarded/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v7.
+
+test:
+  environment:
+    contents:
+      packages:
+        - coreutils
+        - curl
+        - elasticsearch-config
+        - shadow
+        - sudo
+    environment:
+      ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+      ES_USER: elasticsearch
+  pipeline:
+    - name: "Check for LICENSE.txt"
+      runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
+    - name: "Setup Elasticsearch configuration"
+      runs: |
+        set -x
+
+        useradd $ES_USER
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        # Ignore the error, vm.max_map_count needs to be increased.
+        sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+
+        # # Reset the password
+        # ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')
+
+        # curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+
+        # curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+        #     {
+        #       "name": "John Doe",
+        #       "age": 30,
+        #       "about": "I love to go rock climbing"
+        #     }' || exit 1
+        # curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+
+        # kill $(cat /tmp/elasticsearch.pid)
