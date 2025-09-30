@@ -107,6 +107,10 @@ $(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
 %.qcow2: %.raw
 	./tools/convert-image $< $@
 
+# VMware-specific VMDK conversion (monolithicFlat for ESXi compatibility)
+$(ARCH_OUT_D)/vmware-%/disk.vmdk: $(ARCH_OUT_D)/vmware-%/disk.raw
+	./tools/convert-image --vmdk-format monolithicFlat $< $@
+
 %.vmdk: %.raw
 	./tools/convert-image $< $@
 
@@ -130,9 +134,10 @@ $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$
 debug_shell_targets = $(foreach name,$(names),debug-shell-$(name))
 .PHONY: $(debug_shell_targets)
 $(debug_shell_targets): debug-shell-%:
-	@echo "::: Make sure you have a 'run-debug-$*' session running or this wont work"
-	@echo "[hit enter]"
-	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
+	@command -v socat >/dev/null 2>&1 || { echo "$* target requires 'socat' installed." 1>&2; exit 1; }
+	@echo "::: Make sure you have a 'run-debug-$*' session running or this will not work"
+	@echo "[hit enter for shell prompt. ctrl-e to exit]"
+	@socat STDIO,cfmakeraw,isig=1,escape=0x05 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
 
 configs/%/build.yaml:
 	@mkdir -p $(dir $@)
@@ -315,7 +320,7 @@ publish-vmware: $(foreach name,$(disks_vmware),publish-$(name))
 $(foreach name,$(disks_vmware),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk
+$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk $(ARCH_OUT_D)/%/disk-flat.vmdk
 	@mkdir -p $(dir $@)
 	@echo "Publishing VMWARE images for $* ($(ARCH))"
 	@artifact_name="$(VMWARENAME).raw"; \
@@ -324,9 +329,14 @@ $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_
 	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
 	@artifact_name="$(VMWARENAME).vmdk"; \
 	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	sed -i "s/disk-flat.vmdk/$(VMWARENAME)-flat.vmdk/" $(dir $@)disk.vmdk; \
 	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
 	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	@artifact_name="$(VMWARENAME)-flat.vmdk"; \
+	gcs_vmdk_flat_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	echo "Uploading $(dir $@)disk-flat.vmdk to $$gcs_vmdk_flat_path"; \
+	gcloud storage cp "$(dir $@)disk-flat.vmdk" "$$gcs_vmdk_flat_path"
+	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"vmdk\": \"$$gcs_vmdk_flat_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 .PHONY: publish-rpi
 publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
@@ -395,7 +405,7 @@ show-vars:
 	@echo ALL_DISKS=$(ALL_DISKS)
 	@echo names=$(names)
 
-.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
+.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk-flat.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%/build.yaml builder/ovmf-%.fd
 
 arches = aarch64 x86_64
