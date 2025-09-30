@@ -1,0 +1,85 @@
+package:
+  name: scuttle
+  version: "1.1.11"
+  epoch: 0
+  description: A wrapper application that makes it easy to run containers next to Istio sidecars
+  copyright:
+    - license: MIT
+
+pipeline:
+  # This is a fork of redboxllc/scuttle (original maintainer lost access)
+  # Originally forked from envoy-preflight, adapted for Istio sidecars
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kvij/scuttle
+      tag: v${{package.version}}
+      expected-commit: 4869a8aeb330ccd14aed828fc4ec6ca4b13ecd3a
+
+  - uses: go/build
+    with:
+      packages: .
+      output: scuttle
+      ldflags: -X 'main.Version=v${{package.version}}'
+
+update:
+  enabled: true
+  github:
+    identifier: kvij/scuttle
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - envoy
+        - wait-for-it
+    environment:
+      SCUTTLE_LOGGING: "true"
+      ENVOY_ADMIN_API: "http://127.0.0.1:15000"
+      ISTIO_QUIT_API: "http://127.0.0.1:15000"
+  pipeline:
+    - name: "Test scuttle version output"
+      runs: |
+        set -o pipefail
+        # Test that scuttle starts up and shows correct version as --version is not implemented
+        START_WITHOUT_ENVOY="true" scuttle echo "test" 2>&1 | grep -F "Scuttle v${{package.version}} starting up"
+    - name: "Test scuttle with Envoy using daemon-check-output"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cat > /tmp/envoy.yaml << 'EOF'
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 15000
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+
+          cat > /tmp/test-app.sh << 'EOF'
+          #!/bin/sh
+          echo "Application running with Envoy sidecar"
+          sleep 3
+          echo "Processing requests"
+          sleep 2
+          echo "Application shutting down"
+          EOF
+          chmod +x /tmp/test-app.sh
+        # We start Envoy here instead of in setup because scuttle needs Envoy
+        # to be running when it starts. Background processes from setup phase
+        # are terminated when setup completes, before the start command runs.
+        start: sh -c "envoy -c /tmp/envoy.yaml > /tmp/envoy.log 2>&1 & wait-for-it localhost:15000 -t 30 && scuttle /tmp/test-app.sh"
+        timeout: 45
+        expected_output: |
+          Scuttle v${{package.version}} starting up
+          Logging is now enabled
+          Application running with Envoy sidecar
+          Processing requests
+          Application shutting down
+          Sent quitquitquit to Istio
+        post: |
+          # Fail if Envoy is still running (scuttle should have killed it)
+          ! pgrep -f "envoy -c /tmp/envoy.yaml"

@@ -1,7 +1,7 @@
 package:
   name: kibana-9.0
-  version: "9.0.6"
-  epoch: 0
+  version: "9.0.7"
+  epoch: 1 # GHSA-vj76-c3g6-qr5v
   description: Your window into the Elastic Stack
   copyright:
     - license: Apache-2.0
@@ -48,13 +48,15 @@ environment:
       - wget
       - yarn
       - yq
+  environment:
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 1
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/elastic/kibana
       tag: v${{package.version}}
-      expected-commit: 042db7248f4083cb1659298cf6a84625b71fbf58
+      expected-commit: 9d44cc2d50d27f4d3ae7b72f0fe6b612508674bb
 
   - uses: patch
     with:
@@ -62,23 +64,32 @@ pipeline:
 
   - name: Mitigate CVEs
     runs: |
-      resolutions='{"axios": "^1.12.0", "prismjs": "^1.30.0"}'
+      resolutions='{"axios": "^1.12.0", "prismjs": "^1.30.0", "jsondiffpatch": "^0.7.2", "tar-fs": "^3.1.1"}'
       jq --argjson resolutions "$resolutions" '.resolutions += $resolutions' package.json > temp.json && mv temp.json package.json
 
   - runs: |
       export NODE_OPTIONS="--max-old-space-size=32768 --max-semi-space-size=8192"
+      export MOON_WORKSPACE_ROOT=$(pwd)
+
       yarn install --force-install
-      yarn kbn bootstrap --allow-root
+
+      # moon explicitly excludes $HOME from being the workspace root
+      # (https://github.com/moonrepo/moon/blob/master/crates/app/src/systems/startup.rs#L58-L59),
+      # so we unset HOME for the build (and so have to explicitly mark it as
+      # safe for `git` which is used within the build)
+      HOME= git config --global --add safe.directory /home/build
+      HOME= yarn kbn bootstrap --allow-root
 
       # builds fail in x86_64 CI without upping bazels available memory
       echo "startup --host_jvm_args=-Xmx48g" >> ~/.bazelrc
-      node --optimize_for_size --gc-interval=100 scripts/build --release --skip-os-packages --skip-canvas-shareable-runtime --skip-docker-ubi --skip-docker-fips
+      HOME= node --optimize_for_size --gc-interval=100 scripts/build --release --skip-os-packages --skip-canvas-shareable-runtime --skip-docker-ubi --skip-docker-fips
 
   - runs: |
       mkdir -p "${{targets.destdir}}"/usr/share/kibana
       tar xf target/kibana-${{package.version}}-linux-*.tar.gz -C ${{targets.destdir}}/usr/share/kibana --strip-components=1
 
   - runs: |
+      rm -rf "${{targets.destdir}}"/usr/share/kibana/node_modules/puppeteer/.cache
       rm -rf "${{targets.destdir}}"/usr/share/kibana/node/glibc-217/bin/node
       ln -sf /usr/bin/node "${{targets.destdir}}"/usr/share/kibana/node/glibc-217/bin/node
 
