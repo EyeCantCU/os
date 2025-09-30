@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -48,15 +49,27 @@ func impactCmd() *cobra.Command {
 
 func unguardedCmd() *cobra.Command {
 	var arch string
+	var ignoreFile string
 	cmd := &cobra.Command{
 		Use:   "unguarded",
 		Short: "Find melange builds that depend on unguarded packages",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return unguarded(cmd.Context(), arch)
+			ignored := map[string]struct{}{}
+			if ignoreFile != "" {
+				f, err := os.ReadFile(ignoreFile)
+				if err != nil {
+					return fmt.Errorf("reading ignore file %s: %w", err)
+				}
+				for line := range bytes.Lines(f) {
+					ignored[strings.TrimSpace(string(line))] = struct{}{}
+				}
+			}
+			return unguarded(cmd.Context(), arch, ignored)
 		},
 	}
 
 	cmd.Flags().StringVar(&arch, "arch", types.ParseArchitecture(runtime.GOARCH).ToAPK(), "architecture to evaluate")
+	cmd.Flags().StringVar(&ignoreFile, "ignore", "unguarded.txt", "packages to ignore (we expect them to be unguarded)")
 
 	return cmd
 }
@@ -172,7 +185,7 @@ func impact(ctx context.Context, arch string) error {
 	return nil
 }
 
-func unguarded(ctx context.Context, arch string) error {
+func unguarded(ctx context.Context, arch string, ignored map[string]struct{}) error {
 	pkgss, err := dirToOrigins(ctx)
 	if err != nil {
 		return fmt.Errorf("getting package configurations: %w", err)
@@ -200,14 +213,27 @@ func unguarded(ctx context.Context, arch string) error {
 		return err
 	}
 
+	// We want to see if anything in our ignored list can be dropped.
+	notIgnored := maps.Clone(ignored)
+
 	unguarded := map[string][]string{}
 
 	for origin, deps := range depMap.deps {
 		for _, dep := range deps {
 			pkg, _, _ := strings.Cut(dep, "=")
-			if _, ok := allPackages[pkg]; !ok {
-				unguarded[origin] = append(unguarded[origin], pkg)
+
+			// If package exists, it's guarded.
+			if _, ok := allPackages[pkg]; ok {
+				continue
 			}
+
+			// If it's on the ignore list, we ignore it.
+			if _, ok := ignored[pkg]; ok {
+				delete(notIgnored, pkg)
+				continue
+			}
+
+			unguarded[origin] = append(unguarded[origin], pkg)
 		}
 	}
 
@@ -220,6 +246,14 @@ func unguarded(ctx context.Context, arch string) error {
 
 	if len(unguarded) != 0 {
 		return fmt.Errorf("%d packages are unguarded", len(unguarded))
+	}
+
+	if len(notIgnored) != 0 {
+		fmt.Printf("Ignored but not unguarded:\n")
+		// TODO: Should this be fatal?
+		for _, pkg := range slices.Sorted(maps.Keys(notIgnored)) {
+			fmt.Printf("  %s\n", pkg)
+		}
 	}
 
 	return nil
