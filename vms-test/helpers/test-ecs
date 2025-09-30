@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+
+# shellcheck disable=SC2329  # heavy use of dynamic dispatch leads to unused function warnings
+# shellcheck disable=SC2317  # dito for dead code analysis (fixed in recent shellcheck)
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+
+DEF_AWS_REGION=us-west-1
+AWS_REGION=${AWS_REGION:-$DEF_AWS_REGION}
+
+Usage_cluster_list() {
+    cat <<EOF
+Usage: ${0##*/} cluster-list
+
+   List all ECS clusters managed by this script.
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output: space-separated list of cluster names
+
+EOF
+}
+
+cluster_list() {
+    local out="" clusters=""
+
+    # List stacks that match our naming pattern: ecs-test-*-stack
+    out=$(aws cloudformation list-stacks \
+        --region "$AWS_REGION" \
+        --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+        --output=json) || {
+            stderr 'aws cloudformation list-stacks failed'
+            return 1
+        }
+
+    # Extract cluster names from stack names (ecs-test-NAME-stack -> NAME)
+    clusters=$(
+        echo "$out" \
+            | jq -r '.StackSummaries[] | select(.StackName | test("^ecs-test-.*-stack$")) | .StackName' \
+            | sed 's/^ecs-test-//; s/-stack$//'
+    )
+
+    # shellcheck disable=SC2086
+    set -- $clusters
+    echo "$@"
+}
+
+Usage_cluster_status() {
+    cat <<EOF
+Usage: ${0##*/} cluster-status cluster-name
+
+   Get the status of an ECS cluster.
+
+   arguments:
+      cluster-name             name of the ECS cluster
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output: CloudFormation stack status
+      - CREATE_COMPLETE: stack created successfully
+      - UPDATE_COMPLETE: stack updated successfully
+      - CREATE_IN_PROGRESS: stack creation in progress
+      - DELETE_IN_PROGRESS: stack deletion in progress
+      - *_FAILED: various failure states
+      - *_ROLLBACK*: rollback states
+      - NONE: stack does not exist
+
+EOF
+}
+
+cluster_status() {
+    local name="$1" out=""
+    [ -n "$name" ] || { stderr 'cluster_status got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    out=$(aws cloudformation describe-stacks \
+        --region "$AWS_REGION" \
+        --stack-name "$stack_name" \
+        --output=json 2>/dev/null) || {
+            stderr 'aws cloudformation describe-stacks failed'
+            return 1
+        }
+
+    local stack_status
+    stack_status=$(echo "$out" | jq -r '.Stacks[0].StackStatus') || {
+        echo "NONE"
+        return
+    }
+
+    echo "$stack_status"
+}
+
+Usage_cluster_create() {
+    cat <<EOF
+Usage: ${0##*/} cluster-create cluster-name
+
+   Create an ECS cluster.
+
+   arguments:
+      cluster-name             name of the ECS cluster (e.g. vmtest-ecs)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
+cluster_create() {
+    local name="$1"
+    [ -n "$name" ] || { stderr 'cluster_create got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    local template_path
+    template_path="$(dirname -- "${BASH_SOURCE[0]}")/ecs-test-infrastructure.json"
+    [ -f "$template_path" ] || {
+        stderr "CloudFormation template not found at $template_path"
+        return 1
+    }
+
+    log "Creating CloudFormation stack: $stack_name"
+    vr aws cloudformation deploy \
+        --region "$AWS_REGION" \
+        --stack-name "$stack_name" \
+        --template-file "$template_path" \
+        --parameter-overrides "ClusterName=$name" \
+        --capabilities CAPABILITY_IAM \
+        --no-fail-on-empty-changeset || {
+            stderr 'Failed to create CloudFormation stack'
+            return 1
+        }
+
+    log 'Stack created successfully'
+}
+
+Usage_cluster_destroy() {
+    cat <<EOF
+Usage: ${0##*/} cluster-destroy cluster-name
+
+   Destroy an ECS cluster and all associated resources.
+
+   arguments:
+      cluster-name             name of the ECS cluster to destroy (e.g. vmtest-ecs)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
+cluster_destroy() {
+    local name="$1"
+    [ -n "$name" ] || { stderr 'cluster_destroy got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    log "Deleting CloudFormation stack: $stack_name"
+    vr aws cloudformation delete-stack \
+        --region "$AWS_REGION" \
+        --stack-name "$stack_name" || {
+            stderr 'Failed to delete CloudFormation stack'
+            return 1
+        }
+
+    log 'Waiting for stack deletion to complete...'
+    vr aws cloudformation wait stack-delete-complete \
+        --region "$AWS_REGION" \
+        --stack-name "$stack_name" || {
+            stderr 'Stack deletion failed or timed out'
+            return 1
+        }
+
+    log 'Stack deleted successfully'
+}
+
+SUBCMDS=(
+    cluster-create
+    cluster-destroy
+    cluster-list
+    cluster-status
+)
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
+    cat <<EOF
+Usage: ${0##*/} subcommand [options]
+
+Available subcommands:
+EOF
+    for _s in "${SUBCMDS[@]}"; do
+        echo "  $_s"
+    done
+    echo ""
+    echo "Use '${0##*/} subcommand --help' for subcommand-specific help."
+    exit 0
+fi
+
+for _s in "${SUBCMDS[@]}"; do
+    [ "$_s" = "$1" ] || continue
+    name="$1"
+    fname=${name//-/_}
+    shift
+    if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+        "Usage_$fname" 2>/dev/null || stderr "No usage information for: $name"
+        exit 0
+    fi
+    "$fname" "$@"
+    exit
+done
+
+stderr "Bad subcmd '$1'. subcmds:"
+for _s in "${SUBCMDS[@]}"; do
+    stderr "  $_s"
+done
+exit 1

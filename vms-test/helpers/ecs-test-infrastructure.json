@@ -1,0 +1,249 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "ECS Test Infrastructure for Wolfi VM Testing",
+
+    "Parameters": {
+        "ClusterName": {
+            "Type": "String",
+            "Description": "Name of the ECS cluster"
+        },
+        "VPCCidr": {
+            "Type": "String",
+            "Default": "10.192.0.0/16",
+            "Description": "CIDR block for the VPC"
+        }
+    },
+
+    "Resources": {
+        "VPC": {
+            "Type": "AWS::EC2::VPC",
+            "Properties": {
+                "CidrBlock": {"Ref": "VPCCidr"},
+                "EnableDnsHostnames": true,
+                "EnableDnsSupport": true,
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-vpc"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"}
+                ]
+            }
+        },
+
+        "PublicSubnet": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "CidrBlock": {"Fn::Select": [0, {"Fn::Cidr": [{"Ref": "VPCCidr"}, 4, 12]}]},
+                "AvailabilityZone": {"Fn::Select": [0, {"Fn::GetAZs": ""}]},
+                "MapPublicIpOnLaunch": true,
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-public"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"},
+                    {"Key": "Type", "Value": "Public"}
+                ]
+            }
+        },
+
+        "InternetGateway": {
+            "Type": "AWS::EC2::InternetGateway",
+            "Properties": {
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-igw"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"}
+                ]
+            }
+        },
+
+        "AttachGateway": {
+            "Type": "AWS::EC2::VPCGatewayAttachment",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "InternetGatewayId": {"Ref": "InternetGateway"}
+            }
+        },
+
+        "PublicRouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-public-rt"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"},
+                ]
+            }
+        },
+
+        "PublicRoute": {
+            "Type": "AWS::EC2::Route",
+            "DependsOn": "AttachGateway",
+            "Properties": {
+                "RouteTableId": {"Ref": "PublicRouteTable"},
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "GatewayId": {"Ref": "InternetGateway"}
+            }
+        },
+
+        "PublicSubnetRouteAssoc1": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "PublicSubnet"},
+                "RouteTableId": {"Ref": "PublicRouteTable"}
+            }
+        },
+
+        "ECSSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Security group for ECS container instances",
+                "VpcId": {"Ref": "VPC"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-sg"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"}
+                ]
+            }
+        },
+
+        "ECSSecurityGroupIngressSSH": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {"Ref": "ECSSecurityGroup"},
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "CidrIp": "0.0.0.0/0",
+                "Description": "SSH access"
+            }
+        },
+
+        "ECSSecurityGroupIngressSelf": {
+            "Type": "AWS::EC2::SecurityGroupIngress",
+            "Properties": {
+                "GroupId": {"Ref": "ECSSecurityGroup"},
+                "IpProtocol": "-1",
+                "SourceSecurityGroupId": {"Ref": "ECSSecurityGroup"},
+                "Description": "All traffic within security group"
+            }
+        },
+
+        "ECSCluster": {
+            "Type": "AWS::ECS::Cluster",
+            "Properties": {
+                "ClusterName": {"Ref": "ClusterName"},
+                "ClusterSettings": [
+                    {
+                        "Name": "containerInsights",
+                        "Value": "enabled"
+                    }
+                ],
+                "Configuration": {
+                    "ExecuteCommandConfiguration": {
+                        "Logging": "DEFAULT"
+                    }
+                },
+                "Tags": [
+                    {"Key": "Environment", "Value": "wolfi-vm-test"}
+                ]
+            }
+        },
+
+        "ECSInstanceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "ec2.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }]
+                },
+                "ManagedPolicyArns": [
+                    "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role",
+                    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+                    "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+                ],
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-ecs-instance-role"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"}
+                ]
+            }
+        },
+
+        "ECSInstanceProfile": {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": {
+                "Roles": [{"Ref": "ECSInstanceRole"}]
+            }
+        },
+
+        "ECSTaskExecutionRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }]
+                },
+                "ManagedPolicyArns": [
+                    "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+                ],
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-ecs-task-execution-role"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"}
+                ]
+            }
+        },
+
+        "LogGroup": {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+                "LogGroupName": {"Fn::Sub": "/ecs/${ClusterName}"},
+                "RetentionInDays": 30,
+                "Tags": [
+                    {"Key": "Name", "Value": {"Fn::Sub": "${ClusterName}-ecs-task-execution-role"}},
+                    {"Key": "Environment", "Value": "wolfi-vm-test"}
+                ]
+            }
+        }
+    },
+
+    "Outputs": {
+        "ClusterName": {
+            "Description": "ECS Cluster Name",
+            "Value": {"Ref": "ECSCluster"},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-ClusterName"}}
+        },
+        "VPCId": {
+            "Description": "VPC ID",
+            "Value": {"Ref": "VPC"},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-VPC"}}
+        },
+        "PublicSubnet": {
+            "Description": "Public Subnet ID",
+            "Value": {"Ref": "PublicSubnet"},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-PublicSubnet"}}
+        },
+        "SecurityGroupId": {
+            "Description": "Security Group ID",
+            "Value": {"Ref": "ECSSecurityGroup"},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-SecurityGroup"}}
+        },
+        "InstanceProfileArn": {
+            "Description": "ECS Instance Profile ARN",
+            "Value": {"Fn::GetAtt": ["ECSInstanceProfile", "Arn"]},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-InstanceProfileArn"}}
+        },
+        "InstanceProfileName": {
+            "Description": "ECS Instance Profile Name",
+            "Value": {"Ref": "ECSInstanceProfile"},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-InstanceProfile"}}
+        },
+        "TaskExecutionRoleArn": {
+            "Description": "ECS Task Execution Role ARN",
+            "Value": {"Fn::GetAtt": ["ECSTaskExecutionRole", "Arn"]},
+            "Export": {"Name": {"Fn::Sub": "${AWS::StackName}-TaskExecutionRole"}}
+        }
+    }
+}
