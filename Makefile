@@ -316,11 +316,11 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"qcow2\": \"$$gcs_qcow2_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"qcow2_signed_url\": \"$$qcow2_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 .PHONY: publish-vmware
-publish-vmware: $(foreach name,$(disks_vmware),publish-$(name))
-$(foreach name,$(disks_vmware),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
+publish-vmware: $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name)))
+$(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name))): publish-vmware-%: $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk $(ARCH_OUT_D)/%/disk-flat.vmdk
+$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
+$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.vmdk $(ARCH_OUT_D)/vmware-%/disk-flat.vmdk
 	@mkdir -p $(dir $@)
 	@echo "Publishing VMWARE images for $* ($(ARCH))"
 	@artifact_name="$(VMWARENAME).raw"; \
