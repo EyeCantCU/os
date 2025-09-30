@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+
+VERBOSITY=1
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH --raw-path RAW_PATH
+
+  Publish generic VM images to cloud storage and generate JSON output.
+
+  Required arguments:
+    --name NAME           Image name (e.g., base, docker)
+    --timestamp TIMESTAMP Build timestamp
+    --arch ARCH          Architecture (x86_64, aarch64)
+    --raw-path RAW_PATH   Path to the raw disk image
+
+  Storage destination arguments (at least one required):
+    --gcs-bucket BUCKET  GCS bucket URL (e.g., gs://bucket-name)
+    --azure-account ACCOUNT  Azure storage account name
+    --azure-container CONTAINER  Azure storage container name
+
+  Optional arguments:
+    --qcow2-path PATH    Path to qcow2 image (generates qcow2 fields in JSON)
+    --vmdk-path PATH     Path to vmdk image (generates vmdk fields in JSON)
+    --vmdk-flat-path PATH Path to vmdk-flat image (generates vmdk_flat fields in JSON)
+    --artifact-prefix PREFIX  Artifact filename prefix (default: name-arch-timestamp)
+    --signed-urls        Generate signed URLs for uploaded artifacts
+    --signed-url-expiry DURATION  Expiry duration for signed URLs (e.g., 12h, 24h) [12h]
+    -v | --verbose       Be more verbose
+    -h | --help         Show this help
+
+  Environment variables:
+    GCP_PROJECT - if set, gcloud commands will use --project=GCP_PROJECT
+
+EOF
+}
+
+stderr() { echo "$@" 1>&2; }
+
+debug() {
+    if [ "$VERBOSITY" -ge 2 ]; then
+        stderr "DEBUG: $*"
+    fi
+}
+
+info() {
+    if [ "$VERBOSITY" -ge 1 ]; then
+        stderr "INFO: $*"
+    fi
+}
+
+_gcloud() {
+    local rc=0
+    set -- gcloud ${GCP_PROJECT:+"--project=$GCP_PROJECT"} "$@"
+    debug "Executing: $*"
+    "$@" && return 0
+    rc=$?
+    stderr "ERROR: gcloud command failed with exit code $rc: $*"
+    return $rc
+}
+
+_az() {
+    local rc=0
+    debug "Executing: az $*"
+    az "$@" && return 0
+    rc=$?
+    stderr "ERROR: az command failed with exit code $rc: az $*"
+    return $rc
+}
+
+upload_gcs_file() {
+    local local_path="$1"
+    local gcs_path="$2"
+    local filename="$3"
+
+    info "Uploading $filename to $gcs_path"
+    _gcloud storage cp "$local_path" "$gcs_path" || {
+        stderr "ERROR: Failed to upload $local_path to $gcs_path"
+        return 1
+    }
+    echo "$gcs_path"
+}
+
+upload_azure_file() {
+    local local_path="$1"
+    local account="$2"
+    local container="$3"
+    local blob_name="$4"
+    local filename="$5"
+
+    info "Uploading $filename to Azure storage account $account, container $container as $blob_name"
+    _az storage blob upload \
+        --account-name "$account" \
+        --container-name "$container" \
+        --name "$blob_name" \
+        --file "$local_path" \
+        --auth-mode login || {
+        stderr "ERROR: Failed to upload $local_path to Azure blob storage"
+        return 1
+    }
+
+    local blob_url
+    blob_url=$(_az storage blob url \
+        --account-name "$account" \
+        --container-name "$container" \
+        --name "$blob_name" \
+        --auth-mode login) || {
+        stderr "ERROR: Failed to get blob URL"
+        return 1
+    }
+    echo "$blob_url"
+}
+
+generate_gcs_signed_url() {
+    local gcs_path="$1"
+    local expiry="$2"
+    local signed_url
+
+    debug "Generating signed URL for $gcs_path with expiry $expiry"
+    signed_url=$(_gcloud storage sign-url "$gcs_path" \
+        --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com \
+        --duration="$expiry" --quiet) || {
+        stderr "ERROR: Failed to generate signed URL for $gcs_path"
+        return 1
+    }
+    echo "$signed_url"
+}
+
+generate_azure_signed_url() {
+    local account="$1"
+    local container="$2"
+    local blob_name="$3"
+    local expiry_duration="$4"
+    local signed_url
+
+    debug "Generating signed URL for Azure blob $blob_name with expiry $expiry_duration"
+    local expiry
+    expiry=$(date -u -d "$expiry_duration" +"%Y-%m-%dT%H:%M:%SZ") || {
+        stderr "ERROR: Invalid expiry duration format: $expiry_duration"
+        return 1
+    }
+    signed_url=$(_az storage blob generate-sas \
+        --permissions r \
+        --full-uri \
+        --auth-mode login \
+        --as-user \
+        --expiry "$expiry" \
+        --account-name "$account" \
+        --container-name "$container" \
+        --name "$blob_name") || {
+        stderr "ERROR: Failed to generate signed URL for Azure blob"
+        return 1
+    }
+    echo "$signed_url"
+}
+
+get_gcp_arch() {
+    local arch="$1"
+    case "$arch" in
+        x86_64|amd64) echo "x86_64";;
+        aarch64|arm64) echo "aarch64";;
+        *) stderr "ERROR: Unsupported architecture: $arch"; return 1;;
+    esac
+}
+
+get_azure_arch() {
+    local arch="$1"
+    case "$arch" in
+        x86_64|amd64) echo "x64";;
+        aarch64|arm64) echo "arm64";;
+        *) stderr "ERROR: Unsupported architecture: $arch"; return 1;;
+    esac
+}
+
+derive_gcp_path_prefix() {
+    local name="$1"
+    local arch="$2"
+    local timestamp="$3"
+    local gcparch
+    gcparch=$(get_gcp_arch "$arch") || return 1
+
+    echo "${gcparch}/${name}/${timestamp}"
+}
+
+derive_azure_path_prefix() {
+    local name="$1"
+    local arch="$2"
+    local timestamp="$3"
+    local azarch
+    azarch=$(get_azure_arch "$arch") || return 1
+
+    echo "${azarch}/${name}/${timestamp}"
+}
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,artifact-prefix:,signed-urls,signed-url-expiry:"
+    local getopt_out=""
+    if ! getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@"); then
+        Usage 1>&2
+        return 1
+    fi
+    eval set -- "${getopt_out}"
+
+    local name="" timestamp="" arch="" gcs_bucket="" azure_account="" azure_container="" raw_path="" qcow2_path="" vmdk_path="" vmdk_flat_path=""
+    local artifact_prefix="" signed_urls=false signed_url_expiry="12h"
+
+    while [ $# -ne 0 ]; do
+        case "$1" in
+            -h|--help) Usage; exit 0;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --name) name="$2"; shift;;
+            --timestamp) timestamp="$2"; shift;;
+            --arch) arch="$2"; shift;;
+            --gcs-bucket) gcs_bucket="$2"; shift;;
+            --azure-account) azure_account="$2"; shift;;
+            --azure-container) azure_container="$2"; shift;;
+            --raw-path) raw_path="$2"; shift;;
+            --qcow2-path) qcow2_path="$2"; shift;;
+            --vmdk-path) vmdk_path="$2"; shift;;
+            --vmdk-flat-path) vmdk_flat_path="$2"; shift;;
+            --artifact-prefix) artifact_prefix="$2"; shift;;
+            --signed-urls) signed_urls=true;;
+            --signed-url-expiry) signed_url_expiry="$2"; shift;;
+            --) shift; break;;
+            *) stderr "ERROR: Unknown option: $1"; Usage 1>&2; return 1;;
+        esac
+        shift
+    done
+
+    if [ -z "$name" ] || [ -z "$timestamp" ] || [ -z "$arch" ] || [ -z "$raw_path" ]; then
+        stderr "ERROR: Missing required arguments: --name --timestamp --arch --raw-path"
+        Usage 1>&2
+        return 1
+    fi
+
+    if [ -z "$gcs_bucket" ] && [ -z "$azure_account" ]; then
+        stderr "ERROR: At least one storage destination must be specified (--gcs-bucket or --azure-account/--azure-container)"
+        Usage 1>&2
+        return 1
+    fi
+
+    if [ -n "$azure_account" ] && [ -z "$azure_container" ]; then
+        stderr "ERROR: --azure-container is required when --azure-account is specified"
+        Usage 1>&2
+        return 1
+    fi
+
+    if [ -n "$azure_container" ] && [ -z "$azure_account" ]; then
+        stderr "ERROR: --azure-account is required when --azure-container is specified"
+        Usage 1>&2
+        return 1
+    fi
+
+    if [ ! -f "$raw_path" ]; then
+        stderr "ERROR: Raw disk image not found: $raw_path"
+        return 1
+    fi
+
+    if [ -n "$qcow2_path" ] && [ ! -f "$qcow2_path" ]; then
+        stderr "ERROR: QCOW2 disk image not found: $qcow2_path"
+        return 1
+    fi
+
+    if [ -n "$vmdk_path" ] && [ ! -f "$vmdk_path" ]; then
+        stderr "ERROR: VMDK disk image not found: $vmdk_path"
+        return 1
+    fi
+
+    if [ -n "$vmdk_flat_path" ] && [ ! -f "$vmdk_flat_path" ]; then
+        stderr "ERROR: VMDK flat disk image not found: $vmdk_flat_path"
+        return 1
+    fi
+
+    if [ -n "$gcs_bucket" ]; then
+        command -v gcloud >/dev/null 2>&1 || {
+            stderr "ERROR: 'gcloud' not found in PATH (required for GCS upload)"
+            return 1
+        }
+        gcs_bucket="${gcs_bucket#gs://}"
+        gcs_bucket="gs://$gcs_bucket"
+    fi
+
+    if [ -n "$azure_account" ]; then
+        command -v az >/dev/null 2>&1 || {
+            stderr "ERROR: 'az' not found in PATH (required for Azure upload)"
+            return 1
+        }
+    fi
+
+    local gcparch
+    gcparch=$(get_gcp_arch "$arch") || return 1
+
+    if [ -z "$artifact_prefix" ]; then
+        artifact_prefix="${name}-${gcparch}-${timestamp}"
+    fi
+
+    info "Publishing images for $name ($arch)"
+
+    local json_sections=()
+    json_sections+=("\"timestamp\": \"$timestamp\"")
+
+    if [ -n "$gcs_bucket" ]; then
+        local gcs_json_parts=()
+        local gcp_path_prefix
+        gcp_path_prefix=$(derive_gcp_path_prefix "$name" "$arch" "$timestamp") || return 1
+        local base_gcs_path="${gcs_bucket}/${gcp_path_prefix}"
+
+        local raw_filename="${artifact_prefix}.raw"
+        local raw_gcs_path="${base_gcs_path}/${raw_filename}"
+        upload_gcs_file "$raw_path" "$raw_gcs_path" "$raw_filename" || return 1
+        gcs_json_parts+=("\"raw\": \"$raw_gcs_path\"")
+
+        if [ "$signed_urls" = true ]; then
+            local raw_signed_url
+            raw_signed_url=$(generate_gcs_signed_url "$raw_gcs_path" "$signed_url_expiry") || return 1
+            gcs_json_parts+=("\"raw_signed_url\": \"$raw_signed_url\"")
+        fi
+
+        if [ -n "$qcow2_path" ]; then
+            local qcow2_filename="${artifact_prefix}.qcow2"
+            local qcow2_gcs_path="${base_gcs_path}/${qcow2_filename}"
+            upload_gcs_file "$qcow2_path" "$qcow2_gcs_path" "$qcow2_filename" || return 1
+            gcs_json_parts+=("\"qcow2\": \"$qcow2_gcs_path\"")
+
+            if [ "$signed_urls" = true ]; then
+                local qcow2_signed_url
+                qcow2_signed_url=$(generate_gcs_signed_url "$qcow2_gcs_path" "$signed_url_expiry") || return 1
+                gcs_json_parts+=("\"qcow2_signed_url\": \"$qcow2_signed_url\"")
+            fi
+        fi
+
+        if [ -n "$vmdk_path" ]; then
+            local vmdk_filename="${artifact_prefix}.vmdk"
+            local vmdk_gcs_path="${base_gcs_path}/${vmdk_filename}"
+            upload_gcs_file "$vmdk_path" "$vmdk_gcs_path" "$vmdk_filename" || return 1
+            gcs_json_parts+=("\"vmdk\": \"$vmdk_gcs_path\"")
+        fi
+
+        if [ -n "$vmdk_flat_path" ]; then
+            local vmdk_flat_filename="${artifact_prefix}-flat.vmdk"
+            local vmdk_flat_gcs_path="${base_gcs_path}/${vmdk_flat_filename}"
+            upload_gcs_file "$vmdk_flat_path" "$vmdk_flat_gcs_path" "$vmdk_flat_filename" || return 1
+            gcs_json_parts+=("\"vmdk_flat\": \"$vmdk_flat_gcs_path\"")
+        fi
+
+        local gcs_json=""
+        local first=true
+        for part in "${gcs_json_parts[@]}"; do
+            if [ "$first" = true ]; then
+                first=false
+            else
+                gcs_json+=", "
+            fi
+            gcs_json+="$part"
+        done
+        json_sections+=("\"gcp\": { $gcs_json }")
+    fi
+
+    if [ -n "$azure_account" ]; then
+        local azure_json_parts=()
+        local azure_path_prefix
+        azure_path_prefix=$(derive_azure_path_prefix "$name" "$arch" "$timestamp") || return 1
+
+        local raw_filename="${artifact_prefix}.raw"
+        local raw_blob_name="${azure_path_prefix}/${raw_filename}"
+        local raw_azure_url
+        raw_azure_url=$(upload_azure_file "$raw_path" "$azure_account" "$azure_container" "$raw_blob_name" "$raw_filename") || return 1
+        azure_json_parts+=("\"raw\": \"$raw_azure_url\"")
+
+        if [ "$signed_urls" = true ]; then
+            local raw_signed_url
+            raw_signed_url=$(generate_azure_signed_url "$azure_account" "$azure_container" "$raw_blob_name" "$signed_url_expiry") || return 1
+            azure_json_parts+=("\"raw_signed_url\": \"$raw_signed_url\"")
+        fi
+
+        if [ -n "$qcow2_path" ]; then
+            local qcow2_filename="${artifact_prefix}.qcow2"
+            local qcow2_blob_name="${azure_path_prefix}/${qcow2_filename}"
+            local qcow2_azure_url
+            qcow2_azure_url=$(upload_azure_file "$qcow2_path" "$azure_account" "$azure_container" "$qcow2_blob_name" "$qcow2_filename") || return 1
+            azure_json_parts+=("\"qcow2\": \"$qcow2_azure_url\"")
+
+            if [ "$signed_urls" = true ]; then
+                local qcow2_signed_url
+                qcow2_signed_url=$(generate_azure_signed_url "$azure_account" "$azure_container" "$qcow2_blob_name" "$signed_url_expiry") || return 1
+                azure_json_parts+=("\"qcow2_signed_url\": \"$qcow2_signed_url\"")
+            fi
+        fi
+
+        if [ -n "$vmdk_path" ]; then
+            local vmdk_filename="${artifact_prefix}.vmdk"
+            local vmdk_blob_name="${azure_path_prefix}/${vmdk_filename}"
+            local vmdk_azure_url
+            vmdk_azure_url=$(upload_azure_file "$vmdk_path" "$azure_account" "$azure_container" "$vmdk_blob_name" "$vmdk_filename") || return 1
+            azure_json_parts+=("\"vmdk\": \"$vmdk_azure_url\"")
+        fi
+
+        if [ -n "$vmdk_flat_path" ]; then
+            local vmdk_flat_filename="${artifact_prefix}-flat.vmdk"
+            local vmdk_flat_blob_name="${azure_path_prefix}/${vmdk_flat_filename}"
+            local vmdk_flat_azure_url
+            vmdk_flat_azure_url=$(upload_azure_file "$vmdk_flat_path" "$azure_account" "$azure_container" "$vmdk_flat_blob_name" "$vmdk_flat_filename") || return 1
+            azure_json_parts+=("\"vmdk_flat\": \"$vmdk_flat_azure_url\"")
+        fi
+
+        local azure_json=""
+        local first=true
+        for part in "${azure_json_parts[@]}"; do
+            if [ "$first" = true ]; then
+                first=false
+            else
+                azure_json+=", "
+            fi
+            azure_json+="$part"
+        done
+        json_sections+=("\"azure\": { $azure_json }")
+    fi
+
+    printf "{\n"
+    local first=true
+    for section in "${json_sections[@]}"; do
+        if [ "$first" = true ]; then
+            first=false
+        else
+            printf ",\n"
+        fi
+        printf "  %s" "$section"
+    done
+    printf "\n}\n"
+}
+
+main "$@"
