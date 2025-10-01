@@ -33,7 +33,7 @@ ARCH ?= $(BUILDER_ARCH)
 ARCH_OUT_D = output/$(ARCH)
 
 BUILDER_KERNEL := builder/kernel-$(BUILDER_ARCH)
-BUILDER_INITRD := builder/initrd-$(BUILDER_ARCH)
+BUILDER_INITRD := builder/initrd-$(BUILDER)-$(BUILDER_ARCH)
 BUILDER_DEBUG_INITRD := builder/initrd-debug-$(BUILDER_ARCH)
 
 cfgs = $(wildcard configs/*)
@@ -157,11 +157,11 @@ configs/%/build.yaml:
 builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 
 builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
-	$(TOP_D)/apkoaas --log-level=debug make-builder --arch=$* iac/builder-debug.yaml $@
+	$(TOP_D)/apkoaas --log-level=debug make-builder --arch=$(BUILDER_ARCH) iac/builder-debug.yaml $@
 
 builder/initrd-%: apkoaas iac/$(BUILDER).yaml
 	@mkdir -p $(dir $@)
-	$(TOP_D)/apkoaas make-builder --arch=$* iac/$(BUILDER).yaml $@
+	$(TOP_D)/apkoaas make-builder --arch=$(BUILDER_ARCH) iac/$(BUILDER).yaml $@
 
 builder/ovmf-%.fd: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* ovmf $@
