@@ -1,0 +1,80 @@
+# Normally, Haskell packages use this pipeline between checking out the
+# repository and running the build, looking something like this:
+#
+#   - uses: haskell/fetch-dependencies
+#
+#   - working-directory: "${{package.name}}"
+#     runs: cabal install --installdir="${{targets.destdir}}/usr/bin" --install-method=copy ...
+#
+#   - working-directory: "${{package.name}}"
+#     runs: cabal test ...
+#
+# However, preparing the input dependencies-file currently requires an
+# initial local bootstrapping run that looks something like this instead:
+#
+#   - working-directory: "${{package.name}}"
+#     uses: haskell/record-dependencies
+#
+# If all goes well, that will print a JSON array and then exit non-zero.
+# Copy and paste that JSON data into hackage-dependencies.json in your
+# package's subdirectory, then rerun with this pipeline as normal.
+#
+name: "Fetch dependencies from Hackage"
+
+needs:
+  packages:
+    - py3-requests
+    - python3
+
+inputs:
+  dependencies-file:
+    description: "JSON file specifying exact dependencies and their digests"
+    default: "hackage-dependencies.json"
+
+pipeline:
+  - name: "Fetch dependencies from Hackage"
+    runs: |
+      mkdir -p "$HOME/local-hackage"
+      python3 <<'EOF'
+      import hashlib
+      import json
+      from pathlib import Path
+
+      import requests
+
+      with open("${{inputs.dependencies-file}}") as deps_file:
+          deps = json.load(deps_file)
+
+      base_url = "https://hackage.haskell.org/package"
+      repository = Path.home() / "local-hackage"
+
+      for dep in deps:
+          package = dep["package"]
+          version = dep["version"]
+          src_url = f"{base_url}/{package}-{version}.tar.gz"
+          print(f"Downloading {src_url}", flush=True)
+          src = requests.get(src_url)
+          src.raise_for_status()
+          assert hashlib.sha256(src.content).hexdigest() == dep["src_sha256"]
+          with open(repository / f"{dep['package']}-{dep['version']}.tar.gz", mode="wb") as src_file:
+              src_file.write(src.content)
+
+          if "cabal_revision" in dep:
+              cabal_revision = dep["cabal_revision"]
+              cabal_url = f"{base_url}/{package}-{version}/revision/{cabal_revision}.cabal"
+              print(f"Downloading {cabal_url}", flush=True)
+              cabal = requests.get(cabal_url)
+              cabal.raise_for_status()
+              assert hashlib.sha256(cabal.content).hexdigest() == dep["cabal_sha256"]
+              with open(repository / f"{dep['package']}-{dep['version']}.cabal", mode="wb") as cabal_file:
+                  cabal_file.write(cabal.content)
+      EOF
+
+  - name: "Configure Cabal to use only fetched dependencies"
+    runs: |
+      mkdir -p "$HOME/.config/cabal"
+      cat > "$HOME/.config/cabal/config" <<EOF
+      repository local-hackage
+        url: file+noindex://$HOME/local-hackage
+      EOF
+      cabal update
