@@ -4,6 +4,7 @@ package waagent
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/systemd"
+	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
 	"github.com/moby/sys/mountinfo"
 )
 
@@ -18,8 +21,27 @@ const (
 	datalossWarningFilename = "DATALOSS_WARNING_README.txt"
 )
 
+func waitForServiceIfPresent(ctx context.Context, t *testing.T, svc string) {
+	t.Helper()
+	_, err := systemd.SystemctlShow(ctx, svc)
+	if err != nil {
+		// Assume service doesn't exist on this image by design.
+		return
+	}
+	// Don't care about start time but, this function
+	// also waits for the service to be started.
+	_, err = systemd.GetServiceStartMonotonic(ctx, svc)
+	if err != nil {
+		t.Errorf("systemd.GetServiceStartMonotonic(ctx, %q) = err %v, want nil", svc, err)
+	}
+}
+
 // Run this on a machine type that has local temp disk storage
 func TestResourceDisk(t *testing.T) {
+	ctx := vmtest.Context(t)
+	waitForServiceIfPresent(ctx, t, "waagent.service")
+	waitForServiceIfPresent(ctx, t, "cloud-init.service")
+
 	resourceDiskPath, err := filepath.EvalSymlinks("/dev/disk/azure/resource")
 	if err != nil {
 		t.Fatalf("filepath.EvalSymlinks(/dev/disk/azure/resource) = err %v, want nil", err)
