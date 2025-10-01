@@ -176,11 +176,222 @@ cluster_destroy() {
     log 'Stack deleted successfully'
 }
 
+Usage_cluster_resources() {
+    cat <<EOF
+Usage: ${0##*/} cluster-resources cluster
+
+   Get resource IDs belonging to an ECS cluster.
+
+   arguments:
+      cluster                  name of the ECS cluster (e.g. vmtest-ecs)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+
+   output: vpc-id subnet-id sg-id profile-name
+
+   where:
+     - vpc-id: VPC ID created for the cluster
+     - subnet-id: VPC Subnet ID for instances in the cluster
+     - sg-id: Security Group ID for instances in the cluster
+     - profile-name: name of the Instance Profile instances need assigned when joining the cluster
+EOF
+}
+
+cluster_resources() {
+    local name="$1"
+    [ -n "$name" ] || { stderr 'cluster_status got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    local outputs
+    outputs=$(aws cloudformation describe-stacks \
+        --region "$AWS_REGION" \
+        --stack-name "$stack_name" \
+        --output json 2>/dev/null) || {
+            stderr "Stack $stack_name not found"
+            return 1
+        }
+
+    local vpc_id subnet_id sg_id profile_name
+    read -r -d $"\n" vpc_id subnet_id sg_id profile_name < <(
+        cloudformation_output() {
+            local key="$1"
+            echo "$outputs" | jq -r ".Stacks[0].Outputs[] | select(.OutputKey == \"${key}\") | .OutputValue"
+        }
+
+        cloudformation_output VPCId
+        cloudformation_output PublicSubnet
+        cloudformation_output SecurityGroupId
+        cloudformation_output InstanceProfileName
+    )
+
+    if [ -z "$vpc_id" ] || [ -z "$subnet_id" ] || [ -z "$sg_id" ] || [ -z "$profile_name" ]; then
+        stderr 'Failed to get all required stack outputs:'
+        stderr "                 VPC ID: $vpc_id"
+        stderr "              Subnet ID: $sg_id"
+        stderr "      Security Group ID: $sg_id"
+        stderr "  Instance Profile Name: $profile_name"
+        return 1
+    fi
+
+    echo "$vpc_id $subnet_id $sg_id $profile_name"
+}
+
+Usage_instance_add() {
+    cat <<EOF
+Usage: ${0##*/} instance-add cluster ami capacity instance-type
+
+   Launch EC2 instances and join them to an ECS cluster.
+
+   arguments:
+      cluster                  name of the ECS cluster (e.g. vmtest-ecs)
+      ami                      AMI ID to use for instances (e.g. ami-012346789abcdef)
+      capacity                 number of instances to create
+      instance-type            EC2 instance type (e.g. t4g.large)
+      subnet-id                Subnet ID for instances
+      sg-id                    Security Group ID for instances
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output: space-separated list of instance IDs
+
+EOF
+}
+
+instance_add() {
+    local cluster="$1" ami="$2" capacity="$3" instance_type="$4"
+
+    [ $# -eq 4 ] || {
+        stderr 'error: instance_add requires exactly 4 arguments'
+        Usage_instance_add
+        return 1
+    } >&2
+
+    local out
+
+    log 'Retrieving required parameters for instance launch'
+    local vpc_id subnet_id sg_id profile_name
+    out=$(cluster_resources "$cluster") || {
+        stderr 'Failed to determine required parameters to launch new instances'
+        return 1
+    }
+    read -r vpc_id subnet_id sg_id profile_name <<<"${out}"
+
+    local userdata="#!/bin/sh
+echo 'ECS_CLUSTER=$cluster' >> /etc/ecs/ecs.config
+echo 'ECS_ENABLE_CONTAINER_METADATA=true' >> /etc/ecs/ecs.config
+echo 'ECS_ENABLE_TASK_IAM_ROLE=true' >> /etc/ecs/ecs.config
+"
+
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+
+    local instance_tags
+    instance_tags="ResourceType=instance,Tags=["
+    instance_tags+="{Key=Name,Value=ecs-${cluster}-${timestamp}},"
+    instance_tags+="{Key=Environment,Value=wolfi-vm-test},"
+    instance_tags+="{Key=ECSCluster,Value=${cluster}},"
+    instance_tags+="{Key=AMI,Value=${ami}}"
+    instance_tags+="]"
+
+    log 'Launching instances'
+    out=$(vr aws ec2 run-instances \
+        --region "$AWS_REGION" \
+        --image-id "$ami" \
+        --count "$capacity" \
+        --instance-type "$instance_type" \
+        --subnet-id "$subnet_id" \
+        --security-group-ids "$sg_id" \
+        --iam-instance-profile "Name=${profile_name}" \
+        --user-data "$userdata" \
+        --tag-specifications "$instance_tags" \
+        --output json
+    ) || {
+        stderr 'Failed to launch new instances'
+        return 1
+    }
+    local instance_ids
+    mapfile -t instance_ids < <(jq -r '.Instances[].InstanceId' <<<"$out")
+
+    log "Waiting for instances ${instance_ids[*]} to be reported as running"
+    vr aws ec2 wait instance-running \
+        --region "$AWS_REGION" --instance-ids "${instance_ids[@]}" || {
+            stderr "Instances ${instance_ids[*]} did not flip to running"
+            return 1
+        }
+
+    log 'Waiting for instances to join the cluster'
+
+    local instance_ids_list
+    instance_ids_list=$(printf "'%s'," "${instance_ids[@]}")
+    instance_ids_list=${instance_ids_list%,}
+
+    local num_joined=0 attempt
+    for (( attempt = 0; attempt < 30; attempt++ )); do
+        num_joined=$(
+            aws ecs list-container-instances \
+                --region "$AWS_REGION" \
+                --cluster "$cluster" \
+                --filter "ec2InstanceId in [${instance_ids_list}]" \
+                --status ACTIVE \
+                --output json \
+            | jq '.containerInstanceArns | length'
+        )
+        if [ "$num_joined" -eq "$capacity" ]; then
+            log 'All instances joined the cluster'
+            break
+        fi
+        log "Still waiting on $(( capacity - num_joined ))/$capacity instances"
+        sleep 10
+    done
+
+    if [ "$num_joined" -ne "$capacity" ]; then
+        stderr 'Some instances failed to join the cluster'
+        return 1
+    fi
+
+    echo "${instance_ids[*]}"
+}
+
+Usage_instance_remove() {
+    cat <<EOF
+Usage: ${0##*/} instance-remove instance-ids...
+
+   Deregister instances from the cluster and terminate them.
+
+   arguments:
+      instance-ids             one or more EC2 instance IDs to terminate
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
+instance_remove() {
+    [ $# -gt 0 ] || {
+        stderr 'error: instance_remove requires at least 1 instance ID'
+        Usage_instance_remove
+        return 1
+    }
+
+    # Just terminate; deregister happens automatically
+    vr aws ec2 terminate-instances \
+        --region "$AWS_REGION" \
+        --instance-ids "$@"
+}
+
 SUBCMDS=(
     cluster-create
     cluster-destroy
     cluster-list
     cluster-status
+    cluster-resources
+    instance-add
+    instance-remove
 )
 
 if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
