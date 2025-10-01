@@ -10,6 +10,20 @@ define list_cloud_images
 	$(notdir $(wildcard configs/$1-*))
 endef
 
+# return a true-y value if the given variable has been set by the user
+define is_explicitly_set
+$(or $(findstring environment,$(origin $(1))),\
+     $(findstring command line,$(origin $(1))))
+endef
+
+# automatically select a builder from iac/ based on the build config name
+define select_builder
+$(if $(findstring hardened,$(1)),builder-cis,\
+$(if $(findstring rpi,$(1)),builder-rpi,\
+builder\
+))
+endef
+
 disks_aws := $(call list_cloud_images,aws)
 disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu := $(call list_cloud_images,generic)
@@ -344,7 +358,7 @@ $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspu
 	@$(call capture_stdout,$@,\
 	awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
 
-$(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
+$(ARCH_OUT_D)/%/disk.raw-build:
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas build \
 	--log-level=debug \
@@ -352,8 +366,16 @@ $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILD
 	--build-arch=$(BUILDER_ARCH) \
 	--builder-cpio=$(BUILDER_INITRD) \
 	--kernel=$(BUILDER_KERNEL) \
-	--output=$@ \
+	--output=$(patsubst %-build,%,$@) \
 	configs/$*/build.yaml
+
+$(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
+	$(if $(call is_explicitly_set,BUILDER), \
+	     , \
+	     $(eval BUILDER := $(call select_builder,$*)) \
+	     $(info Auto-selecting BUILDER=$(BUILDER) for $*) \
+	)
+	@$(MAKE) BUILDER=$(BUILDER) $@-build
 
 $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD)
 	@mkdir -p $(dir $@)
