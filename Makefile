@@ -337,8 +337,7 @@ $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-ge
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
 		--gcs-bucket $(RPI_GCSBUCKET) \
-		--raw-path $(dir $@)disk.raw \
-		--signed-urls)
+		--raw-path $(dir $@)disk.raw)
 
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
