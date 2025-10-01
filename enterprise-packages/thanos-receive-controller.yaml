@@ -1,0 +1,82 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: thanos-receive-controller
+  version: "0_git20250929"
+  epoch: 0
+  description: Kubernetes controller to automatically configure Thanos receive hashrings
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/observatorium/thanos-receive-controller
+      branch: main
+      expected-commit: f0fd9ed6b5169172b50418acb1da9cddc8e63e5d
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+        golang.org/x/crypto@v0.35.0
+        github.com/golang-jwt/jwt/v5@v5.2.2
+        github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.6.0
+        golang.org/x/net@v0.38.0
+
+  - name: upgrade Go to 1.25
+    runs: |
+      sed -i 's/go 1\.21\(\.[0-9]*\)\?/go 1.25/' go.mod
+      # remove this line too: toolchain go1.21.5
+      sed -i '/$toolchain /d' go.mod
+      go mod tidy
+
+  - uses: go/build
+    with:
+      packages: .
+      output: thanos-receive-controller
+
+update:
+  enabled: true
+  git: {}
+  schedule:
+    period: weekly
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: 32764
+  pipeline:
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          # Grant cluster-admin permissions to the default service account
+          kubectl create clusterrolebinding default-admin --clusterrole=cluster-admin --serviceaccount=default:default
+
+          cat <<EOF > hashrings.json
+          [
+            {
+              "hashring": "default",
+              "tenants": [
+
+              ]
+            }
+          ]
+          EOF
+          kubectl create configmap thanos-receive-controller-tenants --from-file=hashrings.json
+        start: /usr/bin/thanos-receive-controller --configmap-name=thanos-receive-controller-tenants --configmap-generated-name=thanos-receive-controller-tenants-generated --file-name=hashrings.json
+        timeout: 30
+        expected_output: |
+          starting the controller
+          successfully synced ConfigMap cache
+          hashring populated
+        post: |
+          wait-for-it -t 30 localhost:8080
+          curl -s http://localhost:8080/metrics | grep thanos_receive_controller_configmap_hash

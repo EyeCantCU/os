@@ -1,17 +1,32 @@
 package:
   name: volsync
-  version: "0.13.0"
+  version: "0.13.1"
   epoch: 0
   description: Asynchronous data replication for Kubernetes volumes
   copyright:
     - license: AGPL-3.0-or-later
+  dependencies:
+    runtime:
+      - acl
+      - openssh
+      - openssh-client
+      - openssh-server
+      - openssl
+      - perl
+      - rsync
+      - stunnel # rclone, restic, syncthing will be added at image level since those are not required at runtime for volsync to work
+
+environment:
+  contents:
+    packages:
+      - rsync
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/backube/volsync
       tag: v${{package.version}}
-      expected-commit: 34b8e30c6354bb8380dc77310ae07ba8687b3e5b
+      expected-commit: d271a1756ce58d2dadc45f8426cda5d76a3df187
 
   - uses: go/bump
     with:
@@ -24,7 +39,86 @@ pipeline:
       packages: ./cmd
       output: manager
 
+  - name: "copy mover scripts"
+    runs: |
+      mkdir -p ${{targets.contextdir}}/mover-rclone \
+               ${{targets.contextdir}}/mover-restic \
+               ${{targets.contextdir}}/mover-rsync \
+               ${{targets.contextdir}}/mover-rsync-tls \
+               ${{targets.contextdir}}/mover-syncthing
+
+      # copy rclone scripts
+      cp mover-rclone/active.sh ${{targets.contextdir}}/mover-rclone/
+      chmod a+rx ${{targets.contextdir}}/mover-rclone/*.sh
+
+      # copy restic scripts
+      cp mover-restic/entry.sh ${{targets.contextdir}}/mover-restic/
+      chmod a+rx ${{targets.contextdir}}/mover-restic/*.sh
+
+      # copy rsync(ssh) scripts
+      cp mover-rsync/source.sh ${{targets.contextdir}}/mover-rsync/
+      cp mover-rsync/destination.sh ${{targets.contextdir}}/mover-rsync/
+      cp mover-rsync/destination-command.sh ${{targets.contextdir}}/mover-rsync/
+      chmod a+rx ${{targets.contextdir}}/mover-rsync/*.sh
+
+      mkdir -p "${{targets.contextdir}}/etc/ssh/sshd_config.d" \
+             "${{targets.contextdir}}/usr/local/bin"
+
+      install -m0755 /usr/bin/rrsync "${{targets.contextdir}}/usr/local/bin/rrsync" && \
+
+      cat > "${{targets.contextdir}}/etc/ssh/sshd_config.d/volsync.conf" <<EOF
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      AllowTcpForwarding no
+      X11Forwarding no
+      PermitTunnel no
+      PidFile /tmp/sshd.pid
+      UsePAM no
+      HostKey /etc/ssh/ssh_host_rsa_key
+      EOF
+
+      # copy rsync-tls scripts
+      cp mover-rsync-tls/client.sh ${{targets.contextdir}}/mover-rsync-tls/
+      cp mover-rsync-tls/server.sh ${{targets.contextdir}}/mover-rsync-tls/
+      chmod a+rx ${{targets.contextdir}}/mover-rsync-tls/*.sh
+
+      # copy syncthing scripts + templates
+      cp mover-syncthing/config-template.xml ${{targets.contextdir}}/mover-syncthing/
+      cp mover-syncthing/stignore-template ${{targets.contextdir}}/mover-syncthing/
+      cp mover-syncthing/entry.sh ${{targets.contextdir}}/mover-syncthing/
+      chmod a+r ${{targets.contextdir}}/mover-syncthing/config-template.xml
+      chmod a+r ${{targets.contextdir}}/mover-syncthing/stignore-template
+      chmod a+rx ${{targets.contextdir}}/mover-syncthing/*.sh
+
+  - name: "test"
+    runs: |
+      test -f "${{targets.contextdir}}/etc/ssh/sshd_config.d/volsync.conf"
+      test -x "${{targets.contextdir}}/mover-rclone/active.sh"
+      test -x "${{targets.contextdir}}/mover-restic/entry.sh"
+      test -x "${{targets.contextdir}}/mover-rsync/source.sh"
+      test -x "${{targets.contextdir}}/mover-rsync/destination.sh"
+      test -x "${{targets.contextdir}}/mover-rsync/destination-command.sh"
+      test -x "${{targets.contextdir}}/mover-rsync-tls/client.sh"
+      test -x "${{targets.contextdir}}/mover-rsync-tls/server.sh"
+      test -x "${{targets.contextdir}}/mover-syncthing/entry.sh"
+
 subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream helm charts"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"
+          ln -s ./usr/bin/manager "${{targets.contextdir}}/manager"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
   - name: ${{package.name}}-cli
     description: CLI for volsync
     pipeline:
@@ -84,10 +178,9 @@ test:
     - uses: test/daemon-check-output
       with:
         setup: |
-          helm pull volsync \
-            --repo https://backube.github.io/helm-charts/ \
-            --version ${{package.version}} --untar
-          helm template volsync ./volsync \
+          helm repo add backube https://backube.github.io/helm-charts/
+          helm template backube/volsync \
+            --version ${{package.version}} \
             --set manageCRDs=true \
             --show-only templates/volsync.backube_replicationdestinations.yaml \
             --show-only templates/volsync.backube_replicationsources.yaml \

@@ -1,7 +1,7 @@
 package:
   name: beats-fips-9.1
-  version: "9.1.3"
-  epoch: 1 # GHSA-x4rx-4gw3-53p4
+  version: "9.1.4"
+  epoch: 0
   description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
   resources:
     cpu: 16
@@ -28,7 +28,7 @@ pipeline:
     with:
       repository: https://github.com/elastic/beats
       tag: v${{package.version}}
-      expected-commit: d9d2860c7593868e25d1b2da7da43793fe12c99e
+      expected-commit: c50e2cc4adfaed4367b3fba44d27db0222123cec
 
   - uses: go/bump
     with:
@@ -98,6 +98,7 @@ subpackages:
         environment:
           ELASTICSEARCH_HOSTS: localhost:9200
           ES_JAVA_HOME: /usr/lib/jvm/java-24-openjdk
+          NODE_OPTIONS: "--openssl-config=/dev/null"
       pipeline:
         - uses: test/go-fips-check
           with:
@@ -119,63 +120,44 @@ subpackages:
             auditbeat keystore list | grep FOO
             auditbeat keystore remove FOO | grep "successfully removed key: FOO"
         - name: Test auditbeat setup and test
-          working-directory: /usr/share/auditbeat
-          runs: |
-            set -eu -o pipefail
-            chown -R elasticsearch:root /usr/share/elasticsearch
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              chown -R elasticsearch:root /usr/share/elasticsearch
+              touch /tmp/elasticsearch.pid
+              chown -R elasticsearch:root /tmp/elasticsearch.pid
 
-            # Start up Elasticsearch with no username/password
-            sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
-              -Ediscovery.type=single-node \
-              -Expack.security.enabled=false \
-              -p /tmp/elasticsearch.pid > {{package.name}}.log 2>&1 &
+              # Start up Elasticsearch with no username/password
+              sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+                -Ediscovery.type=single-node \
+                -Expack.security.enabled=false \
+                -p /tmp/elasticsearch.pid
 
-            wait-for-it localhost:9200 --timeout=120
+              wait-for-it localhost:9200 --timeout=120
 
-            # Confirm Elasticsearch status before continuing
-            es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
-            echo "Elasticsearch status: $es_status"
+              # Confirm Elasticsearch status before continuing
+              curl --retry 10 -sf -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status' | grep "green"
 
-            timer_start=$(date +%s)
-            while [ $es_status != "green" ]
-            do
-              timer_now=$(date +%s)
-              es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
-              echo "Elasticsearch status: $es_status"
-              if [ $(( timer_now - timer_start )) -gt 120 ]
-              then
-                echo "Timed out waiting for Elasticsearch!"
-                exit 1
-              fi
-              sleep 2
-            done
-
-            # Temporary workaround until we have ES and Kibana working correctly with xpack.security enabled
-            # Do auditbeat tests only if Kibana hasn't Node.js in FIPS mode.
-
-            echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
-            /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
-
-            sleep 10
-
-            if grep -q "the configured Node.js environment has FIPS enabled" kibana.log; then
-              echo "Found Kibana's Node.js environment in FIPS mode. Don't wait-for-it."
-            else
+              echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+            start: /usr/share/kibana/bin/kibana --config kibana.yml --allow-root
+            expected_output: |
+              http server running
+              Task Manager is healthy
+              Kibana is now available
+            error_strings: |
+              FAIL
+              FATAL
+              Traceback.*most.recent.call
+              Exception in thread
+              java.lang.*Exception
+              Gem::MissingSpecError
+              command not found
+            timeout: 120
+            post: |
               wait-for-it localhost:5601 --timeout=120
-
-              # Test auditbeat setup with default Elasticsearch and Kibana services running
-              for try in $(seq 1 5)
-              do
-                if ! auditbeat setup
-                then
-                  sleep 5
-                else
-                  break
-                fi
-              done
-            fi
-
-            auditbeat test output
+              cd /usr/share/auditbeat
+              auditbeat setup
+              auditbeat test output
 
   - name: metricbeat-fips-${{vars.major-minor-version}}
     dependencies:

@@ -1,0 +1,1016 @@
+From e5ded700abec47480d62d3025278f9e090d5ffa7 Mon Sep 17 00:00:00 2001
+From: Amelia Crate <amelia.crate@chainguard.dev>
+Date: Mon, 28 Jul 2025 16:56:42 -0700
+Subject: [PATCH 2/3] crypto: reusable jitterentropy
+
+make jitterentropy highly reusable
+
+* move MODULE macros to a recompilable jitterentropy-module object
+* shim all function calls in a recompilable jitterentropy-shim object
+* vendor sha3 for direct use by jitterentropy
+
+achieving the same reusability without vendoring sha3 is possible, just
+requires the same sha3_generic-module.c and sha3_generic-shim.c technique.
+---
+ crypto/jitterentropy-kcapi.c        |  81 ++++----
+ crypto/jitterentropy-shim.c         | 306 ++++++++++++++++++++++++++++
+ crypto/jitterentropy-shim.h         | 101 +++++++++
+ crypto/jitterentropy.c              |  13 +-
+ crypto/sha3_jitterentropy.c         | 245 ++++++++++++++++++++++
+ include/crypto/sha3_jitterentropy.h |  54 +++++
+ 6 files changed, 748 insertions(+), 52 deletions(-)
+ create mode 100644 crypto/jitterentropy-shim.c
+ create mode 100644 crypto/jitterentropy-shim.h
+ create mode 100644 crypto/sha3_jitterentropy.c
+ create mode 100644 include/crypto/sha3_jitterentropy.h
+
+diff --git a/crypto/jitterentropy-kcapi.c b/crypto/jitterentropy-kcapi.c
+index 1266eb790708..a455f670ff39 100644
+--- a/crypto/jitterentropy-kcapi.c
++++ b/crypto/jitterentropy-kcapi.c
+@@ -36,9 +36,6 @@
+  * USE OF THIS SOFTWARE, EVEN IF NOT ADVISED OF THE POSSIBILITY OF SUCH
+  * DAMAGE.
+  */
+-
+-#include <crypto/hash.h>
+-#include <crypto/sha3.h>
+ #include <linux/fips.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -46,6 +43,7 @@
+ #include <linux/time.h>
+ #include <crypto/internal/rng.h>
+ 
++#include <crypto/sha3_jitterentropy.h>
+ #include "jitterentropy.h"
+ 
+ #define JENT_CONDITIONING_HASH	"sha3-256-generic"
+@@ -105,15 +103,19 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
+ 		   unsigned int addtl_len, __u64 hash_loop_cnt,
+ 		   unsigned int stuck)
+ {
+-	struct shash_desc *hash_state_desc = (struct shash_desc *)hash_state;
+-	SHASH_DESC_ON_STACK(desc, hash_state_desc->tfm);
++	struct sha3_state *hash_state_desc = (struct sha3_state *)hash_state;
++	struct sha3_state *desc;
+ 	u8 intermediary[SHA3_256_DIGEST_SIZE];
+ 	__u64 j = 0;
+ 	int ret;
+ 
+-	desc->tfm = hash_state_desc->tfm;
++	desc = kmalloc(sizeof(struct sha3_state), GFP_KERNEL);
++	if (!desc) {
++		ret = -ENOMEM;
++		goto err;
++	}
+ 
+-	if (sizeof(intermediary) != crypto_shash_digestsize(desc->tfm)) {
++	if (sizeof(intermediary) != SHA3_256_DIGEST_SIZE) {
+ 		pr_warn_ratelimited("Unexpected digest size\n");
+ 		return -EINVAL;
+ 	}
+@@ -129,13 +131,13 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
+ 	 *
+ 	 * Note, it does not matter which or how much data you inject, we are
+ 	 * interested in one Keccack1600 compression operation performed with
+-	 * the crypto_shash_final.
++	 * the jitter_sha3_final.
+ 	 */
+ 	for (j = 0; j < hash_loop_cnt; j++) {
+-		ret = crypto_shash_init(desc) ?:
+-		      crypto_shash_update(desc, intermediary,
++		ret = jitter_sha3_init(desc, SHA3_256_DIGEST_SIZE) ?:
++		      jitter_sha3_update(desc, intermediary,
+ 					  sizeof(intermediary)) ?:
+-		      crypto_shash_finup(desc, addtl, addtl_len, intermediary);
++		      jitter_sha3_finup(desc, addtl, addtl_len, SHA3_256_DIGEST_SIZE, intermediary);
+ 		if (ret)
+ 			goto err;
+ 	}
+@@ -144,7 +146,7 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
+ 	 * Inject the data from the previous loop into the pool. This data is
+ 	 * not considered to contain any entropy, but it stirs the pool a bit.
+ 	 */
+-	ret = crypto_shash_update(hash_state_desc, intermediary, sizeof(intermediary));
++	ret = jitter_sha3_update(hash_state_desc, intermediary, sizeof(intermediary));
+ 	if (ret)
+ 		goto err;
+ 
+@@ -161,10 +163,10 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
+ 		time = 0;
+ 	}
+ 
+-	ret = crypto_shash_update(hash_state_desc, (u8 *)&time, sizeof(__u64));
++	ret = jitter_sha3_update(hash_state_desc, (u8 *)&time, sizeof(__u64));
+ 
+ err:
+-	shash_desc_zero(desc);
++	jitter_sha3_zero(desc);
+ 	memzero_explicit(intermediary, sizeof(intermediary));
+ 
+ 	return ret;
+@@ -172,12 +174,12 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
+ 
+ int jent_read_random_block(void *hash_state, char *dst, unsigned int dst_len)
+ {
+-	struct shash_desc *hash_state_desc = (struct shash_desc *)hash_state;
++	struct sha3_state *hash_state_desc = (struct sha3_state *)hash_state;
+ 	u8 jent_block[SHA3_256_DIGEST_SIZE];
+ 	/* Obtain data from entropy pool and re-initialize it */
+-	int ret = crypto_shash_final(hash_state_desc, jent_block) ?:
+-		  crypto_shash_init(hash_state_desc) ?:
+-		  crypto_shash_update(hash_state_desc, jent_block,
++	int ret = jitter_sha3_final(hash_state_desc, SHA3_256_DIGEST_SIZE, jent_block) ?:
++		  jitter_sha3_init(hash_state_desc, SHA3_256_DIGEST_SIZE) ?:
++		  jitter_sha3_update(hash_state_desc, jent_block,
+ 				      sizeof(jent_block));
+ 
+ 	if (!ret && dst_len)
+@@ -194,8 +196,7 @@ int jent_read_random_block(void *hash_state, char *dst, unsigned int dst_len)
+ struct jitterentropy {
+ 	spinlock_t jent_lock;
+ 	struct rand_data *entropy_collector;
+-	struct crypto_shash *tfm;
+-	struct shash_desc *sdesc;
++	struct sha3_state *sdesc;
+ };
+ 
+ static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
+@@ -205,15 +206,11 @@ static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
+ 	spin_lock(&rng->jent_lock);
+ 
+ 	if (rng->sdesc) {
+-		shash_desc_zero(rng->sdesc);
++		jitter_sha3_zero(rng->sdesc);
+ 		kfree(rng->sdesc);
+ 	}
+ 	rng->sdesc = NULL;
+ 
+-	if (rng->tfm)
+-		crypto_free_shash(rng->tfm);
+-	rng->tfm = NULL;
+-
+ 	if (rng->entropy_collector)
+ 		jent_entropy_collector_free(rng->entropy_collector);
+ 	rng->entropy_collector = NULL;
+@@ -223,8 +220,7 @@ static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
+ static int jent_kcapi_init(struct crypto_tfm *tfm)
+ {
+ 	struct jitterentropy *rng = crypto_tfm_ctx(tfm);
+-	struct crypto_shash *hash;
+-	struct shash_desc *sdesc;
++	struct sha3_state *sdesc;
+ 	int size, ret = 0;
+ 
+ 	spin_lock_init(&rng->jent_lock);
+@@ -238,22 +234,15 @@ static int jent_kcapi_init(struct crypto_tfm *tfm)
+ 	 * using a fast implementation, we would need to call it more often
+ 	 * as its variations are lower.
+ 	 */
+-	hash = crypto_alloc_shash(JENT_CONDITIONING_HASH, 0, 0);
+-	if (IS_ERR(hash)) {
+-		pr_err("Cannot allocate conditioning digest\n");
+-		return PTR_ERR(hash);
+-	}
+-	rng->tfm = hash;
+ 
+-	size = sizeof(struct shash_desc) + crypto_shash_descsize(hash);
++	size = sizeof(struct sha3_state);
+ 	sdesc = kmalloc(size, GFP_KERNEL);
+ 	if (!sdesc) {
+ 		ret = -ENOMEM;
+ 		goto err;
+ 	}
+ 
+-	sdesc->tfm = hash;
+-	crypto_shash_init(sdesc);
++	jitter_sha3_init(sdesc, SHA3_256_DIGEST_SIZE);
+ 	rng->sdesc = sdesc;
+ 
+ 	rng->entropy_collector =
+@@ -333,23 +322,21 @@ static struct rng_alg jent_alg = {
+ 
+ static int __init jent_mod_init(void)
+ {
+-	SHASH_DESC_ON_STACK(desc, tfm);
+-	struct crypto_shash *tfm;
+-	int ret = 0;
++	struct sha3_state *sdesc;
++	int size, ret = 0;
+ 
+ 	jent_testing_init();
+ 
+-	tfm = crypto_alloc_shash(JENT_CONDITIONING_HASH, 0, 0);
+-	if (IS_ERR(tfm)) {
++	size = sizeof(struct sha3_state);
++	sdesc = kmalloc(size, GFP_KERNEL);
++	if (!sdesc) {
+ 		jent_testing_exit();
+-		return PTR_ERR(tfm);
++		return -ENOMEM;
+ 	}
+ 
+-	desc->tfm = tfm;
+-	crypto_shash_init(desc);
+-	ret = jent_entropy_init(CONFIG_CRYPTO_JITTERENTROPY_OSR, 0, desc, NULL);
+-	shash_desc_zero(desc);
+-	crypto_free_shash(tfm);
++	jitter_sha3_init(sdesc, SHA3_256_DIGEST_SIZE);
++	ret = jent_entropy_init(CONFIG_CRYPTO_JITTERENTROPY_OSR, 0, sdesc, NULL);
++	jitter_sha3_zero(sdesc);
+ 	if (ret) {
+ 		/* Handle permanent health test error */
+ 		if (fips_enabled)
+diff --git a/crypto/jitterentropy-shim.c b/crypto/jitterentropy-shim.c
+new file mode 100644
+index 000000000000..ac074593c4f2
+--- /dev/null
++++ b/crypto/jitterentropy-shim.c
+@@ -0,0 +1,306 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Jitter RNG shim layer implementation
++ *
++ * This file provides wrapper functions for Linux kernel functions
++ * used by the jitterentropy modules, creating an abstraction layer.
++ */
++
++#include <crypto/hash.h>
++#include <crypto/internal/rng.h>
++#include <linux/atomic.h>
++#include <linux/bitops.h>
++#include <linux/debugfs.h>
++#include <linux/fips.h>
++#include <linux/kernel.h>
++#include <linux/minmax.h>
++#include <linux/module.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/string.h>  
++#include <linux/time.h>
++#include <linux/types.h>
++#include <linux/uaccess.h>
++#include <linux/unaligned.h>
++#include <linux/wait.h>
++#include <linux/printk.h>
++
++#include "jitterentropy-shim.h"
++
++/* Memory allocation functions */
++void *jent_shim_kvzalloc(unsigned int len, gfp_t flags)
++{
++	return kvzalloc(len, flags);
++}
++
++void jent_shim_kvfree_sensitive(void *ptr, unsigned int len)
++{
++	kvfree_sensitive(ptr, len);
++}
++
++void *jent_shim_kzalloc(unsigned int len, gfp_t flags)
++{
++	return kzalloc(len, flags);
++}
++
++void jent_shim_kfree_sensitive(void *ptr)
++{
++	kfree_sensitive(ptr);
++}
++
++void *jent_shim_kmalloc(unsigned int size, gfp_t flags)
++{
++	return kmalloc(size, flags);
++}
++
++void jent_shim_kfree(void *ptr)
++{
++	kfree(ptr);
++}
++
++/* Time functions */
++unsigned long jent_shim_random_get_entropy(void)
++{
++	return random_get_entropy();
++}
++
++u64 jent_shim_ktime_get_ns(void)
++{
++	return ktime_get_ns();
++}
++
++/* Memory operations */
++void *jent_shim_memcpy(void *dest, const void *src, unsigned int n)
++{
++	return memcpy(dest, src, n);
++}
++
++void *jent_shim_memset(void *s, int c, unsigned int n)
++{
++	return memset(s, c, n);
++}
++
++void jent_shim_memzero_explicit(void *s, unsigned int count)
++{
++	memzero_explicit(s, count);
++}
++
++/* Printing functions */
++void jent_shim_pr_warn_ratelimited(const char *fmt, ...)
++{
++	va_list args;
++	va_start(args, fmt);
++	pr_warn_ratelimited("%pV", &(struct va_format){ fmt, &args });
++	va_end(args);
++}
++
++void jent_shim_pr_warn_once(const char *fmt, ...)
++{
++	va_list args;
++	va_start(args, fmt);
++	pr_warn_once("%pV", &(struct va_format){ fmt, &args });
++	va_end(args);
++}
++
++void jent_shim_pr_warn(const char *fmt, ...)
++{
++	va_list args;
++	va_start(args, fmt);
++	pr_warn("%pV", &(struct va_format){ fmt, &args });
++	va_end(args);
++}
++
++void jent_shim_pr_err(const char *fmt, ...)
++{
++	va_list args;
++	va_start(args, fmt);
++	pr_err("%pV", &(struct va_format){ fmt, &args });
++	va_end(args);
++}
++
++void jent_shim_pr_info(const char *fmt, ...)
++{
++	va_list args;
++	va_start(args, fmt);
++	pr_info("%pV", &(struct va_format){ fmt, &args });
++	va_end(args);
++}
++
++void jent_shim_printk(const char *fmt, ...)
++{
++	va_list args;
++	va_start(args, fmt);
++	printk("%pV", &(struct va_format){ fmt, &args });
++	va_end(args);
++}
++
++/* FIPS and system functions */
++
++int jent_shim_fips_enabled()
++{
++	return fips_enabled;
++}
++
++void jent_shim_panic(const char *fmt, ...)
++{
++	va_list args;
++	va_start(args, fmt);
++	panic(fmt, args);
++	va_end(args);
++}
++
++/* Utility functions */
++__u64 jent_shim_rol64(__u64 word, unsigned int shift)
++{
++	return rol64(word, shift);
++}
++
++/* Scheduler functions */
++int jent_shim_need_resched(void)
++{
++	return need_resched();
++}
++
++void jent_shim_schedule(void)
++{
++	schedule();
++}
++
++int jent_shim_signal_pending(void *current_task)
++{
++	return signal_pending(current);
++}
++
++/* Wait queue functions */
++void jent_shim_wake_up_interruptible(void *wait_queue)
++{
++	wake_up_interruptible((wait_queue_head_t *)wait_queue);
++}
++
++int jent_shim_wq_has_sleeper(void *wait_queue)
++{
++	return wq_has_sleeper((wait_queue_head_t *)wait_queue);
++}
++
++int jent_shim_wait_event_interruptible(void *wait_queue, int condition)
++{
++	return wait_event_interruptible(*(wait_queue_head_t *)wait_queue, condition);
++}
++
++/* User space access */
++unsigned long jent_shim_copy_to_user(void __user *to, const void *from, unsigned long n)
++{
++	return copy_to_user(to, from, n);
++}
++
++/* Alignment */
++void *jent_shim_PTR_ALIGN(const void *p, unsigned int a)
++{
++	return (void *)PTR_ALIGN(p, a);
++}
++
++/* Unaligned access */
++u64 jent_shim_get_unaligned_le64(const void *p)
++{
++	return get_unaligned_le64(p);
++}
++
++void jent_shim_put_unaligned_le64(u64 val, void *p)
++{
++	put_unaligned_le64(val, p);
++}
++
++u32 jent_shim_get_unaligned_le32(const void *p)
++{
++	return get_unaligned_le32(p);
++}
++
++void jent_shim_put_unaligned_le32(u32 val, void *p)
++{
++	put_unaligned_le32(val, p);
++}
++
++/* Crypto registration */
++int jent_shim_crypto_register_rng(void *alg)
++{
++	return crypto_register_rng((struct rng_alg *)alg);
++}
++
++void jent_shim_crypto_unregister_rng(void *alg)
++{
++	crypto_unregister_rng((struct rng_alg *)alg);
++}
++
++/* Module and debugfs functions */
++struct dentry *jent_shim_debugfs_create_dir(const char *name, struct dentry *parent)
++{
++	return debugfs_create_dir(name, parent);
++}
++
++struct dentry *jent_shim_debugfs_create_file_unsafe(const char *name, umode_t mode,
++						   struct dentry *parent, void *data,
++						   const void *fops)
++{
++	return debugfs_create_file_unsafe(name, mode, parent, data, 
++					  (const struct file_operations *)fops);
++}
++
++void jent_shim_debugfs_remove_recursive(struct dentry *dentry)
++{
++	debugfs_remove_recursive(dentry);
++}
++
++/* Spinlock functions */
++void jent_shim_spin_lock_init(void *lock)
++{
++	spin_lock_init((spinlock_t *)lock);
++}
++
++void jent_shim_spin_lock(void *lock)
++{
++	spin_lock((spinlock_t *)lock);
++}
++
++void jent_shim_spin_unlock(void *lock)
++{
++	spin_unlock((spinlock_t *)lock);
++}
++
++void jent_shim_spin_lock_irqsave(void *lock, unsigned long *flags)
++{
++	spin_lock_irqsave((spinlock_t *)lock, *flags);
++}
++
++void jent_shim_spin_unlock_irqrestore(void *lock, unsigned long flags)
++{
++	spin_unlock_irqrestore((spinlock_t *)lock, flags);
++}
++
++/* Atomic operations */
++void jent_shim_atomic_set(void *atomic, int val)
++{
++	atomic_set((atomic_t *)atomic, val);
++}
++
++int jent_shim_atomic_read(const void *atomic)
++{
++	return atomic_read((const atomic_t *)atomic);
++}
++
++void jent_shim_atomic_inc(void *atomic)
++{
++	atomic_inc((atomic_t *)atomic);
++}
++
++/* Crypto context functions */
++void *jent_shim_crypto_tfm_ctx(void *tfm)
++{
++	return crypto_tfm_ctx((struct crypto_tfm *)tfm);
++}
++
++void *jent_shim_crypto_rng_ctx(void *tfm)
++{
++	return crypto_rng_ctx((struct crypto_rng *)tfm);
++}
++
+diff --git a/crypto/jitterentropy-shim.h b/crypto/jitterentropy-shim.h
+new file mode 100644
+index 000000000000..a6d330c43726
+--- /dev/null
++++ b/crypto/jitterentropy-shim.h
+@@ -0,0 +1,101 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Jitter RNG shim layer
++ * 
++ * This header provides function declarations for Linux kernel functions
++ * used by the jitterentropy modules, creating an abstraction layer.
++ */
++
++#ifndef _JITTERENTROPY_SHIM_H
++#define _JITTERENTROPY_SHIM_H
++
++#include <linux/types.h>
++#include <linux/errno.h>
++#include <linux/gfp.h>
++
++/* Memory allocation functions */
++void *jent_shim_kvzalloc(unsigned int len, gfp_t flags);
++void jent_shim_kvfree_sensitive(void *ptr, unsigned int len);
++void *jent_shim_kzalloc(unsigned int len, gfp_t flags);
++void jent_shim_kfree_sensitive(void *ptr);
++void *jent_shim_kmalloc(unsigned int size, gfp_t flags);
++void jent_shim_kfree(void *ptr);
++
++/* Time functions */
++unsigned long jent_shim_random_get_entropy(void);
++u64 jent_shim_ktime_get_ns(void);
++
++/* Memory operations */
++void *jent_shim_memcpy(void *dest, const void *src, unsigned int n);
++void *jent_shim_memset(void *s, int c, unsigned int n);
++void jent_shim_memzero_explicit(void *s, unsigned int count);
++
++/* Printing functions */
++void jent_shim_pr_warn_ratelimited(const char *fmt, ...);
++void jent_shim_pr_warn_once(const char *fmt, ...);
++void jent_shim_pr_warn(const char *fmt, ...);
++void jent_shim_pr_err(const char *fmt, ...);
++void jent_shim_pr_info(const char *fmt, ...);
++void jent_shim_printk(const char *fmt, ...);
++
++/* FIPS and system functions */
++int jent_shim_fips_enabled(void);
++void jent_shim_panic(const char *fmt, ...) __noreturn __cold;
++
++/* Utility macros and functions */
++#define jent_shim_min(x, y) ((x) < (y) ? (x) : (y))
++__u64 jent_shim_rol64(__u64 word, unsigned int shift);
++
++/* Scheduler functions */
++int jent_shim_need_resched(void);
++void jent_shim_schedule(void);
++int jent_shim_signal_pending(void *current_task);
++
++/* Wait queue functions */
++void jent_shim_wake_up_interruptible(void *wait_queue);
++int jent_shim_wq_has_sleeper(void *wait_queue);
++int jent_shim_wait_event_interruptible(void *wait_queue, int condition);
++
++/* User space access */
++unsigned long jent_shim_copy_to_user(void __user *to, const void *from, unsigned long n);
++
++/* Alignment */
++void *jent_shim_PTR_ALIGN(const void *p, unsigned int a);
++
++/* Unaligned access */
++u64 jent_shim_get_unaligned_le64(const void *p);
++void jent_shim_put_unaligned_le64(u64 val, void *p);
++u32 jent_shim_get_unaligned_le32(const void *p);
++void jent_shim_put_unaligned_le32(u32 val, void *p);
++
++/* Crypto registration */
++int jent_shim_crypto_register_rng(void *alg);
++void jent_shim_crypto_unregister_rng(void *alg);
++
++/* Module and debugfs functions */
++struct dentry *jent_shim_debugfs_create_dir(const char *name, struct dentry *parent);
++struct dentry *jent_shim_debugfs_create_file_unsafe(const char *name, umode_t mode,
++						   struct dentry *parent, void *data,
++						   const void *fops);
++void jent_shim_debugfs_remove_recursive(struct dentry *dentry);
++
++/* Spinlock functions */
++void jent_shim_spin_lock_init(void *lock);
++void jent_shim_spin_lock(void *lock);
++void jent_shim_spin_unlock(void *lock);
++void jent_shim_spin_lock_irqsave(void *lock, unsigned long *flags);
++void jent_shim_spin_unlock_irqrestore(void *lock, unsigned long flags);
++
++/* Atomic operations */
++void jent_shim_atomic_set(void *atomic, int val);
++int jent_shim_atomic_read(const void *atomic);
++void jent_shim_atomic_inc(void *atomic);
++
++/* Module parameters */
++int jent_shim_module_param(void);
++
++/* Crypto context functions */
++void *jent_shim_crypto_tfm_ctx(void *tfm);
++void *jent_shim_crypto_rng_ctx(void *tfm);
++
++#endif /* _JITTERENTROPY_SHIM_H */
+diff --git a/crypto/jitterentropy.c b/crypto/jitterentropy.c
+index 0bdbaeb40bbb..e6afb40408fd 100644
+--- a/crypto/jitterentropy.c
++++ b/crypto/jitterentropy.c
+@@ -150,6 +150,7 @@ struct rand_data {
+ #include <linux/printk.h>
+ #include <generated/utsrelease.h>
+ #include "jitterentropy.h"
++#include "jitterentropy-shim.h"
+ 
+ /***************************************************************************
+  * Adaptive Proportion Test
+@@ -180,7 +181,9 @@ static const unsigned int jent_apt_cutoff_lookup[15] = {
+ static const unsigned int jent_apt_cutoff_permanent_lookup[15] = {
+ 	355, 447, 479, 494, 502, 507, 510, 512,
+ 	512, 512, 512, 512, 512, 512, 512 };
+-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
++/* #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
++ * redefined by includes from jitterentropy-shim.h
++ */
+ 
+ static void jent_apt_init(struct rand_data *ec, unsigned int osr)
+ {
+@@ -362,7 +365,7 @@ static int jent_stuck(struct rand_data *ec, __u64 current_delta)
+ static unsigned int jent_health_failure(struct rand_data *ec)
+ {
+ 	/* Test is only enabled in FIPS mode */
+-	if (!fips_enabled)
++	if (!jent_shim_fips_enabled())
+ 		return 0;
+ 
+ 	return ec->health_failure;
+@@ -560,7 +563,7 @@ static void jent_gen_entropy(struct rand_data *ec)
+ {
+ 	unsigned int k = 0, safety_factor = 0;
+ 
+-	if (fips_enabled)
++	if (jent_shim_fips_enabled())
+ 		safety_factor = JENT_ENTROPY_SAFETY_FACTOR;
+ 
+ 	/* priming of the ->prev_time value */
+@@ -641,7 +644,7 @@ int jent_read_entropy(struct rand_data *ec, unsigned char *data,
+ 			return -2;
+ 		}
+ 
+-		tocopy = min(DATA_SIZE_BITS / 8, len);
++		tocopy = jent_shim_min(DATA_SIZE_BITS / 8, len);
+ 		if (jent_read_random_block(ec->hash_state, p, tocopy))
+ 			return -1;
+ 
+@@ -709,7 +712,7 @@ void jent_entropy_collector_free(struct rand_data *entropy_collector)
+ int jent_entropy_init(unsigned int osr, unsigned int flags, void *hash_state,
+ 		      struct rand_data *p_ec)
+ {
+-	printk(KERN_INFO "Initializing jitterentropy built from %s sources\n", UTS_RELEASE);
++	jent_shim_printk(KERN_INFO "Initializing jitterentropy built from %s sources\n", UTS_RELEASE);
+ 	/*
+ 	 * If caller provides an allocated ec, reuse it which implies that the
+ 	 * health test entropy data is used to further still the available
+diff --git a/crypto/sha3_jitterentropy.c b/crypto/sha3_jitterentropy.c
+new file mode 100644
+index 000000000000..a5ab6b44b965
+--- /dev/null
++++ b/crypto/sha3_jitterentropy.c
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Cryptographic API.
++ *
++ * SHA-3, as specified in
++ * https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.202.pdf
++ *
++ * SHA-3 code by Jeff Garzik <jeff@garzik.org>
++ *               Ard Biesheuvel <ard.biesheuvel@linaro.org>
++ */
++
++#include <crypto/sha3_jitterentropy.h>
++#include "jitterentropy-shim.h"
++
++/* Taken from sha3_generic.c unchanged */
++/*
++ * On some 32-bit architectures (h8300), GCC ends up using
++ * over 1 KB of stack if we inline the round calculation into the loop
++ * in keccakf(). On the other hand, on 64-bit architectures with plenty
++ * of [64-bit wide] general purpose registers, not inlining it severely
++ * hurts performance. So let's use 64-bitness as a heuristic to decide
++ * whether to inline or not.
++ */
++#ifdef CONFIG_64BIT
++#define SHA3_INLINE	inline
++#else
++#define SHA3_INLINE	noinline
++#endif
++
++#define KECCAK_ROUNDS 24
++
++static const u64 keccakf_rndc[24] = {
++	0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL,
++	0x8000000080008000ULL, 0x000000000000808bULL, 0x0000000080000001ULL,
++	0x8000000080008081ULL, 0x8000000000008009ULL, 0x000000000000008aULL,
++	0x0000000000000088ULL, 0x0000000080008009ULL, 0x000000008000000aULL,
++	0x000000008000808bULL, 0x800000000000008bULL, 0x8000000000008089ULL,
++	0x8000000000008003ULL, 0x8000000000008002ULL, 0x8000000000000080ULL,
++	0x000000000000800aULL, 0x800000008000000aULL, 0x8000000080008081ULL,
++	0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL
++};
++
++/* update the state with given number of rounds */
++
++static SHA3_INLINE void keccakf_round(u64 st[25])
++{
++	u64 t[5], tt, bc[5];
++
++	/* Theta */
++	bc[0] = st[0] ^ st[5] ^ st[10] ^ st[15] ^ st[20];
++	bc[1] = st[1] ^ st[6] ^ st[11] ^ st[16] ^ st[21];
++	bc[2] = st[2] ^ st[7] ^ st[12] ^ st[17] ^ st[22];
++	bc[3] = st[3] ^ st[8] ^ st[13] ^ st[18] ^ st[23];
++	bc[4] = st[4] ^ st[9] ^ st[14] ^ st[19] ^ st[24];
++
++	t[0] = bc[4] ^ jent_shim_rol64(bc[1], 1);
++	t[1] = bc[0] ^ jent_shim_rol64(bc[2], 1);
++	t[2] = bc[1] ^ jent_shim_rol64(bc[3], 1);
++	t[3] = bc[2] ^ jent_shim_rol64(bc[4], 1);
++	t[4] = bc[3] ^ jent_shim_rol64(bc[0], 1);
++
++	st[0] ^= t[0];
++
++	/* Rho Pi */
++	tt = st[1];
++	st[ 1] = jent_shim_rol64(st[ 6] ^ t[1], 44);
++	st[ 6] = jent_shim_rol64(st[ 9] ^ t[4], 20);
++	st[ 9] = jent_shim_rol64(st[22] ^ t[2], 61);
++	st[22] = jent_shim_rol64(st[14] ^ t[4], 39);
++	st[14] = jent_shim_rol64(st[20] ^ t[0], 18);
++	st[20] = jent_shim_rol64(st[ 2] ^ t[2], 62);
++	st[ 2] = jent_shim_rol64(st[12] ^ t[2], 43);
++	st[12] = jent_shim_rol64(st[13] ^ t[3], 25);
++	st[13] = jent_shim_rol64(st[19] ^ t[4],  8);
++	st[19] = jent_shim_rol64(st[23] ^ t[3], 56);
++	st[23] = jent_shim_rol64(st[15] ^ t[0], 41);
++	st[15] = jent_shim_rol64(st[ 4] ^ t[4], 27);
++	st[ 4] = jent_shim_rol64(st[24] ^ t[4], 14);
++	st[24] = jent_shim_rol64(st[21] ^ t[1],  2);
++	st[21] = jent_shim_rol64(st[ 8] ^ t[3], 55);
++	st[ 8] = jent_shim_rol64(st[16] ^ t[1], 45);
++	st[16] = jent_shim_rol64(st[ 5] ^ t[0], 36);
++	st[ 5] = jent_shim_rol64(st[ 3] ^ t[3], 28);
++	st[ 3] = jent_shim_rol64(st[18] ^ t[3], 21);
++	st[18] = jent_shim_rol64(st[17] ^ t[2], 15);
++	st[17] = jent_shim_rol64(st[11] ^ t[1], 10);
++	st[11] = jent_shim_rol64(st[ 7] ^ t[2],  6);
++	st[ 7] = jent_shim_rol64(st[10] ^ t[0],  3);
++	st[10] = jent_shim_rol64(    tt ^ t[1],  1);
++
++	/* Chi */
++	bc[ 0] = ~st[ 1] & st[ 2];
++	bc[ 1] = ~st[ 2] & st[ 3];
++	bc[ 2] = ~st[ 3] & st[ 4];
++	bc[ 3] = ~st[ 4] & st[ 0];
++	bc[ 4] = ~st[ 0] & st[ 1];
++	st[ 0] ^= bc[ 0];
++	st[ 1] ^= bc[ 1];
++	st[ 2] ^= bc[ 2];
++	st[ 3] ^= bc[ 3];
++	st[ 4] ^= bc[ 4];
++
++	bc[ 0] = ~st[ 6] & st[ 7];
++	bc[ 1] = ~st[ 7] & st[ 8];
++	bc[ 2] = ~st[ 8] & st[ 9];
++	bc[ 3] = ~st[ 9] & st[ 5];
++	bc[ 4] = ~st[ 5] & st[ 6];
++	st[ 5] ^= bc[ 0];
++	st[ 6] ^= bc[ 1];
++	st[ 7] ^= bc[ 2];
++	st[ 8] ^= bc[ 3];
++	st[ 9] ^= bc[ 4];
++
++	bc[ 0] = ~st[11] & st[12];
++	bc[ 1] = ~st[12] & st[13];
++	bc[ 2] = ~st[13] & st[14];
++	bc[ 3] = ~st[14] & st[10];
++	bc[ 4] = ~st[10] & st[11];
++	st[10] ^= bc[ 0];
++	st[11] ^= bc[ 1];
++	st[12] ^= bc[ 2];
++	st[13] ^= bc[ 3];
++	st[14] ^= bc[ 4];
++
++	bc[ 0] = ~st[16] & st[17];
++	bc[ 1] = ~st[17] & st[18];
++	bc[ 2] = ~st[18] & st[19];
++	bc[ 3] = ~st[19] & st[15];
++	bc[ 4] = ~st[15] & st[16];
++	st[15] ^= bc[ 0];
++	st[16] ^= bc[ 1];
++	st[17] ^= bc[ 2];
++	st[18] ^= bc[ 3];
++	st[19] ^= bc[ 4];
++
++	bc[ 0] = ~st[21] & st[22];
++	bc[ 1] = ~st[22] & st[23];
++	bc[ 2] = ~st[23] & st[24];
++	bc[ 3] = ~st[24] & st[20];
++	bc[ 4] = ~st[20] & st[21];
++	st[20] ^= bc[ 0];
++	st[21] ^= bc[ 1];
++	st[22] ^= bc[ 2];
++	st[23] ^= bc[ 3];
++	st[24] ^= bc[ 4];
++}
++
++static void keccakf(u64 st[25])
++{
++	int round;
++
++	for (round = 0; round < KECCAK_ROUNDS; round++) {
++		keccakf_round(st);
++		/* Iota */
++		st[0] ^= keccakf_rndc[round];
++	}
++}
++
++/* End taken from sha3_generic.c unchanged */
++
++/* Forked from sha3_generic.c. Added digest_size arg,
++ * take sha3_state arg directly.
++ *
++ * Normally these are attached to the cipher handle and fetched
++ * from there.
++ */ 
++int jitter_sha3_init(struct sha3_state *sctx, unsigned int digest_size)
++{
++	sctx->rsiz = 200 - 2 * digest_size;
++	sctx->rsizw = sctx->rsiz / 8;
++	sctx->partial = 0;
++
++	jent_shim_memset(sctx->st, 0, sizeof(sctx->st));
++	return 0;
++}
++
++int jitter_sha3_update(struct sha3_state *sctx, const u8 *data,
++		       unsigned int len)
++{
++	unsigned int done;
++	const u8 *src;
++
++	done = 0;
++	src = data;
++
++	if ((sctx->partial + len) > (sctx->rsiz - 1)) {
++		if (sctx->partial) {
++			done = -sctx->partial;
++			jent_shim_memcpy(sctx->buf + sctx->partial, data,
++			       done + sctx->rsiz);
++			src = sctx->buf;
++		}
++
++		do {
++			unsigned int i;
++
++			for (i = 0; i < sctx->rsizw; i++)
++				sctx->st[i] ^= jent_shim_get_unaligned_le64(src + 8 * i);
++			keccakf(sctx->st);
++
++			done += sctx->rsiz;
++			src = data + done;
++		} while (done + (sctx->rsiz - 1) < len);
++
++		sctx->partial = 0;
++	}
++	jent_shim_memcpy(sctx->buf + sctx->partial, src, len - done);
++	sctx->partial += (len - done);
++
++	return 0;
++}
++
++int jitter_sha3_final(struct sha3_state *sctx, unsigned int digest_size, u8 *out)
++{
++	unsigned int i, inlen = sctx->partial;
++	__le64 *digest = (__le64 *)out;
++
++	sctx->buf[inlen++] = 0x06;
++	jent_shim_memset(sctx->buf + inlen, 0, sctx->rsiz - inlen);
++	sctx->buf[sctx->rsiz - 1] |= 0x80;
++
++	for (i = 0; i < sctx->rsizw; i++)
++		sctx->st[i] ^= jent_shim_get_unaligned_le64(sctx->buf + 8 * i);
++
++	keccakf(sctx->st);
++
++	for (i = 0; i < digest_size / 8; i++)
++		jent_shim_put_unaligned_le64(sctx->st[i], digest++);
++
++	if (digest_size & 4)
++		jent_shim_put_unaligned_le32(sctx->st[i], (__le32 *)digest);
++
++	jent_shim_memset(sctx, 0, sizeof(*sctx));
++	return 0;
++}
++
++/* End forked from sha3_generic.c */
++
++/* Helper functions from shash.c reimplemeted here */
++
++int jitter_sha3_finup(struct sha3_state *desc, const u8 *data, unsigned int len, unsigned int digest_size, u8 *out)
++{
++	return jitter_sha3_update(desc, data, len) ?:
++		jitter_sha3_final(desc, digest_size, out);
++}
+diff --git a/include/crypto/sha3_jitterentropy.h b/include/crypto/sha3_jitterentropy.h
+new file mode 100644
+index 000000000000..cdb51594f32a
+--- /dev/null
++++ b/include/crypto/sha3_jitterentropy.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Common values for SHA-3 algorithms
++ */
++#ifndef __CRYPTO_SHA3_JITTER_H__
++#define __CRYPTO_SHA3_JITTER_H__
++
++#include <linux/types.h>
++#include <linux/string.h>
++
++/* taken unchanged from sha3.h */
++
++#define SHA3_224_DIGEST_SIZE	(224 / 8)
++#define SHA3_224_BLOCK_SIZE	(200 - 2 * SHA3_224_DIGEST_SIZE)
++
++#define SHA3_256_DIGEST_SIZE	(256 / 8)
++#define SHA3_256_BLOCK_SIZE	(200 - 2 * SHA3_256_DIGEST_SIZE)
++
++#define SHA3_384_DIGEST_SIZE	(384 / 8)
++#define SHA3_384_BLOCK_SIZE	(200 - 2 * SHA3_384_DIGEST_SIZE)
++
++#define SHA3_512_DIGEST_SIZE	(512 / 8)
++#define SHA3_512_BLOCK_SIZE	(200 - 2 * SHA3_512_DIGEST_SIZE)
++
++struct sha3_state {
++	u64		st[25];
++	unsigned int	rsiz;
++	unsigned int	rsizw;
++
++	unsigned int	partial;
++	u8		buf[SHA3_224_BLOCK_SIZE];
++};
++
++/* Forked from sha3.h
++ * 
++ * Added digest_size arg, swapped shash_desc to sha3_state.
++ * Normally these are attached to the cipher handle and fetched from there.
++ */
++
++int jitter_sha3_init(struct sha3_state *sctx, unsigned int digest_size);
++int jitter_sha3_update(struct sha3_state *sctx, const u8 *data,
++		       unsigned int len);
++int jitter_sha3_final(struct sha3_state *sctx, unsigned int digest_size, u8 *out);
++
++/* Helper functions from include/crypto/hash.h reimplemented here */
++int jitter_sha3_finup(struct sha3_state *desc, const u8 *data, unsigned int len, unsigned int digest_size, u8 *out);
++
++/* shash_desc_zero
++ */
++static inline void jitter_sha3_zero(struct sha3_state *desc)
++{
++	memzero_explicit(desc, sizeof(*desc));
++}
++#endif
+-- 
+2.50.1
+

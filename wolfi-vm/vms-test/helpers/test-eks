@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2015,SC2039,SC2166,SC3043,SC2317
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043,SC2317,SC2329
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+
 VERBOSITY=0
 TEMP_D=""
 DEF_VERSION="1.32"
@@ -7,58 +10,55 @@ DEF_CLUSTER_NAME=vmtest-VERSION
 DEF_NODE_TYPE_ARM="t4g.large"
 DEF_NODE_TYPE_X86="t3.large"
 DEF_NGNAME="burrito"
-AWS_REGION=${AWS_REGION:-us-west-1}
+DEF_AWS_REGION=us-west-1
+AWS_REGION=${AWS_REGION:-$DEF_AWS_REGION}
 
 TEARDOWN_NODEGROUP=""
 CLUSTER_NAME=""
 
-stderr() { echo "$@" 1>&2; }
-failrc() { local rc=$1; shift; stderr "$@"; exit "$rc"; }
-fail() { local r=$?;  [ "$r" -eq 0 ] && r=1; failrc "$r" "$@"; }
+Usage_dump_awspubin() {
+    cat <<EOF
+Usage: ${0##*/} dump-awspubin awspubfile
 
-parse_awspubins() {
-    local i="" f="" n=0
-    for i in "$@"; do
-        if [ -d "$i" ]; then
-            for f in "$i"/*.json; do
-                dump_awspubin "$f" || { stderr "failed reading $f in $i"; return 1; }
-                n=$((n+1))
-            done
-        elif [ -f "$i" ]; then
-            dump_awspubin "$i" || { stderr "failed reading $f"; return 1; }
-            n=$((n+1))
-        else
-            stderr "$f: not a file"
-            return 1
-        fi
-    done
-    [ "$n" -ne 0 ] || { stderr "did not process any files"; return 1; }
-    return 0
+   Parse an awspub JSON file and output AMI information.
+
+   arguments:
+      awspubfile               awspub JSON file to parse
+
+   output format: region ami-id architecture family localname
+
+   where:
+      - region: AWS region (e.g. us-east-1)
+      - ami-id: AMI ID (e.g. ami-01234678abcdef)
+      - architecture: aarch64 or x86_64
+      - family: image family (e.g. chainguard-docker-dev)
+      - localname: (e.g. aws-docker-dev)
+
+EOF
 }
 
-dump_awspubin() {
-    local f="$1" out="" arch="" localname=""
-    out=$(jq -r '.images | to_entries[] | . as $entry | $entry.value |
-        to_entries[] | "\(.key) \(.value) \($entry.key)"' < "$f")
-    localname="${f##*/}"
-    localname="${localname/.json/}"
-    # shellcheck disable=SC2162
-    echo "$out" |
-        while read region ami name ; do
-            # 'name' looks like chainguard-docker-x86_64-20250501-1545
-            case "$name" in
-                *-arm64-*)
-                    arch=aarch64
-                    family=${name%-arm64-*}
-                    ;;
-                *-x86_64-*)
-                    arch=x86_64
-                    family=${name%-x86_64-*}
-                    ;;
-                *) stderr "could not find arch in $name"; return 1;;
-            esac
-            echo "$region $ami $arch $family $localname"
-        done
+Usage_get_pubin_region_ami() {
+    cat <<EOF
+Usage: ${0##*/} get-pubin-region-ami awspubfile...
+
+   Extract region name and AMI ID for the eks-X.Y-dev image in the awspub files.
+
+   arguments:
+      awspubfile               one or more paths to awspub JSON files or
+                               directories containing awspub outputs
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output format: region ami-id
+
+   where:
+      - region: AWS region (e.g. us-east-1)
+      - ami-id: AMI ID (e.g. ami-0123456789abcdef)
+
+   Fails if there is not exactly one eks-X.Y-dev AMI.
+
+EOF
 }
 
 get_pubin_region_ami() {
@@ -66,12 +66,16 @@ get_pubin_region_ami() {
     tmpf && pfile="$_RET" || return 1
     parse_awspubins "$@" > "$pfile" ||
         { stderr "Failed to parse aws pubins '$*'"; return 1; }
-    local region ami arch family localname found="" fregion=""
+    local region ami family found="" fregion=""
     # shellcheck disable=SC2162
-    while read region ami arch family localname; do
+    while read region ami _ family _; do
         case "$family" in
             # match eks-X.Y-dev
             *eks-[0-9].[0-9]*-dev)
+                if [[ -n "$AWS_REGION" ]] && [[ "$region" != "$AWS_REGION" ]]; then
+                    stderr "ignoring $ami ($family) in $region because of AWS_REGION=$AWS_REGION being set"
+                    continue
+                fi
                 [ -z "$found" ] || {
                     stderr "found more than one eks-X.Y-dev ami in aws pub input $*"
                     return 1
@@ -83,33 +87,6 @@ get_pubin_region_ami() {
     done < "$pfile"
     echo "$fregion $found"
     return 0
-}
-
-
-Usage_run_test() {
-    cat <<EOF
-Usage: ${0##*/} [ options ] out-dir
-
-   test chainguard-eks image via eksctl.
-
-   options:
-
-      --cluster-name  NAME     the name of the cluster to run on.
-                               Will be create if it does not exist.
-                               default $DEF_CLUSTER_NAME
-      --nodegroup-name NAME    default: $DEF_NGNAME
-
-      --version       VER      the kubernetes version.
-                               default: $DEF_VERSION
-
-      --awspub-inputs DIR      read awspub info from DIR
-      --ami           AMI-ID   ami id. conflicts with awspub-inputs
-
-      --node-type     TYPE     default: $DEF_NODE_TYPE_ARM (aarch64) or $DEF_NODE_TYPE_X86 (x86_64)
-
-      --no-teardown            do not tear down the nodegroup
-
-EOF
 }
 
 bad_Usage() {
@@ -127,48 +104,23 @@ cleanup() {
     [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
 }
 
-log() {
-    local now=""
-    now=$(date '+%Y/%m/%d %H:%M:%S')
-    [ -z "$LOG" ] || echo "$now" "$@" >> "$LOG"
-    stderr "$now" "$@"
-}
-
 debug() {
     [ "$VERBOSITY" -ge 1 ] || return 0
     log "[DEBUG]" "$@"
 }
 
-# vr(cmd) - run cmd, log execution and result. stdout and stderr unmodified.
-vr() {
-    local rc="" sstart=$SECONDS
-    log "execute: $*"
-    "$@"
-    rc=$?
-    log ":: exit $rc [$((SECONDS-sstart))s]"
-    return "$rc"
-}
+Usage_cluster_list() {
+    cat <<EOF
+Usage: ${0##*/} cluster-list
 
-# vrl(output, cmd) - verbose run log.
-#   run cmd with output to output.stdout and output.stderr
-vrl() {
-    local output="$1" rc="" sstart=$SECONDS
-    shift
-    log "execute: $*"
-    "$@" >"$output.stdout" 2>"$output.stderr"
-    rc=$?
-    log ":: exit $rc [$((SECONDS-sstart))s]"
-    return "$rc"
-}
+   List all EKS clusters in the current region.
 
-# rq(cmd) - run cmd quietly unless it fails
-rq() {
-    local rc="" out=""
-    out=$("$@" 2>&1) && return 0
-    rc=$?
-    stderr "failed [$rc]: $*"
-    printf "%s\n" "$out" | sed -e 's,^,> ,' 1>&2
-    return "$rc"
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output: space-separated list of cluster names
+
+EOF
 }
 
 cluster_list() {
@@ -180,6 +132,30 @@ cluster_list() {
     # shellcheck disable=SC2086
     set -- $clusters
     echo "$@"
+}
+
+Usage_cluster_status() {
+    cat <<EOF
+Usage: ${0##*/} cluster-status cluster-name
+
+   Get the status of an EKS cluster.
+
+   arguments:
+      cluster-name             name of the EKS cluster
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output:
+      - ACTIVE: cluster is running
+      - CREATING: cluster is being created
+      - DELETING: cluster is being deleted
+      - FAILED: cluster creation/update failed
+      - UPDATING: cluster is being updated
+      - PENDING: cluster is not connected to AWS
+      - NONE: cluster does not exist
+
+EOF
 }
 
 cluster_status() {
@@ -198,6 +174,22 @@ cluster_status() {
     echo "$status"
 }
 
+Usage_cluster_create() {
+    cat <<EOF
+Usage: ${0##*/} cluster-create cluster-name version
+
+   Create an EKS cluster.
+
+   arguments:
+      cluster-name             name of the EKS cluster (e.g. cluster-132)
+      version                  Kubernetes version (e.g. 1.32)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
 cluster_create() {
     local name="$1" version="$2"
     vr eksctl create cluster \
@@ -208,6 +200,23 @@ cluster_create() {
        --with-oidc \
        --without-nodegroup \
        --vpc-nat-mode=Disable
+}
+
+Usage_cluster_create_if_needed() {
+    cat <<EOF
+Usage: ${0##*/} cluster-create-if-needed cluster-name version
+
+   Create an EKS cluster if it does not already exist.
+
+   arguments:
+      cluster-name             name of the EKS cluster (e.g. cluster-132)
+      version                  Kubernetes version (e.g. 1.32)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   Fails if a cluster with that name already exists but its status is not ACTIVE.
+EOF
 }
 
 cluster_create_if_needed() {
@@ -223,9 +232,48 @@ cluster_create_if_needed() {
     esac
 }
 
+Usage_cluster_destroy() {
+    cat <<EOF
+Usage: ${0##*/} cluster-destroy cluster-name
+
+   Destroy an EKS cluster and all associated resources.
+
+   arguments:
+      cluster-name             name of the EKS cluster to destroy (e.g. cluster-132)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
 cluster_destroy() {
     local name="$1"
     vr eksctl delete cluster --region="$AWS_REGION" --name="$name"
+}
+
+Usage_nodegroup_create() {
+    cat <<EOF
+Usage: ${0##*/} nodegroup-create cluster nodegroup-name capacity nodetype ami [pubkey]
+
+   Create a node group in an existing EKS cluster.
+
+   arguments:
+      cluster                  name of the EKS cluster (e.g. cluster-132)
+      nodegroup-name           name for the new nodegroup (e.g. cluster-132-ng)
+      capacity                 number of nodes to create (default: 2)
+      nodetype                 EC2 instance type (e.g. t4g.large)
+      ami                      AMI ID to use for nodes (e.g. ami-012346789abcdef)
+      pubkey                   (optional) SSH public key or path to public key file
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   The node group is created with:
+      - Node label: nodegroup=<nodegroup-name>
+      - AMI family: AmazonLinux2023
+
+EOF
 }
 
 nodegroup_create() {
@@ -262,10 +310,44 @@ nodegroup_create() {
         ${pubkeydata:+--ssh-public-key="$pubkeydata"}
 }
 
+Usage_nodegroup_destroy() {
+    cat <<EOF
+Usage: ${0##*/} nodegroup-destroy cluster nodegroup-name
+
+   Destroy a node group in an EKS cluster.
+
+   arguments:
+      cluster                  name of the EKS cluster (e.g. cluster-132)
+      nodegroup-name           name of the node group to destroy (e.g. cluster-132-ng)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
 nodegroup_destroy() {
     local cluster="$1" ngname="$2"
     vr eksctl delete nodegroup --region="$AWS_REGION" \
          --disable-eviction --cluster="$cluster" --name="$ngname"
+}
+
+Usage_ami_list() {
+    cat <<EOF
+Usage: ${0##*/} ami-list [pattern]
+
+   List AMIs matching the specified pattern.
+
+   arguments:
+      pattern                  (optional) regex pattern to match AMI names
+                               (default: 'chainguard-eks-[0-9][.][0-9]+-dev')
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output format: ami-id ami-name
+
+EOF
 }
 
 ami_list() {
@@ -279,6 +361,21 @@ ami_list() {
     rm -f "$tfile"
 }
 
+Usage_cluster_kubeconfig() {
+    cat <<EOF
+Usage: ${0##*/} cluster-kubeconfig cluster-name
+
+   Output kubeconfig for the specified EKS cluster to stdout for use with kubectl.
+
+   arguments:
+      cluster-name             name of the EKS cluster (e.g. cluster-132)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
 cluster_kubeconfig() {
     local cluster="$1" tmpf=""
     tmpf=$(mktemp) || { stderr "mktemp failed"; return 1; }
@@ -290,6 +387,39 @@ cluster_kubeconfig() {
        }
     cat "$tmpf"
     rm -f "$tmpf"
+}
+
+Usage_run_test() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] out-dir
+
+   Test an EKS AMI (including cluster setup if needed).
+
+   options:
+
+      --cluster-name  NAME     name of the cluster to run tests in (will be
+                               created if it does not exist, default: $DEF_CLUSTER_NAME)
+      --nodegroup-name NAME    name of the node group to use (will be created
+                               with the given AMI and instance type, default: $DEF_NGNAME)
+
+      --version       VER      Kubernetes version of the cluster (default: $DEF_VERSION)
+
+      --awspub-inputs DIR      read awspub info from DIR
+      --ami           AMI-ID   AMI ID (conflicts with --awspub-inputs)
+
+      --node-type     TYPE     EC2 instance type to test on (default: $DEF_NODE_TYPE_ARM (aarch64)
+                               or $DEF_NODE_TYPE_X86 (x86_64))
+
+      --no-teardown            do not tear down the node group after testing
+
+   arguments:
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   Either --awspub-inputs or --ami must be provided (but not both).
+
+EOF
 }
 
 run_test() {
@@ -330,6 +460,8 @@ run_test() {
     TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
         { stderr "mktemp failed"; return 1; }
     trap cleanup EXIT
+
+    # shellcheck disable=SC2034  # (used by log() in lib.sh)
     LOG="$outd/test-eks.log"
 
     if [ -z "$amiid" ] && [ -z "$pubin" ]; then
@@ -468,6 +600,29 @@ showfile() {
     } 1>&2
 }
 
+Usage_test_basepod() {
+    cat <<EOF
+Usage: ${0##*/} test-basepod nodegroup-name pod-name
+
+   Deploy and test a multi-container pod on a specific node group.
+
+   arguments:
+      nodegroup-name           node group to schedule pod on (e.g. cluster-132-ng)
+      pod-name                 name for the test pod (e.g. wolfi-test-pod)
+
+   environment:
+      KUBECONFIG               path to a kubeconfig file for the cluster
+
+   Creates a pod with:
+
+      - nginx container (cgr.dev/chainguard/nginx)
+      - busybox container (cgr.dev/chainguard/busybox:latest)
+
+   Fails if the pod does not become ready within 60 seconds.
+
+EOF
+}
+
 test_basepod() {
     local ngname="$1" podname="$2"
     [ $# -eq 2 ] ||
@@ -508,6 +663,8 @@ SUBCMDS=(
     cluster-create-if-needed
     cluster-destroy
     cluster-kubeconfig
+    cluster-list
+    cluster-status
     nodegroup-create
     nodegroup-destroy
     get-pubin-region-ami
@@ -516,13 +673,31 @@ SUBCMDS=(
     test-basepod
 )
 
+if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
+    cat <<EOF
+Usage: ${0##*/} subcommand [options]
+
+Available subcommands:
+EOF
+    for _s in "${SUBCMDS[@]}"; do
+        echo "  $_s"
+    done
+    echo ""
+    echo "Use '${0##*/} subcommand --help' for subcommand-specific help."
+    exit 0
+fi
+
 for _s in "${SUBCMDS[@]}"; do
     [ "$_s" = "$1" ] || continue
     VERBOSITY=1
     name="$1"
-    name=${name//-/_}
-    shift;
-    "$name" "$@"
+    fname=${name//-/_}
+    shift
+    if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+        "Usage_$fname" 2>/dev/null || stderr "No usage information for: $name"
+        exit 0
+    fi
+    "$fname" "$@"
     exit
 done
 

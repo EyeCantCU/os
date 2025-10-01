@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
@@ -20,12 +21,8 @@ import (
 )
 
 const (
-	ssgELFSectionName = "ssg"
-	ssgFile           = "ssg-chainguard-ds.xml"
-	embeddedSSGFile   = "ssg/" + ssgFile + ".gz"
-	resultsFile       = "cis-level-1-results.xml"
-	reportFile        = "cis-level-1-report.html"
-	profileName       = "xccdf_org.ssgproject.content_profile_cis_server_l1"
+	ssgFile         = "ssg-chainguard-ds.xml"
+	embeddedSSGFile = "ssg/" + ssgFile + ".gz"
 )
 
 // Embed the SCAP Security Guide to use during build so the test is self-contained.
@@ -68,7 +65,7 @@ func extractSCAPSecurityGuideFromSelf(outputPath string) (bool, error) {
 	return true, nil
 }
 
-func TestGenerateCISBenchmarkComplianceReport(t *testing.T) {
+func TestGenerateComplianceReports(t *testing.T) {
 	ctx := vmtest.Context(t)
 
 	// Extract the SCAP Security Guide that is piggybacking on the test
@@ -94,52 +91,70 @@ func TestGenerateCISBenchmarkComplianceReport(t *testing.T) {
 		t.Log("OpenSCAP installed successfully")
 	}
 
-	// Run the scan. This needs elevated privileges, because with hardening
-	// applied some of the rules will read files inaccessible to regular users.
-	cmd := exec.CommandContext(ctx, "oscap", "xccdf", "eval",
-		"--profile", profileName,
-		"--results", resultsFile,
-		"--report", reportFile,
-		ssgFile)
-	output, err := cmd.CombinedOutput()
-	t.Logf("OpenSCAP output:\n%s", output)
+	profiles := []struct {
+		prettyName  string
+		profileName string
+	}{
+		{"CIS Server L1", "xccdf_org.ssgproject.content_profile_cis_server_l1"},
+		{"STIG", "xccdf_org.ssgproject.content_profile_stig"},
+		{"STIG Draft9", "xccdf_org.ssgproject.content_profile_stig_draft9"},
+		{"STIG Draft24", "xccdf_org.ssgproject.content_profile_stig_draft24"},
+	}
 
-	if err != nil {
-		// OpenSCAP returns non-zero exit codes for various reasons:
-		// - Exit code 1: Error during evaluation
-		// - Exit code 2: Evaluation successful but some rules failed (non-compliance)
-		// We only want to fail the test for actual errors (exit code 1)
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			switch ec := exitErr.ExitCode(); ec {
-			case 1:
-				t.Errorf("OpenSCAP evaluation error, check stderr")
-			case 2:
-				t.Logf("OpenSCAP found the system non-compliant")
-			default:
-				t.Errorf("OpenSCAP exited with an unknown exit code: %v", ec)
+	for _, profile := range profiles {
+		// Golang-friendly name, e.g. "CISServerL1"
+		methodName := strings.ReplaceAll(profile.prettyName, " ", "")
+
+		t.Run(methodName, func(t *testing.T) {
+			// Filesystem-friendly name, e.g. "cis-server-l1"
+			fsName := strings.ToLower(strings.ReplaceAll(profile.prettyName, " ", "-"))
+			resultsFile := fsName + "-results.xml"
+			reportFile := fsName + "-report.html"
+
+			// Run the scan. This needs elevated privileges, because with hardening
+			// applied some of the rules will read files inaccessible to regular users.
+			cmd := exec.CommandContext(ctx, "oscap", "xccdf", "eval",
+				"--profile", profile.profileName,
+				"--results", resultsFile,
+				"--report", reportFile,
+				ssgFile)
+			output, err := cmd.CombinedOutput()
+			t.Logf("OpenSCAP output:\n%s", output)
+
+			if err != nil {
+				// OpenSCAP returns non-zero exit codes for various reasons:
+				// - Exit code 1: Error during evaluation
+				// - Exit code 2: Evaluation successful but some rules failed (non-compliance)
+				// We only want to fail the test for actual errors (exit code 1)
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					switch ec := exitErr.ExitCode(); ec {
+					case 1:
+						t.Errorf("OpenSCAP evaluation error, check stderr")
+					case 2:
+						t.Logf("OpenSCAP found the system non-compliant")
+					default:
+						t.Errorf("OpenSCAP exited with an unknown exit code: %v", ec)
+					}
+				}
 			}
-		}
+
+			if _, err := os.Stat(resultsFile); os.IsNotExist(err) {
+				t.Error("expected results XML file to be created")
+			}
+			if _, err := os.Stat(reportFile); os.IsNotExist(err) {
+				t.Error("expected HTML report file to be created")
+			}
+			t.Logf("compliance report generated: %s", reportFile)
+
+			// Store test artifacts.
+			meta := map[string]any{"scap_profile": profile.profileName}
+			var content []byte
+
+			content, err = os.ReadFile(resultsFile)
+			artifacts.File(t, files.ComplianceXMLResults, content, err, meta)
+
+			content, err = os.ReadFile(reportFile)
+			artifacts.File(t, files.ComplianceHTMLReport, content, err, meta)
+		})
 	}
-
-	if _, err := os.Stat(resultsFile); os.IsNotExist(err) {
-		t.Error("expected results XML file to be created")
-	}
-	if _, err := os.Stat(reportFile); os.IsNotExist(err) {
-		t.Error("expected HTML report file to be created")
-	}
-	t.Logf("CIS benchmark compliance report generated: %s", reportFile)
-
-	// Store test artifacts. Keep the profile used for scanning attached
-	// to the results only. The guide itself is profile-agnostic.
-	meta := map[string]any{"scap_profile": profileName}
-	var content []byte
-
-	content, err = os.ReadFile(ssgFile)
-	artifacts.File(t, files.ComplianceSCAPSecurityGuide, content, err, nil)
-
-	content, err = os.ReadFile(resultsFile)
-	artifacts.File(t, files.ComplianceXMLResults, content, err, meta)
-
-	content, err = os.ReadFile(reportFile)
-	artifacts.File(t, files.ComplianceHTMLReport, content, err, meta)
 }

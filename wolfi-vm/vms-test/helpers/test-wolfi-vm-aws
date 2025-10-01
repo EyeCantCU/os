@@ -15,7 +15,10 @@ Usage: ${0##*/} [ options ] aws out-dir -- [ aws-options ]
         --awspub-inputs DIR or FILE         directory of files with
                                             'awspub create' output
 
-        --instance-type  TYPE               size to test. default to t3.medium.
+        --region REGION                     region to test in (can be given
+                                            more than once, default: us-east-1);
+                                            regions are determined by awspub
+                                            data if not given
 
 awspub input is json format. An example is:
 
@@ -35,55 +38,10 @@ cleanup_aws() {
     cleanup
 }
 
-dump_awspubin() {
-    local f="$1" out="" arch="" localname=""
-    out=$(jq -r '.images | to_entries[] | . as $entry | $entry.value |
-        to_entries[] | "\(.key) \(.value) \($entry.key)"' < "$f")
-    # shellcheck disable=SC2030
-    localname="${f##*/}"
-    localname="${localname/.json/}"
-    echo "$out" |
-        while read region ami name ; do
-            # 'name' looks like chainguard-docker-x86_64-20250501-1545
-            case "$name" in
-                *-arm64-*)
-                    arch=aarch64
-                    family=${name%-arm64-*}
-                    ;;
-                *-x86_64-*)
-                    arch=x86_64
-                    family=${name%-x86_64-*}
-                    ;;
-                *) stderr "could not find arch in $name"; return 1;;
-            esac
-            echo "$region $ami $arch $family $localname"
-        done
-}
-
-parse_awspubins() {
-    local i="" f="" n=0
-    for i in "$@"; do
-        if [ -d "$i" ]; then
-            for f in "$i"/*.json; do
-                dump_awspubin "$f" || { stderr "failed reading $f in $i"; return 1; }
-                n=$((n+1))
-            done
-        elif [ -f "$i" ]; then
-            dump_awspubin "$i" || { stderr "failed reading $f"; return 1; }
-            n=$((n+1))
-        else
-            stderr "$f: not a file"
-            return 1
-        fi
-    done
-    [ $n -ne 0 ] || { stderr "did not process any files"; return 1; }
-    return 0
-}
-
 test_aws() {
     # shellcheck disable=SC2034
     local short_opts="h"
-    local long_opts="help,awspub-inputs:,instance-type:,launch-group:"
+    local long_opts="help,awspub-inputs:,launch-group:,region:"
     local getopt_out=""
     getopt_out=$(getopt --options "${short_opts}" \
         --long "${long_opts}" -- "$@") &&
@@ -91,13 +49,14 @@ test_aws() {
         { bad_aws_usage; return; }
 
     local cur="" next=""
-    local awspubin="" launchgroup=""
+    local awspubin="" launchgroup="" regions=""
     while [ $# -ne 0 ]; do
         { cur="$1"; next="$2"; }
         case "$cur" in
             --help) aws_usage ; exit 0;;
             --awspub-inputs) awspubin="$next"; shift;;
             --launch-group) launchgroup="$next"; shift;;
+            --region) regions="$regions $next"; shift;;
             --) shift; break;;
         esac
         shift;
@@ -131,6 +90,11 @@ test_aws() {
 
     local region="" ami="" family="" arch="" fails="" tagid="" localname=""
     while read region ami arch family localname; do
+        if [[ -n "$regions" ]] && [[ " $regions " != *" $region "* ]]; then
+            log "skipping $ami in $region because of region selection '$regions'"
+            continue
+        fi
+
         tagid="vmt-$family-$RANDOM"
         vr aws_testimage "$launchgroup" "$outd/$arch/$family" "$tagid" \
             "$key" "$region" "$ami" "$arch" "$family" "$wolfivmd/configs/$localname/test.yaml" ||

@@ -1,0 +1,196 @@
+package:
+  name: jetty-12.0
+  version: "12.0.27"
+  epoch: 0
+  description: Eclipse Jetty is a lightweight, highly scalable, Java-based web server and Servlet engine.
+  copyright:
+    - license: EPL-2.0 AND Apache-2.0
+  dependencies:
+    provides:
+      - jetty=${{package.full-version}}
+
+vars:
+  # Jetty is built using jdk-17 but can run with both jre-17 and jre-21 (runtime variation is configured at the image level)
+  java-version: openjdk-17-default-jdk
+  # Adding SHA256 verification to catch upstream file changes
+  docker-entrypoint-script-sha256: 8fd669a82e06f0d56d070ed8bc09cd2ca28dbe921f631c8293451bf4576c1ca7
+  generate-jetty-start-script-sha256: be4ba1437a8049c30613d93bc36f0dd74087674c385f46c72b132b0111d37e61
+
+environment:
+  contents:
+    packages:
+      - ${{vars.java-version}}
+      - busybox
+      - curl
+      - maven
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/jetty/jetty.project
+      tag: jetty-${{package.version}}
+      expected-commit: 3569a3e83ad136ee44e26b370b74c1c5e9f33e61
+
+  - runs: |
+      # Remove Mimir extension which causes hostname resolution errors in ARM64 CI.
+      # Mimir is used for build caching but -Dmaven.build.cache.enabled=false doesn't disable it.
+      rm .mvn/extensions.xml
+
+      # Build using fast profile (skips tests, style checks, docs) and disable integration tests
+      mvn -Pfast -T$(nproc)C -DskipITs -Dmaven.build.cache.enabled=false clean install
+
+      JETTY_HOME=${{targets.contextdir}}/usr/local/jetty
+      mkdir -p $JETTY_HOME
+      cp -r jetty-home/target/jetty-home/* $JETTY_HOME/
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "compat package for jetty"
+    dependencies:
+      runtime:
+        - bash-binsh # the entrypoint script specifically checks for bash
+        - coreutils
+        - sed
+        - grep
+        - gawk
+      provides:
+        - jetty-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          # upsteam image is pre-configured with modules for deploying webapps
+          JETTY_BASE="${{targets.contextdir}}/var/lib/jetty"
+          JETTY_HOME="$(pwd)/jetty-home/target/jetty-home"
+          mkdir -p $JETTY_BASE
+          cd $JETTY_BASE
+          java -jar "$JETTY_HOME/start.jar" --add-modules=server,http,ext,resources
+
+          # downloading entrypoint scripts from jetty.docker
+          BASE_URL="https://raw.githubusercontent.com/jetty/jetty.docker/refs/heads/master/"
+          curl -fsSL $BASE_URL/docker-entrypoint.sh -o ${{targets.contextdir}}/docker-entrypoint.sh
+          curl -fsSL $BASE_URL/generate-jetty-start.sh -o ${{targets.contextdir}}/generate-jetty-start.sh
+
+          # verifying hashes
+          [[ "$(sha256sum ${{targets.contextdir}}/docker-entrypoint.sh | cut -d' ' -f1)" == "${{ vars.docker-entrypoint-script-sha256 }}" ]] || exit 1
+          [[ "$(sha256sum ${{targets.contextdir}}/generate-jetty-start.sh | cut -d' ' -f1)" == "${{ vars.generate-jetty-start-script-sha256 }}" ]] || exit 1
+
+          chmod +x ${{targets.contextdir}}/generate-jetty-start.sh ${{targets.contextdir}}/docker-entrypoint.sh
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - jq
+            - jetty
+            - ${{vars.java-version}}
+      pipeline:
+        - name: "Test Jetty-Compat Configuration"
+          runs: |
+            set -euo pipefail
+            export JETTY_HOME=/usr/local/jetty
+            export JETTY_BASE=/var/lib/jetty
+            cd $JETTY_BASE
+
+            # Verify pre-configured modules
+            config=$(java -jar "$JETTY_HOME/start.jar" --list-config)
+            echo "$config" | grep "server"
+            echo "$config" | grep "http"
+            echo "$config" | grep "resources"
+            echo "$config" | grep "ext"
+
+            # Verify that generate-jetty-start.sh script create jetty.script
+            /generate-jetty-start.sh
+            if [ ! -s $JETTY_BASE/jetty.start ]; then
+              echo "Error: jetty.start was not created"
+              exit 1
+            fi
+        - uses: test/daemon-check-output
+          # Setup runs in a separate shell process, so cd and exports don't persist to the daemon.
+          # Using a wrapper script keeps the environment setup and daemon start in the same process.
+          with:
+            setup: |
+              cat > /tmp/start-jetty.sh << 'EOF'
+              #!/bin/sh
+              export JETTY_HOME=/usr/local/jetty
+              export JETTY_BASE=/var/lib/jetty
+              cd /var/lib/jetty
+              /generate-jetty-start.sh
+              exec /docker-entrypoint.sh java -jar /usr/local/jetty/start.jar jetty.home=/usr/local/jetty jetty.base=/var/lib/jetty
+              EOF
+              chmod +x /tmp/start-jetty.sh
+            start: /tmp/start-jetty.sh
+            expected_output: |
+              STARTING
+              docker-entrypoint:jetty start from /var/lib/jetty/jetty.start
+            post: |
+              echo "Since no webapps have been deployed, requests should return a default jetty 404 response"
+              curl -s -w '%{http_code}' -o /dev/null "http://localhost:8080/" | grep "404"
+              curl -s "http://localhost:8080/" | grep "Powered by Eclipse Jetty"
+
+update:
+  enabled: true
+  github:
+    identifier: jetty/jetty.project
+    strip-prefix: jetty-
+    tag-filter-prefix: jetty-12.0.
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - ${{vars.java-version}}
+  pipeline:
+    - name: "Test Jetty Configuration"
+      runs: |
+        set -euo pipefail
+        export JETTY_HOME=/usr/local/jetty
+        export JETTY_BASE=/var/lib/jetty
+        mkdir -p $JETTY_BASE
+        cd $JETTY_BASE
+
+        # Verify Jetty version
+        config=$(java -jar "$JETTY_HOME/start.jar" --list-config)
+        echo "$config" | grep -F "jetty.version = ${{package.version}}"
+        echo "$config" | grep -F "jetty.home = $JETTY_HOME"
+        echo "$config" | grep -F "jetty.base = $JETTY_BASE"
+
+        # Verify Jetty modules
+        # On start, jetty should have no enabled modules and throw an error
+        set +e
+        ERROR_OUTPUT=$(java -jar $JETTY_HOME/start.jar 2>&1)
+        set -e
+        if ! echo "$ERROR_OUTPUT" | grep "ERROR : No enabled jetty modules found"; then
+          echo "Error: Expected module error message not found"
+          exit 1
+        fi
+
+        # Add modules and verify that they're available
+        java -jar $JETTY_HOME/start.jar --add-modules=demos
+
+        java -jar "$JETTY_HOME/start.jar" --list-config | grep "demos"
+    - uses: test/daemon-check-output
+      with:
+        # Using a wrapper script keeps the environment setup and daemon start in the same shell process.
+        # Jetty throws errors if $JETTY_HOME and $JETTY_BASE are not explicitly set.
+        setup: |
+          cat > /tmp/start-jetty.sh << 'EOF'
+          #!/bin/sh
+          export JETTY_HOME=/usr/local/jetty
+          export JETTY_BASE=/var/lib/jetty
+          cd /var/lib/jetty
+          exec java -jar /usr/local/jetty/start.jar
+          EOF
+          chmod +x /tmp/start-jetty.sh
+        start: /tmp/start-jetty.sh
+        expected_output: |
+          STARTING
+          The test-spec webapp is deployed
+        post: |
+          curl -fsSL "http://localhost:8080/" | grep "Welcome to Jetty"
+          echo "Welcome page test passed"
+          curl -fsSL "http://localhost:8080/ee10-demo-jsp/expr.jsp?A=20" | grep "<td>20&nbsp;</td>"
+          echo "JSP test passed"
+          curl -sL "http://localhost:8080/oldContextPath/" | grep "Redirected Context Example"
+          curl -s -I "http://localhost:8080/oldContextPath/" | grep "Location:.*moved"
+          echo "Redirect tests passed"

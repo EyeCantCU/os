@@ -1,0 +1,80 @@
+name: compiler tests for oldglibc environment
+
+inputs:
+  cc:
+    description: |
+      CC compiler to use
+    required: false
+    default: ""
+  cxx:
+    description: |
+      C++ compiler to use
+    required: false
+    default: ""
+
+pipeline:
+  - name: validate pipeline inputs
+    runs: |
+      test -z "${{inputs.cc}}" || exit 0
+      test -z "${{inputs.cxx}}" || exit 0
+      echo "ERROR: pipeline requires either cc or cxx as input" 1>&2
+      exit 1
+
+  - name: oldglibc headers should win
+    runs: |
+      test -n "${{inputs.cc}}" || { echo "No C compiler specified, skipping" 1>&2; exit 0; }
+      stdio="/usr/lib/oldglibc/usr/include/stdio.h"
+      tmpdir="$(mktemp -d)"
+      cd "$tmpdir"
+      trap "rm -rf $tmpdir; mv ${stdio}.bak ${stdio}" EXIT
+      cp "${stdio}" "${stdio}.bak"
+      echo "#error oldglibc headers did win (not really an error)" > "${stdio}"
+      cat > smoke.c <<EOF
+      #include <stdio.h>
+      int main() { printf("OK"); }
+      EOF
+      ${{inputs.cc}} smoke.c -o smoke 2>&1 | grep "oldglibc headers did win"
+
+  - name: system glibc headers should be ignored
+    runs: |
+      test -n "${{inputs.cc}}" || { echo "No C compiler specified, skipping" 1>&2; exit 0; }
+      stdio="/usr/include/stdio.h"
+      tmpdir="$(mktemp -d)"
+      cd "$tmpdir"
+      trap "rm -rf $tmpdir; mv ${stdio}.bak ${stdio}" EXIT
+      cp "${stdio}" "${stdio}.bak"
+      echo "#error this file should not be in your include path" > "${stdio}"
+      cat > smoke.c <<EOF
+      #include <stdio.h>
+      int main() { printf("OK"); }
+      EOF
+      ${{inputs.cc}} smoke.c -o smoke
+      ./smoke
+
+  - name: C++ headers before C headers
+    runs: |
+      test -n "${{inputs.cxx}}" || { echo "No C++ compiler specified, skipping" 1>&2; exit 0; }
+      case ${{inputs.cxx}} in
+        *clang*)
+          gccver="$(gcc -dumpversion)"
+          ;;
+        *)
+          gccver="$(${{inputs.cxx}} -dumpversion)"
+          ;;
+      esac
+      chdr="/usr/lib/oldglibc/usr/include/stdlib.h"
+      cxxhdr="/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${gccver}/include/c++/${gccver}/stdlib.h"
+
+      tmpdir="$(mktemp -d)"
+      cd "$tmpdir"
+
+      cp "${chdr}" "${chdr}.bak"
+      cp "${cxxhdr}" "${cxxhdr}.bak"
+      trap "rm -rf $tmpdir; mv ${chdr}.bak ${chdr}; mv ${cxxhdr}.bak ${cxxhdr}" EXIT
+      echo "#warning CHDR-MARKER" > "${chdr}"
+      echo "#warning CXXHDR-MARKER" > "${cxxhdr}"
+      cat > smoke.cpp <<EOF
+      #include <stdlib.h>
+      int main() { }
+      EOF
+      ${{inputs.cxx}} smoke.cpp -o smoke 2>&1 | grep MARKER | head -1 | grep CXXHDR-MARKER

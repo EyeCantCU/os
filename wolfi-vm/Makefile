@@ -3,7 +3,7 @@ TOOLS_D = $(TOP_D)/tools
 HASH := \#
 
 # when converting from an existing image, we stuff these in.
-BOOT_PKGS = linux-boot-configuration mattmoor-chainit-init
+BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
 
 # list_cloud_images(cloud)
 define list_cloud_images
@@ -15,6 +15,7 @@ disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu := $(call list_cloud_images,generic)
 disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
+disks_rpi := $(call list_cloud_images,rpi)
 
 group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
 group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
@@ -53,7 +54,7 @@ test-generic: $(ARCH_OUT_D)/generic/disk.raw builder/ovmf-$(ARCH).fd
 	QEMU_VMS=generic ./vms-test/helpers/test-wolfi-vm \
   --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results/$(ARCH)"
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
 disks-aws-noneks: $(foreach name,$(group_aws_noneks),disk-$(name))
@@ -61,8 +62,9 @@ disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
 disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
+disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
 
-.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-vmware
+.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-vmware list-rpi
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -75,6 +77,8 @@ list-qemu:
 	@for n in $(disks_qemu); do echo $$n; done
 list-vmware:
 	@for n in $(disks_vmware); do echo $$n; done
+list-rpi:
+	@for n in $(disks_rpi); do echo $$n; done
 list-%:
 	@groups="$(group_$(subst -,_,$(*)))"; \
 	[ -n "$$groups" ] || { echo "no group $*"; exit 1; }; \
@@ -103,6 +107,10 @@ $(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
 %.qcow2: %.raw
 	./tools/convert-image $< $@
 
+# VMware-specific VMDK conversion (monolithicFlat for ESXi compatibility)
+$(ARCH_OUT_D)/vmware-%/disk.vmdk: $(ARCH_OUT_D)/vmware-%/disk.raw
+	./tools/convert-image --vmdk-format monolithicFlat $< $@
+
 %.vmdk: %.raw
 	./tools/convert-image $< $@
 
@@ -126,9 +134,10 @@ $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$
 debug_shell_targets = $(foreach name,$(names),debug-shell-$(name))
 .PHONY: $(debug_shell_targets)
 $(debug_shell_targets): debug-shell-%:
-	@echo "::: Make sure you have a 'run-debug-$*' session running or this wont work"
-	@echo "[hit enter]"
-	@socat STDIO,cfmakeraw,isig=1 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
+	@command -v socat >/dev/null 2>&1 || { echo "$* target requires 'socat' installed." 1>&2; exit 1; }
+	@echo "::: Make sure you have a 'run-debug-$*' session running or this will not work"
+	@echo "[hit enter for shell prompt. ctrl-e to exit]"
+	@socat STDIO,cfmakeraw,isig=1,escape=0x05 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
 
 configs/%/build.yaml:
 	@mkdir -p $(dir $@)
@@ -187,30 +196,39 @@ else
 endif
 ifeq ($(PUBLISH_TARGET),dev)
   AZGALLERY = vmtesting_dev
+  AZRESOURCEGROUP = chainguard-vms
   GCPPROJECT = $(shell gcloud config get project)
   GCPBUCKET = $(GCPPROJECT)
   QEMUBUCKET = gs://$(GCPPROJECT)
   VMWAREBUCKET = gs://$(GCPPROJECT)
+  RPIBUCKET = gs://$(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
-  AZGALLERY = vmtesting
+  AZGALLERY = chainguard_vms_staging
+  AZRESOURCEGROUP = chainguard-vms-staging
   GCPPROJECT = staging-vms-h8zx
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://wolfi-vm-images-workloads
   VMWAREBUCKET = gs://wolfi-vm-images-workloads
+  RPIBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
-  AZGALLERY = chainguard_vms_eap
+  AZGALLERY = eap_chainguard_vms
+  AZRESOURCEGROUP = chainguard-vms-prod
   GCPPROJECT = chainguard-vms-eap
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://chainguard-vms-eap
   VMWAREBUCKET = gs://chainguard-vms-eap
+  RPIBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),production)
+  AZGALLERY = chainguard_vms
+  AZRESOURCEGROUP = chainguard-vms-prod
 # Currently we are using wolfi-vm for internal images for workstations and other cases.
 # TODO: Move production workstation images to the chainguard-workstations project.
   GCPPROJECT = wolfi-vm
   GCPBUCKET = wolfi-vm-images-workloads
   QEMUBUCKET = gs://wolfi-vm-images-workloads
   VMWAREBUCKET = gs://wolfi-vm-images-workloads
+  RPIBUCKET = gs://wolfi-vm-images-workloads
 else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
@@ -260,7 +278,7 @@ $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/azure-%/disk
 	@$(call capture_stdout,$@,\
 		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
-		--tags="$(AZTAGS)" $(dir $@)disk.raw)
+		--tags="$(AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
 
 .PHONY: publish-gcp
 publish-gcp: $(foreach name,$(disks_gcp),publish-gcp-$(subst gcp-,,$(name)))
@@ -302,7 +320,7 @@ publish-vmware: $(foreach name,$(disks_vmware),publish-$(name))
 $(foreach name,$(disks_vmware),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk
+$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk $(ARCH_OUT_D)/%/disk-flat.vmdk
 	@mkdir -p $(dir $@)
 	@echo "Publishing VMWARE images for $* ($(ARCH))"
 	@artifact_name="$(VMWARENAME).raw"; \
@@ -311,9 +329,31 @@ $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_
 	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
 	@artifact_name="$(VMWARENAME).vmdk"; \
 	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	sed -i "s/disk-flat.vmdk/$(VMWARENAME)-flat.vmdk/" $(dir $@)disk.vmdk; \
 	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
 	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	@artifact_name="$(VMWARENAME)-flat.vmdk"; \
+	gcs_vmdk_flat_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	echo "Uploading $(dir $@)disk-flat.vmdk to $$gcs_vmdk_flat_path"; \
+	gcloud storage cp "$(dir $@)disk-flat.vmdk" "$$gcs_vmdk_flat_path"
+	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"vmdk\": \"$$gcs_vmdk_flat_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+
+.PHONY: publish-rpi
+publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
+$(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name))): publish-rpi-%: $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json
+
+$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: RPINAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
+$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-generic-%/disk.raw
+	@mkdir -p $(dir $@)
+	@echo "Publishing RPI images for $* ($(ARCH))"
+	@artifact_name="$(RPINAME).raw"; \
+	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
+	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
+	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
+	@echo "Generating signed URLs for uploaded artifacts"; \
+	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$(RPINAME).raw"; \
+	raw_signed_url=$$(gcloud storage sign-url "$$gcs_raw_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
+	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
 
 # we use the stdout of awspub publish to indicate the thing was published.
 $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
@@ -365,7 +405,7 @@ show-vars:
 	@echo ALL_DISKS=$(ALL_DISKS)
 	@echo names=$(names)
 
-.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
+.PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk-flat.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%/build.yaml builder/ovmf-%.fd
 
 arches = aarch64 x86_64
@@ -413,14 +453,21 @@ $(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst az
 output/azure-marketplace-update-technical-plan-%s.json: AZNAME=$(PREFIX)-$*
 output/azure-marketplace-update-technical-plan-%s.json: azure-marketplace-install-extension
 # We don't want to publish devel or testing images by mistake
-ifneq ("$(AZGALLERY)","chainguard_vms_eap")
+ifneq ("$(AZGALLERY)","eap_chainguard_vms")
 	$(error This gallery is not allowed listed in the makefile if you want to upload images from it please update the makefile.)
+endif
+ifneq ("$(AZRESOURCEGROUP)","chainguard-vms-prod")
+	$(error This resouce group is not allowed listed in the makefile if you want to upload images from it please update the makefile.)
 endif
 	$(call capture_stdout,$@,\
 		$(TOOLS_D)/azure-marketplace-add-vm-image-version \
 		--image-version=$(AZVERSION) --image-name=$(AZNAME) \
 		--gallery=$(AZGALLERY) --plan=$(AZMARKETPLACE_PLAN) \
-		--offer=$(AZMARKETPLACE_OFFER) )
+		--offer=$(AZMARKETPLACE_OFFER) --resource-group=$(AZRESOURCEGROUP) )
+	@result=$$(jq -rs '.[0].result' "$@"); \
+	if [ "$$result" = "failed" ]; then exit 1; fi; \
+	job_result=$$(jq -rs '.[1].job_result' "$@"); \
+	if [ "$$job_result" = "failed" ]; then exit 1; fi
 
 # Yam doesn't recurse
 .PHONY: lint-configs
