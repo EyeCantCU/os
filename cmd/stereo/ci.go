@@ -68,7 +68,9 @@ func unguardedCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&arch, "arch", types.ParseArchitecture(runtime.GOARCH).ToAPK(), "architecture to evaluate")
+	// Default to x86_64 because they tend to be a superset of aarch64.
+	// TODO: Consider both.
+	cmd.Flags().StringVar(&arch, "arch", "x86_64", "architecture to evaluate")
 	cmd.Flags().StringVar(&ignoreFile, "ignore", "unguarded.txt", "packages to ignore (we expect them to be unguarded)")
 
 	return cmd
