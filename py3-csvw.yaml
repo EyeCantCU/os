@@ -10,6 +10,9 @@ vars:
   pypi-package: csvw
 
 environment:
+  environment:
+    SAMPLE_CSVW_FILE: https://raw.githubusercontent.com/cldf/csvw/5bc712fe5e8353ec602eb758522ab674adf86753/tests/fixtures/test.tsv
+    SAMPLE_JSON_FILE: https://raw.githubusercontent.com/cldf/csvw/5bc712fe5e8353ec602eb758522ab674adf86753/tests/fixtures/zipped-metadata.json
   contents:
     packages:
       - py3-supported-build-base-dev
@@ -53,18 +56,25 @@ subpackages:
       - uses: py/pip-build-install
         with:
           python: python${{range.key}}
-      - name: move usr/bin executables for -bin
-        runs: |
-          mkdir -p ./cleanup/${{range.key}}/
-          mv ${{targets.contextdir}}/usr/bin ./cleanup/${{range.key}}/
       - uses: strip
     test:
+      environment:
+        contents:
+          packages:
+            - jq
       pipeline:
         - uses: test/tw/pip-check
         - uses: python/import
           with:
             python: python${{range.key}}
             import: ${{vars.pypi-package}}
+        - runs: |
+            python${{range.key}} <<EOF | jq ".[].province" | grep -F -e "Hello"
+            import json
+            from csvw import CSVW
+            data = CSVW('${SAMPLE_CSVW_FILE}')
+            print(json.dumps(data.to_json(minimal=True)))
+            EOF
 
   - range: py-versions
     name: py${{range.key}}-${{vars.pypi-package}}-bin
@@ -77,18 +87,40 @@ subpackages:
       runtime:
         - py${{range.key}}-${{vars.pypi-package}}
     pipeline:
-      - runs: |
-          mkdir -p ${{targets.contextdir}}/usr/
-          mv ./cleanup/${{range.key}}/bin ${{targets.contextdir}}/usr/
+      - uses: split/bin
     test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - jq
+            - sqlite
       pipeline:
         - runs: |
-            csvw2datasette --help
-            csvw2json --help
-            csvw2markdown --help
-            csvw2sqlite --help
-            csvwdescribe --help
-            csvwvalidate --help
+            set -o pipefail
+            csvw2datasette --help | grep -F -e "Convert CSVW to data for datasette"
+            csvw2json --help | grep -F -e "Convert CSVW to JSON"
+            csvw2markdown --help | grep -F -e "show this help message and exit"
+            csvw2sqlite --help | grep -F -e "show this help message and exit"
+            csvwdescribe --help | grep -F -e "Describe a (set of) CSV file(s)"
+            csvwvalidate --help | grep -F -e "Validate a (set of) CSV file(s) described by CSVW metadata."
+
+            CSVW_FILE="$(mktemp)"
+            chmod -v 644 "${CSVW_FILE}"
+            curl -fsSLo "${CSVW_FILE}" "${SAMPLE_CSVW_FILE}"
+
+            JSON_FILE="$(mktemp)"
+            chmod -v 644 "${JSON_FILE}"
+            curl -fsSLo "${JSON_FILE}" "${SAMPLE_JSON_FILE}"
+
+            csvw2json "${CSVW_FILE}" | jq -rc .tables[].row[].describes[] | grep -F -e "Hello\\tworld\\t1"
+
+            csvw2markdown "${JSON_FILE}" | grep -F -e "Described by [$(basename "${JSON_FILE}")]"
+            touch /tmp/zipped.csv
+            csvw2sqlite "${JSON_FILE}" "out.db"
+            sqlite3 ./out.db -- .tables | grep -F -e "zipped.csv"
+            csvwdescribe "${JSON_FILE}" | jq -rc '."dc:conformsTo"' | grep -F -e "data-package"
+            csvwvalidate "${JSON_FILE}" | grep -F -e "OK"
 
 update:
   enabled: true
