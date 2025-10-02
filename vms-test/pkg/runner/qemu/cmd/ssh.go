@@ -102,7 +102,7 @@ func runRemoteCmd() *cobra.Command {
 			}
 			hostPort := fmt.Sprintf("%s:%d", sshAddr, sshPort)
 
-			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
+			remoteFile := filepath.Join("/home", user, filepath.Base(localFilePath))
 
 			auth, err := sshutils.GetPrivateKeyOrDefaultAuth(sshKeyFile)
 			if err != nil {

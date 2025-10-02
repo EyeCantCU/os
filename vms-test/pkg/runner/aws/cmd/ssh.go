@@ -91,7 +91,7 @@ func runRemoteCmd() *cobra.Command {
 			publicIP := getIPByTag(ctx, region, tagName)
 			log.Printf("Connecting to VM at %s", publicIP)
 
-			remoteFile := filepath.Join("/tmp", filepath.Base(localFilePath))
+			remoteFile := filepath.Join("/home", sshUser, filepath.Base(localFilePath))
 
 			if knownHosts == "" {
 				var err error
