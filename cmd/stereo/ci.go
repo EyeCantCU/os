@@ -258,6 +258,14 @@ func unguarded(ctx context.Context, arch string, ignored map[string]struct{}) er
 		}
 	}
 
+	if len(depMap.errors) != 0 {
+		// TODO: Should this be fatal?
+		fmt.Printf("Failed to lock %d builds:\n", len(depMap.errors))
+		for _, pkg := range slices.Sorted(maps.Keys(depMap.errors)) {
+			fmt.Printf("  %s\n", pkg)
+		}
+	}
+
 	return nil
 }
 
