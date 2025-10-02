@@ -375,6 +375,7 @@ $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILD
 	     $(eval BUILDER := $(call select_builder,$*)) \
 	     $(info Auto-selecting BUILDER=$(BUILDER) for $*) \
 	)
+	@$(MAKE) BUILDER=$(BUILDER) builder
 	@$(MAKE) BUILDER=$(BUILDER) $@-build
 
 $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD)
