@@ -246,8 +246,9 @@ else ifeq ($(PUBLISH_TARGET),production)
 else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
-QEMU_AZSTORAGEACCOUNT = chainguardvms$(PUBLISH_TARGET)
+AZSTORAGEACCOUNT = chainguardvms$(PUBLISH_TARGET)
 QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
+VMWARE_AZSTORAGECONTAINER = chainguard-vms-vmware
 
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
@@ -319,7 +320,7 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
 		--gcs-bucket $(QEMU_GCSBUCKET) \
-		--azure-account $(QEMU_AZSTORAGEACCOUNT) \
+		--azure-account $(AZSTORAGEACCOUNT) \
 		--azure-container $(QEMU_AZSTORAGECONTAINER) \
 		--raw-path $(dir $@)disk.raw \
 		--qcow2-path $(dir $@)disk.qcow2 \
@@ -335,7 +336,8 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 		--name vmware-$* \
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
-		--gcs-bucket $(VMWARE_GCSBUCKET) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(VMWARE_AZSTORAGECONTAINER) \
 		--raw-path $(dir $@)disk.raw \
 		--vmdk-path $(dir $@)disk.vmdk \
 		--vmdk-flat-path $(dir $@)disk-flat.vmdk)
