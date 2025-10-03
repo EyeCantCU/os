@@ -8,6 +8,12 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 DEF_AWS_REGION=us-west-1
 AWS_REGION=${AWS_REGION:-$DEF_AWS_REGION}
 
+aws=(
+    aws
+    --region "$AWS_REGION"
+    --no-cli-pager
+)
+
 Usage_cluster_list() {
     cat <<EOF
 Usage: ${0##*/} cluster-list
@@ -26,13 +32,14 @@ cluster_list() {
     local out="" clusters=""
 
     # List stacks that match our naming pattern: ecs-test-*-stack
-    out=$(aws cloudformation list-stacks \
-        --region "$AWS_REGION" \
-        --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
-        --output=json) || {
-            stderr 'aws cloudformation list-stacks failed'
-            return 1
-        }
+    out=$(
+        "${aws[@]}" cloudformation list-stacks \
+            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+            --output=json
+    ) || {
+        stderr 'aws cloudformation list-stacks failed'
+        return 1
+    }
 
     # Extract cluster names from stack names (ecs-test-NAME-stack -> NAME)
     clusters=$(
@@ -76,13 +83,14 @@ cluster_status() {
 
     local stack_name="ecs-test-${name}-stack"
 
-    out=$(aws cloudformation describe-stacks \
-        --region "$AWS_REGION" \
-        --stack-name "$stack_name" \
-        --output=json 2>/dev/null) || {
-            stderr 'aws cloudformation describe-stacks failed'
-            return 1
-        }
+    out=$(
+        "${aws[@]}" cloudformation describe-stacks \
+            --stack-name "$stack_name" \
+            --output json 2>/dev/null
+    ) || {
+        stderr 'aws cloudformation describe-stacks failed'
+        return 1
+    }
 
     local stack_status
     stack_status=$(echo "$out" | jq -r '.Stacks[0].StackStatus') || {
@@ -122,8 +130,7 @@ cluster_create() {
     }
 
     log "Creating CloudFormation stack: $stack_name"
-    vr aws cloudformation deploy \
-        --region "$AWS_REGION" \
+    vr "${aws[@]}" cloudformation deploy \
         --stack-name "$stack_name" \
         --template-file "$template_path" \
         --parameter-overrides "ClusterName=$name" \
@@ -158,20 +165,16 @@ cluster_destroy() {
     local stack_name="ecs-test-${name}-stack"
 
     log "Deleting CloudFormation stack: $stack_name"
-    vr aws cloudformation delete-stack \
-        --region "$AWS_REGION" \
-        --stack-name "$stack_name" || {
-            stderr 'Failed to delete CloudFormation stack'
-            return 1
-        }
+    vr "${aws[@]}" cloudformation delete-stack --stack-name "$stack_name" || {
+        stderr 'Failed to delete CloudFormation stack'
+        return 1
+    }
 
     log 'Waiting for stack deletion to complete...'
-    vr aws cloudformation wait stack-delete-complete \
-        --region "$AWS_REGION" \
-        --stack-name "$stack_name" || {
-            stderr 'Stack deletion failed or timed out'
-            return 1
-        }
+    vr "${aws[@]}" cloudformation wait stack-delete-complete --stack-name "$stack_name" || {
+        stderr 'Stack deletion failed or timed out'
+        return 1
+    }
 
     log 'Stack deleted successfully'
 }
@@ -205,14 +208,17 @@ cluster_resources() {
 
     local stack_name="ecs-test-${name}-stack"
 
-    local outputs
-    outputs=$(aws cloudformation describe-stacks \
-        --region "$AWS_REGION" \
-        --stack-name "$stack_name" \
-        --output json 2>/dev/null) || {
+    local outputs="$describe_stack_cache"
+    if [ -z "$describe_stack_cache" ]; then
+        outputs=$(
+            "${aws[@]}" cloudformation describe-stacks \
+                --stack-name "$stack_name" \
+                --output json 2>/dev/null
+        ) || {
             stderr "Stack $stack_name not found"
             return 1
         }
+    fi
 
     local vpc_id subnet_id sg_id profile_name
     read -r -d $"\n" vpc_id subnet_id sg_id profile_name < <(
@@ -227,14 +233,20 @@ cluster_resources() {
         cloudformation_output InstanceProfileName
     )
 
-    if [ -z "$vpc_id" ] || [ -z "$subnet_id" ] || [ -z "$sg_id" ] || [ -z "$profile_name" ]; then
-        stderr 'Failed to get all required stack outputs:'
-        stderr "                 VPC ID: $vpc_id"
-        stderr "              Subnet ID: $sg_id"
-        stderr "      Security Group ID: $sg_id"
-        stderr "  Instance Profile Name: $profile_name"
+    local errors=()
+    [ -n "$vpc_id" ]         || errors+=( 'VPC ID is missing' )
+    [ -n "$subnet_id" ]      || errors+=( 'Subnet ID is missing' )
+    [ -n "$sg_id" ]          || errors+=( 'Security Group ID is missing' )
+    [ -n "$profile_name" ]   || errors+=( 'Instance Profile Name is missing' )
+
+    if [ "${#errors[@]}" -ne 0 ]; then
+        stderr "Failed to get required stack outputs:"
+        stderr "$(printf "  %s\n" "${errors[@]}")"
         return 1
     fi
+
+    # Speed up future calls; intentionally non-local variable
+    [ -n "$describe_stack_cache" ] || describe_stack_cache="$outputs"
 
     echo "$vpc_id $subnet_id $sg_id $profile_name"
 }
@@ -250,8 +262,6 @@ Usage: ${0##*/} instance-add cluster ami capacity instance-type
       ami                      AMI ID to use for instances (e.g. ami-012346789abcdef)
       capacity                 number of instances to create
       instance-type            EC2 instance type (e.g. t4g.large)
-      subnet-id                Subnet ID for instances
-      sg-id                    Security Group ID for instances
 
    environment:
       AWS_REGION               AWS region (default: $DEF_AWS_REGION)
@@ -298,8 +308,7 @@ echo 'ECS_ENABLE_TASK_IAM_ROLE=true' >> /etc/ecs/ecs.config
     instance_tags+="]"
 
     log 'Launching instances'
-    out=$(vr aws ec2 run-instances \
-        --region "$AWS_REGION" \
+    out=$(vr "${aws[@]}" ec2 run-instances \
         --image-id "$ami" \
         --count "$capacity" \
         --instance-type "$instance_type" \
@@ -317,11 +326,10 @@ echo 'ECS_ENABLE_TASK_IAM_ROLE=true' >> /etc/ecs/ecs.config
     mapfile -t instance_ids < <(jq -r '.Instances[].InstanceId' <<<"$out")
 
     log "Waiting for instances ${instance_ids[*]} to be reported as running"
-    vr aws ec2 wait instance-running \
-        --region "$AWS_REGION" --instance-ids "${instance_ids[@]}" || {
-            stderr "Instances ${instance_ids[*]} did not flip to running"
-            return 1
-        }
+    vr "${aws[@]}" ec2 wait instance-running --instance-ids "${instance_ids[@]}" || {
+        stderr "Instances ${instance_ids[*]} did not flip to running"
+        return 1
+    }
 
     log 'Waiting for instances to join the cluster'
 
@@ -332,8 +340,7 @@ echo 'ECS_ENABLE_TASK_IAM_ROLE=true' >> /etc/ecs/ecs.config
     local num_joined=0 attempt
     for (( attempt = 0; attempt < 30; attempt++ )); do
         num_joined=$(
-            aws ecs list-container-instances \
-                --region "$AWS_REGION" \
+            "${aws[@]}" ecs list-container-instances \
                 --cluster "$cluster" \
                 --filter "ec2InstanceId in [${instance_ids_list}]" \
                 --status ACTIVE \
@@ -379,9 +386,7 @@ instance_remove() {
     }
 
     # Just terminate; deregister happens automatically
-    vr aws ec2 terminate-instances \
-        --region "$AWS_REGION" \
-        --instance-ids "$@"
+    vr "${aws[@]}" ec2 terminate-instances --instance-ids "$@"
 }
 
 SUBCMDS=(
