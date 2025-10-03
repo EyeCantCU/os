@@ -62,6 +62,10 @@ import (
 		pkgs?: [...string]
 	}
 
+	// Filesystem  for systemd-repart-rootfs-*.
+	// set to "" to remove this package.
+	filesystem: string | *"xfs"
+
 	// TODO: do this for real from source of truth gotypes
 	metadata: {
 		fips: bool | *false
