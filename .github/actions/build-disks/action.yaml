@@ -4,6 +4,9 @@
 name: "Build VM Disks"
 description: "Build VM disks for the specified cloud provider and architecture."
 
+permissions:
+  id-token: write # Needed for octo-sts
+
 inputs:
   cg_identity:
     required: false
@@ -25,6 +28,18 @@ runs:
       - uses: chainguard-dev/setup-chainctl@be0acd273acf04bfdf91f51198327e719f6af978 # v0.4.0
         with:
           identity: ${{ inputs.cg_identity }}
+
+      - name: Get octo-sts token
+        id: octo-sts
+        uses: octo-sts/action@e480437973a6f6ac2e9caa40ecabedc870d76395
+        with:
+          scope: chainguard-images/images-private
+          identity: wolfi-vm
+
+      - name: Configure Git for private repository access
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ steps.octo-sts.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
       - name: Get apk.cgr.dev token
         shell: bash
@@ -113,6 +128,18 @@ runs:
         run: |
           make builder
 
+      - name: diff rendered image configs
+        shell: bash
+        run: |
+          num_jobs=$(awk -v gb_per_job=4 '/MemFree/ { print int($2 / 1024 / 1024 / gb_per_job) }' /proc/meminfo)
+          if [[ -z ${num_jobs} ]] || [[ ${num_jobs} -lt 1 ]]; then
+              num_jobs=1
+          fi
+          make -j"${num_jobs}" --output-sync=recurse ARCH="${VM_ARCH}" "art-diff-${VM_GROUP}"
+        env:
+          VM_ARCH: ${{ inputs.arch }}
+          VM_GROUP: ${{ inputs.vm_group }}
+
       - name: make disks
         shell: bash
         run: |
@@ -126,3 +153,10 @@ runs:
           VM_ARCH: ${{ inputs.arch }}
           VM_GROUP: ${{ inputs.vm_group }}
           TMPDIR: ${{ runner.temp }}
+
+      - name: collect cue locks
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cue-locks-${{ inputs.arch }}-${{ inputs.vm_group }}
+          path: ./configs/*/*_lock.cue
+        if: ${{ !cancelled() }}
