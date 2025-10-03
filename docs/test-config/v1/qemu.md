@@ -10,6 +10,7 @@ This file specifies qemu-specific options in test configuration v1. Refer to con
 	* **aarch64**:
 		* **name** (optional): friendly name for the vm configuration, default is fwcode basename
 		* **fwcode**: path (relative to test.yaml) to fwcode
+        * **fwvars**: path (relative to disk.raw) to fwvars
 
 ## Non-normative conventions
 
@@ -30,10 +31,12 @@ data:
 vmconfigs:
   x86_64:
     - fwcode: ../../builder/ovmf-x86_64.fd
+      fwvars: uefi-data.fd
       tests:
       - group: core
   aarch64:
     - fwcode: ../../builder/ovmf-aarch64.fd
+      fwvars: uefi-data.fd
       tests:
       - group: core
 ```

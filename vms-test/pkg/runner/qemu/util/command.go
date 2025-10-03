@@ -26,10 +26,10 @@ func GetCommand(arch types.Architecture) []string {
 		return []string{}
 	}
 
-	return f(arch, "disk.raw", "fw-code.fd")
+	return f(arch, "disk.raw", "fw-code.fd", "fw-vars.fd")
 }
 
-func generateArmCommand(arch types.Architecture, efiDisk, fwcode string) []string {
+func generateArmCommand(arch types.Architecture, efiDisk, fwcode, fwvars string) []string {
 	qemuArmCommand := []string{
 		"qemu-system-aarch64",
 		"-nodefaults",
@@ -45,7 +45,8 @@ func generateArmCommand(arch types.Architecture, efiDisk, fwcode string) []strin
 		"-monitor", "chardev:monitor0",
 		"-qmp", "chardev:qmp0",
 		"-device", "virtio-rng-pci",
-		"-drive", "if=pflash,format=raw,file=" + fwcode + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=0,file=" + fwcode + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=1,file=" + fwvars,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
@@ -73,7 +74,7 @@ func generateArmCommand(arch types.Architecture, efiDisk, fwcode string) []strin
 	return append(qemuArmCommand, []string{"-cpu", "cortex-a53", "-accel", "tcg"}...)
 }
 
-func generateAmdCommand(arch types.Architecture, efiDisk, fwcode string) []string {
+func generateAmdCommand(arch types.Architecture, efiDisk, fwcode, fwvars string) []string {
 	qemuAmdCommand := []string{
 		"qemu-system-x86_64",
 		"-nodefaults",
@@ -89,7 +90,8 @@ func generateAmdCommand(arch types.Architecture, efiDisk, fwcode string) []strin
 		"-monitor", "chardev:monitor0",
 		"-qmp", "chardev:qmp0",
 		"-device", "virtio-rng-pci",
-		"-drive", "if=pflash,format=raw,file=" + fwcode + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=0,file=" + fwcode + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=1,file=" + fwvars,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",

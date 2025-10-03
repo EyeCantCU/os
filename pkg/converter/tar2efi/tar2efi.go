@@ -78,7 +78,7 @@ func (c *t2e) Cleanup() error {
 }
 
 // Convert implements converter.Interface
-func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer, arch types.Architecture) error {
+func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer, fwvars io.Writer, arch types.Architecture) error {
 	// Create a scratch space for ourselves.
 	tmp, err := os.MkdirTemp("", "")
 	if err != nil {
@@ -102,6 +102,19 @@ func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer, ar
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("f.Close() failed with %w", err)
 	}
+
+	fwPath := filepath.Join(tmp, "uefi-data.fd")
+	f, err = os.Open(fwPath)
+	if err != nil {
+		return fmt.Errorf("os.Open() on %s failed with %w", fwPath, err)
+	}
+	if _, err := io.Copy(fwvars, f); err != nil {
+		return fmt.Errorf("io.Copy() failed with %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("f.Close() failed with %w", err)
+	}
+
 	return nil
 }
 
@@ -232,6 +245,32 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 		return fmt.Errorf("os.ReadFile() failed with %w", err)
 	} else if string(b) != "0" {
 		return fmt.Errorf("%w: %s", ErrDiskConversion, buf.String())
+	}
+
+	// Secureboot variables side-effect
+	if sbdir, err := os.Stat(filepath.Join(workDir, "secureboot")); err == nil && sbdir.IsDir() {
+		efifiles := []string{
+			// For new UEFI vars tools
+			"uefi-data.json",
+			// For AWS registration
+			"uefi-data.aws",
+			// For OVMF/AAMVF vars template
+			"uefi-data.fd",
+			"uefi-data.empty.fd",
+			// For GCP (possibly)
+			"PK.esl", "KEK.esl", "dbx.esl", "db.esl",
+			// For manual enrollment in firmware / redfish / bmc
+			"PK.auth", "KEK.auth", "dbx.auth", "db.auth",
+			// TODO add authenticode hashes for Azure
+		}
+		for _, efi := range efifiles {
+			efiFilePath := filepath.Join(workDir, "secureboot", efi)
+			efiFileOutput := filepath.Join(filepath.Dir(output), efi)
+			if err := os.Rename(efiFilePath, efiFileOutput); err != nil {
+				return fmt.Errorf("failed to rename EFI vars into %s: %w", output, err)
+			}
+			clog.Infof("writting UEFI variables %s", efiFileOutput)
+		}
 	}
 
 	if err := os.Rename(diskFileName, output); err != nil {

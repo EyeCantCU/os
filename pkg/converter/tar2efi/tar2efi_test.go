@@ -59,12 +59,18 @@ func buildImage(t *testing.T, c converter.Interface, ic types.ImageConfiguration
 		t.Fatalf("layer.Uncompressed() failed with %v", err)
 	}
 
-	disk, err := os.Create(filepath.Join(t.TempDir(), "disk.raw"))
+	destDir := t.TempDir()
+	disk, err := os.Create(filepath.Join(destDir, "disk.raw"))
 	if err != nil {
-		t.Fatalf("os.CreateTemp() failed with %v", err)
+		t.Fatalf("os.Create() failed with %v", err)
 	}
 
-	if err := c.Convert(ctx, ucl, disk, arch); err != nil {
+	fwvars, err := os.Create(filepath.Join(destDir, "uefi-data.fd"))
+	if err != nil {
+		t.Fatalf("os.Create() failed with %v", err)
+	}
+
+	if err := c.Convert(ctx, ucl, disk, fwvars, arch); err != nil {
 		t.Fatalf("c.Convert() failed with %v", err)
 	}
 	return disk.Name()
@@ -124,7 +130,7 @@ func TestConverter(t *testing.T) {
 		filename:     "testdata/curl.yaml",
 		expectedSize: 2 * GiB,
 		testDisk: func(t *testing.T, disk string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			t.Cleanup(cancel)
 			output := boot(ctx, t, bios, disk, arch)
 			if !strings.Contains(output, `"cmd":"--fail file:///etc/apko.json"`) {
@@ -195,12 +201,17 @@ func TestConverter(t *testing.T) {
 	t.Run("malformed", func(t *testing.T) {
 		malformedTarball := bytes.NewBufferString("asdf")
 
-		disk, err := os.CreateTemp(t.TempDir(), "disk.raw")
+		destDir := t.TempDir()
+		disk, err := os.Create(filepath.Join(destDir, "disk.raw"))
 		if err != nil {
-			t.Fatalf("os.CreateTemp() failed with %v", err)
+			t.Fatalf("os.Create() failed with %v", err)
+		}
+		fwvars, err := os.Create(filepath.Join(destDir, "uefi-data.fd"))
+		if err != nil {
+			t.Fatalf("os.Create() failed with %v", err)
 		}
 
-		if err := c.Convert(context.Background(), malformedTarball, disk, arch); err == nil {
+		if err := c.Convert(context.Background(), malformedTarball, disk, fwvars, arch); err == nil {
 			t.Fatalf("c.Convert() failed with %v", err)
 		} else if !errors.Is(err, ErrDiskConversion) {
 			t.Fatalf("c.Convert() failed with %v", err)

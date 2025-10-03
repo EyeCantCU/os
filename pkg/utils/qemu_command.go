@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -19,12 +20,13 @@ func GenerateQEMUCommand(arch, efiDisk, ovmf string) []string {
 	result := []string{}
 
 	socketPath := efiDisk + ".socket"
+	varsPath := filepath.Join(filepath.Dir(efiDisk), "uefi-data.fd")
 
 	switch types.ParseArchitecture(arch).ToAPK() {
 	case "aarch64":
-		result = generateArmCommand(arch, efiDisk, ovmf, socketPath)
+		result = generateArmCommand(arch, efiDisk, ovmf, socketPath, varsPath)
 	case "x86_64":
-		result = generateAmdCommand(arch, efiDisk, ovmf, socketPath)
+		result = generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath)
 	}
 
 	return result
@@ -52,7 +54,7 @@ func getHostFwd() string {
 	return "hostfwd=tcp:127.0.0.1:" + port + "-:22"
 }
 
-func generateArmCommand(arch, efiDisk, ovmf, socketPath string) []string {
+func generateArmCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []string {
 	cmd := []string{
 		"qemu-system-aarch64",
 		"-machine", "virt",
@@ -62,7 +64,8 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath string) []string {
 		"-serial", "mon:stdio",
 		"-echr", "0x05",
 		"-device", "virtio-rng-pci",
-		"-drive", "if=pflash,format=raw,file=" + ovmf + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=0,file=" + ovmf + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=1,file=" + varsPath,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
@@ -92,7 +95,7 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath string) []string {
 	return append(cmd, []string{"-cpu", "cortex-a53", "-accel", "tcg"}...)
 }
 
-func generateAmdCommand(arch, efiDisk, ovmf, socketPath string) []string {
+func generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []string {
 	cmd := []string{
 		"qemu-system-x86_64",
 		"-machine", "q35",
@@ -103,7 +106,8 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath string) []string {
 		"-serial", "mon:stdio",
 		"-echr", "0x05",
 		"-device", "virtio-rng-pci",
-		"-drive", "if=pflash,format=raw,file=" + ovmf + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=0,file=" + ovmf + ",readonly=on",
+		"-drive", "if=pflash,format=raw,unit=1,file=" + varsPath,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
