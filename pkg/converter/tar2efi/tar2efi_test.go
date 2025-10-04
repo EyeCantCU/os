@@ -139,15 +139,15 @@ func TestConverter(t *testing.T) {
 		},
 	}, {
 		filename:     "testdata/generic.yaml",
-		expectedSize: 3 * GiB,
+		expectedSize: 2 * GiB,
 		// TODO(mattmoor): How do we want to test the generic image?
 	}, {
 		filename:     "testdata/gcp-docker.yaml",
-		expectedSize: 4 * GiB,
+		expectedSize: 3 * GiB,
 		// TODO(mattmoor): How do we want to test the generic-docker image?
 	}, {
 		filename:     "testdata/gcp-base.yaml",
-		expectedSize: 3 * GiB,
+		expectedSize: 2 * GiB,
 		testDisk: func(t *testing.T, disk string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			t.Cleanup(cancel)
@@ -159,7 +159,7 @@ func TestConverter(t *testing.T) {
 		},
 	}, {
 		filename:     "testdata/aws-base.yaml",
-		expectedSize: 3 * GiB,
+		expectedSize: 2 * GiB,
 		testDisk: func(t *testing.T, disk string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			t.Cleanup(cancel)
