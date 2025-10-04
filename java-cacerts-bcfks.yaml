@@ -1,0 +1,137 @@
+package:
+  name: java-cacerts-bcfks
+  # Update this when ca-certificates is updated.
+  version: "20250619"
+  epoch: 0
+  description: "default certificate authorities for Java in BCFKS format for BouncyCastle FIPS"
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - bouncycastle-fips
+      - java-cacerts~${{package.version}}
+
+vars:
+  bcfks-path: /etc/ssl/certs/java/cacerts.bcfks
+  bc-fips-class: org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
+  bc-fips-path: /usr/share/java/bouncycastle-fips/bc-fips.jar
+
+environment:
+  contents:
+    packages:
+      - bouncycastle-fips
+      - default-jdk
+      # The java-cacerts~VERSION dependency ensures we only successfully build the package if
+      # we already successfully built the java-cacerts equivalent.
+      - java-cacerts~${{package.version}}
+      - p11-kit-trust
+      - wolfi-base
+
+pipeline:
+  - runs: |
+      # Generate the update script from template
+      sed -e "s|@PROVIDERCLASS@|${{vars.bc-fips-class}}|g" \
+          -e "s|@PROVIDERPATH@|${{vars.bc-fips-path}}|g" \
+          -e "s|@DESTKEYSTORE@|${{vars.bcfks-path}}|g" \
+          ./java-cacerts-bcfks.in > java-cacerts-bcfks
+      chmod +x java-cacerts-bcfks
+      install -Dm755 java-cacerts-bcfks "${{targets.contextdir}}/etc/ca-certificates/update.d/java-cacerts-bcfks"
+
+  - runs: |
+      EPOCH=$SOURCE_DATE_EPOCH
+      unset SOURCE_DATE_EPOCH
+
+      # Create BCFKS directory
+      mkdir -p "${{targets.contextdir}}"/etc/ssl/certs/java
+
+      # Generate and execute the conversion script
+      sed -e "s|@PROVIDERCLASS@|${{vars.bc-fips-class}}|g" \
+          -e "s|@PROVIDERPATH@|${{vars.bc-fips-path}}|g" \
+          -e "s|@DESTKEYSTORE@|${{targets.contextdir}}${{vars.bcfks-path}}|g" \
+          ./java-cacerts-bcfks.in > convert.sh
+      chmod +x convert.sh
+      ./convert.sh
+
+      # Set timestamp
+      touch -d @"$EPOCH" "${{targets.contextdir}}"/etc/ssl/certs/java/cacerts.bcfks
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 332224
+
+test:
+  environment:
+    contents:
+      packages:
+        - bouncycastle-fips
+        - default-jdk
+        - openssl
+  pipeline:
+    - runs: |
+        # Test that BCFKS cacerts file exists and is accessible
+        test -f /etc/ssl/certs/java/cacerts
+
+        # Test that the update script exists and is executable
+        test -x /etc/ca-certificates/update.d/java-cacerts-bcfks
+        /etc/ca-certificates/update.d/java-cacerts-bcfks
+
+        # Verify BCFKS format by listing keystore with BouncyCastle provider
+        keytool \
+          -list \
+          -keystore ${{vars.bcfks-path}}\
+          -storetype BCFKS \
+          -storepass changeit \
+          -providername BCFIPS \
+          -providerclass ${{vars.bc-fips-class}} \
+          -providerpath ${{vars.bc-fips-path}} > /dev/null
+    - runs: |
+        set -euo pipefail
+
+        # Test extracting a certificate from BCFKS keystore to verify it works
+        # First, get a list of aliases and pick the first one
+        # Use a temporary file to avoid pipeline issues
+        keytool \
+          -list \
+          -keystore ${{vars.bcfks-path}} \
+          -storetype BCFKS \
+          -storepass changeit \
+          -providername BCFIPS \
+          -providerclass ${{vars.bc-fips-class}} \
+          -providerpath ${{vars.bc-fips-path}} > keystore_list.txt
+
+        # Extract first certificate alias (lines that don't start with whitespace and end with comma)
+        FIRST_ALIAS=$(grep "," keystore_list.txt | head -1 | cut -d',' -f1)
+
+        echo "Testing certificate extraction for alias: $FIRST_ALIAS"
+
+        # Export the certificate to verify BCFKS keystore is functional
+        keytool \
+          -exportcert \
+          -alias "$FIRST_ALIAS" \
+          -keystore ${{vars.bcfks-path}} \
+          -storetype BCFKS \
+          -storepass changeit \
+          -providername BCFIPS \
+          -providerclass ${{vars.bc-fips-class}} \
+          -providerpath ${{vars.bc-fips-path}} \
+          -file test_cert.pem -rfc
+
+        # Verify the exported certificate has proper PEM format
+        grep -q "^-----BEGIN CERTIFICATE-----" test_cert.pem
+        grep -q "^-----END CERTIFICATE-----" test_cert.pem
+
+        # Test that update script works with new certificates
+        openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 -keyout server.key -out /usr/local/share/ca-certificates/server.crt -subj "/CN=someteststring/"
+        update-ca-certificates
+
+        # Verify the new certificate appears in our BCFKS keystore after update
+        keytool \
+          -list \
+          -keystore ${{vars.bcfks-path}} \
+          -storetype BCFKS \
+          -storepass changeit \
+          -providername BCFIPS \
+          -providerclass ${{vars.bc-fips-class}} \
+          -providerpath ${{vars.bc-fips-path}} \
+          | grep someteststring
