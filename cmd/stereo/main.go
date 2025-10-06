@@ -89,6 +89,7 @@ func main() {
 	root.AddCommand(archiveCmd())
 	root.AddCommand(bucketsCmd())
 	root.AddCommand(buildDepsCmd())
+	root.AddCommand(bumpCmd())
 	root.AddCommand(imageDependenciesCmd())
 	root.AddCommand(lintCmd())
 	root.AddCommand(makeCmd())
