@@ -192,13 +192,14 @@ Usage: ${0##*/} cluster-resources cluster
       AWS_REGION               AWS region (default: $DEF_AWS_REGION)
 
 
-   output: vpc-id subnet-id sg-id profile-name
+   output: vpc-id subnet-id sg-id profile-name basic-task-arn
 
    where:
      - vpc-id: VPC ID created for the cluster
      - subnet-id: VPC Subnet ID for instances in the cluster
      - sg-id: Security Group ID for instances in the cluster
      - profile-name: name of the Instance Profile instances need assigned when joining the cluster
+     - basic-task-arn: ARN of a basic ECS Task
 EOF
 }
 
@@ -220,8 +221,8 @@ cluster_resources() {
         }
     fi
 
-    local vpc_id subnet_id sg_id profile_name
-    read -r -d $"\n" vpc_id subnet_id sg_id profile_name < <(
+    local vpc_id subnet_id sg_id profile_name basic_task_arn
+    read -r -d $"\n" vpc_id subnet_id sg_id profile_name basic_task_arn < <(
         cloudformation_output() {
             local key="$1"
             echo "$outputs" | jq -r ".Stacks[0].Outputs[] | select(.OutputKey == \"${key}\") | .OutputValue"
@@ -231,6 +232,7 @@ cluster_resources() {
         cloudformation_output PublicSubnet
         cloudformation_output SecurityGroupId
         cloudformation_output InstanceProfileName
+        cloudformation_output TestBasicTaskArn
     )
 
     local errors=()
@@ -238,6 +240,7 @@ cluster_resources() {
     [ -n "$subnet_id" ]      || errors+=( 'Subnet ID is missing' )
     [ -n "$sg_id" ]          || errors+=( 'Security Group ID is missing' )
     [ -n "$profile_name" ]   || errors+=( 'Instance Profile Name is missing' )
+    [ -n "$basic_task_arn" ] || errors+=( 'Basic Task ARN is missing' )
 
     if [ "${#errors[@]}" -ne 0 ]; then
         stderr "Failed to get required stack outputs:"
@@ -248,7 +251,7 @@ cluster_resources() {
     # Speed up future calls; intentionally non-local variable
     [ -n "$describe_stack_cache" ] || describe_stack_cache="$outputs"
 
-    echo "$vpc_id $subnet_id $sg_id $profile_name"
+    echo "$vpc_id $subnet_id $sg_id $profile_name $basic_task_arn"
 }
 
 Usage_instance_add() {
@@ -288,7 +291,7 @@ instance_add() {
         stderr 'Failed to determine required parameters to launch new instances'
         return 1
     }
-    read -r vpc_id subnet_id sg_id profile_name <<<"${out}"
+    read -r vpc_id subnet_id sg_id profile_name _ <<<"${out}"
 
     local userdata="#!/bin/sh
 echo 'ECS_CLUSTER=$cluster' >> /etc/ecs/ecs.config
@@ -389,6 +392,80 @@ instance_remove() {
     vr "${aws[@]}" ec2 terminate-instances --instance-ids "$@"
 }
 
+test_basic_task() {
+    local cluster="$1" ami_id="$2"
+
+    [ "$#" -eq 2 ] || {
+        stderr "test_basic_task requires exactly 2 arguments: cluster ami_id"
+        return 1
+    }
+
+    local out
+    out=$(cluster_resources "$cluster") || {
+        stderr "Failed to determine ECS task family for cluster $cluster"
+        return 1
+    }
+
+    local task_arn
+    read -r _ _ _ _ task_arn <<<"$out"
+
+    log "Running task $task_arn on cluster $cluster (AMI: $ami_id)"
+    local out
+    out=$(vr "${aws[@]}" ecs run-task \
+        --cluster "$cluster" \
+        --task-definition "$task_arn" \
+        --placement-constraints "type=memberOf,expression=attribute:ecs.ami-id==$ami_id" \
+        --output json \
+    ) || {
+        stderr "Failed to run task"
+        return 1
+    }
+
+    local task_arn
+    task_arn=$(jq -r '.tasks[0].taskArn' <<<"$out")
+
+    if [ -z "$task_arn" ] || [ "$task_arn" == "null" ]; then
+        stderr 'Failed to get task ARN. Failures:'
+        stderr "$(jq -r '.failures[].reason' <<<"$out")"
+        return 1
+    fi
+
+    log "Started task ($task_arn), now waiting for it to run"
+    vr "${aws[@]}" ecs wait tasks-running \
+        --cluster "$cluster" \
+        --tasks "$task_arn" \
+    || {
+        stderr 'Task failed to start running:'
+        vr "${aws[@]}" ecs describe-tasks --cluster "$cluster" --tasks "$task_arn"
+        return 1
+    }
+    log 'Task is now running'
+
+    log 'Checking container is running'
+    out=$("${aws[@]}" ecs describe-tasks --cluster "$cluster" --tasks "$task_arn") || {
+        stderr 'Failed to describe task'
+        return 1
+    }
+
+    local container_status
+    container_status=$(jq -r '.tasks[0].containers[0].lastStatus' <<<"$out")
+    if [ "$container_status" != "RUNNING" ]; then
+        stderr "Container is not running. Status: $container_status"
+        return 1
+    fi
+    log 'Container is running'
+
+    log 'Stopping task'
+    # It's ok for this to fail; tasks are automatically stopped on instance
+    # termination. This is a best effort attempt to clean up.
+    rq "${aws[@]}" ecs stop-task \
+        --cluster "$cluster" \
+        --task "$task_arn" \
+        --reason 'Test passed'
+
+    return 0
+}
+
 SUBCMDS=(
     cluster-create
     cluster-destroy
@@ -397,6 +474,7 @@ SUBCMDS=(
     cluster-resources
     instance-add
     instance-remove
+    test-basic-task
 )
 
 if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
