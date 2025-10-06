@@ -218,6 +218,7 @@ func unguarded(ctx context.Context, arch string, ignored map[string]struct{}) er
 	// We want to see if anything in our ignored list can be dropped.
 	notIgnored := maps.Clone(ignored)
 
+	// pkg -> origins
 	unguarded := map[string][]string{}
 
 	for origin, deps := range depMap.deps {
@@ -235,19 +236,19 @@ func unguarded(ctx context.Context, arch string, ignored map[string]struct{}) er
 				continue
 			}
 
-			unguarded[origin] = append(unguarded[origin], pkg)
+			unguarded[pkg] = append(unguarded[pkg], origin)
 		}
 	}
 
 	for _, origin := range slices.Sorted(maps.Keys(unguarded)) {
 		fmt.Printf("%s:\n", origin)
-		for _, dep := range unguarded[origin] {
+		for _, dep := range slices.Sorted(slices.Values(unguarded[origin])) {
 			fmt.Printf("  %s\n", dep)
 		}
 	}
 
 	if len(unguarded) != 0 {
-		return fmt.Errorf("%d packages are unguarded", len(unguarded))
+		return fmt.Errorf("%d unguarded packages are still used", len(unguarded))
 	}
 
 	if len(notIgnored) != 0 {
