@@ -1,0 +1,135 @@
+package:
+  name: dbgate-fips
+  version: "6.6.4"
+  epoch: 1
+  description: Open-source database administration tool for SQL Server, MySQL, PostgreSQL, MongoDB and SQLite
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - bash
+      - ca-certificates-bundle
+      - dash-binsh
+      - gawk
+      - iproute2
+      - iputils
+      - nodejs-${{vars.node-version}}
+      - openssl-config-fipshardened
+      - unixodbc
+
+vars:
+  node-version: 22
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - nodejs-${{vars.node-version}}
+      - npm
+      - python3
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/dbgate/dbgate.git
+      tag: v${{package.version}}
+      expected-commit: 1c371bb7bf27a0eb0dc434cf46674bc68e8f0814
+
+  - uses: patch
+    with:
+      patches: dbgate-axios-cve-fix.patch
+
+  - name: Install dependencies and build
+    runs: |
+      yarn install --frozen-lockfile
+      # CRITICAL: Collect database drivers from all plugins and add to API package.json
+      # This script scans plugins/dbgate-plugin-*/package.json and extracts volatile dependencies
+      # (mongodb, pg, mysql2, tedious, better-sqlite3, etc.) then adds them to packages/api/package.json
+      # Without this, defineVolatileDependencies.js only finds 4 deps instead of 16+ database drivers
+      # See: https://github.com/dbgate/dbgate/blob/master/adjustPackageJson.js
+      # Used in upstream CI: https://github.com/dbgate/dbgate/blob/master/.github/workflows/build-docker.yaml#L57
+      node adjustPackageJson.js --community
+      yarn plugins:copydist
+      yarn build:web
+      yarn build:api
+
+  - name: Install DbGate
+    runs: |
+      mkdir -p ${{targets.contextdir}}/usr/share/dbgate/plugins
+      mkdir -p ${{targets.contextdir}}/usr/share/dbgate/public
+
+      cp packages/api/dist/* ${{targets.contextdir}}/usr/share/dbgate/
+      cp -r packages/web/public/* ${{targets.contextdir}}/usr/share/dbgate/public/
+      cp -r plugins/dist/* ${{targets.contextdir}}/usr/share/dbgate/plugins/
+
+      install -Dm755 docker/entrypoint.sh ${{targets.contextdir}}/usr/share/dbgate/entrypoint.sh
+
+      # Create package.json with runtime database drivers that cannot be bundled with webpack
+      # This matches upstream's prepare:docker target behavior
+      # https://github.com/dbgate/dbgate/blob/master/package.json#L58
+      node common/defineVolatileDependencies.js ${{targets.contextdir}}/usr/share/dbgate
+      cd ${{targets.contextdir}}/usr/share/dbgate && yarn install
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    description: Docker compatibility symlinks for DbGate
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/home
+          ln -s /usr/share/dbgate ${{targets.subpkgdir}}/home/dbgate-docker
+    test:
+      pipeline:
+        - runs: |
+            [ "$(readlink -f /home/dbgate-docker)" = "/usr/share/dbgate" ]
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+        - nodejs-${{vars.node-version}}
+        - procps
+    environment:
+      HOME: /tmp
+      DBGATE_PORT: "3000"
+  pipeline:
+    - name: Test DbGate server startup
+      uses: test/daemon-check-output
+      working-directory: /usr/share/dbgate
+      with:
+        setup: |
+          set -o pipefail
+          # Create temporary data directory for test
+          TEST_DIR=$(mktemp -d)
+          DBGATE_STORAGE="${TEST_DIR}"
+        start: node bundle.js --listen-api
+        timeout: 30
+        expected_output: |
+          Calling init controller for controller /connections
+          Calling init controller for controller /database-connections
+          DbGate API listening on port 3000
+        post: |
+          set -o pipefail
+          wait-for-it localhost:"${DBGATE_PORT}" -t 15
+          curl -sf http://localhost:"${DBGATE_PORT}"/health | grep -q -F 'ok'
+
+update:
+  enabled: true
+  github:
+    identifier: dbgate/dbgate
+    strip-prefix: v
+    use-tag: true
+  ignore-regex-patterns:
+    - '.*-beta.*'
+    - '.*-premium-beta.*'
