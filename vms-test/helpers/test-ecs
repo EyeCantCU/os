@@ -6,6 +6,9 @@
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 
 DEF_AWS_REGION=us-west-1
+DEF_CLUSTER_NAME=vmtest
+DEF_INSTANCE_TYPE_ARM=t4g.medium
+DEF_INSTANCE_TYPE_X86=t3.medium
 AWS_REGION=${AWS_REGION:-$DEF_AWS_REGION}
 
 aws=(
@@ -466,6 +469,171 @@ test_basic_task() {
     return 0
 }
 
+Usage_run_test() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] out-dir
+
+   Test an ECS AMI (including cluster setup if needed).
+
+   options:
+
+      -i, --ami           AMI-ID   AMI ID (conflicts with --awspub-inputs)
+      -I, --awspub-inputs DIR      read awspub info from DIR
+      -c, --cluster-name  NAME     name of the cluster to run tests in (will be created
+                                   if it does not exist, default: $DEF_CLUSTER_NAME)
+      -t, --instance-type TYPE     EC2 instance type to test on
+          --no-teardown            do not tear down the instance after testing
+
+   environment:
+      AWS_REGION                   AWS region (default: $DEF_AWS_REGION)
+
+   Either --ami or --awspub-inputs must be provided (but not both).
+
+EOF
+}
+
+run_test() {
+    local short_opts='c:hi:I:t:'
+    local long_opts="ami-id:,awspub-inputs:,cluster-name:,instance-type:,no-teardown"
+    local getopt_out=
+
+    if getopt_out=$(getopt --name "${0##*/}" --options "${short_opts}" --long "${long_opts}" -- "$@"); then
+        eval set -- "${getopt_out}"
+    else
+        Usage_run_test >&2
+        return 1
+    fi
+
+    local ami_id awspub_file cluster instance_type teardown=true
+
+    while [ $# -ne 0 ]; do
+        cur="$1"
+        next="$2"
+        case "$cur" in
+            -i|--ami-id)        ami_id=$next; shift ;;
+            -I|--awspub-inputs) awspub_file=$next; shift ;;
+            -c|--cluster-name)  cluster=$next; shift ;;
+            -h|--help)          Usage_run_test; exit 0 ;;
+            -t|--instance-type) instance_type=$next; shift ;;
+            --no-teardown)      teardown=false ;;
+            --)                 shift; break;
+        esac
+        shift
+    done
+
+    if [ -z "$ami_id" ] && [ -z "$awspub_file" ]; then
+        Usage_run_test >&2
+        stderr "error: must give --ami-id or --awspub-inputs"
+        return 1
+    elif [ -n "$ami_id" ] && [ -n "$awspub_file" ]; then
+        Usage_run_test >&2
+        stderr "error: --ami-id and --awspub-inputs cannot be both given"
+        return 1
+    fi
+
+    if [ -n "$awspub_file" ]; then
+        out=$(
+            parse_awspubins "$awspub_file" \
+                | grep '-ecs-' \
+                | awk -v region="$AWS_REGION" '$1 == region { print $2 }'
+        ) || {
+            stderr "Failed to get AMI ID from awspub output $awspub_file"
+            return 1
+        }
+        case "$(grep -c ami- <<<"$out")" in
+            0)
+                stderr "Did not find an ECS AMI in $AWS_REGION in $awspub_file"
+                return 1
+                ;;
+            1)
+                ami_id="$out"
+                log "Using AMI $ami_id in $AWS_REGION found in $awspub_file"
+                ;;
+            *)
+                stderr "Found more than one ECS AMI in $AWS_REGION in $awspub_file:"
+                stderr "$out"
+                return 1
+                ;;
+        esac
+    fi
+
+    if [ -z "$instance_type" ]; then
+        local ami_arch=
+        ami_arch=$(
+            aws ec2 --region "$AWS_REGION" describe-images \
+                --image-ids "$ami_id" \
+                --query 'Images[0].Architecture' \
+                --output text
+        )
+        case "$ami_arch" in
+            arm64)
+               instance_type="$DEF_INSTANCE_TYPE_ARM" ;;
+            x86_64)
+               instance_type="$DEF_INSTANCE_TYPE_X86" ;;
+            *)
+               stderr "no instance type given and architecture '$ami_arch' of '$ami_id' is unknown"
+               return 1
+               ;;
+        esac
+    fi
+
+    log "Creating or updating cluster '$cluster'"
+    cluster_create "$cluster" || {
+        stderr "Failed to create/update cluster '$cluster'"
+        return 1
+    }
+
+    log "Adding 1 instance of type $instance_type to cluster '$cluster'"
+    local instance_ids=()
+    out=$(instance_add "$cluster" "$ami_id" 1 "$instance_type") || {
+        stderr "Failed to add capacity to cluster '$cluster'"
+        return 1
+    }
+    read -r -a instance_ids <<<"$out"
+
+    if [ "$teardown" = true ]; then
+        # shellcheck disable=SC2064  # expand now because variable is local
+        trap "instance_remove ${instance_ids[*]}" EXIT
+    fi
+
+    log 'Running tests'
+    local tests=(
+        test_basic_task
+    )
+    local passed=() failed=()
+    local test_fn
+
+    for test_fn in "${tests[@]}"; do
+        if vr "$test_fn" "$cluster" "$ami_id"; then
+            passed+=( "$test_fn" )
+        else
+            failed+=( "$test_fn" )
+        fi
+    done
+
+    log "SUMMARY:"
+    for test_fn in "${passed[@]}"; do
+        log "PASS $test_fn"
+    done
+    for test_fn in "${failed[@]}"; do
+        log "FAIL $test_fn"
+    done
+
+    if [ "$teardown" = "true" ]; then
+        instance_remove "${instance_ids[@]}" || {
+            stderr "Failed to remove and terminate ${instance_ids[*]} from cluster '$cluster'"
+            # Intentionally don't fail. At this point, the test passed already.
+        }
+        trap - EXIT
+    fi
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
 SUBCMDS=(
     cluster-create
     cluster-destroy
@@ -475,6 +643,7 @@ SUBCMDS=(
     instance-add
     instance-remove
     test-basic-task
+    run-test
 )
 
 if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
