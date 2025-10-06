@@ -1,0 +1,102 @@
+package:
+  name: kaniko-busybox-static
+  version: 1.37.0
+  epoch: 0
+  description: "BusyBox compiled statically for Kaniko"
+  copyright:
+    - license: GPL-2.0-only
+
+var-transforms:
+  - from: ${{package.version}}
+    match: \.
+    replace: _
+    to: mangled-package-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - perl # provides pod2html/pod2text
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: be7d1b7b1701d225379bc1665487ed0871b592a5
+      repository: https://git.busybox.net/busybox
+      tag: ${{vars.mangled-package-version}}
+
+  - uses: patch
+    with:
+      patches: CVE-2022-28391-1.patch CVE-2022-28391-2.patch
+
+  # from aports.git busybox/0001-tar-fix-TOCTOU-symlink-race-condition.patch
+  - uses: patch
+    with:
+      patches: 0001-tar-fix-TOCTOU-symlink-race-condition.patch
+
+  # from aports.git busybox/0037-awk.c-fix-CVE-2023-42366-bug-15874.patch
+  # http://lists.busybox.net/pipermail/busybox/2024-March/090654.html
+  - uses: patch
+    with:
+      patches: 0037-awk.c-fix-CVE-2023-42366-bug-15874.patch
+
+  # created patch for CVE-2024-58251
+  - uses: patch
+    with:
+      patches: CVE-2024-58251-2.patch
+
+  - uses: patch
+    with:
+      patches: CVE-2025-46394.patch
+
+  - name: Configure
+    runs: |
+      cp busyboxconfig .config
+
+  - runs: |
+      make CC="${{host.triplet.gnu}}-gcc" V=1 -j$(nproc)
+
+  - name: Setup
+    runs: |
+      mkdir -p /busybox
+      install -m755 busybox /busybox/busybox
+      /busybox/busybox sh -c '/busybox/busybox --install -s /busybox'
+
+  - name: Install
+    runs: |
+      mkdir -p ${{targets.contextdir}}/busybox
+      mv /busybox/* ${{targets.contextdir}}/busybox/
+
+test:
+  pipeline:
+    - runs: |
+        PATH="/busybox:$PATH"
+
+        which busybox | grep /busybox/busybox
+
+        busybox --help
+        busybox --list-full >full.txt
+
+        # These programs have been intentionally removed from default busybox
+        for p in nc netcat wget; do
+            if grep "busybox/$p" full.txt; then
+                echo "Found '$p' in list-full output"
+                exit 1
+            fi
+            command -v "$p" &&
+              { echo "command '$p' is present. It should not be."; exit 1; }
+        done
+    - name: "awk = and ?: precedence"
+      runs: |
+        PATH="/busybox:$PATH"
+
+        found=$(awk 'BEGIN { a=0?"bug":"ok"; print a}')
+        [ "$found" = "ok" ] &&
+          echo "PASS: ternary precedence" ||
+          { echo "FAIL: ternary precedence" ; exit 1; }
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 230
