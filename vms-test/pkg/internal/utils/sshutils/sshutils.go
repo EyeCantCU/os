@@ -442,3 +442,12 @@ func GetSinglePublicKey(path string) (string, error) {
 	log.Printf("Using public key: %s", pubkeys[0])
 	return pubkeys[0], nil
 }
+
+// Guess the path to the home directory for the given remote user.
+func GuessHomePath(user string) string {
+	if user == "root" {
+		return "/root"
+	} else {
+		return "/home/" + user
+	}
+}
