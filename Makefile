@@ -58,9 +58,9 @@ gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
 	go build -o apkoaas
 
-.PHONY: test test-generic
+.PHONY: test-gotest test-generic
 
-test:
+test-gotest:
 	go test -v -tags withauth ./...
 
 test-generic: $(ARCH_OUT_D)/generic/disk.raw builder/ovmf-$(ARCH).fd

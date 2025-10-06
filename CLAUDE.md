@@ -61,7 +61,7 @@ make run-debug-<config-name>
 make debug-shell-<config-name>  # Connect to debug console
 
 # Run comprehensive tests
-make test                    # Go unit tests
+make test-gotest            # Go unit tests
 make test-generic           # Full VM testing on generic image
 ```
 
