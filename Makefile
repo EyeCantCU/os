@@ -18,10 +18,9 @@ endef
 
 # automatically select a builder from iac/ based on the build config name
 define select_builder
-$(if $(findstring hardened,$(1)),builder-cis,\
 $(if $(findstring rpi,$(1)),builder-rpi,\
 builder\
-))
+)
 endef
 
 disks_aws := $(call list_cloud_images,aws)

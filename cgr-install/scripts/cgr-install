@@ -398,6 +398,52 @@ secureboot_setup() {
         { stderr "failed to copy rootd/$espmp -> $outd"; return 1; }
 }
 
+get_install_option() {
+    local name="$1" otype="$2" oifs="$IFS" iopts="" opt=""
+    shift 2
+    # shellcheck disable=SC2206
+    { IFS=","; iopts=( ${INSTALLER_OPTS} ); IFS="$oifs"; }
+    case "$otype" in
+        presence)
+            local found=false
+            for opt in "${iopts[@]}"; do
+                [ "$name" = "$opt" ] && found=true && break
+            done
+            echo "$found"
+            return
+            ;;
+        bool)
+            # key=(true|false)
+            local default=${1:-true} val
+            for opt in "${iopts[@]}"; do
+                # shellcheck disable=SC2295
+                [ "${opt#${name}=}" = "$opt" ] && continue
+                val=${opt#*=}
+                case "$val" in
+                    true|false) echo "$val"; return 0;;
+                esac
+                stderr "Error parsing boolean $name. bad value '$val'"
+                return 1
+            done
+            echo false
+            return 0
+            ;;
+        string)
+            local default=${1:-""}
+            for opt in "${iopts[@]}"; do
+                # shellcheck disable=SC2295
+                [ "${opt#${name}=}" = "$opt" ] && continue
+                val=${opt#*=}
+                echo "$val"
+                return 0
+            done
+            echo "$default"
+            return 0
+            ;;
+        *) stderr "Error reeding $name, unknown type '$otype'"; return 1;;
+    esac
+}
+
 guest_install() {
     local sopts="hvT:o:i:d:s:"
     local lopts="help,disk:,input-tar:,kernel-cmdline-toks:,output:,scratch:,verbose"
@@ -407,7 +453,7 @@ guest_install() {
 
     local cur="" next=""
     local ktok="" output="" output_arg=""
-    local input="" dest="" scratch_arg="" opts=""
+    local input="" dest="" scratch_arg=""
     while [ $# -ne 0 ]; do
         # shellcheck disable=SC2034
         { cur="$1"; next="$2"; }
@@ -470,6 +516,7 @@ guest_install() {
         fi
     fi
 
+    local opts=""
     if [ -n "$ktok" ]; then
         local kcmdline=""
         # shellcheck disable=SC2162
@@ -506,30 +553,34 @@ guest_install() {
         x86_64|aarch64) myarch="$unamem";;
         *) fail "unexpected output of 'uname -m': $unamem";;
     esac
-    case ",$opts," in
-        *,immutable,*)
-            stderr "FIXME FIXME - immutable builder just takes default path"
-            stderr "FIXME FIXME - the same as it does on main right now"
-            builder="default"
-            ;;
-        *,rpi,*) builder="rpi";;
-        *,cis,*) builder="cis";;
-    esac
-    case ",$opts," in
-        *,debug,*) DEBUG=true;;
-    esac
-    case ",$opts," in
-        *,targetarch=*,) tarch=${opts#*targetarch=}; tarch=${tarch%%,*};;
-        *)
-            tarch="$myarch"
-            # legacy - tar2efi would write this file to tell us the target arch
-            # buildArch had no trailing newline.
-            if [ -f "$output/buildArch" ]; then
-                tarch=$(cat "$output/buildArch") ||
-                    fail "Reading target arch from $output/buildArch failed"
-            fi
-            ;;
-    esac
+
+    INSTALLER_OPTS=$opts
+
+    local rpi=false immutable=false
+    rpi=$(get_install_option rpi presence) || fail "failed reading option rpi"
+    immutable=$(get_install_option immutable bool) || fail "failed reading option rpi"
+    if [ "$rpi" = "true" ]; then
+        builder="rpi"
+    elif [ "$immutable" = "true" ]; then
+        stderr "FIXME FIXME - immutable builder just takes default path"
+        stderr "FIXME FIXME - the same as it does on main right now"
+        builder="default"
+    fi
+
+    DEBUG=$(get_install_option debug presence) ||
+        fail "failed reading debug"
+
+    tarch=$(get_install_option targetarch string "not-found") ||
+        fail "failed reading targetarch"
+    if [ "$tarch" = "not-found" ]; then
+        tarch="$myarch"
+        # legacy - tar2efi would write this file to tell us the target arch
+        # buildArch had no trailing newline.
+        if [ -f "$output/buildArch" ]; then
+            tarch=$(cat "$output/buildArch") ||
+                fail "Reading target arch from $output/buildArch failed"
+        fi
+    fi
 
     stderr "opts=$opts input=$input dest=$dest output=${output_arg}"
     stderr "DEBUG=$DEBUG builder=$builder myarch=$myarch targetarch=$tarch"
