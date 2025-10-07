@@ -28,7 +28,7 @@ var ErrDiskConversion = errors.New("disk conversion failed")
 
 // New creates a new converter.Interface for translating a tarball-based image
 // into an EFI disk image.
-func New(ctx context.Context, kernel string, buildArch string, ic types.ImageConfiguration) (converter.Interface, error) {
+func New(ctx context.Context, kernel string, kernelCmdlineAppend string, buildArch string, ic types.ImageConfiguration) (converter.Interface, error) {
 	// Create the builder initrd on startup.
 	f, err := os.CreateTemp("", "builder-*.cpio")
 	if err != nil {
@@ -43,13 +43,13 @@ func New(ctx context.Context, kernel string, buildArch string, ic types.ImageCon
 		return nil, fmt.Errorf("utils.CreateCpio() failed with %w", err)
 	}
 
-	return NewFromCpio(ctx, f.Name(), kernel, buildArch)
+	return NewFromCpio(ctx, f.Name(), kernel, kernelCmdlineAppend, buildArch)
 }
 
 // NewFromCpio creates a new converter.Interface for translating a tarball-based image
 // into an EFI disk image.
 // This one does not build a cpio, but needs one to be provided
-func NewFromCpio(ctx context.Context, cpio, kernel string, buildArch string) (converter.Interface, error) {
+func NewFromCpio(ctx context.Context, cpio, kernel string, kcmdlineAppend, buildArch string) (converter.Interface, error) {
 	// Force Cloud Run to pull in these files at startup to avoid them creating
 	// a big hit at request time.
 	if _, err := os.ReadFile(kernel); err != nil {
@@ -57,16 +57,18 @@ func NewFromCpio(ctx context.Context, cpio, kernel string, buildArch string) (co
 	}
 
 	return &t2e{
-		kernel:    kernel,
-		builder:   cpio,
-		buildArch: buildArch,
+		kernel:              kernel,
+		kernelCmdlineAppend: kcmdlineAppend,
+		builder:             cpio,
+		buildArch:           buildArch,
 	}, nil
 }
 
 type t2e struct {
-	kernel    string
-	builder   string
-	buildArch string
+	kernel              string
+	kernelCmdlineAppend string
+	builder             string
+	buildArch           string
 }
 
 // Check that we implement the interface
@@ -200,6 +202,10 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 	q := QemuInfo[types.ParseArchitecture(c.buildArch)]
 	// Convert the image to a raw disk image.
 	buf := bytes.NewBuffer(nil)
+	kcmdline := "panic=-1 quiet console=" + q.Console
+	if c.kernelCmdlineAppend != "" {
+		kcmdline += " " + c.kernelCmdlineAppend
+	}
 	{
 		// nolint:gosec // We trust the kernel argument here.
 		cmd := exec.CommandContext(ctx, q.Command, append(slices.Clone(q.MachineArgs),
@@ -226,7 +232,8 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 
 			// The console=ttyS0 gets us useful debug output on x86_64
 			// (in the Cloud Run service), but hides test output on aarch64.
-			"-kernel", c.kernel, "-append", "panic=-1 quiet console="+q.Console,
+			"-kernel", c.kernel,
+			"-append", kcmdline,
 			"-initrd", c.builder,
 		)...)
 
@@ -241,10 +248,18 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 		clog.Debug(buf.String())
 	}
 
+	outDir := filepath.Dir(output)
+	if err := os.Rename(filepath.Join(workDir, "install.log"), filepath.Join(outDir, "install.log")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to save install.log to %s: %w", outDir, err)
+	}
+
 	if b, err := os.ReadFile(filepath.Join(workDir, "result")); err != nil {
 		return fmt.Errorf("os.ReadFile() failed with %w", err)
-	} else if string(b) != "0" {
-		return fmt.Errorf("%w: %s", ErrDiskConversion, buf.String())
+	} else {
+		rc := strings.TrimSpace(string(b))
+		if rc != "0" {
+			return fmt.Errorf("%w: result was '%s'\n%s\n", ErrDiskConversion, rc, buf.String())
+		}
 	}
 
 	// Secureboot variables side-effect

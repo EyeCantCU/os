@@ -1,0 +1,70 @@
+#!/bin/bash
+set -o pipefail
+set -u
+
+DISK="${DISK:-ERROR_UNSET_DISK}"
+ROOT_DIR=${ROOT_DIR:-ERROR_UNSET_ROOT_DIR}
+OUT_DIR=${OUT_DIR:-ERROR_UNSET_OUT_DIR}
+
+if [ "$DEBUG" = "true" ]; then
+    write_debug_kernel_conf "$ROOT_DIR" ||
+        fail "failed writing debug kernel config"
+fi
+
+vr secureboot_setup "$ROOT_DIR" "$OUT_DIR/secureboot" ||
+    fail "secureboot setup failed"
+
+# Create a GPT parition table on our disk where the
+# EFI System Partition (ESP) is 100M to hold the kernel,
+# systemd-boot, and a handful of configuration files.
+# The root partition will be the remainder of the disk.
+gib=$((1024 * 1024 * 1024))
+start=$((1024 * 1024 * 4)) # Start 4Mib for maximum alignment
+sectsize=512
+sstart=$((start / sectsize))
+efisize=$(((gib - start) / sectsize)) # make efisize 1GiB - startsize, so second part starts at 1GiB
+
+# shellcheck disable=SC2086
+sfdisk_in=$(tmpf) || fail
+cat > "$sfdisk_in" <<EOF
+# cat
+label: gpt
+label-id: $GPT_UUID
+unit: sectors
+sector-size: $sectsize
+
+disk.raw1 : start=  $sstart, size=$efisize, type=$EFI_TYPE, uuid=$PT_UUID_EFI, name="ESP"
+disk.raw2 : start=, size=, type=$ROOT_TYPE, uuid=$PT_UUID_ROOT, name="Chainguard", attrs="GUID:59"
+EOF
+
+sfdisk "$DISK" <"$sfdisk_in" || {
+    stderr "sfdisk input:"
+    sed 's,^,>,' "$sfdisk_in" 1>&2
+    fail "sfdisk $DISK failed with input from above"
+}
+# shellcheck disable=SC2181
+[ $? -eq 0 ] || fail "sfdisk $DISK failed"
+
+# Reproducibility improvements, this way partition layout is reproducible
+vr sfdisk --disk-id "$DISK" "$DISK_UUID" || fail
+
+case "$DISK" in
+    /dev/loop*)
+        echo "would now do partprobe $DISK"
+        vr partx --update "$DISK" ||
+            fail "partx --update $DISK on loop device failed"
+esac
+
+pt_esp=$(ptdev "$DISK" 1) || {
+    error "huihhhono $DISK 1"
+    bash
+    fail
+}
+
+pt_root=$(ptdev "$DISK" 2) || fail
+
+vr mkfs_esp "$pt_esp" || fail
+
+vr move_esp "$ROOT_DIR" "$pt_esp" "$sstart" || fail
+
+xfs_populate "$ROOT_DIR" "$pt_root" "$FS_UUID_ROOT" || fail

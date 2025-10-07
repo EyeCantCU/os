@@ -1,0 +1,583 @@
+#!/bin/bash
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043
+
+VERBOSITY=1
+TEMP_D=""
+MYNAME="${0##*/}"
+OUTPUT_MOUNT=""
+OUTPUT=""
+SCRATCH_MOUNT=""
+RC=99
+
+stderr() { echo "$@" 1>&2; }
+error() { stderr "[$MYNAME] ERROR" "$@"; return 0; }
+fail() { local r=$?;  [ $r -eq 0 ] && r=1; failrc "$r" "$@"; }
+failrc() { local r="$1"; shift; [ $# -eq 0 ] || stderr "[$MYNAME] FATAL" "$@"; exit "$r"; }
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] subcmd [ options ]
+
+   subcmds:
+
+     guest-install
+      -T --kernel-cmdline-toks=token  kernel command line contains '<token>=' variables
+                                      options for this program in a comma delimited list
+      -o/--output     9p:PLAN9_NAME   mount this plan 9 fs and write status to it
+      -i/--input-tar  TARBALL         tarball to copy
+      -d/--disk       DISK            device to write write to
+      -s/--scratch    SCRATCH         device that can be formated and mounted for scratch
+
+   options:
+      -v | --verbose   increase verbosity
+EOF
+}
+
+# shellcheck disable=SC2120
+bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+
+cleanup() {
+    if [ -d "$OUTPUT" ]; then
+        stderr "recording exit code $RC to <output>/result"
+        printf "%d" "$RC" > "$OUTPUT/result" ||
+            echo "FATAL ERROR FATAL: could not write to $OUTPUT/result" 1>&2
+    fi
+    if [ -n "$OUTPUT_MOUNT" ]; then
+        vr umount "$OUTPUT_MOUNT" || :
+        OUTPUT_MOUNT=""
+    fi
+    if [ -n "$SCRATCH_MOUNT" ]; then
+        vr umount "$SCRATCH_MOUNT" || :
+        SCRATCH_MOUNT=""
+    fi
+    [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
+}
+
+debug() {
+    local level="$1"
+    shift
+    [ "${level}" -gt "${VERBOSITY}" ] && return
+    stderr "${@}"
+}
+
+vr() {
+    local rc=""
+    debug 1 "execute:" "$@"
+    "$@" && return 0
+    rc=$?
+    stderr "execution failed [$rc]: $*"
+    return $rc
+}
+
+ptdev() {
+    local dev="$1" part="$2" delim=""
+    for delim in p ""; do
+        [ -e "$dev$delim$part" ] && echo "$dev$delim$part" && return 0
+    done
+    error "did not find partition device for partition $part on $dev"
+    return 1
+}
+
+# shellcheck disable=SC2034
+set_env() {
+    local targetarch="$1" mdisk="$2" mrootd="$3" moutdir="$4"
+    FROZEN_TIMESTAMP=1744654025
+
+    DISK_UUID=5A82A03F-386A-43C8-8DD5-DD0E5452A3F1
+    FS_UUID_DMVERITY=77777777-7777-7777-7777-777777777777
+    FS_UUID_EFI=55555555 # 32 bit int
+    FS_UUID_ROOT=44444444-4444-4444-4444-444444444444
+    GPT_UUID=11111111-1111-1111-11111111111111111
+    PT_UUID_DMVERITY=66666666-6666-6666-6666-666666666666
+    PT_UUID_EFI=22222222-2222-2222-2222-222222222222
+    PT_UUID_ROOT=33333333-3333-3333-3333-333333333333
+
+    # https://uapi-group.org/specifications/specs/discoverable_partitions_specification
+    EFI_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    ROOT_X86_64="4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
+    ROOT_ARM64="b921b045-1df0-41c3-af44-4c6f280d3fae"
+    DM_VERITY_X86_64="2c7357ed-ebd2-46d9-aec1-23d437ec2bf5"
+    DM_VERITY_ARM64="df3300ce-d69f-4c92-978c-9bfb0f38d820"
+
+    EFI_SUFFIX_X86_64=X64
+    EFI_SUFFIX_ARM64=AA64
+
+    VERITY_SALT="85dafa347119380f271b1f90d07143e6"
+
+    TARGET_ARCH="$targetarch"
+
+    case "$targetarch" in
+        x86_64)
+            ROOT_TYPE="${ROOT_X86_64}"
+            DMVERITY="${DM_VERITY_X86_64}"
+            EFI_SUFFIX="${EFI_SUFFIX_X86_64}"
+            ;;
+        aarch64)
+            ROOT_TYPE="${ROOT_ARM64}"
+            DMVERITY="${DM_VERITY_ARM64}"
+            EFI_SUFFIX="${EFI_SUFFIX_ARM64}"
+            ;;
+        *) error "unexpected runtime arch '$targetarch'"; return 1;;
+    esac
+
+    export SOURCE_DATE_EPOCH="$FROZEN_TIMESTAMP"
+
+    DISK=$mdisk
+    ROOT_DIR=$mrootd
+    OUT_DIR=$moutdir
+}
+
+with_faketime() {
+    local lfaketime="/usr/lib/faketime/libfaketime.so.1"
+    [ -f "$lfaketime" ] ||
+        { error "LD_PRELOAD faketime lib $lfaketime did not exist"; return 1; }
+    local ft=""
+    ft=$(date -d @"$FROZEN_TIMESTAMP" +"%Y-%m-%d %H:%M:%S") ||
+        { error "'date' failed in set_env"; return 1; }
+    vr env FAKETIME="$ft" \
+        LD_PRELOAD="$lfaketime${LD_PRELOAD:+:${LD_PRELOAD}}" \
+        FAKERANDOM_SEED="0x12345678DEADBEEF" \
+        NO_FAKE_STAT=1 "$@"
+}
+
+move_esp() {
+    # Extract the boot directory from the tar, then populate
+    # our EFI partition.
+    # We will use mtools so we wont need to mount, this making the
+    # partition not reproducible
+    # configure mtools to correctly read out vfat partition
+    local rootd="$1" dest="$2" offset="$3" myhome=""
+    [ -d "$rootd" ] || { error "move_esp src '$rootd' is not a dir"; return 1; }
+    if [ ! -f "$dest" ] && [ ! -b "$dest" ]; then
+        error "move_esp dest '$dest' is not a file or block device";
+        return 1
+    fi
+
+    # ESP mount point should be /boot, but old 'boot-installed' packages
+    # effectively expected it to be /boot/efi.  Those are identifyable
+    # by presence of /boot/efi/EFI rather than /boot/EFI.
+    espmp="boot"
+    if [ -d "$rootd/boot/efi/EFI" ]; then
+        espmp="boot/efi"
+    fi
+    if [ -e "$rootd/boot/EFI" ] && [ -e "$rootd/boot/efi" ]; then
+        error "move_esp: installation has boot /boot/EFI and /boot/efi"
+        return 1
+    fi
+
+    myhome=$(tmpd move_esp) ||
+        error "failed to create temp dir in move_esp"
+    (
+        set -o pipefail
+        # subshell for local setting of HOME and other exports
+        export HOME="$myhome"
+        export MTOOLS_SKIP_CHECK=1
+        export TZ=UTC
+        # this doesn't seem right. there should be no offset here if we give it
+        # a partition.
+        echo "drive c: file=\"$dest\" partition=0 hidden=$offset" > "$HOME/.mtoolsrc" ||
+            { error "failed to write $HOME/.mtoolsrc"; return 1; }
+
+        # First create directories
+        find "$rootd/$espmp" -type d -printf "%P\n" | sort |
+            while read -r dir; do
+                [ -z "$dir" ] && continue
+                mmd -D o "c:/$dir" ||
+                    fail "failed mmd copy of $dir"
+            done
+
+        # Then copy all files
+        find "$rootd/$espmp" -type f -printf "%P\n" | sort |
+            while read -r file; do
+                mcopy -o -p -m -Q "$rootd/$espmp/$file" "c:/$file" ||
+                    fail "failed mcopy $espmp/$file -> $file"
+            done
+    ) || {
+        rm -Rf "$myhome"
+        error "populating esp failed"
+        return 1
+    }
+
+    # Remove files in boot which were copied to ESP
+    empty_dir "$rootd/$espmp" ||
+        { error "move_esp failed emptying $espmp"; return 1; }
+
+    rm -Rf "$myhome" ||
+        { error "move_esp temp dir cleanup failed"; return 1; }
+    return
+}
+
+empty_dir() {
+    # empty an existing dir maintaining its timestamp. error on non-existing.
+    local d="$1"
+    [ -d "$d" ] || { error "empty_dir $d: '$d' is not a directory"; return 1; }
+    [ -L "$d" ] && { error "empty_dir $d: '$d' is a symlink"; return 1; }
+    vr stampdalf "$d" rm -rf "$d"/* "$d"/.* ||
+        { error "failed emptying directory $d"; return 1; }
+}
+
+mkfs_esp() {
+    # Format our EFP System Partition with FAT32 (required)
+    # using invariant will make the partition reproducible
+    local esppath="$1"
+    [ -f "$esppath" -o -b "$dest" ] ||
+        { error "mkfs_esp: path '$esppath' is not a file or block device"; return 1; }
+    vr mkfs.vfat --invariant -i "$FS_UUID_EFI" -F 32 "$esppath"
+}
+
+xfs_populate() {
+    local srcd="$1" dest="$2" fsuuid="$3"
+    [ -d "$srcd" ] ||
+        { error "xfs_populate: srcd '$srcd' not a directory"; return 1; }
+    [ -f "$dest" -o -b "$dest" ] ||
+        { error "xfs_populate: dest '$dest' not a file or block device"; return 1; }
+
+    with_faketime mkfs.xfs \
+        -b size=4096 \
+        -d agcount=4 \
+        -d noalign \
+        -i attr=2 \
+        -i projid32bit=1 \
+        -i size=512 \
+        -l size=67108864 \
+        -l su=4096 \
+        -l version=2 \
+        -m crc=1 \
+        -m finobt=1 \
+        -m uuid="$fsuuid" \
+        -n size=16384 \
+        -n version=2 \
+        -p file="$srcd" \
+        "$dest" || { error "mkfs.xfs failed"; return 1; }
+
+    # Ensure / is 0755 or systemd will complain
+    # by default it will inherit whatever permission $root_dir will have
+    # for consistency lets set it manually.
+    with_faketime xfs_db -x "$dest" -c "inode 128" -c "write core.mode 040755" || return 1
+}
+
+tmpd() {
+    [ "${TEMP_D:-unset}" = "unset" ] &&
+        { error "tmpd called with TEMP_D not set"; return 1; }
+    mktemp -d "${TEMP_D}/${1:-${0##*/}}.XXXXXX" || {
+        stderr "failed to create temp dir"
+        return 1
+    }
+}
+
+tmpf() {
+    [ "${TEMP_D:-unset}" = "unset" ] &&
+        { error "tmpf called with TEMP_D not set"; return 1; }
+    mktemp "${TEMP_D}/${1:-${0##*/}}.XXXXXX" || {
+        stderr "failed to create temp dir"
+        return 1
+    }
+}
+
+write_debug_kernel_conf() {
+    local rootd="$1" rootflag="" out="" ver="" opts="" fname="" kernel=""
+
+    # basically find a single chainguard/*/linux file and write
+    # an entry in boot/loader/entries for it.
+    out=$(cd "$rootd/boot" && set +f && set -- chainguard/*/linux
+        [ $# -eq 0 ] && { error "no kernel found" 1>&2; exit 1; };
+        echo "$# - $*" 1>&2
+        for f in "$@"; do [ -f "$f" ] && echo "$f" && exit 0; done
+        error "did not find kernel"
+        exit 1) || return 1
+    kernel="/$out"
+    # grab the version from chainguard/6.1.2/linux
+    ver=${out#chainguard/}
+    ver=${ver%/linux}
+    rootflag="root=PARTLABEL=Chainguard"
+
+    local console="ttyS0" debugtty="ttyS1"
+    if [ "${TARGET_ARCH}" = "aarch64" ]; then
+        console="ttyAMA0"
+        debugtty="ttyS0"
+    fi
+
+    opts="$rootflag systemd.debug-shell=$debugtty console=$console"
+
+    local rwflag="" ofname="boot/loader/entries/chainguard-$ver.conf"
+    if [ ! -f "$rootd/$ofname" ]; then
+        echo "expected config file in $ofname was not found." 1>&2
+        return 1
+    else
+        local line=""
+        line=$(grep "options .* rw" "$rootd/$ofname")
+        if [ -n "$line" ]; then
+            rwflag="rw"
+        fi
+    fi
+
+    fname="boot/loader/entries/chainguard-$ver-debug.conf"
+
+    tee "$rootd/$fname" <<EOF
+title      Chainguard-debug
+version    $ver
+sort-key   0chainguard
+options    $opts${rwflag:+ $rwflag}
+linux      $kernel
+EOF
+    [ $? -eq 0 ] || { error "failed writing to $rootd/$fname"; return 1; }
+
+    (
+      stderr "=== /$fname =="
+      sed "s,^,| ," "$rootd/$fname"
+      stderr "=== cmdlines ===" ;
+      cd "$rootd/boot/loader/entries" && grep -- options *.conf )
+}
+
+secureboot_setup() {
+    # this expects to on a full 'rootd' and make changes to it (populating boot/loader/keys/auto)
+    local rootd="$1" outd="$2"
+    mkdir -p "$outd" || {
+        stderr "failed creating $outd in secureboot_setup";
+        return 1;
+    }
+
+    ## Empty key for PK, KEK, DBX
+    local ktype=""
+    for ktype in PK KEK dbx; do
+        vr hash-to-efi-sig-list /dev/null "$outd/$ktype.esl" ||
+            { stderr "Failed creating empty sig list for $ktype"; return 1; }
+    done
+
+    ## Calculate hash list of all EFI apps (currently only systemd-boot) and kernels
+    local out=""
+    out=$(find "$rootd/boot" -name "BOOT${EFI_SUFFIX}.EFI" -o -name linux) ||
+        { stderr "failed to find files to sign in in $rootd/boot"; return 1; }
+    [ -n "$out" ] ||
+        { stderr "did not find any files to sign under $rootd"; return 1; }
+
+    local oifs="$IFS"
+    IFS=$'\n';
+    # shellcheck disable=SC2206
+    tosign=( $out );
+    IFS="$oifs"
+
+    debug 1 "found ${#tosign} to sign under boot/"
+    vr hash-to-efi-sig-list "${tosign[@]}" "$outd/db.esl" ||
+        { stderr "failed to sign ${#tosign[@]} files under boot/"; return 1; }
+
+    ## Create JSON vars file
+    vr uefivars -i none -o json -O "$outd/uefi-data.json" \
+        --PK "$outd/PK.esl" --KEK "$outd/KEK.esl" --dbx "$outd/dbx.esl" --db "$outd/db.esl" ||
+        { stderr "could not create json file with uefivars"; return 1; }
+
+    ## Create AWS UEFI data file for AWS registration
+    vr uefivars -i json -o aws -I "$outd/uefi-data.json" -O "$outd/uefi-data.aws" ||
+        { stderr "could not reate aws uefi files"; return 1; }
+
+    ## Create EDK2 vars for Qemu launch (arch specific)
+    local tarch="${TARGET_ARCH}" varsf=""
+    case "$tarch" in
+        x86_64|aarch64)
+          varsf="/usr/share/qemu/edk2-$tarch-vars.fd"
+          vr cp "$varsf" "$outd"/uefi-data.empty.fd ||
+              { stderr "failed to copy edk2 vars"; return 1; }
+
+          vr virt-fw-vars --input "$varsf" --output "$outd/uefi-data.fd" \
+              --set-json "$outd/uefi-data.json" ||
+              { stderr "failed virt-fw-vars for $varsf"; return 1; }
+          ;;
+        *) stderr "unknown arch for secureboot edk2 files '$tarch"
+           return 1;;
+    esac
+
+    ## Create .auth firmware / redfish / bmc enrollment files
+    vr virt-fw-vars --set-json "$outd"/uefi-data.json --output-auth "$outd" ||
+        { stderr "failed virt-fw-vars .auth firmware enrollment"; return 1; }
+
+    ## Install systemd-boot auto enrollment .auth files
+    local espmp="boot"
+    vr stampdalf "$rootd/$espmp" mkdir -p "$rootd/$espmp/loader/keys/auto" ||
+        { stderr "failed to create $espmp/loader/keys/auto"; return 1; }
+    vr stampdalf "$rootd/$espmp" cp "$outd"/*.auth "$rootd/$espmp/loader/keys/auto" ||
+        { stderr "failed to copy rootd/$espmp -> $outd"; return 1; }
+}
+
+guest_install() {
+    local sopts="hvT:o:i:d:s:"
+    local lopts="help,disk:,input-tar:,kernel-cmdline-toks:,output:,scratch:,verbose"
+    local out=""
+    out=$(getopt --name "${0##*/}" --options "$sopts" --long "$lopts" -- "$@") &&
+        eval set -- "$out" || { bad_Usage; return; }
+
+    local cur="" next=""
+    local ktok="" output="" output_arg=""
+    local input="" dest="" scratch_arg="" opts=""
+    while [ $# -ne 0 ]; do
+        # shellcheck disable=SC2034
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -T|--kernel-cmdline-toks) ktok="$next"; shift;;
+            -o|--output) output_arg="$next"; shift;;
+            -i|--input-tar) input="$next"; shift;;
+            -d|--disk) dest="$next"; shift;;
+            -s|--scratch) scratch_arg="$next"; shift;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        fail "failed to make tempdir"
+    trap cleanup EXIT
+
+    local out9p=""
+    case "$output_arg" in
+        9p:*) out9p="${output_arg#9p:}"
+            output="$TEMP_D/output"
+            vr mkdir "$output" || fail "failed to create output mountpoint"
+            vr mount -t 9p -otrans=virtio -oversion=9p2000.L "$out9p" "$output" ||
+                fail "failed to mount $out9p"
+            OUTPUT_MOUNT="$output"
+            OUTPUT="$output"
+            ;;
+        "") mkdir "$TEMP_D/output" || fail "failed mkdir TEMP_D/output"
+            OUTPUT="$TEMP_D/output"
+            ;;
+        *) [ -d "$output_arg" ] || fail "output '$output_arg': not a dir"
+            OUTPUT="$output_arg"
+            ;;
+    esac
+
+    [ -n "$dest" ] || fail "-d/--disk is required"
+    [ -n "$input" ] || fail "-i/--input is required"
+
+    if [ -z "$INSTALLER_LIBDIR" ]; then
+        INSTALLER_LIBDIR=/usr/lib/cgr-install
+    fi
+    [ -d "$INSTALLER_LIBDIR" ] ||
+        fail "INSTALLER_LIBDIR '$INSTALLER_LIBDIR' is not a directory"
+
+    local scratch="${TEMP_D}/scratch"
+    vr mkdir "$scratch" || fail "failed mk scratch"
+    if [ -n "$scratch_arg" ]; then
+        if [ -b "$scratch_arg" ]; then
+            vr mkfs.xfs "${scratch_arg}" &&
+                vr mount -t xfs -o noatime,nodiratime "$scratch_arg" "$scratch" &&
+                SCRATCH_MOUNT="$TEMP_D/scratch" ||
+                fail "failed using scratch $scratch_arg"
+        elif [ -d "$scratch_arg" ]; then
+            scratch="$scratch_arg"
+        else
+            fail "not sure what to do with scratch=$scratch_arg"
+        fi
+    fi
+
+    if [ -n "$ktok" ]; then
+        local kcmdline=""
+        # shellcheck disable=SC2162
+        read kcmdline </proc/cmdline ||
+            fail "could not read /proc/cmdline"
+        kcmdline=" $kcmdline "
+        # shellcheck disable=SC2295
+        case "$kcmdline" in
+            *\ $ktok=\"*)
+                opts=${kcmdline##*$ktok=\"}
+                opts=${opts%%\"*}
+                ;;
+            *\ $ktok=* )
+                opts=${kcmdline##*$ktok=}
+                opts=${opts%% *}
+                ;;
+            *) debug 1 "did not find token '$ktok' in kernel cmdline: $kcmdline"
+                ;;
+        esac
+    elif [ -n "${INSTALLER_OPTS:-}" ]; then
+        opts=${INSTALLER_OPTS}
+        debug 1 "set opts=${INSTALLER_OPTS} from INSTALLER_OPTS env"
+    fi
+
+    [ -b "$dest" ] || fail "dest '$dest' is not a block device"
+    [ -e "$input" ] || fail "input '$input' does not exist"
+    [ ! -d "$input" ] || fail "input '$input' is a directory"
+
+    local builder="default" unamem="" myarch="" tarch=""
+    DEBUG=false
+
+    unamem=$(uname -m) || fail "uname -m failed"
+    case "$unamem" in
+        x86_64|aarch64) myarch="$unamem";;
+        *) fail "unexpected output of 'uname -m': $unamem";;
+    esac
+    case ",$opts," in
+        *,immutable,*)
+            stderr "FIXME FIXME - immutable builder just takes default path"
+            stderr "FIXME FIXME - the same as it does on main right now"
+            builder="default"
+            ;;
+        *,rpi,*) builder="rpi";;
+        *,cis,*) builder="cis";;
+    esac
+    case ",$opts," in
+        *,debug,*) DEBUG=true;;
+    esac
+    case ",$opts," in
+        *,targetarch=*,) tarch=${opts#*targetarch=}; tarch=${tarch%%,*};;
+        *)
+            tarch="$myarch"
+            # legacy - tar2efi would write this file to tell us the target arch
+            # buildArch had no trailing newline.
+            if [ -f "$output/buildArch" ]; then
+                tarch=$(cat "$output/buildArch") ||
+                    fail "Reading target arch from $output/buildArch failed"
+            fi
+            ;;
+    esac
+
+    stderr "opts=$opts input=$input dest=$dest output=${output_arg}"
+    stderr "DEBUG=$DEBUG builder=$builder myarch=$myarch targetarch=$tarch"
+
+    local bpath="$INSTALLER_LIBDIR/builder-$builder"
+    [ -f "$bpath" ] || fail "builder '$builder' not found in $bpath"
+
+    local root_dir="$scratch/root"
+    vr mkdir -p "$root_dir" || fail "failed to create root directory for extract"
+
+    set_env "$tarch" "$dest" "$root_dir" "$output" ||
+        fail "set_env failed"
+
+    vr tar \
+      --sort=name \
+      --warning=no-timestamp \
+      --xattrs \
+      --xattrs-include='*' \
+      -xpf "$input" \
+      --numeric-owner \
+      -C "$root_dir" ||
+      fail "failed to extract tar file from $input to $root_dir"
+
+    empty_dir "$root_dir/dev" ||
+        fail "failed removing entries in dev/"
+
+    (
+        set -e
+        set -u
+        # shellcheck disable=SC1090
+        . "$bpath"
+    ) ||
+        fail "builder $bpath failed"
+
+    vr sync || fail "sync failed"
+    RC=0
+    stderr "successfull install to $dest"
+    return 0
+}
+
+main() {
+    case "$1" in
+        -h|--help) Usage; return 0;;
+        guest-install) shift; guest_install "$@";;
+        "") bad_Usage "no subcommand given"; return 1;;
+        *) fail "unknown subcommand $1";;
+    esac
+}
+
+main "$@"
+# vi: ts=4 expandtab

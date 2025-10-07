@@ -115,7 +115,7 @@ func TestConverter(t *testing.T) {
 	}
 
 	cfg := readBuildConfig(t)
-	c, err := New(context.Background(), kernel, arch.ToAPK(), cfg)
+	c, err := New(context.Background(), kernel, "cgri.opts=", arch.ToAPK(), cfg)
 	if err != nil {
 		t.Fatalf("New() failed with %v", err)
 	}

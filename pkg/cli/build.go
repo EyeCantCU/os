@@ -40,6 +40,7 @@ func buildCmd() *cobra.Command {
 	var builderConfFilePath string
 	var builderCpioPath string
 	var kernelPath string
+	var kernelCmdlineAppend string
 	var arch string
 	var buildArch string
 	var err error
@@ -100,7 +101,7 @@ func buildCmd() *cobra.Command {
 				}
 			}
 
-			return BuildCmd(ctx, buildFilePath, builderConfFilePath, builderCpioPath, kernelPath, buildArch, arch, output)
+			return BuildCmd(ctx, buildFilePath, builderConfFilePath, builderCpioPath, kernelPath, kernelCmdlineAppend, buildArch, arch, output)
 		},
 	}
 
@@ -110,6 +111,7 @@ func buildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&builderConfFilePath, "builder", "", "path to builder yaml definition")
 	cmd.Flags().StringVar(&builderCpioPath, "builder-cpio", "", "path to premade builder cpio")
 	cmd.Flags().StringVar(&kernelPath, "kernel", "", "path to kernel to use")
+	cmd.Flags().StringVar(&kernelCmdlineAppend, "kernel-cmdline-append", "", "append to kernel command line")
 
 	return cmd
 }
@@ -125,7 +127,7 @@ func createDisk(ctx context.Context, converter converter.Interface, buildTargetP
 	return converter.ConvertToFile(ctx, inputTar, output, types.ParseArchitecture(arch))
 }
 
-func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPath, arch string) (converter.Interface, error) {
+func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPath, kernelCmdlineAppend, arch string) (converter.Interface, error) {
 	if builderCpio == "" {
 		builderConfig, err := os.Open(builderConfigPath)
 		if err != nil {
@@ -140,21 +142,21 @@ func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPa
 			return nil, fmt.Errorf("failed to parse image configuration: %v", err)
 		}
 
-		return tar2efi.New(ctx, kernelPath, arch, ic)
+		return tar2efi.New(ctx, kernelPath, kernelCmdlineAppend, arch, ic)
 	}
 
 	// just convert using the provided cpio
-	return tar2efi.NewFromCpio(ctx, builderCpio, kernelPath, arch)
+	return tar2efi.NewFromCpio(ctx, builderCpio, kernelPath, kernelCmdlineAppend, arch)
 }
 
-func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, buildArch, arch, output string) error {
+func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, kcmdAppend, buildArch, arch, output string) error {
 	apkoTar, err := utils.CreateTar(ctx, buildFilePath, arch)
 	if err != nil {
 		return fmt.Errorf("error creating image.tar: %w", err)
 	}
 	defer os.RemoveAll(apkoTar)
 
-	converter, err := createBuilder(ctx, builderConf, builderCpio, kernelPath, buildArch)
+	converter, err := createBuilder(ctx, builderConf, builderCpio, kernelPath, kcmdAppend, buildArch)
 	if err != nil {
 		return fmt.Errorf("error creating tar converter: %w", err)
 	}

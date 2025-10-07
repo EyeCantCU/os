@@ -48,7 +48,6 @@ ARCH_OUT_D = output/$(ARCH)
 
 BUILDER_KERNEL := builder/kernel-$(BUILDER_ARCH)
 BUILDER_INITRD := builder/initrd-$(BUILDER)-$(BUILDER_ARCH)
-BUILDER_DEBUG_INITRD := builder/initrd-debug-$(BUILDER_ARCH)
 
 cfgs = $(wildcard configs/*)
 # names is a list of each basename cfg
@@ -59,8 +58,9 @@ apkoaas: $(gosrc)
 	go build -o apkoaas
 
 .PHONY: test-gotest test-generic
+include cgr-install.mk
 
-test-gotest:
+test-gotest: $(CGR_INSTALL_APK)
 	go test -v -tags withauth ./...
 
 test-generic: $(ARCH_OUT_D)/generic/disk.raw builder/ovmf-$(ARCH).fd
@@ -170,10 +170,7 @@ configs/%/build.yaml:
 .PHONY: builder
 builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 
-builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
-	$(TOP_D)/apkoaas --log-level=debug make-builder --arch=$(BUILDER_ARCH) iac/builder-debug.yaml $@
-
-builder/initrd-%: apkoaas iac/$(BUILDER).yaml
+builder/initrd-%: apkoaas iac/$(BUILDER).yaml $(CGR_INSTALL_REPO)/%/$(CGR_INSTALL)-$(CGR_INSTALL_VERSION).apk
 	@mkdir -p $(dir $@)
 	$(TOP_D)/apkoaas make-builder --arch=$(BUILDER_ARCH) iac/$(BUILDER).yaml $@
 
@@ -362,14 +359,16 @@ $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspu
 
 $(ARCH_OUT_D)/%/disk.raw-build:
 	@mkdir -p $(dir $@)
+	kopts=$$($(TOOLS_D)/get-install-opts "$@" configs/$*/build.yaml $(ARCH) ) && \
 	$(TOP_D)/apkoaas build \
-	--log-level=debug \
-	--arch=$(ARCH) \
-	--build-arch=$(BUILDER_ARCH) \
-	--builder-cpio=$(BUILDER_INITRD) \
-	--kernel=$(BUILDER_KERNEL) \
-	--output=$(patsubst %-build,%,$@) \
-	configs/$*/build.yaml
+	  --log-level=debug \
+	  --arch=$(ARCH) \
+	  --build-arch=$(BUILDER_ARCH) \
+	  --builder-cpio=$(BUILDER_INITRD) \
+	  --kernel=$(BUILDER_KERNEL) \
+	  --kernel-cmdline-append=cgri.opts="$$kopts" \
+	  --output=$(patsubst %-build,%,$@) \
+	  configs/$*/build.yaml
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	$(if $(call is_explicitly_set,BUILDER), \
@@ -393,7 +392,7 @@ $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD
 
 .PHONY: clean
 clean:
-	rm -Rf output builder apkoaas *.raw
+	rm -Rf output builder apkoaas *.raw $(CGR_INSTALL_REPO)
 
 install-deps:
 	sudo sh -c 'apt-get --quiet update && \
