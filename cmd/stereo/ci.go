@@ -68,7 +68,9 @@ func unguardedCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&arch, "arch", types.ParseArchitecture(runtime.GOARCH).ToAPK(), "architecture to evaluate")
+	// Default to x86_64 because they tend to be a superset of aarch64.
+	// TODO: Consider both.
+	cmd.Flags().StringVar(&arch, "arch", "x86_64", "architecture to evaluate")
 	cmd.Flags().StringVar(&ignoreFile, "ignore", "unguarded.txt", "packages to ignore (we expect them to be unguarded)")
 
 	return cmd
@@ -216,6 +218,7 @@ func unguarded(ctx context.Context, arch string, ignored map[string]struct{}) er
 	// We want to see if anything in our ignored list can be dropped.
 	notIgnored := maps.Clone(ignored)
 
+	// pkg -> origins
 	unguarded := map[string][]string{}
 
 	for origin, deps := range depMap.deps {
@@ -233,25 +236,33 @@ func unguarded(ctx context.Context, arch string, ignored map[string]struct{}) er
 				continue
 			}
 
-			unguarded[origin] = append(unguarded[origin], pkg)
+			unguarded[pkg] = append(unguarded[pkg], origin)
 		}
 	}
 
 	for _, origin := range slices.Sorted(maps.Keys(unguarded)) {
 		fmt.Printf("%s:\n", origin)
-		for _, dep := range unguarded[origin] {
+		for _, dep := range slices.Sorted(slices.Values(unguarded[origin])) {
 			fmt.Printf("  %s\n", dep)
 		}
 	}
 
 	if len(unguarded) != 0 {
-		return fmt.Errorf("%d packages are unguarded", len(unguarded))
+		return fmt.Errorf("%d unguarded packages are still used", len(unguarded))
 	}
 
 	if len(notIgnored) != 0 {
 		fmt.Printf("Ignored but not unguarded:\n")
 		// TODO: Should this be fatal?
 		for _, pkg := range slices.Sorted(maps.Keys(notIgnored)) {
+			fmt.Printf("  %s\n", pkg)
+		}
+	}
+
+	if len(depMap.errors) != 0 {
+		// TODO: Should this be fatal?
+		fmt.Printf("Failed to lock %d builds:\n", len(depMap.errors))
+		for _, pkg := range slices.Sorted(maps.Keys(depMap.errors)) {
 			fmt.Printf("  %s\n", pkg)
 		}
 	}
