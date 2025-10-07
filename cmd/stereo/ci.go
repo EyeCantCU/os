@@ -77,7 +77,7 @@ func unguardedCmd() *cobra.Command {
 }
 
 func lint(ctx context.Context) error {
-	pkgss, err := dirToPackages(ctx)
+	pkgss, err := dirToPackages(ctx, true)
 	if err != nil {
 		return err
 	}

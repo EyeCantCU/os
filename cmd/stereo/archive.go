@@ -409,7 +409,7 @@ func buildArchiveContext(ctx context.Context, candidates []ArchiveCandidate, arc
 	}
 
 	// Get melange configurations to understand package origins and active packages
-	pkgss, err := dirToPackages(ctx)
+	pkgss, err := dirToPackages(ctx, true)
 	if err != nil {
 		return nil, fmt.Errorf("getting package origins: %w", err)
 	}

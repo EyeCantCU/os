@@ -79,7 +79,7 @@ func buildDeps(ctx context.Context, architectures []string, useWithdrawn bool, w
 	}
 
 	// Get all melange configurations
-	pkgss, err := dirToPackages(ctx)
+	pkgss, err := dirToPackages(ctx, true)
 	if err != nil {
 		return fmt.Errorf("getting package configurations: %w", err)
 	}

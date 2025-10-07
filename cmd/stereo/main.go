@@ -99,13 +99,14 @@ func main() {
 	root.AddCommand(unguardedCmd())
 	root.AddCommand(vmDependenciesCmd())
 	root.AddCommand(withdrawCmd())
+	root.AddCommand(transitionCmd())
 
 	if err := root.ExecuteContext(context.Background()); err != nil {
 		os.Exit(1)
 	}
 }
 
-func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configuration, error) {
+func dirToPackages(ctx context.Context, subpackages bool) (map[string]map[string]*config.Configuration, error) {
 	pkgss := map[string]map[string]*config.Configuration{}
 
 	var (
@@ -116,7 +117,13 @@ func dirToPackages(ctx context.Context) (map[string]map[string]*config.Configura
 		g.Go(func() error {
 			local := fmt.Sprintf("./%s", dir)
 			pipelines := fmt.Sprintf("./%s/pipelines/", dir)
-			pkgs, err := NewPackages(ctx, os.DirFS(dir), local, pipelines)
+			var pkgs map[string]*config.Configuration
+			var err error
+			if subpackages {
+				pkgs, err = NewPackages(ctx, os.DirFS(dir), local, pipelines)
+			} else {
+				pkgs, err = NewOrigins(ctx, os.DirFS(dir), local, pipelines)
+			}
 			if err != nil {
 				return fmt.Errorf("walking %s: %w", dir, err)
 			}
@@ -271,7 +278,7 @@ func NewOrigins(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (m
 	return pkgs, errors.Join(errs...)
 }
 
-// lock build dependencies for a Melange confiugration
+// lock dependencies for a Melange confiugration
 func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRepos []string, arch string) ([]string, error) {
 	// Work around LockImageConfiguration assuming multi-arch.
 	c.Environment.Archs = []apko_types.Architecture{apko_types.Architecture(arch)}
