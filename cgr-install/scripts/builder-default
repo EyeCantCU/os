@@ -11,8 +11,21 @@ if [ "$DEBUG" = "true" ]; then
         fail "failed writing debug kernel config"
 fi
 
-vr secureboot_setup "$ROOT_DIR" "$OUT_DIR/secureboot" ||
-    fail "secureboot setup failed"
+espdir="boot"
+rootfs_type="xfs"
+secureboot=true
+rpi=$(get_install_option rpi presence) || fail
+if [ "$rpi" = "true" ]; then
+    # bootloader on raspberry pi cannot read out xfs
+    rootfs_type="ext4"
+    espdir="boot/firmware"
+    secureboot=false
+fi
+
+if [ "$secureboot" = "true" ]; then
+    vr secureboot_setup "$ROOT_DIR" "$OUT_DIR/secureboot" ||
+        fail "secureboot setup failed"
+fi
 
 # Create a GPT parition table on our disk where the
 # EFI System Partition (ESP) is 100M to hold the kernel,
@@ -55,17 +68,15 @@ case "$DISK" in
             fail "partx --update $DISK on loop device failed"
 esac
 
-pt_esp=$(ptdev "$DISK" 1) || {
-    error "huihhhono $DISK 1"
-    bash
-    fail
-}
-
+pt_esp=$(ptdev "$DISK" 1) || fail "no partition 1 on $DISK"
 pt_root=$(ptdev "$DISK" 2) || fail
 
-vr mkfs_esp "$pt_esp" || fail
+if [ "$rpi" = "true" ]; then
+    vr raspberry_pi_tweaks "$ROOT_DIR" || fail
+fi
 
-vr move_esp "$ROOT_DIR" "$pt_esp" "$sstart" || fail
+vr mkfs_esp "$pt_esp" || fail
+vr move_esp "$ROOT_DIR" "$pt_esp" "$sstart" "$espdir" || fail
 
 cis=$(get_install_option cis presence) ||
     fail "failed reading installer option 'cis'"
@@ -80,4 +91,8 @@ if [ "$cis" = "true" ]; then
         fail "failed apply hardening"
 fi
 
-xfs_populate "$ROOT_DIR" "$pt_root" "$FS_UUID_ROOT" || fail
+case "$rootfs_type" in
+    xfs) xfs_populate "$ROOT_DIR" "$pt_root" "$FS_UUID_ROOT" || fail;;
+    ext4) ext4_populate "$ROOT_DIR" "$pt_root" "$FS_UUID_ROOT" || fail;;
+    *) fail "unexpected rootfs_type '$rootfs_type'"
+esac

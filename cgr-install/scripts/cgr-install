@@ -146,22 +146,10 @@ move_esp() {
     # We will use mtools so we wont need to mount, this making the
     # partition not reproducible
     # configure mtools to correctly read out vfat partition
-    local rootd="$1" dest="$2" offset="$3" myhome=""
+    local rootd="$1" dest="$2" offset="$3" espmp="${4:-boot}" myhome=""
     [ -d "$rootd" ] || { error "move_esp src '$rootd' is not a dir"; return 1; }
     if [ ! -f "$dest" ] && [ ! -b "$dest" ]; then
         error "move_esp dest '$dest' is not a file or block device";
-        return 1
-    fi
-
-    # ESP mount point should be /boot, but old 'boot-installed' packages
-    # effectively expected it to be /boot/efi.  Those are identifyable
-    # by presence of /boot/efi/EFI rather than /boot/EFI.
-    espmp="boot"
-    if [ -d "$rootd/boot/efi/EFI" ]; then
-        espmp="boot/efi"
-    fi
-    if [ -e "$rootd/boot/EFI" ] && [ -e "$rootd/boot/efi" ]; then
-        error "move_esp: installation has boot /boot/EFI and /boot/efi"
         return 1
     fi
 
@@ -255,6 +243,21 @@ xfs_populate() {
     # for consistency lets set it manually.
     with_faketime xfs_db -x "$dest" -c "inode 128" -c "write core.mode 040755" || return 1
 }
+
+ext4_populate() {
+    local srcd="$1" dest="$2" fsuuid="$3"
+    [ -d "$srcd" ] ||
+        { error "ext4_populate: srcd '$srcd' not a directory"; return 1; }
+    [ -f "$dest" -o -b "$dest" ] ||
+        { error "ext4_populate: dest '$dest' not a file or block device"; return 1; }
+    vr env SOURCE_DATE_EPOCH="$FROZEN_TIMESTAMP" mkfs.ext4 \
+        -F \
+        -d "$srcd" \
+        -E hash_seed=035cb65d-0a86-404a-bad7-19c88d05e400 \
+        -U "$fsuuid" \
+        -L root "$dest"
+}
+
 
 tmpd() {
     [ "${TEMP_D:-unset}" = "unset" ] &&
@@ -444,6 +447,25 @@ get_install_option() {
     esac
 }
 
+append_lines() {
+    local file="$1"
+    shift
+    printf "%s\n" "$@" >> "$file" ||
+        { stderr "failed appending $# lines to $file"; return 1; }
+    touch -c -h --date="@${FROZEN_TIMESTAMP}" "$file" ||
+        { stderr "error resetting timestamp on $file to @${FROZEN_TIMESTAMP}"; return 1; }
+    return 0
+}
+
+raspberry_pi_tweaks(){
+    # Raspberry Pi tweaks
+    local rootd="$1"
+    # Put the login prompt on vt1 on the raspberry pi to login on the console
+    vr append_lines "$rootd/etc/systemd/logind.conf" "ReserveVT=1" || return
+    # add linky user to the docker group
+    vr append_lines "$rootd/etc/group" "docker:x:125:linky" || return
+}
+
 guest_install() {
     local sopts="hvT:o:i:d:s:"
     local lopts="help,disk:,input-tar:,kernel-cmdline-toks:,output:,scratch:,verbose"
@@ -556,12 +578,9 @@ guest_install() {
 
     INSTALLER_OPTS=$opts
 
-    local rpi=false immutable=false
-    rpi=$(get_install_option rpi presence) || fail "failed reading option rpi"
-    immutable=$(get_install_option immutable bool) || fail "failed reading option rpi"
-    if [ "$rpi" = "true" ]; then
-        builder="rpi"
-    elif [ "$immutable" = "true" ]; then
+    local immutable=false
+    immutable=$(get_install_option immutable bool) || fail "failed reading option immutable"
+    if [ "$immutable" = "true" ]; then
         stderr "FIXME FIXME - immutable builder just takes default path"
         stderr "FIXME FIXME - the same as it does on main right now"
         builder="default"
