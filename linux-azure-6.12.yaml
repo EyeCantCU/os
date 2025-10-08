@@ -1,8 +1,8 @@
 package:
-  name: linux-azure-generic
-  version: "6.17.1"
-  epoch: 1
-  description: "the Azure generic linux kernel"
+  name: linux-azure-6.12
+  version: "6.12.51"
+  epoch: 0
+  description: "the Azure generic linux kernel 6.12 LTS"
   copyright:
     - license: GPL-2.0
   resources:
@@ -13,8 +13,12 @@ package:
       - ${{package.name}}-modules=${{package.full-version}}
       # Ensure we get Chainguard branding in our VMs.
       - chainguard-baselayout
-      - merged-lib
-      - wolfi-baselayout
+
+vars:
+  # DO NOT BUMP
+  # Pinned to certified build.
+  jitterentropy-package: linux-jitterentropy-6.12
+  jitterentropy-version: 6.12.49-r0
 
 environment:
   environment:
@@ -24,12 +28,16 @@ environment:
 
 var-transforms:
   - from: ${{package.name}}
-    match: "linux-(.*)"
-    replace: "$1"
+    match: 'linux-(.*)'
+    replace: '$1'
     to: flavor
   - from: ${{package.name}}
-    match: "linux-(.*)"
-    replace: "${{package.full-version}}-$1"
+    match: 'linux-(.*)-[0-9.]+'
+    replace: '$1-generic'
+    to: config-flavor
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '${{package.full-version}}-$1'
     to: version-flavor
   - from: ${{package.version}}
     match: '^(\d+[.]\d+)[.]0$'
@@ -43,19 +51,31 @@ var-transforms:
 pipeline:
   - uses: kernel/version-check
     with:
-      moniker: stable
+      moniker: longterm
 
   - uses: git-checkout
     with:
       repository: https://github.com/gregkh/linux
       tag: v${{vars.mangled-package-version}}
-      expected-commit: 4a245d5610b1706a1ede4cf1b5f462bb3cf84f1c
+      expected-commit: a9152eb181adaac576e8ac1ab79989881e0f301b
+
+  - uses: patch
+    with:
+      patches: |
+        0001-crypto-reusable-jitterentropy-${{vars.mangled-kernel-major-version}}.patch
+        0001-random-use-jitterentropy-${{vars.mangled-kernel-major-version}}.patch
 
   - uses: kernel/config
     with:
-      flavor: ${{vars.flavor}}
+      flavor: ${{vars.config-flavor}}
       make-targets: hardening.config
       version-flavor: ${{vars.version-flavor}}
+
+  - uses: kernel/reusable-jitterentropy
+    with:
+      package: ${{vars.jitterentropy-package}}
+      version: ${{vars.jitterentropy-version}}
+      kernel-version: ${{vars.mangled-kernel-major-version}}
 
   - uses: kernel/build
     with:
@@ -69,9 +89,7 @@ subpackages:
         # Ensure we get Chainguard branding in our VMs.
         - ${{package.name}}-modules=${{package.full-version}}
         - chainguard-baselayout
-        - merged-lib
         - systemd-boot-installed
-        - wolfi-baselayout
       provides:
         - ${{package.name}}-boot-configuration=${{package.full-version}}
     pipeline:
@@ -101,12 +119,12 @@ subpackages:
         uses: kernel/boot-installed
         with:
           version-flavor: ${{vars.version-flavor}}
-          extra-args: "fips=1 earlyprintk=ttyS0"
+          extra-args: "earlyprintk=ttyS0"
       - if: ${{build.arch}} == 'aarch64'
         uses: kernel/boot-installed
         with:
           version-flavor: ${{vars.version-flavor}}
-          extra-args: "fips=1 earlyprintk=ttyAMA0"
+          extra-args: "earlyprintk=ttyAMA0"
 
   - name: "${{package.name}}-modules"
     description: "Linux kernel modules"
@@ -119,8 +137,8 @@ subpackages:
         - merged-lib
         - wolfi-baselayout
 
-  - name: hyperv-daemons-generic
-    description: Userspace daemons for hyperv
+  - name: hyperv-daemons-6.12
+    description: Userspace daemons for hyperv 6.12 LTS
     pipeline:
       - uses: autoconf/make
         with:
@@ -150,23 +168,25 @@ subpackages:
               set -e
               [ $res -eq 234 ]
             fi
-    dependencies:
-      runtime:
-        - merged-lib
-        - wolfi-baselayout
 
 test:
   pipeline:
     - uses: kernel/test/kconfig/systemd
     - uses: kernel/test/config-snippet
       with:
-        snippet: ${{vars.flavor}}
+        snippet: jitterentropy-6.12
+        # This will just not be present instead
+        # of being present with =n
+        x86_64_exclude: CRYPTO_MANAGER_DISABLE_TESTS
+        aarch64_exclude: CRYPTO_MANAGER_DISABLE_TESTS
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: ${{vars.config-flavor}}
         aarch64_exclude: |
           # Defined only for x86
           KVM_HYPERV
           HYPERV_IOMMU
           HYPERV_TIMER
-    - uses: kernel/test/kconfig/bpftrace
     - name: Test Basic Boot
       uses: kernel/test/console_grep
       with:
@@ -183,6 +203,13 @@ test:
       uses: kernel/test/console_grep
       with:
         string: "Segment Routing with IPv6"
+    - uses: kernel/test/random_quality
+      with:
+        args: fips=1
+    - name: Test for reusable jent
+      uses: kernel/test/console_grep
+      with:
+        string: "jitterentropy built from ${{vars.jitterentropy-version}}"
 
 update:
   enabled: true
@@ -190,7 +217,7 @@ update:
     identifier: gregkh/linux
     use-tag: true
     strip-prefix: v
-    tag-filter: v
+    tag-filter: v6.12.
   ignore-regex-patterns:
     # skip mainline (x.y) release tags, wait for stable (x.y.z) release tags
     - ^\d+[.]\d+$
