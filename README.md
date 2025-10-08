@@ -24,8 +24,8 @@ make disk-generic
 Build using:
 
 ```
-make ARCH=aarch64 BUILDER=builder-rpi disk-rpi-generic-base
-make ARCH=aarch64 BUILDER=builder-rpi disk-rpi-generic-docker
+make ARCH=aarch64 disk-rpi-generic-base
+make ARCH=aarch64 disk-rpi-generic-docker
 ```
 
 Flash them to sdcard using:
