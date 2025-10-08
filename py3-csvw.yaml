@@ -1,0 +1,137 @@
+package:
+  name: py3-csvw
+  version: 3.7.0
+  epoch: 0
+  description: Python library to work with CSVW described tabular data
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  pypi-package: csvw
+
+environment:
+  contents:
+    packages:
+      - py3-supported-build-base-dev
+
+data:
+  - name: py-versions
+    items:
+      3.10:
+      3.11:
+      3.12:
+      3.13:
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/cldf/csvw.git
+      tag: v${{package.version}}
+      expected-commit: 06f7c383facaed6b7152e4925c62dda61eb0f784
+
+  - runs: sed -i 's/rfc3986<2/rfc3986/g' setup.cfg
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}
+    description: ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-attrs
+        - py${{range.key}}-babel
+        - py${{range.key}}-colorama
+        - py${{range.key}}-frictionless-bin
+        - py${{range.key}}-isodate
+        - py${{range.key}}-jsonschema
+        - py${{range.key}}-language-tags
+        - py${{range.key}}-python-dateutil
+        - py${{range.key}}-rdflib
+        - py${{range.key}}-requests
+        - py${{range.key}}-rfc3986
+        - py${{range.key}}-termcolor
+        - py${{range.key}}-uritemplate
+    pipeline:
+      - uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.pypi-package}}
+        - runs: |
+            echo -e "region	tik	uik\nHello	world	1" | tee "test.csvw"
+            python${{range.key}} <<'EOF' | grep -F -e "Hello\\tworld"
+            import json
+            from csvw import CSVW
+            print(json.dumps(CSVW('./test.csvw').to_json(minimal=True)))
+            EOF
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-bin
+    description: Executable binaries for ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      provider-priority: ${{range.value}}
+      provides:
+        - py3-${{vars.pypi-package}}
+        - py3-${{vars.pypi-package}}-bin
+      runtime:
+        - py${{range.key}}-${{vars.pypi-package}}
+    pipeline:
+      - uses: split/bin
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - jq
+            - sqlite
+      pipeline:
+        - uses: test/tw/help-check
+          with:
+            bins: csvw2datasette csvw2json csvw2markdown csvw2sqlite csvwdescribe csvwvalidate
+            expect-contains: "usage: csvw"
+        - runs: |
+            CSVW_FILE="$(mktemp)"
+            chmod -v 644 "${CSVW_FILE}"
+            echo -e "region	tik	uik\nHello	world	1" | tee "${CSVW_FILE}"
+
+            JSON_FILE="$(mktemp)"
+            chmod -v 644 "${JSON_FILE}"
+            tee "${JSON_FILE}" <<'EOF'
+            {
+              "@context": ["http://www.w3.org/ns/csvw", {"@language": "en"}],
+              "dialect": {"encoding": "utf-8-sig"},
+              "tables": [
+                {
+                  "url": "zipped.csv",
+                  "tableSchema": {
+                    "columns": [
+                      {"name": "ID", "datatype": {"base": "string", "minLength": 3}},
+                      {"name":  "Value", "datatype": "string"}
+                    ]
+                  }
+                }
+              ]
+            }
+            EOF
+            csvw2json "${CSVW_FILE}" | jq -rc .tables[].row[].describes[] | grep -F -e "Hello\\tworld\\t1"
+
+            csvw2markdown "${JSON_FILE}" | grep -F -e "Described by [$(basename "${JSON_FILE}")]"
+            touch /tmp/zipped.csv
+            csvw2sqlite "${JSON_FILE}" "out.db"
+            sqlite3 ./out.db -- .tables | grep -F -e "zipped.csv"
+            csvwdescribe "${JSON_FILE}" | jq -rc '."dc:conformsTo"' | grep -F -e "data-package"
+            csvwvalidate "${JSON_FILE}" | grep -F -e "OK"
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/emptypackage
