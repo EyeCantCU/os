@@ -1,0 +1,245 @@
+#!/bin/bash
+# shellcheck disable=SC2015,SC2039,SC2166,SC3043
+
+VERBOSITY=0
+TEMP_D=""
+START_D="$PWD"
+LOOP_DEV=""
+UMOUNT=""
+
+stderr() { echo "$@" 1>&2; }
+fail() { local r=$?;  [ $r -eq 0 ] && r=1; failrc "$r" "$@"; }
+failrc() { local r="$1"; shift; [ $# -eq 0 ] || stderr "$@"; exit "$r"; }
+
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] disk-image out.d
+
+   Write a summary of disk-image
+   It should aid in seeing what things changed between two images
+
+   options:
+      -v | --verbose    be more verbose
+EOF
+
+}
+
+bad_Usage() { Usage 1>&2; [ $# -eq 0 ] || stderr "$@"; return 1; }
+cleanup() {
+    if [ -n "$UMOUNT" ]; then
+        umount "$UMOUNT"
+        UMOUNT=""
+    fi
+    if [ -n "$LOOP_DEV" ]; then
+        losetup --detach="$LOOP_DEV"
+        LOOP_DEV=""
+    fi
+    cd "$START_D" || :
+    [ -z "${TEMP_D}" -o ! -d "${TEMP_D}" ] || rm -Rf "${TEMP_D}"
+}
+
+debug() {
+    local level="$1"
+    shift
+    [ "${level}" -gt "${VERBOSITY}" ] && return
+    stderr "${@}"
+}
+
+qr() {
+    local rc="" tmpf=""
+    tmpf=$(tmpf) || fail "mktemp failed"
+    debug 2 "execute:" "$@"
+    "$@" 2>"$tmpf"
+    rc=$?
+    [ $rc -eq 0 ] && { rm -f "$tmpf"; return 0; }
+    sed 's,^,>,' "$tmpf"
+    stderr "failed [$rc]: $*"
+    rm -f "$tmpf"
+    return $rc
+}
+
+tmpf() {
+    [ -n "${TEMP_D}" ] || { stderr "FAIL: TEMP_D not set"; return 1; }
+    [ -d "$TEMP_D" ] || { stderr "FAIL: TEMP_D not a dir"; return 1; }
+    mktemp "${TEMP_D}/XXXXXX"
+}
+
+tmpd() {
+    [ -n "${TEMP_D}" ] || { stderr "FAIL: TEMP_D not set"; return 1; }
+    [ -d "$TEMP_D" ] || { stderr "FAIL: TEMP_D not a dir"; return 1; }
+    mktemp -d "${TEMP_D}/XXXXXX"
+}
+
+read_blkinfo() {
+    local binfo="$1" var="$2"
+    # shellcheck disable=SC1090,SC2154
+    ( . "$binfo" && eval val='${'"$var"'}' && echo "$val") || return
+    return 0
+}
+
+tree_info() {
+    local d="$1" pre="$2" sortf=""
+    sortf=$(tmpf) || return
+    ( cd "$d" &&
+        set -o pipefail
+        find . -print0 |
+            xargs -0 ls -ld --full-time --numeric-uid-gid > "$sortf" &&
+            sort -u -k9 < "$sortf" > "${pre}ls-info"
+    )
+    return
+}
+
+maybe_patch_fsuuid() {
+    # xfs wont let you mount 2 filesystems with same fsuuid
+    local fpath="$1" tmpf="" fstype="" fsuuid=""
+    local baduuid="44444444-4444-4444-4444-444444444444"
+    local patcheduuid="54444444-4444-4444-4444-444444444444"
+    tmpf=$(tmpf) || return
+    blkid --output=export --probe "$fpath" > "$tmpf" &&
+        fstype=$(read_blkinfo "$tmpf" TYPE) || return
+    [ "$fstype" = "xfs" ] || return 0
+    fsuuid=$(read_blkinfo "$tmpf" UUID) || return
+    [ "$fsuuid" = "$baduuid" ] || return 0
+
+    qr xfs_admin -U "$patcheduuid" "$fpath" ||
+        { stderr "failed xfs_admin -U $patcheduuid $fpath"; return 1; }
+    debug 1 "patched filesystem uuid to avoid collision"
+    return 0
+}
+
+_ptinfo() {
+    local pre="$1" fpath="$2" ptnum="$3" mp="" binfo="" rc=""
+    binfo="${pre}blkid"
+    qr blkid --output=export --probe "$fpath" > "$binfo" &&
+        sed -i "s,DEVNAME=.*,DEVNAME=part-$ptnum," "$binfo" || return
+
+    mp=$(tmpd) || return
+    local usage=""
+    usage=$(read_blkinfo "$binfo" USAGE) || return
+    if [ "$usage" = "filesystem" ]; then
+        local fstype=""
+        fstype=$(read_blkinfo "$binfo" TYPE) || return
+        case "$fstype" in
+            ext*)
+                qr dumpe2fs "$fpath" > "${pre}dumpe2fs" ||
+                    { stderr "dumpe2fs $fpath failed"; return 1; }
+                ;;
+            xfs)
+                qr xfs_info "$fpath" > "${pre}xfsinfo" ||
+                    { stderr "xfs_info failed"; return 1; }
+                ;;
+
+        esac
+        debug 1 "part $ptnum is $fstype"
+        maybe_patch_fsuuid "$fpath" || return
+
+        mount -t "$fstype" -o ro "$fpath" "$mp" && UMOUNT="$mp" ||
+            { stderr "unable to mount partition $ptnum of type $fstype"; return 1; }
+        tree_info "$mp" "$pre"
+        rc=$?
+        umount "$mp" && UMOUNT=""
+        [ $rc -eq 0 ]
+    else
+        debug 1 "part $ptnum usage $usage"
+    fi
+}
+
+ptinfo() {
+    local outd="$1" disk="$2" ptnum="$3" offset="$4" loopd="" rc=""
+    loopd=$(losetup --show --find --offset="$offset" "$disk") &&
+        LOOP_DEV="$loopd" ||
+        { stderr "failed to create loop device for $disk @ $offset"; return 1; }
+    local pre="" ptpre=""
+    ptpre=$(printf "part-%02d" "$ptnum")
+    mysha256sum "$loopd" "$ptpre" >> "$outd/sha256.sums" || fail
+    pre="$outd/$ptpre-"
+    _ptinfo "$pre" "$loopd" "$ptnum"
+    rc=$?
+    losetup --detach="$loopd" && LOOP_DEV=""
+    return $rc
+}
+
+mysha256sum() {
+    local fpath="$1" name="$2" out="$3" out="" sum=""
+    out=$(qr sha256sum "$fpath") &&
+        sum="${out%  *}" && printf "%s  %s\n" "$sum" "${name:-$1}" ||
+        return
+}
+
+main() {
+    local short_opts="hv"
+    local long_opts="help,verbose"
+    local getopt_out=""
+    getopt_out=$(getopt --name "${0##*/}" \
+        --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+        eval set -- "${getopt_out}" ||
+        { bad_Usage; return; }
+
+    local cur="" next=""
+    while [ $# -ne 0 ]; do
+        # shellcheck disable=SC2034
+        { cur="$1"; next="$2"; }
+        case "$cur" in
+            -h|--help) Usage ; exit 0;;
+            -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
+            --) shift; break;;
+        esac
+        shift;
+    done
+
+    [ $# -eq 2 ] || { bad_Usage "got $# args, expected 2"; return; }
+
+    TEMP_D=$(mktemp -d "${TMPDIR:-/tmp}/${0##*/}.XXXXXX") ||
+        fail "failed to make tempdir"
+    trap cleanup EXIT
+
+    local uid=""
+    uid=$(id -u) || fail "id -u failed"
+    [ "$uid" = "0" ] || fail "sorry, root only"
+
+    local odisk="$1" ooutd="$2" diskf="disk.img" disk="" outd=""
+    [ -f "$odisk" ] || fail "$disk: not a file or block device"
+    [ -d "$ooutd" ] || mkdir "$ooutd" || fail "could not create output dir '$ooutd'"
+    outd=$( cd "$ooutd" && pwd)
+
+    local p="" missing=""
+    for p in xfs_admin xfs_info losetup partx blkid sfdisk sed dumpe2fs ; do
+        command -v "$p" >/dev/null 2>&1 ||
+            missing="$missing,$p"
+    done
+    missing=${missing#,}
+    [ -z "$missing" ] || fail "missing some dependencies: $missing"
+
+    debug 2 "copying $odisk to tmp dir"
+    cp --sparse=always "$odisk" "${TEMP_D}/$diskf" || fail "cp $odisk -> <tmpd>/$diskf failed"
+    cd "$TEMP_D" || fail "failed cd <tmpd>"
+
+    local blocksize="" sizeinblocks="" size=""
+    blocksize=$(stat "-c%B" "$diskf") &&
+        sizeinblocks=$(stat "-c%b" "$diskf") &&
+        size=$(stat "-c%s" "$diskf") || fail "failed reading size of $disk"
+    printf "%s\n" "sparse-size: $((blocksize*sizeinblocks))" \
+        "sparse-size-mb: $((blocksize*sizeinblocks/(1024*1024)))" \
+        "size: $size" \
+        "size-mb: $((size/(1024*1024)))" \
+        > "$outd/disk-size.out"
+
+    mysha256sum "$diskf" disk > "$outd/sha256.sums" || fail
+
+    sfdisk --dump "$diskf" > "$outd/disk-sfdisk.out" || fail "sfdisk failed"
+    debug 1 "wrote to $ooutd/sfdisk.out"
+
+    partx --bytes "$diskf" > "$outd/disk-partx.out" || fail "partx failed"
+    debug 1 "write to $ooutd/disk.partx.out"
+
+    local ptnum="" ptstart="" _ptend="" _ptsize="" _ptname="" _ptuuid="" ssize=512
+    # shellcheck disable=SC2162
+    while read ptnum ptstart _ptend _ptsize _ptname _ptuuid ; do
+        [ "$ptnum" = "NR" ] && continue
+        ptinfo "$outd" "$diskf" "$ptnum" "$((ptstart*ssize))" ||
+            fail "failed ptinfo $diskf $ptnum"
+    done < "$outd/disk-partx.out"
+}
+
+main "$@"
+# vi: ts=4 expandtab
