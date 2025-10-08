@@ -20,12 +20,12 @@ $(test_debug_targets): test-debug/%:
 	stereo make test-debug $*
 
 # Archive Process Workflow Targets
-.PHONY: deps-resolve deps-build deps-image deps-vm deps-seed deps-version-streams
+.PHONY: deps-resolve deps-build deps-image deps-vm deps-seed
 .PHONY: archive archive-generate withdraw validate-withdrawn
 .PHONY: clean-archive archive-workflow-full
 
 # Step 1: Resolve all dependencies
-deps-resolve: deps-build deps-image deps-vm deps-seed deps-version-streams
+deps-resolve: deps-build deps-image deps-vm deps-seed
 
 deps-build:
 	@echo "Resolving build dependencies..."
@@ -54,14 +54,6 @@ deps-seed:
 		stereo seed-dependencies; \
 	else \
 		echo "Info: archive-seeds.json not found, skipping seed dependencies"; \
-	fi
-
-deps-version-streams:
-	@echo "Resolving version-stream dependencies (optional)..."
-	@if [ -d package-version-metadata ]; then \
-		stereo version-stream-dependencies; \
-	else \
-		echo "Info: package-version-metadata directory not found, skipping version-stream dependencies"; \
 	fi
 
 # Step 2: Archive analysis
@@ -106,7 +98,6 @@ archive-workflow-full:
 clean-archive:
 	@echo "Cleaning archive-related outputs..."
 	rm -rf archive retain resolved unresolved withdrawn-indexes withdrawn-test
-	rm -f os/withdrawn-packages.txt extra-packages/withdrawn-packages.txt enterprise-packages/withdrawn-packages.txt
 
 .PHONY: clean
 clean:

@@ -94,10 +94,6 @@ digraph validation_testing {
         SV3 -> SV4 [label="Success"];
         SV3 -> SV5 [label="Failure"];
     }
-    
-    // Version Stream Info - Not Tested
-    VSInfo [label="version-stream-dependencies\nNOT included in validation:\nversion streams work differently\n(keeps latest versions per stream)", 
-            shape=note, fillcolor="#fff9c4", style="dashed"];
 
     // Test Results Analysis cluster
     subgraph cluster_analysis {
@@ -186,8 +182,3 @@ digraph validation_testing {
 2. **Image Breaks**: APKO configs cannot resolve runtime dependencies
 3. **VM Breaks**: VM configurations missing critical packages
 4. **Seed Dependencies**: Manual seed packages become unresolvable
-
-**Note**: Version stream dependencies are NOT tested with withdrawn packages because:
-- Version streams work by keeping the latest version per stream (not removing packages)
-- Their purpose is different from package withdrawal validation
-- They maintain specific version patterns rather than testing removal impact

@@ -95,7 +95,6 @@ func main() {
 	root.AddCommand(makeCmd())
 	root.AddCommand(impactCmd())
 	root.AddCommand(seedDependenciesCmd())
-	root.AddCommand(versionStreamDependenciesCmd())
 	root.AddCommand(unguardedCmd())
 	root.AddCommand(vmDependenciesCmd())
 	root.AddCommand(withdrawCmd())
