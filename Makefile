@@ -23,7 +23,7 @@ disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
 disks_rpi := $(call list_cloud_images,rpi)
 
-group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
+group_aws_main := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
 group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
 
 # Darwin reports arm64 for 'uname -m'
@@ -63,7 +63,7 @@ test-generic: $(ARCH_OUT_D)/generic/disk.raw builder/ovmf-$(ARCH).fd
 .PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
-disks-aws-noneks: $(foreach name,$(group_aws_noneks),disk-$(name))
+disks-aws-main: $(foreach name,$(group_aws_main),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
@@ -253,9 +253,9 @@ $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(A
 aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
 aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
 aws-publish-aws-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
-aws-publish-aws-noneks: $(foreach name,$(group_aws_noneks),aws-image-publish-$(name))
+aws-publish-aws-main: $(foreach name,$(group_aws_main),aws-image-publish-$(name))
 aws-create-aws-eks: $(foreach name,$(group_aws_eks),aws-image-create-$(name))
-aws-create-aws-noneks: $(foreach name,$(group_aws_noneks),aws-image-create-$(name))
+aws-create-aws-main: $(foreach name,$(group_aws_main),aws-image-create-$(name))
 
 output/awspub.mapping:
 	mkdir -p output
