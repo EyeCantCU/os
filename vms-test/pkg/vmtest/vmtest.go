@@ -2,7 +2,8 @@ package vmtest
 
 import (
 	"context"
-	"flag"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -10,64 +11,27 @@ import (
 	_ "chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
 )
 
-var (
-	deadline time.Time
-	timeout  time.Duration
-)
-
-func init() {
-	var deadlineStr string
-	var timeoutStr string
-
-	flag.StringVar(&timeoutStr, "timeout", "", "Test context timeout (e.g., 30s, 2m)")
-
-	if deadlineStr != "" {
-		parsed, err := parseFlexibleTime(deadlineStr)
-		if err != nil {
-			panic("invalid deadline format: " + err.Error())
-		}
-		deadline = parsed
-	}
-
-	if timeoutStr != "" {
-		var err error
-		timeout, err = time.ParseDuration(timeoutStr)
-		if err != nil {
-			panic("invalid timeout format: " + err.Error())
-		}
-	}
-}
-
-func parseFlexibleTime(s string) (time.Time, error) {
-	formats := []string{
-		time.RFC3339,
-		time.ANSIC,
-		time.UnixDate,
-		time.RubyDate,
-		time.Stamp,
-		time.Kitchen,
-		time.DateTime,
-		time.TimeOnly,
-	}
-
-	var err error
-	for _, format := range formats {
-		var t time.Time
-		t, err = time.Parse(format, s)
-		if err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, err
-}
-
 // Context returns an appropriate context for the given test.
 func Context(t *testing.T) context.Context {
 	var ctx context.Context
 	var cancel context.CancelFunc
 
-	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	if deadline, ok := t.Deadline(); ok {
+		timeoutFactor := 0.9
+
+		if factorStr := os.Getenv("VMTEST_TIMEOUT_FACTOR"); factorStr != "" {
+			if factor, err := strconv.ParseFloat(factorStr, 64); err == nil && factor > 0 && factor <= 1 {
+				timeoutFactor = factor
+			}
+		}
+
+		timeout := time.Until(deadline) * time.Duration(timeoutFactor*100) / 100
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		} else {
+			ctx, cancel = context.WithCancel(context.Background())
+		}
+
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
