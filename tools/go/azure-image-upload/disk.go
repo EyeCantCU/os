@@ -47,6 +47,9 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 			},
 			OSType:           to.Ptr(armcompute.OperatingSystemTypesLinux),
 			HyperVGeneration: to.Ptr(armcompute.HyperVGenerationV2),
+			SupportedCapabilities: &armcompute.SupportedCapabilities{
+				Architecture: &arch,
+			},
 		},
 		SKU: &armcompute.DiskSKU{
 			Name: to.Ptr(armcompute.DiskStorageAccountTypesStandardLRS),
