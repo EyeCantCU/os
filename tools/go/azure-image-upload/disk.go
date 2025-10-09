@@ -159,6 +159,7 @@ func prepareVHDImage(imagePath string, sizeGB int, verbose bool) (string, func()
 		}
 		destF, err := os.OpenFile(resizedPath, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
+			srcF.Close()
 			return "", nil, err
 		}
 		_, err = io.Copy(srcF, destF)
