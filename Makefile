@@ -49,6 +49,9 @@ gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
 	go build -o apkoaas
 
+$(TOOLS_D)/%: tools/go/%/*.go
+	go build -o tools/$* ./tools/go/$*
+
 .PHONY: test-gotest test-generic
 include cgr-install.mk
 
@@ -177,7 +180,7 @@ COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
 PREFIX ?= $(shell id -un)
 BUILD_TIMESTAMP ?= $(shell date -u "+%Y%m%d-%H%M")
 AZVERSION ?= $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
-AZTAGS += env=$(PUBLISH_TARGET) commit=$(COMMIT)
+AZTAGS += env=$(PUBLISH_TARGET),commit=$(COMMIT)
 GCPLABELS = env=$(PUBLISH_TARGET),commit=$(COMMIT)
 
 ifeq ($(COMMIT),$(filter $(COMMIT), "", no-git))
@@ -279,12 +282,12 @@ publish-azure: $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(nam
 $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name))): publish-azure-%: $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-$*-$(AZARCH)
-$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZTAGS+= local-name=azure-$*
-$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/azure-%/disk.raw
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: _AZTAGS=$(AZTAGS),local-name=azure-$*
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(TOOLS_D)/azure-image-upload $(ARCH_OUT_D)/azure-%/disk.raw
 	@$(call capture_stdout,$@,\
-		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+		$(TOOLS_D)/azure-image-upload --verbose --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
-		--tags="$(AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
+		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
 
 .PHONY: publish-gcp
 publish-gcp: $(foreach name,$(disks_gcp),publish-gcp-$(subst gcp-,,$(name)))
