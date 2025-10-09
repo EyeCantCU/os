@@ -12,12 +12,13 @@ import (
 )
 
 type createImageDefinitionOpts struct {
-	galleryName    string
-	definitionName string
-	resourceGroup  string
-	region         string
-	arch           armcompute.Architecture
-	tags           map[string]*string
+	galleryName           string
+	definitionName        string
+	resourceGroup         string
+	region                string
+	arch                  armcompute.Architecture
+	tags                  map[string]*string
+	acceleratedNetworking bool
 }
 
 func createImageDefinition(ctx context.Context, clients *AzureClients, opts *createImageDefinitionOpts, verbose bool) error {
@@ -47,6 +48,14 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, opts *cre
 			},
 		},
 		Tags: opts.tags,
+	}
+
+	if opts.acceleratedNetworking {
+		feature := &armcompute.GalleryImageFeature{
+			Name:  to.Ptr("IsAcceleratedNetworkSupported"),
+			Value: to.Ptr("true"),
+		}
+		imageDefinition.Properties.Features = append(imageDefinition.Properties.Features, feature)
 	}
 
 	log.Printf("Creating image definition: %s in gallery: %s", definitionName, opts.galleryName)

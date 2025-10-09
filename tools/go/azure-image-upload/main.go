@@ -14,21 +14,22 @@ import (
 )
 
 var (
-	verbose        bool
-	name           string
-	arch           string
-	resourceGroup  string
-	gallery        string
-	imageVersion   string
-	definitionName string
-	makeDefinition bool
-	existingDisk   bool
-	diskName       string
-	uploadOnly     bool
-	regions        []string
-	tags           map[string]string
-	subscriptionID string
-	diskSizeGB     int
+	verbose               bool
+	name                  string
+	arch                  string
+	resourceGroup         string
+	gallery               string
+	imageVersion          string
+	definitionName        string
+	makeDefinition        bool
+	existingDisk          bool
+	diskName              string
+	uploadOnly            bool
+	regions               []string
+	tags                  map[string]string
+	subscriptionID        string
+	diskSizeGB            int
+	acceleratedNetworking bool
 )
 
 const (
@@ -80,6 +81,7 @@ Examples:
 	rootCmd.Flags().StringSliceVar(&regions, "regions", strings.Split(defaultRegions, ","), "Target regions")
 	rootCmd.Flags().StringToStringVar(&tags, "tags", map[string]string{"env": "dev"}, "Resource tags (key=value)")
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
+	rootCmd.Flags().BoolVar(&acceleratedNetworking, "accelerated-networking", false, "Enable accelerated networking support")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -152,13 +154,14 @@ func runUpload(cmd *cobra.Command, args []string) error {
 
 	if !existingDisk {
 		opts := &uploadDiskImageOpts{
-			imagePath:     imagePath,
-			diskName:      diskName,
-			sizeGB:        diskSizeGB,
-			resourceGroup: resourceGroup,
-			region:        regions[0],
-			arch:          azArch,
-			tags:          azTags,
+			imagePath:             imagePath,
+			diskName:              diskName,
+			sizeGB:                diskSizeGB,
+			resourceGroup:         resourceGroup,
+			region:                regions[0],
+			arch:                  azArch,
+			tags:                  azTags,
+			acceleratedNetworking: acceleratedNetworking,
 		}
 		diskID, err = uploadDiskImage(ctx, clients, opts, verbose)
 		if err != nil {
@@ -178,12 +181,13 @@ func runUpload(cmd *cobra.Command, args []string) error {
 
 	if makeDefinition {
 		opts := &createImageDefinitionOpts{
-			galleryName:    gallery,
-			definitionName: definitionName,
-			resourceGroup:  resourceGroup,
-			region:         regions[0],
-			arch:           azArch,
-			tags:           azTags,
+			galleryName:           gallery,
+			definitionName:        definitionName,
+			resourceGroup:         resourceGroup,
+			region:                regions[0],
+			arch:                  azArch,
+			tags:                  azTags,
+			acceleratedNetworking: acceleratedNetworking,
 		}
 		err = createImageDefinition(ctx, clients, opts, verbose)
 		if err != nil {

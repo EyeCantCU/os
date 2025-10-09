@@ -16,13 +16,14 @@ import (
 )
 
 type uploadDiskImageOpts struct {
-	imagePath     string
-	diskName      string
-	sizeGB        int
-	resourceGroup string
-	region        string
-	arch          armcompute.Architecture
-	tags          map[string]*string
+	imagePath             string
+	diskName              string
+	sizeGB                int
+	resourceGroup         string
+	region                string
+	arch                  armcompute.Architecture
+	tags                  map[string]*string
+	acceleratedNetworking bool
 }
 
 func uploadDiskImage(ctx context.Context, clients *AzureClients, opts *uploadDiskImageOpts, verbose bool) (string, error) {
@@ -53,7 +54,8 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, opts *uploadDis
 			OSType:           to.Ptr(armcompute.OperatingSystemTypesLinux),
 			HyperVGeneration: to.Ptr(armcompute.HyperVGenerationV2),
 			SupportedCapabilities: &armcompute.SupportedCapabilities{
-				Architecture: &opts.arch,
+				Architecture:       &opts.arch,
+				AcceleratedNetwork: &opts.acceleratedNetworking,
 			},
 		},
 		SKU: &armcompute.DiskSKU{
