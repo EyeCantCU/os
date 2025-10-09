@@ -240,6 +240,7 @@ func uploadVHDToBlob(ctx context.Context, vhdPath, uploadURL string, jobs int, v
 
 	logErr := func(e error) {
 		errsMu.Lock()
+		defer errsMu.Unlock()
 		errs = append(errs, e)
 		if verbose {
 			log.Printf("error during VHD upload, canceling\n")
