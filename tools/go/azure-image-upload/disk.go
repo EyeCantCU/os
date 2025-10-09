@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,8 +138,7 @@ func prepareVHDImage(imagePath string, sizeGB int, verbose bool) (string, func()
 		return imagePath, nil, nil
 	}
 
-	tempDir := os.TempDir()
-	tempVHD := filepath.Join(tempDir, fmt.Sprintf("upload_%d.vhd", time.Now().Unix()))
+	tempVHD := filepath.Join(os.TempDir(), fmt.Sprintf("upload_%d.vhd", rand.Int()))
 
 	cleanup := func() {
 		os.Remove(tempVHD)
