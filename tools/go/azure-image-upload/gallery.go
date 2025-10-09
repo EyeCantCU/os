@@ -40,9 +40,7 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, galleryNa
 		Tags: tags,
 	}
 
-	if verbose {
-		log.Printf("Creating image definition: %s in gallery: %s", definitionName, galleryName)
-	}
+	log.Printf("Creating image definition: %s in gallery: %s", definitionName, galleryName)
 
 	poller, err := clients.ImageDefinitions.BeginCreateOrUpdate(ctx, resourceGroup, galleryName, definitionName, imageDefinition, nil)
 	if err != nil {
@@ -54,9 +52,7 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, galleryNa
 		return fmt.Errorf("failed to create image definition: %w", err)
 	}
 
-	if verbose {
-		log.Printf("Image definition created successfully")
-	}
+	log.Printf("Image definition created successfully")
 
 	return nil
 }
@@ -93,9 +89,7 @@ func createImageVersion(ctx context.Context, clients *AzureClients, galleryName,
 		Tags: tags,
 	}
 
-	if verbose {
-		log.Printf("Creating image version: %s for definition: %s", version, definitionName)
-	}
+	log.Printf("Creating image version: %s for definition: %s", version, definitionName)
 
 	poller, err := clients.ImageVersions.BeginCreateOrUpdate(ctx, resourceGroup, galleryName, definitionName, version, imageVersion, nil)
 	if err != nil {
@@ -107,9 +101,7 @@ func createImageVersion(ctx context.Context, clients *AzureClients, galleryName,
 		return fmt.Errorf("failed to create image version: %w", err)
 	}
 
-	if verbose {
-		log.Printf("Image version created successfully")
-	}
+	log.Printf("Image version created successfully")
 
 	return nil
 }

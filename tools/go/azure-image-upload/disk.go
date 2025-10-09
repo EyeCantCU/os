@@ -58,9 +58,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 		Tags: tags,
 	}
 
-	if verbose {
-		log.Printf("Creating disk: %s", diskName)
-	}
+	log.Printf("Creating disk: %s", diskName)
 
 	poller, err := clients.Disks.BeginCreateOrUpdate(ctx, resourceGroup, diskName, disk, nil)
 	if err != nil {
@@ -84,9 +82,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 		DurationInSeconds: &accessDuration,
 	}
 
-	if verbose {
-		log.Printf("Granting write access to disk")
-	}
+	log.Printf("Granting write access to disk")
 
 	accessPoller, err := clients.Disks.BeginGrantAccess(ctx, resourceGroup, diskName, accessReq, nil)
 	if err != nil {
@@ -100,9 +96,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 
 	uploadURL := *accessResult.AccessSAS
 
-	if verbose {
-		log.Printf("Uploading VHD to Azure")
-	}
+	log.Printf("Uploading VHD to Azure")
 
 	err = uploadVHDToBlob(ctx, vhdPath, uploadURL, uploadJobs, verbose)
 	if err != nil {
@@ -123,9 +117,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 		return "", fmt.Errorf("failed to complete access revocation: %w", err)
 	}
 
-	if verbose {
-		log.Printf("Disk upload completed successfully")
-	}
+	log.Printf("Disk upload completed successfully")
 
 	return diskID, nil
 }
@@ -340,11 +332,10 @@ func uploadVHDToBlob(ctx context.Context, vhdPath, uploadURL string, jobs int, v
 			log.Printf("%v\n", e)
 		}
 		return fmt.Errorf("Failed upload with %d errs\n", len(errs))
-	} else if verbose {
-		elapsed := time.Since(uploadStart)
-		avgSpeedMBps := float64(offset) / (1024 * 1024) / elapsed.Seconds()
-		log.Printf("Upload completed: %d bytes (avg speed: %.2f MB/s)", offset, avgSpeedMBps)
 	}
+	elapsed := time.Since(uploadStart)
+	avgSpeedMBps := float64(offset) / (1024 * 1024) / elapsed.Seconds()
+	log.Printf("Upload completed: %d bytes (avg speed: %.2f MB/s)", offset, avgSpeedMBps)
 
 	return nil
 }
