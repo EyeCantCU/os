@@ -1,0 +1,71 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+name: "test-ecs node"
+description: "Test an ECS container instance"
+inputs:
+  artifact-suffix:
+    required: false
+    default: ""
+    description: "suffix on artifact name. artifacts will be named test-ecs-results<suffix>"
+  awspub-inputs-dir:
+    required: true
+    default: ""
+    description: "a directory of awspub inputs to operate on"
+  aws-region:
+    required: false
+    default: "us-east-1"
+    description: "an aws region to run in"
+
+runs:
+  using: composite
+  steps:
+    - name: Test ECS instances
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_PUBIN_DIR: ${{ inputs.awspub-inputs-dir }}
+      run: |
+        set -o pipefail
+
+        cluster="test-ecs"
+
+        fail() { echo "FATAL:" "$@" 1>&2; exit 1; }
+
+        tmpd=$(mktemp -d)
+        mkdir test-ecs-results ||
+            fail "failed to create output dir"
+        fails=""
+
+        for f in "${AWS_PUBIN_DIR}"/*.json; do
+          [ -f "$f" ] || fail "no awspub files"
+
+          ./vms-test/helpers/test-ecs dump-awspub "$f" \
+            | awk -v region="$AWS_REGION" '$1 == region' \
+            > "$tmpd/awspub.txt" ||
+              fail "dump-awspub $f exited $?"
+
+          read region ami arch family fname < "$tmpd/awspub.txt" ||
+            fail "failed read from dump-awspub output"
+
+          echo "===== testing $region/$ami ($family/$arch) in cluster $cluster"
+
+          AWS_REGION="$AWS_REGION" \
+            ./vms-test/helpers/test-ecs run-test \
+              --cluster-name="$cluster" --ami="$ami" \
+              "test-ecs-results/$family-$arch" || {
+                  echo "FAIL[$?]: $family/$arch/$ami"
+                  fails="$fails $family/$arch/$ami"
+              }
+        done
+
+        if [ -n "$fails" ]; then
+          echo "failures: $fails"
+          echo "ignoring failures for trial run"
+        fi
+        exit 0
+
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      if: ${{ !cancelled() }}
+      with:
+        name: test-ecs-results${{ inputs.artifact-suffix }}
+        path: test-ecs-results
