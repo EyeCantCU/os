@@ -285,7 +285,7 @@ $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-$*-$(AZAR
 $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: _AZTAGS=$(AZTAGS),local-name=azure-$*
 $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(TOOLS_D)/azure-image-upload $(ARCH_OUT_D)/azure-%/disk.raw
 	@$(call capture_stdout,$@,\
-		$(TOOLS_D)/azure-image-upload --verbose --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+		$(TOOLS_D)/azure-image-upload --verbose --jobs 2 --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
 		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
 
