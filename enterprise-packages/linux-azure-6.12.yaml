@@ -1,0 +1,227 @@
+package:
+  name: linux-azure-6.12
+  version: "6.12.51"
+  epoch: 0
+  description: "the Azure generic linux kernel 6.12 LTS"
+  copyright:
+    - license: GPL-2.0
+  resources:
+    cpu: 16
+    memory: 24Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-modules=${{package.full-version}}
+      # Ensure we get Chainguard branding in our VMs.
+      - chainguard-baselayout
+
+vars:
+  # DO NOT BUMP
+  # Pinned to certified build.
+  jitterentropy-package: linux-jitterentropy-6.12
+  jitterentropy-version: 6.12.49-r0
+
+environment:
+  environment:
+    KBUILD_BUILD_USER: noreply
+    KBUILD_BUILD_HOST: chainguard.dev
+    KBUILD_BUILD_VERSION: Chainguard
+
+var-transforms:
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '$1'
+    to: flavor
+  - from: ${{package.name}}
+    match: 'linux-(.*)-[0-9.]+'
+    replace: '$1-generic'
+    to: config-flavor
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '${{package.full-version}}-$1'
+    to: version-flavor
+  - from: ${{package.version}}
+    match: '^(\d+[.]\d+)[.]0$'
+    replace: '$1'
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: '^(\d+\.\d+)\.\d+$'
+    replace: '$1'
+    to: mangled-kernel-major-version
+
+pipeline:
+  - uses: kernel/version-check
+    with:
+      moniker: longterm
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gregkh/linux
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: a9152eb181adaac576e8ac1ab79989881e0f301b
+
+  - uses: patch
+    with:
+      patches: |
+        0001-crypto-reusable-jitterentropy-${{vars.mangled-kernel-major-version}}.patch
+        0001-random-use-jitterentropy-${{vars.mangled-kernel-major-version}}.patch
+
+  - uses: kernel/config
+    with:
+      flavor: ${{vars.config-flavor}}
+      make-targets: hardening.config
+      version-flavor: ${{vars.version-flavor}}
+
+  - uses: kernel/reusable-jitterentropy
+    with:
+      package: ${{vars.jitterentropy-package}}
+      version: ${{vars.jitterentropy-version}}
+      kernel-version: ${{vars.mangled-kernel-major-version}}
+
+  - uses: kernel/build
+    with:
+      version-flavor: ${{vars.version-flavor}}
+
+subpackages:
+  - name: "${{package.name}}-boot-installed"
+    description: "Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - ${{package.name}}-modules=${{package.full-version}}
+        - chainguard-baselayout
+        - systemd-boot-installed
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - if: ${{build.arch}} == 'x86_64'
+        uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          extra-args: "earlyprintk=ttyS0"
+      - if: ${{build.arch}} == 'aarch64'
+        uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          extra-args: "earlyprintk=ttyAMA0"
+
+  - name: "${{package.name}}-fips-boot-installed"
+    description: "FIPS Linux kernel (installed for EFI)"
+    dependencies:
+      runtime:
+        # Ensure we get Chainguard branding in our VMs.
+        - ${{package.name}}-modules=${{package.full-version}}
+        - chainguard-baselayout
+        - systemd-boot-installed
+      provides:
+        - ${{package.name}}-boot-configuration=${{package.full-version}}
+    pipeline:
+      - if: ${{build.arch}} == 'x86_64'
+        uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          extra-args: "earlyprintk=ttyS0"
+      - if: ${{build.arch}} == 'aarch64'
+        uses: kernel/boot-installed
+        with:
+          version-flavor: ${{vars.version-flavor}}
+          extra-args: "earlyprintk=ttyAMA0"
+
+  - name: "${{package.name}}-modules"
+    description: "Linux kernel modules"
+    pipeline:
+      - uses: kernel/modules
+        with:
+          version-flavor: ${{vars.version-flavor}}
+    dependencies:
+      runtime:
+        - merged-lib
+        - wolfi-baselayout
+
+  - name: hyperv-daemons-6.12
+    description: Userspace daemons for hyperv 6.12 LTS
+    pipeline:
+      - uses: autoconf/make
+        with:
+          opts: -C tools/hv
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin/
+          cp ./tools/hv/hv_kvp_daemon ${{targets.subpkgdir}}/usr/bin
+          cp ./tools/hv/hv_vss_daemon ${{targets.subpkgdir}}/usr/bin
+          if [ ${{build.arch}} != "aarch64" ]; then
+            cp ./tools/hv/hv_fcopy_uio_daemon ${{targets.subpkgdir}}/usr/bin
+          fi
+
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/systemd/system
+          cp hyperv/hv*.service ${{targets.subpkgdir}}/usr/lib/systemd/system
+
+          mkdir -p ${{targets.subpkgdir}}/usr/lib/udev/rules.d
+          cp hyperv/hv*.rules ${{targets.subpkgdir}}/usr/lib/udev/rules.d
+    test:
+      pipeline:
+        - runs: |
+            hv_kvp_daemon --help
+            hv_vss_daemon --help
+            if [ ${{build.arch}} != "aarch64" ]; then
+              set +e
+              hv_fcopy_uio_daemon -h
+              res=$?
+              set -e
+              [ $res -eq 234 ]
+            fi
+
+test:
+  pipeline:
+    - uses: kernel/test/kconfig/systemd
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: jitterentropy-6.12
+        # This will just not be present instead
+        # of being present with =n
+        x86_64_exclude: CRYPTO_MANAGER_DISABLE_TESTS
+        aarch64_exclude: CRYPTO_MANAGER_DISABLE_TESTS
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: ${{vars.config-flavor}}
+        aarch64_exclude: |
+          # Defined only for x86
+          KVM_HYPERV
+          HYPERV_IOMMU
+          HYPERV_TIMER
+    - name: Test Basic Boot
+      uses: kernel/test/console_grep
+      with:
+        string: "Unable to mount root fs"
+    - name: Test for XFS
+      uses: kernel/test/console_grep
+      with:
+        string: "xfs"
+    - name: Test for NVME
+      uses: kernel/test/console_grep
+      with:
+        string: "nvme nvme0: pci function"
+    - name: Test for ip6tables
+      uses: kernel/test/console_grep
+      with:
+        string: "Segment Routing with IPv6"
+    - uses: kernel/test/random_quality
+      with:
+        args: fips=1
+    - name: Test for reusable jent
+      uses: kernel/test/console_grep
+      with:
+        string: "jitterentropy built from ${{vars.jitterentropy-version}}"
+
+update:
+  enabled: true
+  github:
+    identifier: gregkh/linux
+    use-tag: true
+    strip-prefix: v
+    tag-filter: v6.12.
+  ignore-regex-patterns:
+    # skip mainline (x.y) release tags, wait for stable (x.y.z) release tags
+    - ^\d+[.]\d+$
+  version-transform:
+    # mainline release tag x.y to kernel version x.y.0
+    - match: ^(\d+[.]\d+)$
+      replace: $1.0
