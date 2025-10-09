@@ -152,7 +152,10 @@ func prepareVHDImage(imagePath string, sizeGB int, verbose bool) (string, func()
 	defer resizeCleanup()
 
 	resizeCmd := exec.Command("qemu-img", "resize", imagePath, fmt.Sprintf("%dG", sizeGB))
-	if err := resizeCmd.Run(); err != nil {
+	if output, err := resizeCmd.CombinedOutput(); err != nil {
+		if verbose {
+			log.Printf("in-place resize (%q) failed with output %s, moving to a new file\n", resizeCmd.String(), output)
+		}
 		srcF, err := os.OpenFile(imagePath, os.O_RDWR, 0644)
 		if err != nil {
 			return "", nil, err
@@ -170,8 +173,8 @@ func prepareVHDImage(imagePath string, sizeGB int, verbose bool) (string, func()
 		}
 
 		resizeCmd = exec.Command("qemu-img", "resize", resizedPath, fmt.Sprintf("%dG", sizeGB))
-		if err = resizeCmd.Run(); err != nil {
-			return "", nil, fmt.Errorf("failed to resize image: %w", err)
+		if output, err = resizeCmd.CombinedOutput(); err != nil {
+			return "", nil, fmt.Errorf("failed to resize image: %w\noutput: %s", err, output)
 		}
 		imagePath = resizedPath
 	}
@@ -183,8 +186,8 @@ func prepareVHDImage(imagePath string, sizeGB int, verbose bool) (string, func()
 		log.Printf("Running: %s", strings.Join(convertCmd.Args, " "))
 	}
 
-	if err := convertCmd.Run(); err != nil {
-		return "", nil, fmt.Errorf("failed to convert image to VHD: %w", err)
+	if output, err := convertCmd.CombinedOutput(); err != nil {
+		return "", nil, fmt.Errorf("failed to convert image to VHD: %w\noutput: %s", err, output)
 	}
 
 	return tempVHD, cleanup, nil
