@@ -110,9 +110,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 
 	if arch == "" {
 		arch = runtime.GOARCH
-		if verbose {
-			log.Printf("Auto-detected architecture: %s", arch)
-		}
+		log.Printf("Auto-detected architecture: %s", arch)
 	}
 
 	azArch, err := archEnum(arch)
