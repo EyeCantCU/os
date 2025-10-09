@@ -151,7 +151,16 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	var diskID string
 
 	if !existingDisk {
-		diskID, err = uploadDiskImage(ctx, clients, imagePath, diskName, diskSizeGB, resourceGroup, regions[0], azArch, azTags, verbose)
+		opts := &uploadDiskImageOpts{
+			imagePath:     imagePath,
+			diskName:      diskName,
+			sizeGB:        diskSizeGB,
+			resourceGroup: resourceGroup,
+			region:        regions[0],
+			arch:          azArch,
+			tags:          azTags,
+		}
+		diskID, err = uploadDiskImage(ctx, clients, opts, verbose)
 		if err != nil {
 			return fmt.Errorf("failed to upload disk image: %w", err)
 		}
@@ -168,13 +177,30 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	}
 
 	if makeDefinition {
-		err = createImageDefinition(ctx, clients, gallery, definitionName, resourceGroup, regions[0], azArch, azTags, verbose)
+		opts := &createImageDefinitionOpts{
+			galleryName:    gallery,
+			definitionName: definitionName,
+			resourceGroup:  resourceGroup,
+			region:         regions[0],
+			arch:           azArch,
+			tags:           azTags,
+		}
+		err = createImageDefinition(ctx, clients, opts, verbose)
 		if err != nil {
 			return fmt.Errorf("failed to create image definition: %w", err)
 		}
 	}
 
-	err = createImageVersion(ctx, clients, gallery, definitionName, imageVersion, resourceGroup, diskID, regions, azTags, verbose)
+	opts := &createImageVersionOpts{
+		galleryName:    gallery,
+		definitionName: definitionName,
+		version:        imageVersion,
+		resourceGroup:  resourceGroup,
+		diskID:         diskID,
+		regions:        regions,
+		tags:           azTags,
+	}
+	err = createImageVersion(ctx, clients, opts, verbose)
 	if err != nil {
 		return fmt.Errorf("failed to create image version: %w", err)
 	}

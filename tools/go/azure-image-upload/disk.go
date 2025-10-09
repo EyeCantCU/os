@@ -15,8 +15,18 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 )
 
-func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, diskName string, sizeGB int, resourceGroup, region string, arch armcompute.Architecture, tags map[string]*string, verbose bool) (string, error) {
-	vhdPath, cleanup, err := prepareVHDImage(imagePath, sizeGB, verbose)
+type uploadDiskImageOpts struct {
+	imagePath     string
+	diskName      string
+	sizeGB        int
+	resourceGroup string
+	region        string
+	arch          armcompute.Architecture
+	tags          map[string]*string
+}
+
+func uploadDiskImage(ctx context.Context, clients *AzureClients, opts *uploadDiskImageOpts, verbose bool) (string, error) {
+	vhdPath, cleanup, err := prepareVHDImage(opts.imagePath, opts.sizeGB, verbose)
 	if err != nil {
 		return "", fmt.Errorf("failed to prepare VHD image: %w", err)
 	}
@@ -34,7 +44,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 	}
 
 	disk := armcompute.Disk{
-		Location: to.Ptr(region),
+		Location: to.Ptr(opts.region),
 		Properties: &armcompute.DiskProperties{
 			CreationData: &armcompute.CreationData{
 				CreateOption:    to.Ptr(armcompute.DiskCreateOptionUpload),
@@ -43,18 +53,18 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 			OSType:           to.Ptr(armcompute.OperatingSystemTypesLinux),
 			HyperVGeneration: to.Ptr(armcompute.HyperVGenerationV2),
 			SupportedCapabilities: &armcompute.SupportedCapabilities{
-				Architecture: &arch,
+				Architecture: &opts.arch,
 			},
 		},
 		SKU: &armcompute.DiskSKU{
 			Name: to.Ptr(armcompute.DiskStorageAccountTypesStandardLRS),
 		},
-		Tags: tags,
+		Tags: opts.tags,
 	}
 
-	log.Printf("Creating disk: %s", diskName)
+	log.Printf("Creating disk: %s", opts.diskName)
 
-	poller, err := clients.Disks.BeginCreateOrUpdate(ctx, resourceGroup, diskName, disk, nil)
+	poller, err := clients.Disks.BeginCreateOrUpdate(ctx, opts.resourceGroup, opts.diskName, disk, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to start disk creation: %w", err)
 	}
@@ -78,7 +88,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 
 	log.Printf("Granting write access to disk")
 
-	accessPoller, err := clients.Disks.BeginGrantAccess(ctx, resourceGroup, diskName, accessReq, nil)
+	accessPoller, err := clients.Disks.BeginGrantAccess(ctx, opts.resourceGroup, opts.diskName, accessReq, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to grant disk access: %w", err)
 	}
@@ -101,7 +111,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 		log.Printf("Revoking disk access")
 	}
 
-	revokePoller, err := clients.Disks.BeginRevokeAccess(ctx, resourceGroup, diskName, nil)
+	revokePoller, err := clients.Disks.BeginRevokeAccess(ctx, opts.resourceGroup, opts.diskName, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to revoke disk access: %w", err)
 	}

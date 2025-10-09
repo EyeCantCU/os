@@ -11,17 +11,26 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 )
 
-func createImageDefinition(ctx context.Context, clients *AzureClients, galleryName, definitionName, resourceGroup, region string, arch armcompute.Architecture, tags map[string]*string, verbose bool) error {
+type createImageDefinitionOpts struct {
+	galleryName    string
+	definitionName string
+	resourceGroup  string
+	region         string
+	arch           armcompute.Architecture
+	tags           map[string]*string
+}
+
+func createImageDefinition(ctx context.Context, clients *AzureClients, opts *createImageDefinitionOpts, verbose bool) error {
 	imageDefinition := armcompute.GalleryImage{
-		Location: to.Ptr(region),
+		Location: to.Ptr(opts.region),
 		Properties: &armcompute.GalleryImageProperties{
 			OSType:       to.Ptr(armcompute.OperatingSystemTypesLinux),
 			OSState:      to.Ptr(armcompute.OperatingSystemStateTypesGeneralized),
-			Architecture: to.Ptr(arch),
+			Architecture: to.Ptr(opts.arch),
 			Identifier: &armcompute.GalleryImageIdentifier{
 				Publisher: to.Ptr(defaultPublisher),
 				Offer:     to.Ptr(defaultOffer),
-				SKU:       to.Ptr(definitionName),
+				SKU:       to.Ptr(opts.definitionName),
 			},
 			HyperVGeneration: to.Ptr(armcompute.HyperVGenerationV2),
 			Features:         []*armcompute.GalleryImageFeature{
@@ -37,12 +46,12 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, galleryNa
 				},*/
 			},
 		},
-		Tags: tags,
+		Tags: opts.tags,
 	}
 
-	log.Printf("Creating image definition: %s in gallery: %s", definitionName, galleryName)
+	log.Printf("Creating image definition: %s in gallery: %s", definitionName, opts.galleryName)
 
-	poller, err := clients.ImageDefinitions.BeginCreateOrUpdate(ctx, resourceGroup, galleryName, definitionName, imageDefinition, nil)
+	poller, err := clients.ImageDefinitions.BeginCreateOrUpdate(ctx, resourceGroup, opts.galleryName, opts.definitionName, imageDefinition, nil)
 	if err != nil {
 		return fmt.Errorf("failed to start image definition creation: %w", err)
 	}
@@ -57,21 +66,31 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, galleryNa
 	return nil
 }
 
-func createImageVersion(ctx context.Context, clients *AzureClients, galleryName, definitionName, version, resourceGroup, diskID string, regions []string, tags map[string]*string, verbose bool) error {
-	targetRegions := make([]*armcompute.TargetRegion, 0, len(regions))
-	for _, region := range regions {
+type createImageVersionOpts struct {
+	galleryName    string
+	definitionName string
+	version        string
+	resourceGroup  string
+	diskID         string
+	regions        []string
+	tags           map[string]*string
+}
+
+func createImageVersion(ctx context.Context, clients *AzureClients, opts *createImageVersionOpts, verbose bool) error {
+	targetRegions := make([]*armcompute.TargetRegion, 0, len(opts.regions))
+	for _, region := range opts.regions {
 		targetRegions = append(targetRegions, &armcompute.TargetRegion{
 			Name: to.Ptr(region),
 		})
 	}
 
 	imageVersion := armcompute.GalleryImageVersion{
-		Location: to.Ptr(regions[0]),
+		Location: to.Ptr(opts.regions[0]),
 		Properties: &armcompute.GalleryImageVersionProperties{
 			StorageProfile: &armcompute.GalleryImageVersionStorageProfile{
 				OSDiskImage: &armcompute.GalleryOSDiskImage{
 					Source: &armcompute.GalleryDiskImageSource{
-						ID: to.Ptr(diskID),
+						ID: to.Ptr(opts.diskID),
 					},
 				},
 			},
@@ -86,12 +105,12 @@ func createImageVersion(ctx context.Context, clients *AzureClients, galleryName,
 				            },*/
 			},
 		},
-		Tags: tags,
+		Tags: opts.tags,
 	}
 
-	log.Printf("Creating image version: %s for definition: %s", version, definitionName)
+	log.Printf("Creating image version: %s for definition: %s", opts.version, opts.definitionName)
 
-	poller, err := clients.ImageVersions.BeginCreateOrUpdate(ctx, resourceGroup, galleryName, definitionName, version, imageVersion, nil)
+	poller, err := clients.ImageVersions.BeginCreateOrUpdate(ctx, opts.resourceGroup, opts.galleryName, opts.definitionName, opts.version, imageVersion, nil)
 	if err != nil {
 		return fmt.Errorf("failed to start image version creation: %w", err)
 	}
