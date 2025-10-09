@@ -272,10 +272,8 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 			// For OVMF/AAMVF vars template
 			"uefi-data.fd",
 			"uefi-data.empty.fd",
-			// For GCP (possibly)
-			"PK.esl", "KEK.esl", "dbx.esl", "db.esl",
-			// For manual enrollment in firmware / redfish / bmc
-			"PK.auth", "KEK.auth", "dbx.auth", "db.auth",
+			// For enrollment in GCP / firmware / redfish / bmc
+			"PK.auth.bin", "KEK.auth.bin", "dbx.auth.bin", "db.auth.bin",
 			// TODO add authenticode hashes for Azure
 		}
 		for _, efi := range efifiles {

@@ -123,6 +123,9 @@ func launchCmd() *cobra.Command {
 						},
 					},
 				},
+				ShieldedInstanceConfig: &computepb.ShieldedInstanceConfig{
+					EnableSecureBoot: proto.Bool(true),
+				},
 				ServiceAccounts: []*computepb.ServiceAccount{
 					{
 						Email: proto.String(serviceAccount), // We use the GCE default service account unless specified.

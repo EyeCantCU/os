@@ -115,6 +115,9 @@ For now these are generated with on-the-fly generated signing key. In
 the future, if we get a long-lived ephemeral key, we could make all
 our .auth files to be well formed.
 
+As of October 2025, only db is getting succesfully enrolled, and stock
+GCP (google/microsoft) is used for PK, KEK, dbx.
+
 ## Future work
 
 Explore enrolling and trusting the new Microsoft Option ROM signing
@@ -129,3 +132,5 @@ For immutable VMs explore creating UKI with root hash, and enrolling that.
 Explore modifying systemd-boot to enrol multiple auth files, similar
 to sbkeysync. And also consider packaging self-enrol files such that
 they come from APKs at build time.
+
+Ensure that empty PK, KEK, dbx is enrolled on GCP.

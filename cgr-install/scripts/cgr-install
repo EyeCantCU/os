@@ -484,6 +484,9 @@ secureboot_setup() {
         return 1;
     }
 
+    ## Chainguard OS ESL GUID
+    local GUID="c04269ed-5f3b-46df-ac37-95e3e70e4027"
+
     ## Empty key for PK, KEK, DBX
     local ktype=""
     for ktype in PK KEK dbx; do
@@ -536,6 +539,28 @@ secureboot_setup() {
     ## Create .auth firmware / redfish / bmc enrollment files
     vr virt-fw-vars --set-json "$outd"/uefi-data.json --output-auth "$outd" ||
         { stderr "failed virt-fw-vars .auth firmware enrollment"; return 1; }
+
+    ## Create .auth.bin files for GCP
+    ## Create an ephemeral key, and do proper signing such that auth var structure is complete
+    ## Note this key is not trusted, but only used to create a well-formed auth var structure
+    ## To make it reproducible either use a known key for this; or fixup
+    ## virt-fw-vars to do more realistic auth generation. Also see:
+    ## https://gitlab.com/kraxel/virt-firmware/-/issues/17
+    ## Note only db.auth.bin so far was successfully accepted
+    certf=$(tmpf)
+    keyf=$(tmpf)
+    vr openssl req -x509 -newkey rsa:2048 -keyout "$keyf" -out "$certf" -sha256 -days 1 -nodes -subj "/C=US/ST=Washington/O=Chainguard/CN=Automatic ESL Auth signing key" ||
+        { stderr "failed openssl keygen"; return 1; }
+    vr sign-efi-sig-list -g "$GUID" -c "$certf" -k "$keyf" PK "$outd"/PK.esl "$outd"/PK.auth.bin ||
+        { stderr "failed sign-efi-sig-list PK"; return 1; }
+    vr sign-efi-sig-list -g "$GUID" -c "$certf" -k "$keyf" KEK "$outd"/KEK.esl "$outd"/KEK.auth.bin ||
+        { stderr "failed sign-efi-sig-list KEK"; return 1; }
+    vr sign-efi-sig-list -g "$GUID" -c "$certf" -k "$keyf" db "$outd"/db.esl "$outd"/db.auth.bin ||
+        { stderr "failed sign-efi-sig-list db"; return 1; }
+    vr sign-efi-sig-list -g "$GUID" -c "$certf" -k "$keyf" dbx "$outd"/dbx.esl "$outd"/dbx.auth.bin ||
+        { stderr "failed sign-efi-sig-list dbx"; return 1; }
+    vr rm "$keyf" ||
+        { stderr "failed to remove private key"; return 1; }
 
     ## Install systemd-boot auto enrollment .auth files
     local espmp="boot"
