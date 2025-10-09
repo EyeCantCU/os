@@ -78,6 +78,88 @@ ptdev() {
     return 1
 }
 
+setup_dmverity() {
+    local rootpt="$1" veritypt="$2" bootd="$3" tmpf=""
+    tmpf=$(tmpf) || return
+    (
+      set -o pipefail
+      vr veritysetup format \
+        --format="$DM_VERITY_VERSION" \
+        --hash="$DM_VERITY_HASH_ALGORITHM" \
+        --data-block-size="$DM_VERITY_DATA_BLOCK_SIZE" \
+        --hash-block-size="$DM_VERITY_HASH_BLOCK_SIZE" \
+        --salt="$VERITY_SALT" \
+        --uuid="$FS_UUID_DMVERITY" \
+        "$rootpt" "$veritypt" |
+        tee "$tmpf"
+    ) || { stderr "failed running verity setup"; return 1; }
+
+    local nblocks="" roothash=""
+    nblocks=$(awk '$0 ~ /^Data blocks:/ { print $3 }' "$tmpf") &&
+        [ -n "$nblocks" ] ||
+        { stderr "failed reading Data blocks from veritysetup log"; return 1; }
+    roothash=$(awk '$0 ~ /^Root hash:/ { print $3 }' "$tmpf") &&
+        [ -n "$roothash" ] ||
+        { stderr "failed reading Root hash from veritysetup log"; return 1; }
+
+    rm "$tmpf" || return
+
+    vr veritysetup verify "$rootpt" "$veritypt" "$roothash" ||
+        return
+
+    local parms=""
+    parms=(
+      "root,,,ro,0"
+      # Here we need to use 512 block size ALWAYS, so if in future we format to 4k
+      # we need to report it back to 512 blocks for it to work.
+      "$nblocks"
+      "verity"
+      "${DM_VERITY_VERSION}"
+      "PARTLABEL=Chainguard"
+      "PARTLABEL=Chainguard-verity"
+      "${DM_VERITY_DATA_BLOCK_SIZE}"
+      "${DM_VERITY_HASH_BLOCK_SIZE}"
+      # here instead we just use the output of "Data Blocks:" in veritysetup
+      "$nblocks"
+      "1"
+      "${DM_VERITY_HASH_ALGORITHM}"
+      "$roothash"
+      "${VERITY_SALT}"
+      "2"
+      "restart_on_corruption"
+      "ignore_zero_blocks"
+    )
+    local rootparms="root=/dev/dm-0 rootwait raid=noautodetect dm-mod.create=\"${parms[*]}\""
+    debug 1 "verity root params: ${rootparms}"
+
+    local entries=""
+    # shellcheck disable=SC2206
+    entries=( "${bootd}/loader/entries"/chainguard-* )
+    [ -f "${entries[0]}" ] || {
+        stderr "No loader files in ${bootd}/loader/entries/chainguard-*"
+        return 1
+    }
+
+    # We need ro flag for our boot configuration and add
+    # chainguard.immutable=volatile
+    # to enable the overlayfs /etc and /var mounts
+    local sedits=""
+    sedits=(
+        -e "s| rw | ro |g"
+        -e "s| root=PARTLABEL=Chainguard | $rootparms |g"
+        -e "s|\(options.*\)$|\1 -- chainguard.immutable=volatile|"
+    )
+    vr stampdalf "$bootd" sed -i "${sedits[@]}" "${entries[@]}" ||
+        { stderr "failed sediting loader files for dmverity"; exit 1; }
+
+    for f in "${entries[@]}"; do
+        # shellcheck disable=SC2295
+        show_file "$f" "${f#${bootd}/}" || return
+    done
+
+    return 0
+}
+
 # shellcheck disable=SC2034
 set_env() {
     local targetarch="$1" mdisk="$2" mrootd="$3" moutdir="$4"
@@ -99,6 +181,12 @@ set_env() {
     DM_VERITY_X86_64="2c7357ed-ebd2-46d9-aec1-23d437ec2bf5"
     DM_VERITY_ARM64="df3300ce-d69f-4c92-978c-9bfb0f38d820"
 
+    DM_VERITY_VERSION=1
+    DM_VERITY_HASH_ALGORITHM=sha256
+    # Here we need to use the block size chosen in sfdisk and mkfs.xfs, 512
+    DM_VERITY_DATA_BLOCK_SIZE=512
+    DM_VERITY_HASH_BLOCK_SIZE=512
+
     EFI_SUFFIX_X86_64=X64
     EFI_SUFFIX_ARM64=AA64
 
@@ -109,12 +197,12 @@ set_env() {
     case "$targetarch" in
         x86_64)
             ROOT_TYPE="${ROOT_X86_64}"
-            DMVERITY="${DM_VERITY_X86_64}"
+            DM_VERITY_TYPE="${DM_VERITY_X86_64}"
             EFI_SUFFIX="${EFI_SUFFIX_X86_64}"
             ;;
         aarch64)
             ROOT_TYPE="${ROOT_ARM64}"
-            DMVERITY="${DM_VERITY_ARM64}"
+            DM_VERITY_TYPE="${DM_VERITY_ARM64}"
             EFI_SUFFIX="${EFI_SUFFIX_ARM64}"
             ;;
         *) error "unexpected runtime arch '$targetarch'"; return 1;;
@@ -140,13 +228,13 @@ with_faketime() {
         NO_FAKE_STAT=1 "$@"
 }
 
-move_esp() {
+populate_esp() {
     # Extract the boot directory from the tar, then populate
     # our EFI partition.
     # We will use mtools so we wont need to mount, this making the
     # partition not reproducible
     # configure mtools to correctly read out vfat partition
-    local rootd="$1" dest="$2" offset="$3" espmp="${4:-boot}" myhome=""
+    local rootd="$1" dest="$2" myhome=""
     [ -d "$rootd" ] || { error "move_esp src '$rootd' is not a dir"; return 1; }
     if [ ! -f "$dest" ] && [ ! -b "$dest" ]; then
         error "move_esp dest '$dest' is not a file or block device";
@@ -161,25 +249,37 @@ move_esp() {
         export HOME="$myhome"
         export MTOOLS_SKIP_CHECK=1
         export TZ=UTC
-        # this doesn't seem right. there should be no offset here if we give it
-        # a partition.
-        echo "drive c: file=\"$dest\" partition=0 hidden=$offset" > "$HOME/.mtoolsrc" ||
+        # without 'hidden=N' here, we get errors like:
+        #    Hidden (128) does not match sectors (63)
+        # This happens when installing to /dev/vdb but not to a loop device.
+        # Seemingly odd, hidden=8192 or hidden=1 makes no difference.
+        # literally, same bit-for-bit output with either value.
+        #
+        # The need for hidden is annoying, because without it we
+        # could use '-i$dest@@0' (file@@offset) and could avoid the HOME
+        # dance
+        echo "drive c: file=\"$dest\" hidden=1" > "$HOME/.mtoolsrc" ||
             { error "failed to write $HOME/.mtoolsrc"; return 1; }
 
+        mydirs="$myhome/dirs"
+        myfiles="$myhome/files"
+        find "$rootd" -type d -printf "%P\n" | sort > "$mydirs" ||
+            { error "failed finding directories in $rootd"; return 1; }
+        find "$rootd" -type f -printf "%P\n" | sort > "$myfiles" ||
+            { error "failed finding files in $rootd"; return 1; }
+
         # First create directories
-        find "$rootd/$espmp" -type d -printf "%P\n" | sort |
-            while read -r dir; do
-                [ -z "$dir" ] && continue
-                mmd -D o "c:/$dir" ||
-                    fail "failed mmd copy of $dir"
-            done
+        while read -r dir; do
+            [ -z "$dir" ] && continue
+            mmd -D o "c:/$dir" ||
+                { error "$fname: failed mmd of $dir"; return 1; }
+        done < "$mydirs"
 
         # Then copy all files
-        find "$rootd/$espmp" -type f -printf "%P\n" | sort |
-            while read -r file; do
-                mcopy -o -p -m -Q "$rootd/$espmp/$file" "c:/$file" ||
-                    fail "failed mcopy $espmp/$file -> $file"
-            done
+        while read -r file; do
+            mcopy -o -p -m -Q "$rootd/$file" "c:/$file" ||
+                { error "$fname: failed mcopy of $file"; return 1; }
+        done < "$myfiles"
     ) || {
         rm -Rf "$myhome"
         error "populating esp failed"
@@ -187,12 +287,55 @@ move_esp() {
     }
 
     # Remove files in boot which were copied to ESP
-    empty_dir "$rootd/$espmp" ||
-        { error "move_esp failed emptying $espmp"; return 1; }
+    #empty_dir "$rootd/$espmp" ||
+        #{ error "move_esp failed emptying $espmp"; return 1; }
 
     rm -Rf "$myhome" ||
         { error "move_esp temp dir cleanup failed"; return 1; }
     return
+}
+
+# move_contents(srcd, destd)
+# will move contents from srcd into dest-dir.
+# it will maintain the timestamp on srcd set timestamp on
+# destd to be the same.
+move_contents() {
+    local srcd="$1" destd="$2" fname="move_dir_contents"
+    [ -e "$srcd" ] || { stderr "$fname: $srcd does not exist"; return 1; }
+    [ -d "$srcd" ] || { stderr "$fname: $srcd does not exist"; return 1; }
+    [ -e "$destd" ] || { stderr "$fname: $destd does not exist"; return 1; }
+    [ -d "$destd" ] || { stderr "$fname: $destd is not a dir"; return 1; }
+
+    local tmpf=""
+    tmpf=$(tmpf tstamp) || {
+        stderr "$fname: failed to create tmp file to hold timestamp";
+        return 1;
+    }
+
+    local files=""
+    files=( )
+    set -- "$srcd"/*
+    # if there are no files matching *, then "$1" gets the unexpanded value
+    if [ $# -ne 0 ] && [ "$1" != "$srcd/*" ]; then
+        files=( "$@" )
+    fi
+    set -- "$srcd"/.*
+    if [ $# -ne 0 ] && [ "$1" != "$srcd/.*" ]; then
+        files=( "${files[@]}" "$@" )
+    fi
+    [ "${#files[@]}" -ne 0 ] ||
+        { stderr "$fname: src $srcd was empty"; return 1; }
+
+    touch --reference="$srcd" "$tmpf" ||
+        { stderr "$fname: failed storing timestamp from $srcd"; return 1; }
+
+    vr mv "${files[@]}" "$destd/" ||
+        { stderr "$fname: failed moving files from $srcd -> $destd"; return 1; }
+
+    vr touch --reference="$tmpf" "$srcd" "$destd" ||
+        { stderr "$fname: failed restoring timestamp"; return 1; }
+
+    rm -f "$tmpf" || return
 }
 
 empty_dir() {
@@ -323,6 +466,7 @@ sort-key   0chainguard
 options    $opts${rwflag:+ $rwflag}
 linux      $kernel
 EOF
+    # shellcheck disable=SC2181
     [ $? -eq 0 ] || { error "failed writing to $rootd/$fname"; return 1; }
 
     (
@@ -466,6 +610,65 @@ raspberry_pi_tweaks(){
     vr append_lines "$rootd/etc/group" "docker:x:125:linky" || return
 }
 
+show_file() {
+    local file="$1" name=${2:-""}
+    [ -n "$name" ] || name="$file"
+    [ -f "$file" ] || { stderr "show_file: $file: not a file"; return 1; }
+    stderr "==== $name ===="
+    sed -e 's,^,>,' "$file" 1>&2 ||
+        { stderr "show_file: sed failed [$?] on $file"; return 1; }
+    stderr "^^^^ $name ^^^^"
+}
+
+partition() {
+    # shellcheck disable=SC2086
+    local disk="$1" sectsize="$2" espstart="$3" espsize="$4" veritysize="${5:-0}"
+    local sfdisk_in="" growable="59" readonly="60"
+    local rootattr="$growable"
+
+    sfdisk_in=$(tmpf sfdisk) || { stderr "failed to get tmp file"; return 1; }
+    local n=1
+    cat > "$sfdisk_in" <<EOF
+label: gpt
+label-id: $GPT_UUID
+unit: sectors
+sector-size: $sectsize
+
+disk.raw$n : start=  $espstart, size=$espsize, type=$EFI_TYPE, uuid=$PT_UUID_EFI, name="ESP"
+EOF
+
+    # shellcheck disable=SC2181
+    [ $? -eq 0 ] || { stderr "failed writing to tmp file in 'partition'"; return 1; }
+
+    if [ -n "$veritysize" ] && [ "$veritysize" != "0" ]; then
+        n=$((n+1))
+        cat >> "$sfdisk_in" <<EOF
+disk.raw$n : start=, size=$veritysize, type=$DM_VERITY_TYPE, uuid=$PT_UUID_DMVERITY, name="Chainguard-verity", attrs="GUID:$readonly"
+EOF
+        rootattr="$readonly"
+    fi
+
+    n=$((n+1))
+    cat >> "$sfdisk_in" <<EOF
+disk.raw$n : start=, size=, type=$ROOT_TYPE, uuid=$PT_UUID_ROOT, name="Chainguard", attrs="GUID:$rootattr"
+EOF
+
+    show_file "$sfdisk_in" "sfdisk input" || return
+
+    vr sfdisk --quiet "$disk" <"$sfdisk_in" || {
+        show_file "$sfdisk_in" "sfdisk input"
+        stderr "sfdisk failed"
+        return 1
+    }
+    rm -f "$sfdisk_in"
+    vr sfdisk --quiet --disk-id "$disk" "$DISK_UUID" ||
+        { stderr "failed to set disk uuid in $disk to $DISK_UUID"; return 1; }
+
+    vr sfdisk --dump "$disk" 1>&2 || return
+
+    return 0
+}
+
 guest_install() {
     local sopts="hvT:o:i:d:s:"
     local lopts="help,disk:,input-tar:,kernel-cmdline-toks:,output:,scratch:,verbose"
@@ -577,14 +780,6 @@ guest_install() {
     esac
 
     INSTALLER_OPTS=$opts
-
-    local immutable=false
-    immutable=$(get_install_option immutable bool) || fail "failed reading option immutable"
-    if [ "$immutable" = "true" ]; then
-        stderr "FIXME FIXME - immutable builder just takes default path"
-        stderr "FIXME FIXME - the same as it does on main right now"
-        builder="default"
-    fi
 
     DEBUG=$(get_install_option debug presence) ||
         fail "failed reading debug"
