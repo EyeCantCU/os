@@ -91,6 +91,18 @@ func findPackage(pkg string) (string, error) {
 	return "", errors.Join(errs...)
 }
 
+func keyInit(ctx context.Context, dir, key string) error {
+	cmd := exec.CommandContext(ctx, "make", key)
+
+	cmd.Dir = dir
+
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
+}
+
 func runMake(ctx context.Context, subcmd, pkg string) error {
 	dir, err := findPackage(pkg)
 	if err != nil {
@@ -114,6 +126,10 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 	for _, sub := range precedence {
 		if sub == dir {
 			break
+		}
+
+		if err := keyInit(ctx, sub, strings.TrimSuffix(dirToKeys[sub], ".pub")); err != nil {
+			return fmt.Errorf("keyInit(%q): %w", sub, err)
 		}
 
 		opts = append(opts, fmt.Sprintf("--repository-append ../%s/packages", sub))
