@@ -30,6 +30,7 @@ var (
 	subscriptionID        string
 	diskSizeGB            int
 	acceleratedNetworking bool
+	deleteIfNecessary     bool
 )
 
 const (
@@ -82,6 +83,7 @@ Examples:
 	rootCmd.Flags().StringToStringVar(&tags, "tags", map[string]string{"env": "dev"}, "Resource tags (key=value)")
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
 	rootCmd.Flags().BoolVar(&acceleratedNetworking, "accelerated-networking", false, "Enable accelerated networking support")
+	rootCmd.Flags().BoolVar(&deleteIfNecessary, "delete-if-necessary", false, "Delete and recreate image definition if conflicts occur")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -188,6 +190,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 			arch:                  azArch,
 			tags:                  azTags,
 			acceleratedNetworking: acceleratedNetworking,
+			deleteIfNecessary:     deleteIfNecessary,
 		}
 		err = createImageDefinition(ctx, clients, opts, verbose)
 		if err != nil {
