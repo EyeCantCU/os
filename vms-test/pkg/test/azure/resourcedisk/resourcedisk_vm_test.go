@@ -40,7 +40,7 @@ func waitForServiceIfPresent(ctx context.Context, t *testing.T, svc string) {
 func TestResourceDisk(t *testing.T) {
 	ctx := vmtest.Context(t)
 	waitForServiceIfPresent(ctx, t, "waagent.service")
-	waitForServiceIfPresent(ctx, t, "cloud-init.service")
+	waitForServiceIfPresent(ctx, t, "cloud-init.target")
 
 	resourceDiskPath, err := filepath.EvalSymlinks("/dev/disk/azure/resource")
 	if err != nil {

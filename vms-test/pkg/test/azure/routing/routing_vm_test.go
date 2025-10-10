@@ -35,7 +35,7 @@ func waitForServiceIfPresent(ctx context.Context, t *testing.T, svc string) {
 func TestRoutePresence(t *testing.T) {
 	ctx := vmtest.Context(t)
 	waitForServiceIfPresent(ctx, t, "waagent.service")
-	waitForServiceIfPresent(ctx, t, "cloud-init.service")
+	waitForServiceIfPresent(ctx, t, "cloud-init.target")
 	for _, target := range []net.IP{azurePlatformIP, azureMDSIP} {
 		routes, err := netlink.RouteGet(target)
 		if err != nil {
