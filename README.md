@@ -48,7 +48,7 @@ You can test run your VM with:
 
 As an example:
 
-    make run-generic
+    make run-generic-base
 
 That will boot a VM with the generic disk image.  You can watch it boot and will get a login prompt on your terminal.
 
@@ -63,7 +63,7 @@ There are no builtin passwords, so you won't be able to log in. :cry:
 
    So if your vm has that package installed (like 'generic') then you can do:
 
-       make run-generic
+       make run-generic-base
 
    And then switch to another terminal and
 
@@ -109,6 +109,13 @@ and you should then be able to ssh in as the 'backdoor' user.
 
 ## Test
 Run `make test` to test builder logic and run other tests.
+
+There are more vm tests in vms-test/ directory.  To run those tests for a given image, you
+can run `make test-<image-name>`.  As example, try running
+
+    make test-generic-base
+
+That will create test-results/ with the test output.
 
 ## Converting existing OCI images
 

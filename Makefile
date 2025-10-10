@@ -59,10 +59,13 @@ include cgr-install.mk
 test-gotest: $(CGR_INSTALL_APK)
 	go test -v -tags withauth ./...
 
-test-generic: $(ARCH_OUT_D)/generic/disk.raw builder/ovmf-$(ARCH).fd
+# disk-generic depends on ARCH_OUT_D/generic/disk.raw
+test_targets_qemu = $(foreach name,$(disks_qemu),test-$(name))
+.PHONY: $(test_targets_qemu)
+$(test_targets_qemu): test-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
 	$(MAKE) -C vms-test TEST_ARCHES="$(ARCH)" runner/qemu tests
-	QEMU_VMS=generic ./vms-test/helpers/test-wolfi-vm \
-  --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results/$(ARCH)"
+		QEMU_VMS=$* ./vms-test/helpers/test-wolfi-vm \
+	    --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results"
 
 .PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
