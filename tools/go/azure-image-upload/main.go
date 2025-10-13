@@ -29,6 +29,7 @@ var (
 	tags           map[string]string
 	subscriptionID string
 	diskSizeGB     int
+	dbHashes       []string
 )
 
 const (
@@ -80,6 +81,7 @@ Examples:
 	rootCmd.Flags().StringSliceVar(&regions, "regions", strings.Split(defaultRegions, ","), "Target regions")
 	rootCmd.Flags().StringToStringVar(&tags, "tags", map[string]string{"env": "dev"}, "Resource tags (key=value)")
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
+	rootCmd.Flags().StringSliceVar(&dbHashes, "db-hash", []string{}, "Secureboot db base64 encoded hashes to add")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -174,7 +176,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	err = createImageVersion(ctx, clients, gallery, definitionName, imageVersion, resourceGroup, diskID, regions, azTags, verbose)
+	err = createImageVersion(ctx, clients, gallery, definitionName, imageVersion, resourceGroup, diskID, regions, azTags, dbHashes, verbose)
 	if err != nil {
 		return fmt.Errorf("failed to create image version: %w", err)
 	}

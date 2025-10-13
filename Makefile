@@ -309,6 +309,7 @@ $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(TOOLS_D)/azure-image-upl
 	@$(call capture_stdout,$@,\
 		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
+		$(addprefix --db-hash=,$(shell cat $(dir $@)db-b64-hashes.txt)) \
 		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
 
 .PHONY: publish-gcp

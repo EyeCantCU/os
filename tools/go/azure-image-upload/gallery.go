@@ -57,12 +57,16 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, galleryNa
 	return nil
 }
 
-func createImageVersion(ctx context.Context, clients *AzureClients, galleryName, definitionName, version, resourceGroup, diskID string, regions []string, tags map[string]*string, verbose bool) error {
+func createImageVersion(ctx context.Context, clients *AzureClients, galleryName, definitionName, version, resourceGroup, diskID string, regions []string, tags map[string]*string, dbHashes []string, verbose bool) error {
 	targetRegions := make([]*armcompute.TargetRegion, 0, len(regions))
 	for _, region := range regions {
 		targetRegions = append(targetRegions, &armcompute.TargetRegion{
 			Name: to.Ptr(region),
 		})
+	}
+	targetDb := make([]*string, 0, len(dbHashes))
+	for _, dbHash := range dbHashes {
+		targetDb = append(targetDb, to.Ptr(dbHash))
 	}
 
 	imageVersion := armcompute.GalleryImageVersion{
@@ -78,12 +82,21 @@ func createImageVersion(ctx context.Context, clients *AzureClients, galleryName,
 			PublishingProfile: &armcompute.GalleryImageVersionPublishingProfile{
 				TargetRegions: targetRegions,
 			},
+
 			SecurityProfile: &armcompute.ImageVersionSecurityProfile{
-				/*UefiSettings: &armcompute.GalleryImageVersionUefiSettings{
-					            SignatureTemplateNames: []*armcompute.UefiSignatureTemplateName{
-						            to.Ptr(armcompute.UefiSignatureTemplateNameNoSignatureTemplate),
-					            },
-				            },*/
+				UefiSettings: &armcompute.GalleryImageVersionUefiSettings{
+					AdditionalSignatures: &armcompute.UefiKeySignatures{
+						Db: []*armcompute.UefiKey{
+							{
+								Type:  to.Ptr(armcompute.UefiKeyTypeSHA256),
+								Value: targetDb,
+							},
+						},
+					},
+					SignatureTemplateNames: []*armcompute.UefiSignatureTemplateName{
+						to.Ptr(armcompute.UefiSignatureTemplateNameMicrosoftUefiCertificateAuthorityTemplate),
+					},
+				},
 			},
 		},
 		Tags: tags,
