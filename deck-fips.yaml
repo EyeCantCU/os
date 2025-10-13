@@ -1,0 +1,145 @@
+package:
+  name: deck-fips
+  version: "1.52.0"
+  epoch: 0
+  description: Configuration management and drift detection for Kong
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Kong/deck
+      tag: v${{package.version}}
+      expected-commit: 4cfd1bf6ae8d6df29c41f58bf54be7a6fd05dad6
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: .
+      output: deck
+      ldflags: |
+        -X github.com/kong/deck/cmd.VERSION=${{package.version}}
+        -X github.com/kong/deck/cmd.COMMIT=$(git rev-parse HEAD)
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binary in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -sf /usr/bin/deck ${{targets.contextdir}}/usr/local/bin/deck
+    test:
+      pipeline:
+        - name: "Test compat symlink"
+          runs: |
+            test -L /usr/local/bin/deck
+            test "$(readlink /usr/local/bin/deck)" = "/usr/bin/deck"
+
+update:
+  enabled: true
+  github:
+    identifier: Kong/deck
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - wait-for-it
+        - kong
+    environment:
+      KONG_DATABASE: off
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      KONG_ADMIN_LISTEN: 127.0.0.1:8001
+      KONG_PROXY_LISTEN: 127.0.0.1:8000
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Basic Binary Checks"
+      runs: |
+        deck version | grep "${{package.version}}"
+        deck --help | grep "The deck tool helps you manage Kong clusters"
+    - name: "Core File Operations"
+      runs: |
+        # kong config
+        cat > kong.yaml << EOL
+        _format_version: "3.0"
+        services:
+        - name: example-service
+          url: https://example.com
+          routes:
+          - name: example-route
+            paths:
+            - /example
+        EOL
+
+        # file validation
+        deck file validate kong.yaml
+
+        # Test openapi conversion
+        cat > openapi.json << EOL
+        {
+          "openapi": "3.0.0",
+          "info": {
+            "title": "Sample API",
+            "version": "1.0.0"
+          },
+          "paths": {
+            "/example": {
+              "get": {
+                "summary": "Example endpoint",
+                "responses": {
+                  "200": {
+                    "description": "OK"
+                  }
+                }
+              }
+            }
+          }
+        }
+        EOL
+
+        deck file openapi2kong --spec openapi.json -o converted-kong.yaml
+        grep -q "sample-api_example_get" converted-kong.yaml
+    - name: "Kong Integration Test"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/kong_prefix
+          cat <<'CFG' >/tmp/kong.yml
+          _format_version: "3.0"
+          services:
+            - name: example-service
+              url: https://example.com
+              routes:
+                - name: example-route
+                  paths: [ /example ]
+          CFG
+
+          cat <<'SH' >/tmp/run-kong.sh
+          #!/usr/bin/env bash
+          set -euo pipefail
+          kong prepare -p /tmp/kong_prefix
+          exec kong start -v -p /tmp/kong_prefix
+          SH
+
+          chmod +x /tmp/run-kong.sh
+        start: /tmp/run-kong.sh
+        timeout: 40
+        expected_output: "Kong started"
+        post: |
+          wait-for-it 127.0.0.1:8001 -t 30
+
+          # kong connectivity
+          deck gateway ping --kong-addr http://127.0.0.1:8001
+
+          # config dump
+          deck gateway dump --kong-addr http://127.0.0.1:8001 -o kong-dump.yaml
+          grep -q "example-service" kong-dump.yaml
+
+          # test drift detection, modify config to create drift
+          sed -i 's/example-service/modified-service/' /tmp/kong.yml
+
+          # should detect drift
+          deck gateway diff --kong-addr http://127.0.0.1:8001 /tmp/kong.yml | grep -q "modified-service"
