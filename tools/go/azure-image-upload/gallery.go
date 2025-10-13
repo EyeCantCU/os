@@ -24,17 +24,11 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, galleryNa
 				SKU:       to.Ptr(definitionName),
 			},
 			HyperVGeneration: to.Ptr(armcompute.HyperVGenerationV2),
-			Features:         []*armcompute.GalleryImageFeature{
-				// Setting SecurityType = Standard returns an error from the Azure backend that this is not a valid value.
-				// In the latest version (v7) of the API, the SecurityTypes enum does not contain a 'Standard' value, only
-				// values for trusted (secure boot) and confidential compute.
-				//
-				// I dislike not specifying this but I uploaded a new definition and it does default to standard, and is
-				// also capable of updating old definitions which previously specified standard explicitly with az cli.
-				/*{
-					Name: to.Ptr("SecurityType"),
+			Features: []*armcompute.GalleryImageFeature{
+				{
+					Name:  to.Ptr("SecurityType"),
 					Value: to.Ptr("TrustedLaunchSupported"),
-				},*/
+				},
 			},
 		},
 		Tags: tags,
