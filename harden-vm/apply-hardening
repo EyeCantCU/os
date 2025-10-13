@@ -1,4 +1,50 @@
 #!/usr/bin/env bash
+declare  -ra prohibited_kmods=(
+	atm
+	bluetooth
+	can
+	cramfs
+	dccp
+	firewire-core
+	freevxfs
+	hfs
+	hfsplus
+	jffs2
+	rds
+	sctp
+	squashfs
+	tipc
+	udf
+	usb-storage
+)
+
+declare -a sysctl_common=(
+	"kernel.randomize_va_space = 2"
+	"kernel.yama.ptrace_scope = 1"
+	"net.ipv6.conf.all.accept_ra = 0"
+	"net.ipv6.conf.all.accept_redirects = 0"
+	"net.ipv6.conf.all.accept_source_route = 0"
+	"net.ipv6.conf.all.forwarding = 0"
+	"net.ipv6.conf.default.accept_ra = 0"
+	"net.ipv6.conf.default.accept_redirects = 0"
+	"net.ipv6.conf.default.accept_source_route = 0"
+	"net.ipv4.conf.all.accept_redirects = 0"
+	"net.ipv4.conf.all.accept_source_route = 0"
+	"net.ipv4.conf.all.log_martians = 1"
+	"net.ipv4.conf.all.rp_filter = 1"
+	"net.ipv4.conf.all.secure_redirects = 0"
+	"net.ipv4.conf.default.accept_redirects = 0"
+	"net.ipv4.conf.default.accept_source_route = 0"
+	"net.ipv4.conf.default.log_martians = 1"
+	"net.ipv4.conf.default.rp_filter = 1"
+	"net.ipv4.conf.default.secure_redirects = 0"
+	"net.ipv4.icmp_echo_ignore_broadcasts = 1"
+	"net.ipv4.icmp_ignore_bogus_error_responses = 1"
+	"net.ipv4.tcp_syncookies = 1"
+	"net.ipv4.conf.all.send_redirects = 0"
+	"net.ipv4.conf.default.send_redirects = 0"
+	"net.ipv4.ip_forward = 0"
+)
 
 usage()
 {
@@ -39,40 +85,13 @@ bail()
 	exit 1
 }
 
-# Function to set file timestamps based on SOURCE_DATE_EPOCH
-set_reproducible_timestamp()
-{
-	local -r filepath="$1"
-	# Check if SOURCE_DATE_EPOCH is set
-	if [[ -z ${SOURCE_DATE_EPOCH} ]]; then
-		# SOURCE_DATE_EPOCH not set, nothing to do
-		return 0
-	fi
-	# Set all timestamps (access time, modification time) to SOURCE_DATE_EPOCH
-	# Using @ prefix to specify Unix timestamp
-	if ! touch -a -m -d "@${SOURCE_DATE_EPOCH}" "${filepath}"; then
-		stderr "set_reproducible_timestamp: failed to set timestamp for '${filepath}'"
-		return 1
-	fi
-
-	local current_time=$(date +%s)
-	local file_mtime=$(stat -c %Y "${filepath}" 2> /dev/null || echo 0)
-	if ((current_time - file_mtime <= 5)); then
-		stderr "NEW FILE: $filepath"
-	fi
-
-	return 0
-}
-
 harden_cis_l1_fs_permissions()
 {
 	if [ -e "${sysroot}/etc/shadow" ]; then
 		chmod 0000 "${sysroot}/etc/shadow"
-		set_reproducible_timestamp "${sysroot}/etc/shadow"
 	fi
 	if [ -e "${sysroot}/etc/shadow-" ]; then
 		chmod 0000 "${sysroot}/etc/shadow-"
-		set_reproducible_timestamp "${sysroot}/etc/shadow-"
 	fi
 }
 
@@ -85,12 +104,10 @@ apply_sshd_config()
 
 	sed -Ei "s|^#?${option}\s.*|${expected}|" "${sshd_config}"
 	if grep -Eq "^${expected}$" "${sshd_config}"; then
-		set_reproducible_timestamp "${sshd_config}"
 		return 0
 	fi
 
 	printf '%s\n' "${expected}" >> "${sshd_config}"
-	set_reproducible_timestamp "${sshd_config}"
 }
 
 harden_cis_l1_sshd()
@@ -121,7 +138,7 @@ harden_cis_l1_sshd()
 	done
 
 	chmod 0600 "${sysroot}/etc/ssh/sshd_config" # TODO: do in openssh-server package by default
-	set_reproducible_timestamp "${sysroot}/etc/ssh/sshd_config"
+	chmod -R 0600 "${sysroot}/etc/ssh/sshd_config.d" # TODO: do in openssh-server package by default
 
 	if [[ ${runtime_remediate} == yes ]]; then
 		sudo systemctl restart sshd.service
@@ -131,54 +148,18 @@ harden_cis_l1_sshd()
 harden_cis_l1_login_banners()
 {
 	echo 'Authorized users only. All activity may be monitored and reported.' > "${sysroot}/etc/issue"
-	set_reproducible_timestamp "${sysroot}/etc/issue"
-
 	echo 'Authorized users only. All activity may be monitored and reported.' > "${sysroot}/etc/issue.net"
-	set_reproducible_timestamp "${sysroot}/etc/issue.net"
 }
 
 harden_cis_l1_sysctl()
 {
 	local -r sysctl_config="${sysroot}/usr/lib/sysctl.d/90-cis.conf"
 
-	cat << "EOF" > "${sysctl_config}"
-# Kernel
-kernel.randomize_va_space = 2
-kernel.yama.ptrace_scope = 1
-
-# Networking: IPv6
-net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.all.accept_redirects = 0
-net.ipv6.conf.all.accept_source_route = 0
-net.ipv6.conf.all.forwarding = 0
-
-net.ipv6.conf.default.accept_ra = 0
-net.ipv6.conf.default.accept_redirects = 0
-net.ipv6.conf.default.accept_source_route = 0
-
-# Networking: Hosts and Routers
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.all.accept_source_route = 0
-net.ipv4.conf.all.log_martians = 1
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.all.secure_redirects = 0
-
-net.ipv4.conf.default.accept_redirects = 0
-net.ipv4.conf.default.accept_source_route = 0
-net.ipv4.conf.default.log_martians = 1
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.default.secure_redirects = 0
-
-net.ipv4.icmp_echo_ignore_broadcasts = 1
-net.ipv4.icmp_ignore_bogus_error_responses = 1
-net.ipv4.tcp_syncookies = 1
-
-# Networking: Hosts Only
-net.ipv4.conf.all.send_redirects = 0
-net.ipv4.conf.default.send_redirects = 0
-net.ipv4.ip_forward = 0
-EOF
-	set_reproducible_timestamp "${sysctl_config}"
+	{
+		for tunable in "${sysctl_common[@]}"; do
+			echo "${tunable}"
+		done
+	} > "${sysctl_config}"
 
 	# Uncomment other distro-owned sysctl settings that would compete with
 	# the ones just written.
@@ -194,7 +175,6 @@ EOF
 
 		for sysctl in "${sysctls[@]}"; do
 			sed -i "s/^${sysctl} =/# CIS: ${sysctl} = /" "${sysctl_fragment}"
-			set_reproducible_timestamp "${sysctl_fragment}"
 		done
 	done
 
@@ -210,19 +190,18 @@ harden_cis_l1_shell_profile()
 	cat << "EOF" > "${sysroot}/etc/profile"
 
 # CIS
-umask 027
+umask 077
 
 : <<COMMENT
 The OVAL check in ComplianceAsCode is looking for a literal
 
-   declare -xr TMOUT=900
+   declare -xr TMOUT=600
 
 but this is not POSIX compliant and not supported by busybox' shell. Use only
 POSIX behavior instead:
 COMMENT
-readonly TMOUT=900; export TMOUT
+readonly TMOUT=600; export TMOUT
 EOF
-	set_reproducible_timestamp "${sysroot}/etc/profile"
 }
 
 harden_cis_l1_bash()
@@ -232,13 +211,12 @@ harden_cis_l1_bash()
 	cat << "EOF" >> "${bashrc}"
 
 # CIS
-umask 027
+umask 077
 EOF
-	set_reproducible_timestamp "${bashrc}"
-
-	# TODO: modify rule check to check bash.bashrc for chainguard
-	ln -s "${bashrc}" "$(dirname "${bashrc}")"/bashrc
-	set_reproducible_timestamp "$(dirname "${bashrc}")"/bashrc
+	# TODO: See https://github.com/chainguard-dev/complianceascode-content/pull/2
+	# TODO: and https://github.com/chainguard-dev/internal-dev/issues/20223
+	local -r compat_symlink="${bashrc%/*}/bashrc"
+	ln -s bash.bashrc "${compat_symlink}"
 }
 
 apply_journald_config()
@@ -250,12 +228,10 @@ apply_journald_config()
 
 	sed -Ei "s|^#?${option}\s.*|${expected}|" "${journald_config}"
 	if grep -Eq "^${expected}$" "${journald_config}"; then
-		set_reproducible_timestamp "${journald_config}"
 		return 0
 	fi
 
 	printf '%s\n' "${expected}" >> "${journald_config}"
-	set_reproducible_timestamp "${journald_config}"
 }
 
 harden_cis_l1_journald()
@@ -265,8 +241,6 @@ harden_cis_l1_journald()
 	apply_journald_config ForwardToSyslog no
 
 	ln -s /dev/null "${sysroot}/etc/systemd/system/systemd-journal-remote.socket"
-	set_reproducible_timestamp "${sysroot}/etc/systemd/system/systemd-journal-remote.socket"
-
 	if [[ ${runtime_remediate} == yes ]]; then
 		sudo systemctl restart systemd-journald.service
 	fi
@@ -278,8 +252,6 @@ harden_cis_l1_mount_options()
 tmpfs /dev/shm tmpfs nodev,noexec,nosuid 0 0
 tmpfs /tmp tmpfs nodev,noexec,nosuid 0 0
 EOF
-	set_reproducible_timestamp "${sysroot}/etc/fstab"
-
 	if [[ ${runtime_remediate} == yes ]]; then
 		mount -o remount,nodev,noexec,nosuid /dev/shm
 		mount -o remount,nodev,noexec,nosuid /tmp
@@ -288,23 +260,12 @@ EOF
 
 harden_cis_l1_kmods()
 {
-	# TODO: drop kmods we are not building and are unlikely to ever built from the rules
-	local -ra prohibited_kmods=(
-		cramfs
-		freevxfs
-		hfs
-		hfsplus
-		jffs2
-		usb-storage
-	)
-
 	{
 		for kmod in "${prohibited_kmods[@]}"; do
 			echo "blacklist ${kmod}"
 			echo "install ${kmod} /bin/false"
 		done
 	} > "${sysroot}/etc/modules-load.d/cis.conf"
-	set_reproducible_timestamp "${sysroot}/etc/modules-load.d/cis.conf"
 }
 
 harden_cis_l1_coredumps()
@@ -317,7 +278,6 @@ harden_cis_l1_coredumps()
 Storage = none
 ProcessSizeMax = 0
 EOF
-	set_reproducible_timestamp "${coredump_config}"
 }
 
 harden_cis_l1_sudo()
@@ -326,7 +286,6 @@ harden_cis_l1_sudo()
 Defaults use_pty
 Defaults timestamp_timeout = 15
 EOF
-	set_reproducible_timestamp "${sysroot}/etc/sudoers.d/10-cis.conf"
 }
 
 harden_cis_level_1()
@@ -342,6 +301,244 @@ harden_cis_level_1()
 	harden_cis_l1_kmods
 	harden_cis_l1_coredumps
 	harden_cis_l1_sudo
+}
+
+harden_stig_sshd()
+{
+	local -Ar settings=(
+		[ClientAliveCountMax]=1 # TODO: update policy: 3
+		[ClientAliveInterval]=600 # TODO: update policy: 15
+		[HostbasedAuthentication]=no
+		[PermitEmptyPasswords]=no
+		[IgnoreRhosts]=yes
+		[PermitRootLogin]=no
+		[PermitUserEnvironment]=no
+		[UsePAM]=yes
+		[Banner]=/etc/issue
+		[AllowUsers]=ec2-user # TODO: customize or fix policy check
+		[LoginGraceTime]=60
+		[LogLevel]=VERBOSE
+		[MaxAuthTries]=4
+		[MaxSessions]=10
+		[MaxStartups]=10:30:60
+		[Compression]=no
+		[GSSAPIAuthentication]=no
+		[IgnoreUserKnownHosts]=yes
+		[KerberosAuthentication]=no
+		[PrintLastLog]=yes
+		[PubkeyAuthentication]=yes
+		[RekeyLimit]="1G 1h"
+		[StrictModes]=yes
+		[X11Forwarding]=no
+		[X11UseLocalhost]=yes
+	)
+
+	for option in "${!settings[@]}"; do
+		local value=${settings[${option}]}
+		if ! apply_sshd_config "${option}" "${value}"; then
+			bail "Failed to configure sshd with '${option} ${value}'"
+		fi
+	done
+
+	chmod 0600 "${sysroot}/etc/ssh/sshd_config" # TODO: do in openssh-server package by default
+	chmod -R 0600 "${sysroot}/etc/ssh/sshd_config.d" # TODO: do in openssh-server package by default
+
+	if [[ ${runtime_remediate} == yes ]]; then
+		sudo systemctl restart sshd.service
+	fi
+}
+
+harden_stig_mount_options()
+{
+	harden_cis_l1_mount_options
+}
+
+harden_stig_login_banners()
+{
+	echo -n "I've read & consent to terms in IS user agreem't." > "${sysroot}/etc/issue"
+}
+
+harden_stig_sysctl()
+{
+	local -r sysctl_config="${sysroot}/usr/lib/sysctl.d/91-stig.conf"
+
+	{
+		for tunable in "${sysctl_common[@]}"; do
+			echo "${tunable}"
+		done
+	} > "${sysctl_config}"
+
+	declare -ra sysctl_stig=(
+		"fs.protected_hardlinks=1"
+		"fs.protected_symlinks=1"
+		"kernel.core_pattern=|/bin/false"
+		"kernel.dmesg_restrict=1"
+		"kernel.kexec_load_disabled=1"
+		"kernel.kptr_restrict = 1"
+		"kernel.perf_event_paranoid=2"
+		"kernel.randomize_va_space=2"
+		"kernel.unprivileged_bpf_disabled=1"
+		"kernel.yama.ptrace_scope=1"
+		"net.core.bpf_jit_harden=2"
+		"net.ipv4.conf.all.accept_redirects=0"
+		"net.ipv4.conf.all.accept_source_route=0"
+		"net.ipv4.conf.all.forwarding=0"
+		"net.ipv4.conf.all.log_martians=1"
+		"net.ipv4.conf.all.rp_filter=1"
+		"net.ipv4.conf.all.send_redirects=0"
+		"net.ipv4.conf.default.accept_redirects=0"
+		"net.ipv4.conf.default.accept_source_route=0"
+		"net.ipv4.conf.default.log_martians=1"
+		"net.ipv4.conf.default.rp_filter=1"
+		"net.ipv4.conf.default.send_redirects=0"
+		"net.ipv4.icmp_echo_ignore_broadcasts=1"
+		"net.ipv4.icmp_ignore_bogus_error_responses=1"
+		"net.ipv4.tcp_syncookies=1"
+		"net.ipv6.conf.all.accept_ra=0"
+		"net.ipv6.conf.all.accept_redirects=0"
+		"net.ipv6.conf.all.accept_source_route=0"
+		"net.ipv6.conf.all.forwarding=0"
+		"net.ipv6.conf.default.accept_ra=0"
+		"net.ipv6.conf.default.accept_redirects=0"
+		"net.ipv6.conf.default.accept_source_route=0"
+		"user.max_user_namespaces=0"
+	)
+
+	{
+		for tunable in "${sysctl_stig[@]}"; do
+			echo "${tunable}"
+		done
+	} >> "${sysctl_config}"
+
+	# Uncomment other distro-owned sysctl settings that would compete with
+	# the ones just written.
+	# TODO: enhance rule checks to take into account ordering of fragments
+	local -a sysctls
+	mapfile -t sysctls < <(awk '$2 == "=" && $1 !~ /^-/ { print $1 }' "${sysctl_config}")
+
+	local sysctl_fragment
+	for sysctl_fragment in "$(dirname "${sysctl_config}")"/*; do
+		if [[ "$(basename "${sysctl_config}")" == "$(basename "${sysctl_fragment}")" ]]; then
+			continue
+		fi
+
+		for sysctl in "${sysctls[@]}"; do
+			sed -i "s/^${sysctl} =/# STIG: ${sysctl} = /" "${sysctl_fragment}"
+		done
+	done
+
+	# Remove conflicting configuration
+	if [ -e "${sysroot}/usr/lib/sysctl.d/50-coredump.conf" ]; then
+		sed -i 's|^kernel.core_pattern.*||g' "${sysroot}/usr/lib/sysctl.d/50-coredump.conf"
+	fi
+
+	if [[ ${runtime_remediate} == yes ]]; then
+		sudo systemctl restart systemd-sysctl.service
+	fi
+}
+
+harden_stig_kmods()
+{
+	{
+		for kmod in "${prohibited_kmods[@]}"; do
+			echo "blacklist ${kmod}"
+			echo "install ${kmod} /bin/false"
+		done
+	} > "${sysroot}/etc/modules-load.d/stig.conf"
+}
+
+harden_stig_systemd_target()
+{
+	ln -sf /usr/lib/systemd/system/multi-user.target ${sysroot}/etc/systemd/system/default.target
+}
+
+apply_pwquality_config()
+{
+	local -r option=$1 value=$2
+
+	local -r pwquality_config="${sysroot}/etc/security/pwquality.conf"
+	local -r expected="${option} = ${value}"
+
+	sed -Ei "s|^#\s*?${option}\s.*|${expected}|" "${pwquality_config}"
+	if grep -Eq "^${expected}$" "${pwquality_config}"; then
+		return 0
+	fi
+
+	printf '%s\n' "${expected}" >> "${pwquality_config}"
+}
+
+harden_stig_pam()
+{
+	declare -Ar pwconfigs=(
+		[retry]=3
+		[dcredit]=-1
+		[dictcheck]=1
+		[difok]=8
+		[lcredit]=-1
+		[maxclassrepeat]=4
+		[maxrepeat]=3
+		[minclass]=4
+		[minlen]=15
+		[ocredit]=-1
+		[ucredit]=-1
+	)
+
+	for option in "${!pwconfigs[@]}"; do
+		local value=${pwconfigs[${option}]}
+		if ! apply_pwquality_config "${option}" "${value}"; then
+			bail "Failed to configure pwquality with '${option} ${value}'"
+		fi
+	done
+	sed -i "s|^#? *enforce_for_root|enforce_for_root|g" "${sysroot}/etc/security/pwquality.conf"
+	for i in base-password base-auth base-account; do
+		sed -i '/^password required/i password requisite pam_pwquality.so' "${sysroot}/etc/pam.d/$i"
+		sed -i 's|nullok||g' "${sysroot}/etc/pam.d/$i"
+		echo 'auth        required      pam_faillock.so preauth silent' >> "${sysroot}/etc/pam.d/$i"
+		echo 'auth        required      pam_faillock.so authfail' >> "${sysroot}/etc/pam.d/$i"
+		echo 'account     required      pam_faillock.so' >> "${sysroot}/etc/pam.d/$i"
+	done
+	# TODO: fix the benchmark to search our own paths
+	ln -sf /etc/pam.d/base-password "${sysroot}/etc/pam.d/password-auth"
+	ln -sf /etc/pam.d/base-password "${sysroot}/etc/pam.d/system-auth"
+}
+
+harden_stig_systemd_ctrlaltdel()
+{
+	sed -i "s|^#?*CtrlAltDelBurstAction.*|CtrlAltDelBurstAction=none|g" "${sysroot}/etc/systemd/system.conf"
+	ln -sf /dev/null "${sysroot}/etc/systemd/system/ctrl-alt-del.target"
+	ln -sf /dev/null "${sysroot}/etc/systemd/system/debug-shell.service"
+}
+
+harden_stig_systemd_coredump()
+{
+	sed -i "s|^#?*Storage.*|Storage=none|g" "${sysroot}/etc/systemd/coredump.conf"
+	sed -i "s|^#?*ProcessSizeMax.*|ProcessSizeMax=0|g" "${sysroot}/etc/systemd/coredump.conf"
+	ln -sf /dev/null "${sysroot}/etc/systemd/system/systemd-coredump.socket"
+}
+
+harden_stig_fixnews()
+{
+	chown 0:0 "${sysroot}/usr/lib/news"
+}
+
+harden_stig_sudo()
+{
+	find "${sysroot}/etc/sudoers.d" "${sysroot}/etc/sudoers" -exec sed -i "s|.*NOPASSWD.*||g" {} \;
+}
+
+harden_stig()
+{
+	harden_stig_sshd
+	harden_stig_mount_options
+	harden_stig_login_banners
+	harden_stig_sysctl
+	harden_stig_kmods
+	harden_stig_systemd_target
+	harden_stig_pam
+	harden_stig_systemd_ctrlaltdel
+	harden_stig_systemd_coredump
+	harden_stig_fixnews
+	harden_stig_sudo
 }
 
 main()
@@ -393,8 +590,11 @@ main()
 		cis-level-1)
 			harden_cis_level_1
 			;;
+		stig)
+			harden_stig
+			;;
 		*)
-			bail "invalid --profile '${profile}', valid is 'cis-level-1'"
+			bail "invalid --profile '${profile}', valid profiles are 'cis-level-1' or 'stig'"
 			;;
 	esac
 }

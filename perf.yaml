@@ -1,0 +1,161 @@
+package:
+  name: perf
+  version: "6.12.51"
+  epoch: 0
+  description: "Linux kernel performance profiling tool"
+  copyright:
+    - license: GPL-2.0-only WITH Linux-syscall-note
+  dependencies:
+    runtime:
+      - bash # needed by perf-core script
+      - binutils # required by perf to symbolize and disassemble code
+      - glibc # standard C runtime library required by perf binaries
+      - json-c # used by perf's JSON output and scripting interfaces
+      - libbpf # required for BPF programs and eBPF event support
+      - libcap # required for capability checks when running perf as non-root
+      - libdwarf # required for DWARF debug info parsing (stack traces, symbols)
+      - libelf # required for ELF binary parsing, symbol resolution, and perf map handling
+      - libtraceevent # provides event parsing for tracepoints and ftrace integration
+      - libunwind # used for stack unwinding/backtraces in user space
+      - libzstd1 # required for zstd compression/decompression of perf.data
+      - numactl # required for NUMA topology detection and memory binding
+      - perl # perf has Perl scripting support for report/script
+      - python-${{vars.python-version}} # required for Python scripting and extensions in perf
+      - slang # provides TUI interface support for perf (interactive curses-like UI)
+      - zlib # used for compression of perf.data (default gzip support)
+
+vars:
+  python-version: '3.12'
+
+environment:
+  environment:
+    NO_WERROR: 1
+    WERROR: 0
+    CFLAGS: -Wno-error -Wno-maybe-uninitialized
+  contents:
+    packages:
+      - bash
+      - binutils-dev
+      - bison
+      - build-base
+      - busybox
+      - diffutils
+      - elfutils-dev
+      - flex-dev
+      - json-c-dev
+      - libbpf-dev
+      - libcap-dev
+      - libdebuginfod-dev
+      - libdwarf-dev
+      - libtraceevent-dev
+      - libtracefs-dev
+      - libunwind-dev
+      - numactl-dev
+      - perl-dev
+      - python3-dev
+      - slang-dev
+      - wolfi-baselayout
+      - xz-dev
+      - zlib-dev
+      - zstd-dev
+
+pipeline:
+  - uses: kernel/version-check
+    with:
+      moniker: longterm
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gregkh/linux
+      tag: v${{package.version}}
+      expected-commit: a9152eb181adaac576e8ac1ab79989881e0f301b
+
+  - working-directory: tools/perf
+    pipeline:
+      - uses: autoconf/make
+        with:
+          opts: -j1
+      - uses: autoconf/make-install
+        with:
+          opts: prefix=/usr
+
+  - name: "Remove shell tests scripts"
+    runs: |
+      # Upstream package does not have tests scripts
+      # Harmless text used to test name-matching, but our scanner flags it:
+      # /usr/libexec/perf-core/tests/shell/common/patterns.sh (CRITICAL) Pretends to be a kworker kernel thread kworker/u8:1-ev
+      rm -rf "${{targets.destdir}}/usr/libexec/perf-core/tests"
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: "${{package.name}}"
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-doc
+    description: ${{package.name}} docs
+    pipeline:
+      - uses: split/manpages
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/share
+          mv "${{targets.destdir}}"/usr/share/doc "${{targets.subpkgdir}}"/usr/share
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - name: ${{package.name}}-bash-completion
+    description: Bash completion scripts for ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc
+          mv ${{targets.destdir}}/etc/bash_completion.d ${{targets.subpkgdir}}/etc
+    test:
+      pipeline:
+        - runs: |
+            test -f /etc/bash_completion.d/perf
+
+capabilities:
+  add:
+    - CAP_PERFMON
+    - CAP_SYS_ADMIN
+    - CAP_SYS_PTRACE
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: "Basic version flag test"
+      runs: |
+        set -euo pipefail
+        perf --help
+        perf --version | grep -q "${{package.version}}"
+    - name: "Functional tests"
+      runs: |
+        # List events
+        perf list software | grep -q "Software event"
+        # View stats
+        perf stat -e task-clock,cpu-clock,context-switches,page-faults -- sleep 0.05 2>&1 | grep -q "Performance counter stats"
+        # Record some workload
+        perf record -o perf.data -m 1 -F 99 -a -g -- sleep 1 2>&1
+        # Convert to readable stacks
+        perf script -i perf.data > out.perf
+        # Validate (QEMU may show 'swapper' or lots of 'kworker'—accept either)
+        grep -Eq "swapper|kworker" out.perf
+    - name: "Bench tests"
+      runs: |
+        perf bench sched pipe -l 1000 2>&1 | grep -q "Total time"
+
+update:
+  enabled: true
+  github:
+    identifier: gregkh/linux
+    use-tag: true
+    strip-prefix: v
+    tag-filter-prefix: v6.12
+  ignore-regex-patterns:
+    # skip mainline (x.y) release tags, wait for stable (x.y.z) release tags
+    - ^\d+[.]\d+$
