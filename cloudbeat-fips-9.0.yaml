@@ -1,0 +1,112 @@
+package:
+  name: cloudbeat-fips-9.0
+  version: "9.0.8"
+  epoch: 0
+  description: Cloudbeat is a cloud-native security and compliance monitoring tool for real-time threat detection and policy enforcement across cloud environments.
+  copyright:
+    - license: Elastic-2.0
+  dependencies:
+    provides:
+      - cloudbeat-fips=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/cloudbeat
+      tag: v${{package.version}}
+      expected-commit: a4f1ea79264058fcaa2fcac50567f7cb53ce12c4
+
+  - uses: go/bump
+    with:
+      deps: |-
+        helm.sh/helm/v3@v3.18.5
+        github.com/hashicorp/go-getter@v1.7.9
+        github.com/go-viper/mapstructure/v2@v2.4.0
+        github.com/ulikunitz/xz@v0.5.14
+        github.com/cloudflare/circl@v1.6.1
+        github.com/golang-jwt/jwt/v5@v5.2.2
+
+  - uses: go/build
+    with:
+      packages: .
+      output: cloudbeat
+      ldflags: -X 'github.com/elastic/cloudbeat/build.Version=${{package.version}}' -X 'github.com/elastic/cloudbeat/build.CommitSHA=$(git rev-parse HEAD)'
+      go-package: go-fips
+
+  - name: copy cloudbeat.yml
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/cloudbeat
+      cp cloudbeat.yml ${{targets.destdir}}/usr/share/cloudbeat/cloudbeat.yml
+
+update:
+  enabled: true
+  github:
+    strip-prefix: v
+    identifier: elastic/cloudbeat
+    tag-filter-prefix: v9.0.
+    use-tag: true
+
+test:
+  environment:
+    accounts:
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 0
+      run-as: 0
+    contents:
+      packages:
+        - bash
+        - curl
+        - jq
+        - sudo
+        - wait-for-it
+    environment:
+      ELASTICSEARCH_HOSTS: localhost:9200
+      ES_JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+      KUBERNETES_MASTER: https://127.0.0.1:32764
+      NODE_NAME: node-000000
+      KUBECONFIG: /root/.kube/config
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: cloudbeat -h
+    - uses: test/kwok/cluster
+    - name: "Test cloudbeat"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cat > cloudbeat.test.yml <<'YML'
+          logging.level: info
+          logging.to_stderr: true
+          logging.to_files: false
+          http.enabled: true
+          http.host: 127.0.0.1
+          http.port: 5066
+          output.console:
+            enabled: true
+            pretty: true
+          cloudbeat:
+            type: cloudbeat/cis_k8s
+            period: 1m
+            config:
+              v1:
+                benchmark: cis_k8s
+          YML
+        start: cloudbeat -c cloudbeat.test.yml -e -v run
+        expected_output: |
+          Starting metrics logging
+          Launcher is creating a new Cloudbeat
+          Config initiated
+          "name":"cloudbeat"
+          "version":"${{package.version}}"
+        timeout: 30
+        post: |
+          wait-for-it localhost:5066 --timeout=10
+          curl -fsS --retry 10 http://127.0.0.1:5066 | grep cloudbeat

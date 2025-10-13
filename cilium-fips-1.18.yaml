@@ -1,8 +1,7 @@
-#nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-fips-1.18
-  version: "1.18.1"
-  epoch: 1 # GHSA-2464-8j7c-4cjm
+  version: "1.18.2"
+  epoch: 2
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
@@ -45,7 +44,7 @@ environment:
       - git
       # MD5 needed by the Hubble config watched to calculate hash:
       # https://github.com/cilium/cilium/blob/9e9f098982ddc31463cfcf2d589d9e1d8bb040a7/pkg/hubble/exporter/config_watcher.go#L102
-      - go-fips-md5
+      - go-fips-md5~1.24
       - grep
       - ip6tables
       - iptables # for cilium-iptables
@@ -72,16 +71,16 @@ pipeline:
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: e8a7070f26ca95265dd85ba78f30373d9df0781b
-
-  - uses: go/bump
-    with:
-      deps: |-
-        github.com/go-viper/mapstructure/v2@v2.4.0
+      expected-commit: 5bd307a8f6fbf3489005944ded2ed085fc642cc2
 
   - uses: patch
     with:
-      patches: loopback-location.patch cilium-version.patch
+      patches: loopback-location.patch cilium-version.patch portable-libcrypto.patch
+
+  - uses: go/bump
+    with:
+      # Cherry-pick https://github.com/godbus/dbus/pull/413 to avoid crypto & sha1 usage
+      replaces: github.com/godbus/dbus/v5=github.com/xnox/godbus-dbus/v5@v5.1.0.1
 
   - runs: |
       # Bazel errors out on toolchain stanza
@@ -98,6 +97,7 @@ pipeline:
         s,tools/mount,,g
         s,tools/sysctlfix,,g
         s,plugins/cilium-cni,,g
+        s|osusergo|osusergo,netgo|g
 
   - runs: |
       # Remove groupadd from Makefile: it's not doing anything useful in
@@ -116,6 +116,50 @@ pipeline:
   - uses: strip
 
 subpackages:
+  - name: ${{package.name}}-container-init
+    description: init scripts for cilium
+    dependencies:
+      provides:
+        - cilium-container-init=${{package.full-version}}
+      runtime:
+        - merged-sbin
+        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          cp images/cilium/init-container.sh \
+             plugins/cilium-cni/install-plugin.sh \
+             plugins/cilium-cni/cni-uninstall.sh \
+            ${{targets.subpkgdir}}/usr/bin
+    test:
+      pipeline:
+        - runs: |
+            test -x /usr/bin/init-container.sh
+            test -x /usr/bin/install-plugin.sh
+            test -x /usr/bin/cni-uninstall.sh
+
+  - name: ${{package.name}}-container-init-compat
+    description: init scripts for cilium
+    dependencies:
+      runtime:
+        - ${{package.name}}-container-init
+        - merged-sbin
+        - wolfi-baselayout
+      provides:
+        - cilium-container-init-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}
+          ln -sf /usr/bin/init-container.sh ${{targets.subpkgdir}}/init-container.sh
+          ln -sf /usr/bin/install-plugin.sh ${{targets.subpkgdir}}/install-plugin.sh
+          ln -sf /usr/bin/cni-uninstall.sh ${{targets.subpkgdir}}/cni-uninstall.sh
+    test:
+      pipeline:
+        - runs: |
+            test -x $(readlink -f /init-container.sh)
+            test -x $(readlink -f /install-plugin.sh)
+            test -x $(readlink -f /cni-uninstall.sh)
+
   - name: ${{package.name}}-operator-generic
     description: Generic operator for cilium
     dependencies:
@@ -129,6 +173,11 @@ subpackages:
           make cilium-operator-generic
           DESTDIR=${{targets.subpkgdir}} make install-generic
       - uses: strip
+    # test added by a robot (binary)
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/cilium-operator-generic
 
   - name: ${{package.name}}-operator-aws
     description: AWS operator for cilium
@@ -143,6 +192,11 @@ subpackages:
           make cilium-operator-aws
           DESTDIR=${{targets.subpkgdir}} make install-aws
       - uses: strip
+    # test added by a robot (binary)
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/cilium-operator-aws
 
   - name: ${{package.name}}-operator-azure
     description: Azure operator for cilium
@@ -157,6 +211,11 @@ subpackages:
           make cilium-operator-azure
           DESTDIR=${{targets.subpkgdir}} make install-azure
       - uses: strip
+    # test added by a robot (binary)
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/cilium-operator-azure
 
   - name: ${{package.name}}-hubble-relay
     description: Hubble relay
@@ -169,10 +228,17 @@ subpackages:
           make hubble-relay
           DESTDIR=${{targets.subpkgdir}} make install
       - uses: strip
+    # test added by a robot (binary)
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/hubble-relay
 
   - name: ${{package.name}}-host-utils
     description: Cilium binaries that run on the host.
     dependencies:
+      runtime:
+        - libcrypto3-2.34
       provides:
         - cilium-host-utils=${{package.full-version}}
     pipeline:
@@ -216,8 +282,18 @@ subpackages:
 test:
   pipeline:
     - uses: test/go-fips-check
-    # Ensure that structured version info is available
-    - runs: cilium version -ojsonpath={.Client.Version} | grep ${{package.version}}
+    - uses: test/tw/ver-check
+      with:
+        bins: cilium cilium-dbg cilium-agent
+    - name: Test help commands
+      runs: |
+        cilium --help
+        cilium-agent --help
+        cilium-bugtool --help
+        cilium-dbg --help
+        cilium-health --help
+        cilium-mount --help
+        cilium-sysctlfix --help
     - name: Check that fips-capable hosts, with fips off by default work
       runs: |
         # Mock fips provider available, but not chosen by default
@@ -226,6 +302,7 @@ test:
         # superficial change, which however does trip up go-msft
         # toolchain FIPS mode checks
         sed 's|fips=yes|fips=no|' -i /etc/ssl/openssl.cnf
+        # Ensure that structured version info is available
         cilium version -ojsonpath={.Client.Version} | grep ${{package.version}}
 
 update:

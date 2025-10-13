@@ -1,0 +1,71 @@
+package:
+  name: crossplane-function-auto-ready-fips
+  version: "0.5.1"
+  epoch: 0 # GHSA-6v2p-p543-phr9
+  description: A composition function that automatically detects when resources are ready
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - crossplane-crank
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: c74fa724aed04434769dae5143b0a47ef6ad4913
+      repository: https://github.com/crossplane-contrib/function-auto-ready
+      tag: "v${{package.version}}"
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      output: function
+      packages: .
+
+  - runs: |
+      # extract the xpkg to get the package.yaml which should be shipped alongside the package
+      # ref: https://chainguard-dev.slack.com/archives/C062D52J3T9/p1753993249758369?thread_ts=1753985657.421139&cid=C062D52J3T9
+      crank xpkg extract xpkg.upbound.io/crossplane-contrib/function-auto-ready:v${{package.version}}
+      mkdir -p "${{targets.destdir}}"
+      gunzip out.gz -c > "${{targets.destdir}}/package.yaml"
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: compat package to match entrypoint
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"
+          ln -sf /usr/bin/function "${{targets.contextdir}}/function"
+    test:
+      pipeline:
+        - runs: |
+            test "$(readlink /function)" = "/usr/bin/function"
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  environment:
+    environment:
+      GRPC_PORT: 9443
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Smoke tests
+      runs: |-
+        /usr/bin/function --help
+        cat /package.yaml
+    - name: Test if endpoint works
+      runs: |
+        /usr/bin/function -d --insecure "--address=localhost:${GRPC_PORT}" &
+        DAEMON_PID=$!
+        trap 'kill -9 "${DAEMON_PID}"' exit
+        wait-for-it "localhost:${GRPC_PORT}"
+        curl "localhost:${GRPC_PORT}" --http0.9 -o - | xxd | grep -F -e "0500 0040"

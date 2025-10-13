@@ -1,7 +1,7 @@
 package:
   name: mongod-7.0
-  version: "7.0.23"
-  epoch: 0
+  version: "7.0.24"
+  epoch: 2
   description: "The MongoDB Database"
   copyright:
     - license: "SSPL-1.0"
@@ -52,7 +52,7 @@ pipeline:
     with:
       repository: https://github.com/mongodb/mongo
       tag: r${{package.version}}
-      expected-commit: 90fdbd4f31a7684f0f2af59603ed60e09400ea69
+      expected-commit: d152f51d372c895ea28074cca66a44f92b5245e0
 
   - uses: patch
     with:
@@ -96,7 +96,7 @@ subpackages:
     test:
       pipeline:
         - runs: |
-            mongos --version
+            mongos --version | grep ${{package.version}}
             mongos --help
 
   - name: "mongo-7.0"
@@ -114,98 +114,8 @@ subpackages:
     test:
       pipeline:
         - runs: |
-            mongo --version
+            mongo --version | grep ${{package.version}}
             mongo --help
-
-  - name: "mongod-7.0-bitnami-compat"
-    description: "mongod bitnami compat"
-    dependencies:
-      runtime:
-        # Required by startup scripts
-        - bash
-        - coreutils
-        - posix-libc-utils
-        - merged-usrsbin
-        - mongo-7.0
-        - mongod-7.0
-        - mongosh
-        - posix-libc-utils
-        - render-template
-        # These are needed, but must be specified in the image config to enable FIPS alternatives.
-        #- gosu
-        #- mongo-tools
-        #- wait-for-port
-        #- yq
-        - wolfi-baselayout
-    pipeline:
-      - uses: bitnami/compat
-        with:
-          image: mongodb
-          version-path: 7.0/debian-12
-          commit: d685a6cc58fda7403ad9106c58c0fa851f53c85d
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/licenses
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/scripts
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/etc
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/common/bin
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/mongodb/bin
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/mongodb/logs
-          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/mongodb/tmp
-          mkdir -p "${{targets.subpkgdir}}"/bitnami/mongodb/conf
-          mkdir -p "${{targets.subpkgdir}}"/bitnami/mongodb/data/db
-
-          ln -sf /usr/bin/gosu "${{targets.subpkgdir}}"/opt/bitnami/common/bin/gosu
-          ln -sf /usr/bin/render-template "${{targets.subpkgdir}}"/opt/bitnami/common/bin/render-template
-          ln -sf /usr/bin/wait-for-port "${{targets.subpkgdir}}"/opt/bitnami/common/bin/wait-for-port
-          ln -sf /usr/bin/yq "${{targets.subpkgdir}}"/opt/bitnami/common/bin/yq
-
-          # sed all the scripts to use absolute path in the build environment
-          find . -iname "*.sh" -exec sed 's#/opt/bitnami#${{targets.subpkgdir}}/opt/bitnami#g' -i {} \;
-
-          # this script does some magic with env vars, templates, etc. etc.
-          # it is easier to run it than figure out everything that it touches
-
-          ${{targets.subpkgdir}}/opt/bitnami/scripts/mongodb/postunpack.sh
-
-          # un-sed everything back to absolute /opt/bitnami prefix
-          find ${{targets.subpkgdir}}/opt/bitnami -type f -exec sed 's#${{targets.subpkgdir}}##g' -i {} \;
-      - runs: |
-          # Set the target directory for the symbolic links
-          target_dir="${{targets.subpkgdir}}/opt/bitnami/mongodb/bin/"
-
-          # Loop through the binaries in /usr/bin/
-          for binary_path in /usr/bin/mongo*; do
-              # Check if the path is a file and not a directory
-              if [ -f "$binary_path" ]; then
-                  # Extract the binary name from the path
-                  binary_name=$(basename "$binary_path")
-
-                  # Create the symbolic link
-                  ln -sf "$binary_path" "$target_dir$binary_name"
-
-                  echo "Created symbolic link for $binary_name"
-              fi
-          done
-          for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
-            ln -sf /usr/bin/$binary "${{targets.subpkgdir}}"/opt/bitnami/mongodb/bin/$binary
-          done
-      - runs: |
-          # touch/mkdir these empty files and directories to quiet various startup messages per upstream
-          touch "${{targets.subpkgdir}}"/.dbshell
-          touch "${{targets.subpkgdir}}"/.mongorc.js
-          touch "${{targets.subpkgdir}}"/.mongoshrc.js
-          mkdir "${{targets.subpkgdir}}"/.mongodb
-          mkdir "${{targets.subpkgdir}}"/docker-entrypoint-initdb.d
-    test:
-      pipeline:
-        - runs: |
-            run-script --version
-            run-script --help
-        - runs: |
-            for binary in mongo mongod bsondump mongodump mongoexport mongofiles mongoimport mongorestore mongos mongosh mongostat mongotop; do
-              test "$(readlink /opt/bitnami/mongodb/bin/$binary)" = "/usr/bin/$binary"
-            done
 
   - name: "mongod-7.0-iamguarded-compat"
     description: "mongod iamguarded compat"
@@ -309,7 +219,117 @@ update:
     tag-filter: r7.0.
 
 test:
+  environment:
+    contents:
+      packages:
+        - netcat-openbsd
+        - openssl
+        - mongo-${{vars.major-minor-version}}
   pipeline:
     - runs: |
-        mongod --version
+        mongod --version | grep ${{package.version}}
         mongod --help
+    - runs: |
+        mkdir -p /tmp/mongotest/db
+        mkdir -p /tmp/mongotest/log
+
+        # Start mongod in background
+        mongod \
+          --dbpath /tmp/mongotest/db \
+          --logpath /tmp/mongotest/log/mongod.log \
+          --port 27017 \
+          --bind_ip 127.0.0.1 \
+          --storageEngine wiredTiger &
+
+        mongod_pid=$!
+        sleep 10
+
+        # Check database files created
+        if find /tmp/mongotest/db -name "*.wt" | grep -q .; then
+          echo "Database file creation: PASSED"
+        else
+          echo "Database file creation: FAILED"
+          exit 1
+        fi
+
+        # Test basic MongoDB operations
+        mongo --host 127.0.0.1:27017 --eval "
+          db = db.getSiblingDB('testdb');
+
+        // Insert a test document
+        result = db.testcollection.insertOne({name: 'test', value: 42, timestamp: new Date()});
+        print('Insert result: ' + JSON.stringify(result.acknowledged));
+
+        // Find the document
+        doc = db.testcollection.findOne({name: 'test'});
+        print('Found document: ' + JSON.stringify(doc));
+
+        // Count documents
+        count = db.testcollection.countDocuments({});
+        print('Document count: ' + count);
+
+        // Test index creation
+        db.testcollection.createIndex({name: 1});
+        indexes = db.testcollection.getIndexes();
+        print('Index count: ' + indexes.length);
+
+        // Test server status
+        status = db.runCommand('serverStatus');
+        print('Server uptime: ' + status.uptime + ' seconds');
+        print('MongoDB version: ' + status.version);
+        " --quiet
+
+        kill $mongod_pid
+        wait $mongod_pid
+    - runs: |
+        mkdir -p /tmp/mongotest/ssl
+        cd /tmp/mongotest/ssl
+
+        openssl genrsa 2048 > ca-key.pem
+        openssl req -new -nodes -x509 \
+          -days 2 \
+          -key ca-key.pem \
+          -out ca-cert.pem \
+          -subj "/CN=mongo CA"
+        cat ca-key.pem ca-cert.pem > ca.pem
+
+        openssl req \
+          -newkey rsa:2048 -nodes \
+          -keyout privkey.pem \
+          -x509 -days 2 \
+          -out cert.pem \
+          -CA ca-cert.pem \
+          -CAkey ca-key.pem \
+          -subj "/CN=localhost"
+        cat privkey.pem cert.pem > fullchain.pem
+
+        # Test TLS-enabled mongod startup
+        mkdir -p /tmp/mongotest/tls-db
+        mkdir -p /tmp/mongotest/tls-log
+
+        # Start TLS-enabled mongod
+        mongod \
+          --dbpath /tmp/mongotest/tls-db \
+          --logpath /tmp/mongotest/tls-log/mongod.log \
+          --port 27018 \
+          --bind_ip 127.0.0.1 \
+          --tlsMode allowTLS \
+          --tlsCertificateKeyFile /tmp/mongotest/ssl/fullchain.pem \
+          --tlsCAFile /tmp/mongotest/ssl/ca.pem \
+          --fork
+
+        timeout=30
+        while [ $timeout -gt 0 ]; do
+          if nc -z 127.0.0.1 27018 2>/dev/null; then
+            echo "TLS MongoDB is ready"
+            break
+          fi
+          sleep 1
+          timeout=$((timeout - 1))
+        done
+
+        if [ $timeout -eq 0 ]; then
+          echo "TLS MongoDB failed to start within 30 seconds"
+          cat /tmp/mongotest/tls-log/mongod.log
+          exit 1
+        fi
