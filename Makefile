@@ -372,16 +372,18 @@ $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILD
 	  --output=$(patsubst %-build,%,$@) \
 	  configs/$*/build.yaml
 
-$(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD)
+$(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
+	kopts=$$($(TOOLS_D)/get-install-opts "$@" configs/$*/build.yaml $(ARCH) ) && \
 	$(TOP_D)/apkoaas build \
-	--log-level=debug \
-	--arch=$(ARCH) \
-	--build-arch=$(BUILDER_ARCH) \
-	--builder-cpio=$(BUILDER_DEBUG_INITRD) \
-	--kernel=$(BUILDER_KERNEL) \
-	--output=$@ \
-	configs/$*/build.yaml "$@"
+	  --log-level=debug \
+	  --arch=$(ARCH) \
+	  --build-arch=$(BUILDER_ARCH) \
+	  --builder-cpio=$(BUILDER_INITRD) \
+	  --kernel=$(BUILDER_KERNEL) \
+	  --kernel-cmdline-append=cgri.opts="$$kopts" \
+	  --output=$(patsubst %-build,%,$@) \
+	  configs/$*/build.yaml
 
 .PHONY: clean
 clean:
