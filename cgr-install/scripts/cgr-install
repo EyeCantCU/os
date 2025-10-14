@@ -506,10 +506,28 @@ secureboot_setup() {
     # shellcheck disable=SC2206
     tosign=( $out );
     IFS="$oifs"
+    debug 1 "found ${#tosign[@]} EFI applications under boot/"
 
-    debug 1 "found ${#tosign[@]} to sign under boot/"
-    vr hash-to-efi-sig-list "${tosign[@]}" "$outd/db.esl" ||
-        { stderr "failed to sign ${#tosign[@]} files under boot/"; return 1; }
+    ## Calculate authenticode hashes for every EFI app
+    local -a sigdbargs
+    rm -f "$outd/db-b64-hashes.txt"
+    for efi in "${tosign[@]}"; do
+        ## At this point may as well write own tool
+        hash="$(authenticode "$efi" | sed -n 's|.*digest: ||p')"
+        [ -n "$hash" ] ||
+            { stderr "failed to calculate authenticode hash for $efi"; return 1; }
+        sigdbargs+=("--add-hash")
+        sigdbargs+=("$GUID")
+        sigdbargs+=("$hash")
+        ## Store base64 hashes for Azure
+        echo "$hash" | basenc -d --base16 | basenc --base64 >> "$outd/db-b64-hashes.txt"
+    done
+
+    ## Create db ESL with our GUID
+    vr virt-fw-sigdb -o "$outd/db.esl" "${sigdbargs[@]}" ||
+        { stderr "failed to create ESL for ${#tosign[@]} files under boot/"; return 1; }
+    ## Print generated db ESL
+    virt-fw-sigdb -i "$outd/db.esl" -p
 
     ## Create JSON vars file
     vr uefivars -i none -o json -O "$outd/uefi-data.json" \

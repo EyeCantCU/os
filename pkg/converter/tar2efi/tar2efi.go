@@ -274,7 +274,8 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 			"uefi-data.empty.fd",
 			// For enrollment in GCP / firmware / redfish / bmc
 			"PK.auth.bin", "KEK.auth.bin", "dbx.auth.bin", "db.auth.bin",
-			// TODO add authenticode hashes for Azure
+			// List of DB hashes for Azure
+			"db-b64-hashes.txt",
 		}
 		for _, efi := range efifiles {
 			efiFilePath := filepath.Join(workDir, "secureboot", efi)
