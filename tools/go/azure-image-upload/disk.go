@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,17 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/pageblob"
 )
 
-func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, diskName string, sizeGB int, resourceGroup, region string, arch armcompute.Architecture, tags map[string]*string, uploadJobs int, verbose bool) (string, error) {
+func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, diskName string, sizeGB int, resourceGroup, region string, arch armcompute.Architecture, tags map[string]*string, verbose bool) (string, error) {
 	vhdPath, cleanup, err := prepareVHDImage(imagePath, sizeGB, verbose)
 	if err != nil {
 		return "", fmt.Errorf("failed to prepare VHD image: %w", err)
@@ -98,7 +92,7 @@ func uploadDiskImage(ctx context.Context, clients *AzureClients, imagePath, disk
 
 	log.Printf("Uploading VHD to Azure")
 
-	err = uploadVHDToBlob(ctx, vhdPath, uploadURL, uploadJobs, verbose)
+	err = uploadVHDToBlob(ctx, vhdPath, uploadURL, verbose)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload VHD: %w", err)
 	}
@@ -196,147 +190,16 @@ func getFileSize(filePath string) (int64, error) {
 	return info.Size(), nil
 }
 
-func uploadVHDToBlob(ctx context.Context, vhdPath, uploadURL string, jobs int, verbose bool) error {
-	file, err := os.Open(vhdPath)
-	if err != nil {
-		return fmt.Errorf("failed to open VHD file: %w", err)
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to stat VHD file: %w", err)
-	}
-	fileSize := stat.Size()
-
-	client, err := pageblob.NewClientWithNoCredential(uploadURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create blob client: %w", err)
-	}
-
-	// Page blobs require 512-byte aligned chunks,
-	// with a maximum of 4MiB per chunk.
-	const chunkSize = 4 * 1024 * 1024
-	var offset, uploaded int64 = 0, 0
-	var wg sync.WaitGroup
-
-	// Hold this to read or write to offset or file.
-	var vhdMu sync.Mutex
-
-	var uploadedMu sync.Mutex
-
-	var errs []error
-	var errsMu sync.RWMutex
-
-	uploadStart := time.Now()
-
-	logErr := func(e error) {
-		errsMu.Lock()
-		defer errsMu.Unlock()
-		errs = append(errs, e)
-		if verbose {
-			log.Printf("error during VHD upload, canceling\n")
-		}
-	}
-
-	logUpload := func(uploaded int64) {
-		elapsed := time.Since(uploadStart)
-		avgSpeedMBps := float64(uploaded) / (1024 * 1024) / elapsed.Seconds()
-		log.Printf("Uploaded %d MB / %d MB (avg speed: %.2f MB/s)",
-			offset/(1024*1024), fileSize/(1024*1024), avgSpeedMBps)
-	}
-
+func uploadVHDToBlob(ctx context.Context, vhdPath, uploadURL string, verbose bool) error {
+	uploadCmd := exec.Command("azcopy", "copy", vhdPath, uploadURL, "--blob-type=PageBlob")
 	if verbose {
-		log.Printf("uploading VHD with %d jobs\n", jobs)
-		logUpload(0)
+		log.Printf("Running: %s\n", uploadCmd.String())
 	}
-
-	// Launch jobs to upload
-	for i := 0; i < jobs; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Get buffer for this job, start upload loop.
-			buffer := make([]byte, chunkSize)
-			for {
-				// If another job failed, exit early.
-				errsMu.RLock()
-				done := len(errs) > 0
-				errsMu.RUnlock()
-				if done {
-					break
-				}
-
-				// Lock upload resources, then we can read a chunk into our buffer.
-				// Release lock if we encounter an error
-				vhdMu.Lock()
-				n, err := file.Read(buffer)
-				if err == io.EOF {
-					vhdMu.Unlock()
-					break
-				}
-				if err != nil {
-					logErr(fmt.Errorf("failed to read from file: %w", err))
-					vhdMu.Unlock()
-					break
-				}
-
-				if n%512 != 0 {
-					// n is some non-integer multiple of 512
-					// get that multiple as an int, add 1, mutiply by 512
-					// and we're at the next 512-aligned size.
-					paddedSize := ((n / 512) + 1) * 512
-					for i := n; i < paddedSize; i++ {
-						buffer[i] = 0
-					}
-					n = paddedSize
-				}
-
-				thisOffset := offset
-
-				// Bump offset, we're responsible for uploading it now. Unlock resources
-				// for next job.
-				offset += int64(n)
-
-				vhdMu.Unlock()
-
-				// Upload chunk
-				_, err = client.UploadPages(ctx, streaming.NopCloser(bytes.NewReader(buffer[:n])),
-					blob.HTTPRange{Offset: thisOffset, Count: int64(n)}, nil)
-				if err != nil {
-					logErr(fmt.Errorf("failed to upload page at offset %d: %w", thisOffset, err))
-					break
-				}
-
-				if verbose {
-					uploadedMu.Lock()
-					uploaded += int64(n)
-					if uploaded%(100*1024*1024) == 0 { // Log every 100 MiB
-						// Move cursor up one line, clear it, and return to beginning
-						fmt.Fprint(os.Stderr, "\033[1A\033[2K\r")
-						logUpload(uploaded)
-					}
-					uploadedMu.Unlock()
-				}
-
-			}
-		}()
+	if output, err := uploadCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to upload disk: %w\noutput: %s", err, output)
+	} else if verbose {
+		log.Printf("Output: %s\n", output)
 	}
-	wg.Wait()
-
-	errsMu.Lock()
-	defer errsMu.Unlock()
-
-	if len(errs) > 0 {
-		for _, e := range errs {
-			log.Printf("%v\n", e)
-		}
-		return fmt.Errorf("Failed upload with %d errs\n", len(errs))
-	}
-	elapsed := time.Since(uploadStart)
-	avgSpeedMBps := float64(offset) / (1024 * 1024) / elapsed.Seconds()
-	log.Printf("Upload completed: %d bytes (avg speed: %.2f MB/s)", offset, avgSpeedMBps)
-
 	return nil
 }
 

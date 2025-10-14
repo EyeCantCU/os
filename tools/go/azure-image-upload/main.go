@@ -28,7 +28,6 @@ var (
 	regions        []string
 	tags           map[string]string
 	subscriptionID string
-	uploadJobs     int
 	diskSizeGB     int
 )
 
@@ -80,7 +79,6 @@ Examples:
 	rootCmd.Flags().BoolVar(&uploadOnly, "upload-only", false, "Only upload disk, don't create gallery image")
 	rootCmd.Flags().StringSliceVar(&regions, "regions", strings.Split(defaultRegions, ","), "Target regions")
 	rootCmd.Flags().StringToStringVar(&tags, "tags", map[string]string{"env": "dev"}, "Resource tags (key=value)")
-	rootCmd.Flags().IntVarP(&uploadJobs, "jobs", "j", runtime.NumCPU(), "Jobs for uploading disk (default: num CPUs)")
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -122,10 +120,6 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("specify at least one region")
 	}
 
-	if uploadJobs < 1 {
-		return fmt.Errorf("must have at least one upload job")
-	}
-
 	if diskSizeGB < 1 {
 		return fmt.Errorf("must have at least 1GB disk size")
 	}
@@ -157,7 +151,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	var diskID string
 
 	if !existingDisk {
-		diskID, err = uploadDiskImage(ctx, clients, imagePath, diskName, diskSizeGB, resourceGroup, regions[0], azArch, azTags, uploadJobs, verbose)
+		diskID, err = uploadDiskImage(ctx, clients, imagePath, diskName, diskSizeGB, resourceGroup, regions[0], azArch, azTags, verbose)
 		if err != nil {
 			return fmt.Errorf("failed to upload disk image: %w", err)
 		}
