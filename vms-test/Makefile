@@ -4,6 +4,9 @@ HASH := \#
 
 TEST_ARCHES := x86_64 aarch64
 runners=$(subst pkg/runner/,,$(wildcard pkg/runner/*))
+# grab 'artifacts' from vms-test/pkg/artifacts/cmd/root.go
+cmds=$(subst /cmd,,$(subst pkg/,,$(wildcard pkg/*/cmd)))
+
 test_groups=$(subst pkg/test/,,$(wildcard pkg/test/*))
 tests=$(foreach group,$(test_groups),$(subst pkg/test/,,$(wildcard pkg/test/$(group)/*)))
 
@@ -15,7 +18,7 @@ go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
 shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
-all: runners tests
+all: runners tests cmds
 
 $(go_tools_bin): go.mod pkg/tools/tools.go
 	@mkdir -p tools/
@@ -46,6 +49,12 @@ runners: $(runner_targets)
 $(runner_targets): runner/%: $(go_files) .go-generated
 	@mkdir -p runner
 	go build -C ./pkg/runner/$* -o ../../../runner/$*
+
+cmd_targets=$(foreach cmd,$(cmds),tools/$(cmd))
+cmds: $(cmd_targets)
+$(cmd_targets): tools/%: $(go_files) .go-generated
+	@mkdir -p tools
+	go build -C ./pkg/$*/cmd -o ../../../tools/$*
 
 test_targets=$(foreach arch,$(TEST_ARCHES),$(foreach test,$(tests),test/$(arch)/$(test)))
 tests: $(test_targets)
