@@ -1,26 +1,29 @@
 package:
   name: nginx-otel-stable
   version: 0.1.2
-  epoch: 0
+  epoch: 1
   description: NGINX OpenTelemetry module for stable nginx
   copyright:
     - license: Apache-2.0
+  dependencies:
+    runtime:
+      - c-ares
+  options:
+    # This package builds a dynamic module that is statically linked with its dependencies
+    no-depends: true
 
 environment:
   contents:
     packages:
       - build-base
       - busybox
+      - c-ares-dev
       - curl-dev
-      - grpc-dev
       - nginx-src
-      - ninja
       - openssl-dev
-      - opentelemetry-cpp-dev
-      - opentelemetry-proto
       - pcre-dev
       - pkgconf
-      - protobuf-dev
+      - re2-dev
       - systemd-dev
       - zlib-dev
 
@@ -32,19 +35,15 @@ pipeline:
       expected-commit: 72d8eed53af4c2cd6f3e30a2efe0e38d66f5e176
 
   - runs: |
-      # Configure NGINX to generate files necessary for dynamic module compilation
-      cd /usr/src/nginx
-      ./auto/configure --with-compat --with-http_ssl_module
+      # Configure nginx to prepare objs directory for module build
+      ./auto/configure --with-compat
+    working-directory: /usr/src/nginx
 
   - uses: cmake/configure
     with:
       opts: |
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-        -DNGX_OTEL_NGINX_BUILD_DIR=/usr/src/nginx/objs \
-        -DNGX_OTEL_GRPC=package \
-        -DNGX_OTEL_SDK=package \
-        -DNGX_OTEL_PROTO_DIR=/usr/share/opentelemetry-proto
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DNGX_OTEL_NGINX_BUILD_DIR=/usr/src/nginx/objs
 
   - uses: cmake/build
 
@@ -67,7 +66,9 @@ test:
     contents:
       packages:
         - binutils
+        - curl
         - nginx-stable
+        - wait-for-it
   pipeline:
     - uses: test/tw/ldd-check
     - runs: |
@@ -81,17 +82,37 @@ test:
         # Verify OpenTelemetry symbols are present
         nm -D /usr/lib/nginx/modules/ngx_otel_module.so | grep -q opentelemetry
 
-        # Test module loading syntax (without actually loading nginx)
+        # Test configuration syntax
         echo 'include /etc/nginx/modules/10_otel.conf;
-        events { worker_connections 1; }
+        user nobody;
+        events { }
         http {
             otel_exporter { endpoint localhost:4317; }
             otel_trace on;
-            server { listen 8080; location / { return 200 "test"; } }
+            server {
+                listen 8080;
+                location / { return 200 "nginx-otel module loaded successfully"; }
+            }
         }' > /tmp/test-nginx.conf
 
-        # Verify configuration syntax only (ignore user lookup errors)
-        nginx -t -c /tmp/test-nginx.conf 2>&1 | grep -q "syntax is ok"
+        nginx -t -c /tmp/test-nginx.conf
+    - uses: test/daemon-check-output
+      with:
+        start: nginx -c /tmp/test-nginx.conf -g 'daemon off; error_log /dev/stderr info;'
+        timeout: 10
+        post: |
+          # Wait for nginx to start listening on port 8080
+          wait-for-it localhost:8080 -t 5
+          # Make HTTP request to verify nginx is serving with otel module loaded
+          response=$(curl -s http://localhost:8080/)
+          if echo "$response" | grep -q "nginx-otel module loaded successfully"; then
+            echo "nginx-otel module test successful"
+          else
+            echo "Failed to get expected response from nginx"
+            exit 1
+          fi
+        expected_output: |
+          start worker process
 
 update:
   enabled: true
