@@ -30,6 +30,7 @@ var (
 	subscriptionID string
 	diskSizeGB     int
 	dbHashes       []string
+	trustedLaunch  bool
 )
 
 const (
@@ -126,6 +127,10 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("must have at least 1GB disk size")
 	}
 
+	if len(dbHashes) > 0 {
+		trustedLaunch = true
+	}
+
 	azTags := make(map[string]*string)
 	for k, v := range tags {
 		azTags[k] = &v
@@ -170,7 +175,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	}
 
 	if makeDefinition {
-		err = createImageDefinition(ctx, clients, gallery, definitionName, resourceGroup, regions[0], azArch, azTags, verbose)
+		err = createImageDefinition(ctx, clients, gallery, definitionName, resourceGroup, regions[0], azArch, azTags, trustedLaunch, verbose)
 		if err != nil {
 			return fmt.Errorf("failed to create image definition: %w", err)
 		}

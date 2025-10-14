@@ -11,7 +11,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 )
 
-func createImageDefinition(ctx context.Context, clients *AzureClients, galleryName, definitionName, resourceGroup, region string, arch armcompute.Architecture, tags map[string]*string, verbose bool) error {
+func createImageDefinition(ctx context.Context, clients *AzureClients, galleryName, definitionName, resourceGroup, region string, arch armcompute.Architecture, tags map[string]*string, trustedLaunch, verbose bool) error {
 	imageDefinition := armcompute.GalleryImage{
 		Location: to.Ptr(region),
 		Properties: &armcompute.GalleryImageProperties{
@@ -24,14 +24,17 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, galleryNa
 				SKU:       to.Ptr(definitionName),
 			},
 			HyperVGeneration: to.Ptr(armcompute.HyperVGenerationV2),
-			Features: []*armcompute.GalleryImageFeature{
-				{
-					Name:  to.Ptr("SecurityType"),
-					Value: to.Ptr("TrustedLaunchSupported"),
-				},
-			},
 		},
 		Tags: tags,
+	}
+
+	if trustedLaunch {
+		imageDefinition.Properties.Features = []*armcompute.GalleryImageFeature{
+			{
+				Name:  to.Ptr("SecurityType"),
+				Value: to.Ptr("TrustedLaunchSupported"),
+			},
+		}
 	}
 
 	log.Printf("Creating image definition: %s in gallery: %s", definitionName, galleryName)
@@ -76,24 +79,26 @@ func createImageVersion(ctx context.Context, clients *AzureClients, galleryName,
 			PublishingProfile: &armcompute.GalleryImageVersionPublishingProfile{
 				TargetRegions: targetRegions,
 			},
-
-			SecurityProfile: &armcompute.ImageVersionSecurityProfile{
-				UefiSettings: &armcompute.GalleryImageVersionUefiSettings{
-					AdditionalSignatures: &armcompute.UefiKeySignatures{
-						Db: []*armcompute.UefiKey{
-							{
-								Type:  to.Ptr(armcompute.UefiKeyTypeSHA256),
-								Value: targetDb,
-							},
-						},
-					},
-					SignatureTemplateNames: []*armcompute.UefiSignatureTemplateName{
-						to.Ptr(armcompute.UefiSignatureTemplateNameMicrosoftUefiCertificateAuthorityTemplate),
-					},
-				},
-			},
 		},
 		Tags: tags,
+	}
+
+	if len(targetDb) > 0 {
+		imageVersion.Properties.SecurityProfile = &armcompute.ImageVersionSecurityProfile{
+			UefiSettings: &armcompute.GalleryImageVersionUefiSettings{
+				AdditionalSignatures: &armcompute.UefiKeySignatures{
+					Db: []*armcompute.UefiKey{
+						{
+							Type:  to.Ptr(armcompute.UefiKeyTypeSHA256),
+							Value: targetDb,
+						},
+					},
+				},
+				SignatureTemplateNames: []*armcompute.UefiSignatureTemplateName{
+					to.Ptr(armcompute.UefiSignatureTemplateNameMicrosoftUefiCertificateAuthorityTemplate),
+				},
+			},
+		}
 	}
 
 	log.Printf("Creating image version: %s for definition: %s", version, definitionName)
