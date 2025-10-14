@@ -323,6 +323,7 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 		--azure-container $(QEMU_AZSTORAGECONTAINER) \
 		--raw-path $(dir $@)disk.raw \
 		--qcow2-path $(dir $@)disk.qcow2 \
+		--edk2vars-path $(dir $@)uefi-data.fd \
 		--sign-gcs-urls --sign-az-urls)
 
 .PHONY: publish-vmware
