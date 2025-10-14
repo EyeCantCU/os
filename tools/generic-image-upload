@@ -16,6 +16,7 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH --raw-pa
 
   Storage destination arguments (at least one required):
     --gcs-bucket BUCKET  GCS bucket URL (e.g., gs://bucket-name)
+    --s3-bucket BUCKET  S3 bucket URL (e.g., s3://bucket-name)
     --azure-account ACCOUNT  Azure storage account name
     --azure-container CONTAINER  Azure storage container name
 
@@ -27,8 +28,10 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH --raw-pa
     --artifact-prefix PREFIX  Artifact filename prefix (default: name-arch-timestamp)
     --sign-gcs-urls      Generate signed URLs for GCS uploaded artifacts
     --sign-az-urls       Generate signed URLs for Azure uploaded artifacts
+    --sign-s3-urls       Generate signed URLs for S3 uploaded artifacts
     --signed-gcs-url-expiry DURATION  Expiry duration for GCS signed URLs (e.g., 12h, 24h) [12h]
     --signed-az-url-expiry DURATION   Expiry duration for Azure signed URLs (e.g., 12 hours, 24 hours) [12 hours]
+    --signed-s3-url-expiry DURIATION  Expiry duration (in seconds) for Azure signed URLs (e.g., 43200) [43200 (12 hours)]
     --azure-storage-tier TIER Access tier for Azure blobs [cool]
     -v | --verbose       Be more verbose
     -h | --help         Show this help
@@ -69,6 +72,15 @@ _az() {
     az "$@" && return 0
     rc=$?
     stderr "ERROR: az command failed with exit code $rc: az $*"
+    return $rc
+}
+
+_aws() {
+    local rc=0
+    debug "Executing: aws $*"
+    aws "$@" && return 0
+    rc=$?
+    stderr "ERROR: aws command failed with exit code $rc: aws $*"
     return $rc
 }
 
@@ -118,6 +130,19 @@ upload_azure_file() {
     echo "$blob_url"
 }
 
+upload_s3_file() {
+    local local_path="$1"
+    local s3_path="$2"
+    local filename="$3"
+
+    info "Uploading $filename to $s3_path"
+    _aws s3 cp "$local_path" "$s3_path" >&2 || {
+        stderr "ERROR: Failed to upload $local_path to $s3_path"
+        return 1
+    }
+    echo "$s3_path"
+}
+
 generate_gcs_signed_url() {
     local gcs_path="$1"
     local expiry="$2"
@@ -162,6 +187,20 @@ generate_azure_signed_url() {
     echo "$signed_url"
 }
 
+generate_s3_signed_url() {
+    local s3_path="$1"
+    local expiry="$2"
+    local signed_url
+
+    debug "Generating signed URL for $s3_path with expiry $expiry"
+    signed_url=$(_aws s3 presign "$gcs_path" \
+        --expires-in="$expiry") || {
+        stderr "ERROR: Failed to generate signed URL for $s3_path"
+        return 1
+    }
+    echo "$signed_url"
+}
+
 get_gcp_arch() {
     local arch="$1"
     case "$arch" in
@@ -175,6 +214,15 @@ get_azure_arch() {
     local arch="$1"
     case "$arch" in
         x86_64|amd64) echo "x64";;
+        aarch64|arm64) echo "arm64";;
+        *) stderr "ERROR: Unsupported architecture: $arch"; return 1;;
+    esac
+}
+
+get_aws_arch() {
+    local arch="$1"
+    case "$arch" in
+        x86_64|amd64) echo "x86_64";;
         aarch64|arm64) echo "arm64";;
         *) stderr "ERROR: Unsupported architecture: $arch"; return 1;;
     esac
@@ -200,9 +248,19 @@ derive_azure_path_prefix() {
     echo "${azarch}/${name}/${timestamp}"
 }
 
+derive_s3_path_prefix() {
+    local name="$1"
+    local arch="$2"
+    local timestamp="$3"
+    local awsarch
+    awsarch=$(get_aws_arch "$arch") || return 1
+
+    echo "${awsarch}/${name}/${timestamp}"
+}
+
 main() {
     local short_opts="hv"
-    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,edk2vars-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,azure-storage-tier:"
+    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,s3-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,edk2vars-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,sign-s3-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,signed-s3-url-expiry:,azure-storage-tier:"
     local getopt_out=""
     if ! getopt_out=$(getopt --name "${0##*/}" \
         --options "${short_opts}" --long "${long_opts}" -- "$@"); then
@@ -213,6 +271,7 @@ main() {
 
     local name="" timestamp="" arch="" gcs_bucket="" azure_account="" azure_container="" azure_storage_tier="cool" raw_path="" qcow2_path="" vmdk_path="" vmdk_flat_path="" edk2vars_path=""
     local artifact_prefix="" sign_gcs_urls=false sign_az_urls=false signed_gcs_url_expiry="12h" signed_az_url_expiry="12 hours"
+    local s3_bucket="" sign_s3_urls=false signed_s3_url_expiry="43200"
 
     while [ $# -ne 0 ]; do
         case "$1" in
@@ -224,6 +283,7 @@ main() {
             --gcs-bucket) gcs_bucket="$2"; shift;;
             --azure-account) azure_account="$2"; shift;;
             --azure-container) azure_container="$2"; shift;;
+            --s3-bucket) s3_bucket="$2"; shift;;
             --raw-path) raw_path="$2"; shift;;
             --qcow2-path) qcow2_path="$2"; shift;;
             --vmdk-path) vmdk_path="$2"; shift;;
@@ -232,8 +292,10 @@ main() {
             --artifact-prefix) artifact_prefix="$2"; shift;;
             --sign-gcs-urls) sign_gcs_urls=true;;
             --sign-az-urls) sign_az_urls=true;;
+            --sign-s3-urls) sign_s3_urls=true;;
             --signed-gcs-url-expiry) signed_gcs_url_expiry="$2"; shift;;
             --signed-az-url-expiry) signed_az_url_expiry="$2"; shift;;
+            --signed-s3-url-expiry) signed_s3_url_expiry="$2"; shift;;
             --azure-storage-tier) azure_storage_tier="$2"; shift;;
             --) shift; break;;
             *) stderr "ERROR: Unknown option: $1"; Usage 1>&2; return 1;;
@@ -247,8 +309,8 @@ main() {
         return 1
     fi
 
-    if [ -z "$gcs_bucket" ] && [ -z "$azure_account" ]; then
-        stderr "ERROR: At least one storage destination must be specified (--gcs-bucket or --azure-account/--azure-container)"
+    if [ -z "$gcs_bucket" ] && [ -z "$azure_account" ] && [ -z "$s3_bucket" ]; then
+        stderr "ERROR: At least one storage destination must be specified (--gcs-bucket, --s3-bucket, or --azure-account/--azure-container)"
         Usage 1>&2
         return 1
     fi
@@ -304,6 +366,15 @@ main() {
             stderr "ERROR: 'az' not found in PATH (required for Azure upload)"
             return 1
         }
+    fi
+
+    if [ -n "$s3_bucket" ]; then
+        command -v aws >/dev/null 2>&1 || {
+            stderr "ERROR: 'aws' not found in PATH (required for AWS upload)"
+            return 1
+        }
+        s3_bucket="${s3_bucket#s3://}"
+        s3_bucket="s3://$s3_bucket"
     fi
 
     local gcparch
