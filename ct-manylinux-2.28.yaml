@@ -1,7 +1,8 @@
+#nolint:update-identifier-must-match-git-repository
 package:
   name: ct-manylinux-2.28
   version: "1.28.0"
-  epoch: 2
+  epoch: 3
   description: "the cross native toolchain for manylinux 2.28"
   copyright:
     - license: GPL-3.0-or-later
@@ -13,6 +14,7 @@ package:
   dependencies:
     runtime:
       - ${{package.name}}-gcc-${{vars.gcc-default-version}}
+      - oldlibstdcxx-2.28
     replaces:
       # because we must replace the empty clang config file
       - openssf-compiler-options
@@ -31,9 +33,15 @@ environment:
       # can be used to bump configs
       - crosstool-ng~${{package.version}}
       - gcc-${{vars.gcc-default-version}}-default
+      - oldlibstdcxx-2.28 # for ABI testing
+      - rpm
 
 vars:
   gcc-default-version: 14
+  # This variable selects a target libstdc++ ABI. It maps to a base GCC version
+  # that provided that ABI (80 = GCC 8.0, 48 == GCC 4.8). The libstdc++ that
+  # provided by GCC 8.0 is our target ABI for manylinux-2.28.
+  toolset-nonsharedver: 80
 
 # note also update the ct configs and patches
 data:
@@ -43,6 +51,87 @@ data:
       14:
 
 pipeline:
+  - working-directory: gcc-toolset-14-gcc
+    uses: git-checkout
+    with:
+      repository: https://git.almalinux.org/rpms/gcc-toolset-14-gcc
+      tag: imports/c8/gcc-toolset-14-gcc-14.2.1-7.1.el8_10
+      expected-commit: 62cb63d4a3ddb6b77a5a69794f2b8f76c3a25ad1
+
+  - working-directory: gcc-toolset-13-gcc
+    uses: git-checkout
+    with:
+      repository: https://git.almalinux.org/rpms/gcc-toolset-13-gcc
+      tag: imports/c8/gcc-toolset-13-gcc-13.3.1-2.2.el8_10
+      expected-commit: 0e3b5669d1f5d0f01ff31a2686f9b29e46e9982e
+
+  - name: "Munge gcc-toolset patches so crosstool-ng will apply them"
+    working-directory: gcc-toolset-14-gcc
+    runs: |
+      rpmspec --parse SPECS/gcc.spec > SPECS/gcc.spec.parsed
+      grep -E '^Patch[0-9]+:' < SPECS/gcc.spec.parsed > SPECS/gcc.patches
+      patchdir="../patches/gcc/14.3.0"
+      i=0
+      while read -r patchref filename; do
+        # ct-ng applies patches in the order returned by readdir(). While
+        # that's not guaranteed to be a predictable/sorted order, it
+        # currently works. Rename each patch file to include a numerical
+        # prefix that represents the order it was found in the spec file.
+        i=$((i + 1))
+        newname="$(printf %04d $i)-$(echo "${patchref}" | tr : -)-${filename}"
+        case "$filename" in
+          gcc14-pr118509.patch)
+            # Already upstream in GCC 14.3.0
+            continue
+            ;;
+          isl-rh2155127.patch)
+            # Already upstream in 0.26
+            continue
+            ;;
+          *)
+            ;;
+        esac
+        mkdir -p "$patchdir"
+        cp "SOURCES/$filename" "$patchdir/$newname"
+        # Convert any -p0 patches to -p1 patches
+        grep '^--- a/' "$patchdir/$newname" || \
+          sed -i -e 's!^--- !&a/!' -e 's!^+++ !&b/!' "$patchdir/$newname"
+      done < SPECS/gcc.patches
+
+  - name: "Munge gcc-toolset patches so crosstool-ng will apply them"
+    working-directory: gcc-toolset-13-gcc
+    runs: |
+      rpmspec --parse SPECS/gcc.spec > SPECS/gcc.spec.parsed
+      grep -E '^Patch[0-9]+:' < SPECS/gcc.spec.parsed > SPECS/gcc.patches
+      patchdir="../patches/gcc/13.4.0"
+      i=0
+      while read -r patchref filename; do
+        # ct-ng applies patches in the order returned by readdir(). While
+        # that's not guaranteed to be a predictable/sorted order, it
+        # currently works. Rename each patch file to include a numerical
+        # prefix that represents the order it was found in the spec file.
+        i=$((i + 1))
+        newname="$(printf %04d $i)-$(echo "${patchref}" | tr : -)-${filename}"
+        case "$filename" in
+          gcc13-znver5.patch|gcc13-vector-merge-*.patch)
+            # These don't apply to 13.4.0, but are also for archs
+            # we don't build for, so just skip them.
+            continue
+            ;;
+          isl-rh2155127.patch)
+            # Already upstream in 0.26
+            continue
+            ;;
+          *)
+            ;;
+        esac
+        mkdir -p "$patchdir"
+        cp "SOURCES/$filename" "$patchdir/$newname"
+        # Convert any -p0 patches to -p1 patches
+        grep '^--- a/' "$patchdir/$newname" || \
+          sed -i -e 's!^--- !&a/!' -e 's!^+++ !&b/!' "$patchdir/$newname"
+      done < SPECS/gcc.patches
+
   # Note ct-ng has all mirrors and checksums built-in, but doing fetch
   # instead to run the ct-ng build offline, and to make all of these
   # urls get surfaced in sbom
@@ -184,7 +273,7 @@ pipeline:
       + %{!nostdinc:-nostdinc -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include) -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include-fixed) -idirafter /usr/lib/oldglibc/usr/include -idirafter /usr/include}
 
       *link:
-      + -L/usr/lib/oldglibc/usr/lib -ldl -lutil -lanl --allow-shlib-undefined
+      + -L/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /) -L/usr/lib/oldglibc/usr/lib -ldl -lutil -lanl --allow-shlib-undefined
       EOF
 
   - name: Toolchain integration - clang
@@ -194,7 +283,7 @@ pipeline:
       -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}
       -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}/${{build.arch}}-linux-gnu
       -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}/backward
-      -L/usr/lib/oldglibc/usr/lib
+      -L/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}} -L/usr/lib/oldglibc/usr/lib
       -ldl -lutil -lanl
       -Wl,--allow-shlib-undefined
       EOF
@@ -230,6 +319,63 @@ subpackages:
           # FIXME: avoid doing a full bootstrap for each version
           # (abusing ct-ng STOP/RESTART doesn't work because it checks that the config did not change)
           ct-ng build.0
+      - uses: test/oldlibstdc++
+        with:
+          oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+          newlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++.so.6"
+          nonsharedlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++_nonshared${{vars.toolset-nonsharedver}}.a"
+          cc: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc/xgcc"
+          cc-prefix-dir: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc"
+      - name: "save off full libraries for testing"
+        runs: |
+          gcc_target_platform="${{build.arch}}-linux-gnu"
+          mkdir -p ${{targets.contextdir}}/usr/lib/${{context.name}}/test
+          (cd .build/$gcc_target_platform/build/build-cc-gcc-final/$gcc_target_platform/libstdc++-v3/src/.libs && tar -cz *) > \
+            "${{targets.contextdir}}/usr/lib/${{context.name}}/test/libs.tar.gz"
+      - name: move static C++ libs to gcc-private directories
+        runs: |
+          FULLPATH="${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}"
+          mkdir -p "$FULLPATH"
+          mv ./x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/lib*++*.a "$FULLPATH"
+      - name: install nonshared.a libs
+        runs: |
+          FULLPATH="${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}"
+          mkdir -p "$FULLPATH"
+          cp -vr .build/*-linux-gnu/build/build-cc-gcc-final/*-linux-gnu/libstdc++-v3/src/.libs/libstdc++_nonshared${{vars.toolset-nonsharedver}}.a "$FULLPATH"/libstdc++_nonshared.a
+          cp -vr .build/*-linux-gnu/build/build-cc-gcc-final/*-linux-gnu/libgfortran/.libs/libgfortran_nonshared${{vars.toolset-nonsharedver}}.a "$FULLPATH"/libgfortran_nonshared.a
+      - name: install ld scripts
+        runs: |
+          FULLPATH="${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}"
+          mkdir -p "$FULLPATH"
+          case "${{build.arch}}" in
+            aarch64)
+              oformat="OUTPUT_FORMAT(elf64-littleaarch64)"
+              ;;
+            x86_64)
+              oformat="OUTPUT_FORMAT(elf64-x86-64)"
+              ;;
+            *)
+              echo "ERROR: Unknown build arch: ${{build.arch}}" 1>&2
+              exit 1
+              ;;
+          esac
+
+          cat <<EOF > "$FULLPATH"/libstdc++.so
+          /* GNU ld script
+             Use the shared library, but some functions are only in
+             the static library, so try that secondarily.  */
+          ${oformat}
+          INPUT ( /usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6 -lstdc++_nonshared )
+          EOF
+
+          # FIXME: Add test case
+          cat <<EOF > "$FULLPATH"/libgfortran.so
+          /* GNU ld script
+             Use the shared library, but some functions are only in
+             the static library, so try that secondarily.  */
+          ${oformat}
+          INPUT ( /usr/lib/libgfortran.so.5 -lgfortran_nonshared )
+          EOF
       - name: common files should come from the default gcc build
         runs: |
           [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
@@ -238,6 +384,10 @@ subpackages:
           mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
           cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include ${{targets.destdir}}/usr/lib/oldglibc/usr/
           mv x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/*.a ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+      - name: remove oldglibc libstdc++ .so's; oldlibstdc++ will be used instead
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+          rm "${{targets.destdir}}/usr/lib/oldglibc/usr/lib"/libstdc++*
       - name: Fix aarch64 non-linker script libm
         runs: |
           [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
@@ -305,6 +455,15 @@ subpackages:
           with:
             cc: gcc-${{range.key}}
             cxx: g++-${{range.key}}
+        - name: "unpack the saved-off libstdc++.so"
+          runs: |
+            tar xvfz "/usr/lib/${{context.name}}/test/libs.tar.gz"
+        - uses: test/oldlibstdc++
+          with:
+            oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+            newlib: "libstdc++.so.6"
+            nonsharedlib: "/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/libstdc++_nonshared.a"
+            cc: "gcc-${{range.key}}"
 
 test:
   environment:
@@ -346,6 +505,7 @@ test:
         - x265-dev
         - yasm
         - zeromq-dev
+        - oldlibstdcxx-2.28
   pipeline:
     - uses: test/compiler/smoke
       with:
