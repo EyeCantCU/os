@@ -31,6 +31,7 @@ var (
 	diskSizeGB            int
 	acceleratedNetworking bool
 	deleteIfNecessary     bool
+	deleteJobs            int
 	dbHashes              []string
 	trustedLaunch         bool
 )
@@ -86,6 +87,7 @@ Examples:
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
 	rootCmd.Flags().BoolVar(&acceleratedNetworking, "accelerated-networking", false, "Enable accelerated networking support")
 	rootCmd.Flags().BoolVar(&deleteIfNecessary, "delete-if-necessary", false, "Delete and recreate image definition if conflicts occur")
+	rootCmd.Flags().IntVar(&deleteJobs, "delete-jobs", runtime.NumCPU()+1, "Parallel jobs for deletion")
 	rootCmd.Flags().StringSliceVar(&dbHashes, "db-hash", []string{}, "Secureboot db base64 encoded hashes to add")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -198,6 +200,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 			tags:                  azTags,
 			acceleratedNetworking: acceleratedNetworking,
 			deleteIfNecessary:     deleteIfNecessary,
+			deleteJobs:            deleteJobs,
 			trustedLaunch:         trustedLaunch,
 		}
 		err = createImageDefinition(ctx, clients, opts, verbose)
