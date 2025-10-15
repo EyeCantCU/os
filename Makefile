@@ -240,6 +240,9 @@ else ifeq ($(PUBLISH_TARGET),production)
   QEMU_GCSBUCKET = gs://wolfi-vm-images-workloads
   VMWARE_GCSBUCKET = gs://wolfi-vm-images-workloads
   RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
+else ifeq ($(PUBLISH_TARGET),ona)
+  # TODO: some IaC mechanism to define where an image goes when it publishes to S3.
+  AWS_S3_BUCKET=s3://s3-publish-testing # TOOD: Flip to customer bucket when they're ready
 else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
@@ -283,6 +286,21 @@ capture_stdout = rm -f "$(1)" && mkdir -p "$(dir $(1))" && \
 $(ARCH_OUT_D)/awspub/create/%.json: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
 	@$(call capture_stdout,$@,\
 	awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
+
+.PHONY: bespoke-publish-s3-aws-ecs-full-request-6943
+bespoke-publish-s3-aws-ecs-full-request-6943: $(ARCH_OUT_D)/aws-ecs-full-request-6943/publish.s3.json
+
+# Targets to publish AWS images to an S3 bucket
+$(ARCH_OUT_D)/aws-%/publish.s3.json: AWSNAME=$(PREFIX)-$*-$(AWSARCH)
+$(ARCH_OUT_D)/aws-%/publish.s3.json: $(ARCH_OUT_D)/aws-%/disk.raw $(ARCH_OUT_D)/aws-%/disk.vmdk
+	@mkdir -p $(dir $@)
+	$(call capture_stdout,$@, ./tools/generic-image-upload \
+		--name $(AWSNAME) \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--s3-bucket $(AWS_S3_BUCKET) \
+		--vmdk-path $(dir $@)disk.vmdk \
+		--edk2vars-path $(dir $@)uefi-data.fd)
 
 .PHONY: publish-azure
 publish-azure: $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name)))
