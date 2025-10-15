@@ -1,0 +1,74 @@
+package:
+  name: grafana-alloy-operator-fips
+  version: "0.3.11"
+  epoch: 0
+  description: "Provides entrypoint for kong"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - helm-operator-fips
+
+environment:
+  contents:
+    packages:
+      - busybox
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/grafana/alloy-operator
+      tag: alloy-operator-${{package.version}}
+      expected-commit: b86d424448bb238502d6eb79742ba6767efe695f
+
+  - runs: |
+      mkdir -p "${{targets.contextdir}}/opt/helm/helm-charts/alloy"
+      install -Dm644 operator/watches.yaml "${{targets.contextdir}}/opt/helm/watches.yaml"
+      cp -r operator/helm-charts/alloy/. "${{targets.contextdir}}/opt/helm/helm-charts/alloy/"
+
+test:
+  environment:
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: 32764
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Validate installed files
+      runs: |
+        set -euo pipefail
+        [ -f /opt/helm/watches.yaml ]
+        [ -r /opt/helm/watches.yaml ]
+        [ -d /opt/helm/helm-charts/alloy ]
+    - uses: test/kwok/cluster
+    - name: Apply CRDs
+      runs: |
+        set -euo pipefail
+        # add CRDs manually: https://github.com/grafana/alloy-operator/blob/b86d424448bb238502d6eb79742ba6767efe695f/charts/sample-parent-chart/templates/_crd-validation.tpl#L10
+        kubectl apply -f https://github.com/grafana/alloy-operator/releases/download/alloy-operator-${{package.version}}/collectors.grafana.com_alloy.yaml
+    - name: Test operator daemon
+      runs: |
+        set -euo pipefail
+        cd /opt/helm
+        helm-operator run ./watches.yaml >alloy-operator.log 2>&1 &
+        OPERATOR_PID=$!
+
+        # Wait for expected output with timeout
+        for i in $(seq 1 30); do
+          if grep -q "Watching all namespaces" alloy-operator.log 2>/dev/null; then
+            echo "Operator started successfully"
+            kill $OPERATOR_PID 2>/dev/null || true
+            exit 0
+          fi
+          sleep 1
+        done
+
+        echo "Timeout waiting for operator to start"
+        cat alloy-operator.log
+        kill $OPERATOR_PID 2>/dev/null || true
+        exit 1
+
+update:
+  enabled: true
+  github:
+    identifier: grafana/alloy-operator
+    strip-prefix: alloy-operator-
