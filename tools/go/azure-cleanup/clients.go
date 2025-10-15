@@ -21,6 +21,8 @@ type AzureClients struct {
 	PublicIP             *armnetwork.PublicIPAddressesClient
 	NetworkInterfaces    *armnetwork.InterfacesClient
 	VNet                 *armnetwork.VirtualNetworksClient
+	RouteTable *armnetwork.RouteTablesClient
+	Subnet *armnetwork.SubnetsClient
 }
 
 func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClients, error) {
@@ -79,6 +81,16 @@ func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClien
 	clients.VNet, err = armnetwork.NewVirtualNetworksClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual networks client: %w", err)
+	}
+
+	clients.RouteTable, err = armnetwork.NewRouteTablesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create route tables client: %w", err)
+	}
+
+	clients.Subnet, err = armnetwork.NewSubnetsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create subnets client: %w", err)
 	}
 
 	return clients, nil

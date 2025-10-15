@@ -22,6 +22,7 @@ const (
 	ResourceTypeNIC          ResourceType = "nic"
 	ResourceTypeIP           ResourceType = "ip"
 	ResourceTypeVnet         ResourceType = "vnet"
+	ResourceTypeRouteTable  ResourceType = "routetable"
 )
 
 var validResourceTypes = []ResourceType{
@@ -33,6 +34,7 @@ var validResourceTypes = []ResourceType{
 	ResourceTypeNIC,
 	ResourceTypeIP,
 	ResourceTypeVnet,
+	ResourceTypeRouteTable,
 }
 
 // Deletion sets define the order of resource deletion
@@ -52,6 +54,9 @@ var deletionSets = [][]ResourceType{
 	},
 	{
 		ResourceTypeVnet,
+	},
+	{
+		ResourceTypeRouteTable,
 	},
 }
 
@@ -133,6 +138,14 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 		allResources = append(allResources, resources...)
 	}
 
+	if shouldIncludeResourceType(ResourceTypeRouteTable) {
+		resources, err := getVirtualNetworks(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get route tables: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
 	return allResources, nil
 }
 
@@ -156,6 +169,8 @@ func deleteResource(ctx context.Context, clients *AzureClients, resource *Resour
 		return deleteNetworkInterface(ctx, clients, resource.Name)
 	case ResourceTypeVnet:
 		return deleteVirtualNetwork(ctx, clients, resource.Name)
+	case ResourceTypeRouteTable:
+		return deleteRouteTable(ctx, clients, resource.Name)
 	default:
 		return fmt.Errorf("unsupported resource type for deletion: %s", resource.ResourceType)
 	}
