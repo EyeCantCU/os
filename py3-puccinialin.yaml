@@ -44,18 +44,46 @@ subpackages:
       - uses: py/pip-build-install
         with:
           python: python${{range.key}}
-      - name: move usr/bin executables for -bin
-        runs: |
-          mkdir -p ./cleanup/${{range.key}}/
-          mv ${{targets.contextdir}}/usr/bin ./cleanup/${{range.key}}/
       - uses: strip
     test:
+      environment:
+        contents:
+          packages:
+            # Not strictly required at runtime since this package is just rust tooling
+            - build-base
       pipeline:
         - uses: test/tw/pip-check
         - uses: python/import
           with:
             python: python${{range.key}}
             import: ${{vars.pypi-package}}
+        - runs: |
+            mkdir -p /tmp/rustinstall
+            mkdir -p helloworld/src
+            tee helloworld/Cargo.toml <<'EOF'
+            [package]
+            name = "helloworld"
+            version = "0.1.0"
+            edition = "2024"
+
+            [dependencies]
+            EOF
+            tee helloworld/src/main.rs <<'EOF'
+            fn main() {
+              println!("Hello, Linky!");
+            }
+            EOF
+
+            cd helloworld
+            python${{range.key}} <<'EOF'
+            import os
+            from subprocess import check_call
+
+            from puccinialin import setup_rust
+
+            extra_env = setup_rust("/tmp/rustinstall")
+            check_call(["cargo", "build"], env={**os.environ, **extra_env})
+            EOF
 
   - range: py-versions
     name: py${{range.key}}-${{vars.pypi-package}}-bin
@@ -68,13 +96,18 @@ subpackages:
       runtime:
         - py${{range.key}}-${{vars.pypi-package}}
     pipeline:
-      - runs: |
-          mkdir -p ${{targets.contextdir}}/usr/
-          mv ./cleanup/${{range.key}}/bin ${{targets.contextdir}}/usr/
+      - uses: split/bin
     test:
       pipeline:
+        - uses: test/tw/help-check
+          with:
+            bins: puccinialize
         - runs: |
-            puccinialize --help
+            puccinialize | tee out.txt
+            grep -E -e "PATH.*/root/.cache" out.txt
+        - uses: test/tw/help-check
+          with:
+            bins: /root/.cache/puccinialin/cargo/bin/cargo
 
   - name: py3-supported-${{vars.pypi-package}}
     description: meta package providing ${{vars.pypi-package}} for supported python versions.
@@ -86,6 +119,7 @@ subpackages:
         - py3.13-${{vars.pypi-package}}
     test:
       pipeline:
+        - uses: test/metapackage
         - uses: python/import
           with:
             python: python3.10
