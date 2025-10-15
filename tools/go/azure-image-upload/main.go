@@ -14,23 +14,25 @@ import (
 )
 
 var (
-	verbose        bool
-	name           string
-	arch           string
-	resourceGroup  string
-	gallery        string
-	imageVersion   string
-	definitionName string
-	makeDefinition bool
-	existingDisk   bool
-	diskName       string
-	uploadOnly     bool
-	regions        []string
-	tags           map[string]string
-	subscriptionID string
-	diskSizeGB     int
-	dbHashes       []string
-	trustedLaunch  bool
+	verbose               bool
+	name                  string
+	arch                  string
+	resourceGroup         string
+	gallery               string
+	imageVersion          string
+	definitionName        string
+	makeDefinition        bool
+	existingDisk          bool
+	diskName              string
+	uploadOnly            bool
+	regions               []string
+	tags                  map[string]string
+	subscriptionID        string
+	diskSizeGB            int
+	acceleratedNetworking bool
+	deleteIfNecessary     bool
+	dbHashes              []string
+	trustedLaunch         bool
 )
 
 const (
@@ -82,6 +84,8 @@ Examples:
 	rootCmd.Flags().StringSliceVar(&regions, "regions", strings.Split(defaultRegions, ","), "Target regions")
 	rootCmd.Flags().StringToStringVar(&tags, "tags", map[string]string{"env": "dev"}, "Resource tags (key=value)")
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
+	rootCmd.Flags().BoolVar(&acceleratedNetworking, "accelerated-networking", false, "Enable accelerated networking support")
+	rootCmd.Flags().BoolVar(&deleteIfNecessary, "delete-if-necessary", false, "Delete and recreate image definition if conflicts occur")
 	rootCmd.Flags().StringSliceVar(&dbHashes, "db-hash", []string{}, "Secureboot db base64 encoded hashes to add")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -158,7 +162,17 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	var diskID string
 
 	if !existingDisk {
-		diskID, err = uploadDiskImage(ctx, clients, imagePath, diskName, diskSizeGB, resourceGroup, regions[0], azArch, azTags, verbose)
+		opts := &uploadDiskImageOpts{
+			imagePath:             imagePath,
+			diskName:              diskName,
+			sizeGB:                diskSizeGB,
+			resourceGroup:         resourceGroup,
+			region:                regions[0],
+			arch:                  azArch,
+			tags:                  azTags,
+			acceleratedNetworking: acceleratedNetworking,
+		}
+		diskID, err = uploadDiskImage(ctx, clients, opts, verbose)
 		if err != nil {
 			return fmt.Errorf("failed to upload disk image: %w", err)
 		}
@@ -175,13 +189,34 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	}
 
 	if makeDefinition {
-		err = createImageDefinition(ctx, clients, gallery, definitionName, resourceGroup, regions[0], azArch, azTags, trustedLaunch, verbose)
+		opts := &createImageDefinitionOpts{
+			galleryName:           gallery,
+			definitionName:        definitionName,
+			resourceGroup:         resourceGroup,
+			region:                regions[0],
+			arch:                  azArch,
+			tags:                  azTags,
+			acceleratedNetworking: acceleratedNetworking,
+			deleteIfNecessary:     deleteIfNecessary,
+			trustedLaunch:         trustedLaunch,
+		}
+		err = createImageDefinition(ctx, clients, opts, verbose)
 		if err != nil {
 			return fmt.Errorf("failed to create image definition: %w", err)
 		}
 	}
 
-	err = createImageVersion(ctx, clients, gallery, definitionName, imageVersion, resourceGroup, diskID, regions, azTags, dbHashes, verbose)
+	opts := &createImageVersionOpts{
+		galleryName:    gallery,
+		definitionName: definitionName,
+		version:        imageVersion,
+		resourceGroup:  resourceGroup,
+		diskID:         diskID,
+		regions:        regions,
+		tags:           azTags,
+		dbHashes:       dbHashes,
+	}
+	err = createImageVersion(ctx, clients, opts, verbose)
 	if err != nil {
 		return fmt.Errorf("failed to create image version: %w", err)
 	}
