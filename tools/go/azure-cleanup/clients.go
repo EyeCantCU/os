@@ -20,6 +20,7 @@ type AzureClients struct {
 	VirtualMachines      *armcompute.VirtualMachinesClient
 	PublicIP             *armnetwork.PublicIPAddressesClient
 	NetworkInterfaces    *armnetwork.InterfacesClient
+	VNet                 *armnetwork.VirtualNetworksClient
 }
 
 func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClients, error) {
@@ -73,6 +74,11 @@ func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClien
 	clients.NetworkInterfaces, err = armnetwork.NewInterfacesClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network interfaces client: %w", err)
+	}
+
+	clients.VNet, err = armnetwork.NewVirtualNetworksClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create virtual networks client: %w", err)
 	}
 
 	return clients, nil
