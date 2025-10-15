@@ -247,6 +247,8 @@ else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
 AZSTORAGEACCOUNT = chainguardvms$(PUBLISH_TARGET)
+# Extra user-provided flags
+AZ_IMAGEUPLOAD_FLAGS ?=
 QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
 VMWARE_AZSTORAGECONTAINER = chainguard-vms-vmware
 
@@ -313,7 +315,8 @@ $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(TOOLS_D)/azure-image-upl
 	@$(call capture_stdout,$@,\
 		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
-		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
+		$(addprefix --db-hash=,$(shell cat $(dir $@)db-b64-hashes.txt)) \
+		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(AZ_IMAGEUPLOAD_FLAGS) $(dir $@)disk.raw)
 
 .PHONY: publish-gcp
 publish-gcp: $(foreach name,$(disks_gcp),publish-gcp-$(subst gcp-,,$(name)))
