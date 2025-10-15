@@ -18,6 +18,7 @@ const (
 	ResourceTypeDisk         ResourceType = "disk"
 	ResourceTypeImage        ResourceType = "image"
 	ResourceTypeImageVersion ResourceType = "imageversion"
+	ResourceTypeVM           ResourceType = "vm"
 )
 
 var validResourceTypes = []ResourceType{
@@ -25,18 +26,18 @@ var validResourceTypes = []ResourceType{
 	ResourceTypeDisk,
 	ResourceTypeImage,
 	ResourceTypeImageVersion,
+	ResourceTypeVM,
 }
 
 // Deletion sets define the order of resource deletion
 // Each set can be deleted in parallel, but sets must be processed sequentially
 var deletionSets = [][]ResourceType{
-	// Set 1: Delete Disks and Image Versions first
+	{
+		ResourceTypeImageVersion,
+		ResourceTypeVM,
+	},
 	{
 		ResourceTypeDisk,
-		ResourceTypeImageVersion,
-	},
-	// Set 2: Delete dependent resources
-	{
 		ResourceTypeImage,
 	},
 }
@@ -87,6 +88,14 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 		allResources = append(allResources, resources...)
 	}
 
+	if shouldIncludeResourceType(ResourceTypeVM) {
+		resources, err := getVirtualMachines(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get gallery image versions: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
 	return allResources, nil
 }
 
@@ -97,11 +106,13 @@ func shouldIncludeResourceType(resourceType ResourceType) bool {
 func deleteResource(ctx context.Context, clients *AzureClients, resource *ResourceInfo) error {
 	switch resource.ResourceType {
 	case ResourceTypeDisk:
-		return deleteDisk(ctx, clients.Disks, resource.Name)
+		return deleteDisk(ctx, clients, resource.Name)
 	case ResourceTypeImage:
-		return deleteImage(ctx, clients.Images, resource.Name)
+		return deleteImage(ctx, clients, resource.Name)
 	case ResourceTypeImageVersion:
-		return deleteImageVersion(ctx, clients, resource)
+		return deleteImageVersion(ctx, clients, resource.Name)
+	case ResourceTypeVM:
+		return deleteVirtualMachine(ctx, clients, resource.Name)
 	default:
 		return fmt.Errorf("unsupported resource type for deletion: %s", resource.ResourceType)
 	}
@@ -130,13 +141,8 @@ func hasProtectionTag(tags map[string]*string, protectionTag string) bool {
 		return false
 	}
 
-	for tagName := range tags {
-		if tagName == protectionTag {
-			return true
-		}
-	}
-
-	return false
+	_, ok := tags[protectionTag]
+	return ok
 }
 
 // filterResourcesForDeletion applies all filtering logic to identify resources for deletion
