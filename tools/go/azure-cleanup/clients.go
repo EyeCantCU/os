@@ -21,8 +21,9 @@ type AzureClients struct {
 	PublicIP             *armnetwork.PublicIPAddressesClient
 	NetworkInterfaces    *armnetwork.InterfacesClient
 	VNet                 *armnetwork.VirtualNetworksClient
-	RouteTable *armnetwork.RouteTablesClient
-	Subnet *armnetwork.SubnetsClient
+	RouteTable           *armnetwork.RouteTablesClient
+	Subnet               *armnetwork.SubnetsClient
+	NetworkSecurityGroup *armnetwork.SecurityGroupsClient
 }
 
 func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClients, error) {
@@ -91,6 +92,11 @@ func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClien
 	clients.Subnet, err = armnetwork.NewSubnetsClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subnets client: %w", err)
+	}
+
+	clients.NetworkSecurityGroup, err = armnetwork.NewSecurityGroupsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create network security groups client: %w", err)
 	}
 
 	return clients, nil

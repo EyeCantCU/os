@@ -14,15 +14,16 @@ import (
 type ResourceType string
 
 const (
-	ResourceTypeAll          ResourceType = "all"
-	ResourceTypeDisk         ResourceType = "disk"
-	ResourceTypeImage        ResourceType = "image"
-	ResourceTypeImageVersion ResourceType = "imageversion"
-	ResourceTypeVM           ResourceType = "vm"
-	ResourceTypeNIC          ResourceType = "nic"
-	ResourceTypeIP           ResourceType = "ip"
-	ResourceTypeVnet         ResourceType = "vnet"
-	ResourceTypeRouteTable  ResourceType = "routetable"
+	ResourceTypeAll                  ResourceType = "all"
+	ResourceTypeDisk                 ResourceType = "disk"
+	ResourceTypeImage                ResourceType = "image"
+	ResourceTypeImageVersion         ResourceType = "imageversion"
+	ResourceTypeVM                   ResourceType = "vm"
+	ResourceTypeNIC                  ResourceType = "nic"
+	ResourceTypeIP                   ResourceType = "ip"
+	ResourceTypeVnet                 ResourceType = "vnet"
+	ResourceTypeRouteTable           ResourceType = "routetable"
+	ResourceTypeNetworkSecurityGroup ResourceType = "nsg"
 )
 
 var validResourceTypes = []ResourceType{
@@ -35,6 +36,7 @@ var validResourceTypes = []ResourceType{
 	ResourceTypeIP,
 	ResourceTypeVnet,
 	ResourceTypeRouteTable,
+	ResourceTypeNetworkSecurityGroup,
 }
 
 // Deletion sets define the order of resource deletion
@@ -57,6 +59,7 @@ var deletionSets = [][]ResourceType{
 	},
 	{
 		ResourceTypeRouteTable,
+		ResourceTypeNetworkSecurityGroup,
 	},
 }
 
@@ -146,6 +149,14 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 		allResources = append(allResources, resources...)
 	}
 
+	if shouldIncludeResourceType(ResourceTypeNetworkSecurityGroup) {
+		resources, err := getVirtualNetworks(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get network security groups: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
 	return allResources, nil
 }
 
@@ -171,6 +182,8 @@ func deleteResource(ctx context.Context, clients *AzureClients, resource *Resour
 		return deleteVirtualNetwork(ctx, clients, resource.Name)
 	case ResourceTypeRouteTable:
 		return deleteRouteTable(ctx, clients, resource.Name)
+	case ResourceTypeNetworkSecurityGroup:
+		return deleteNetworkSecurityGroup(ctx, clients, resource.Name)
 	default:
 		return fmt.Errorf("unsupported resource type for deletion: %s", resource.ResourceType)
 	}

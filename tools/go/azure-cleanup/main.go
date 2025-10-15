@@ -43,7 +43,7 @@ Examples:
 
   # Clean up only VMs and disks older than 1 day
   azure-cleanup --subscription-id "abc123" --resource-group "test-rg" \
-                --max-age 24h --resource-types "virtualmachine,disk"
+                --max-age 24h --resource-types "vm,disk"
 
   # Clean up resources matching a name pattern
   azure-cleanup --subscription-id "abc123" --resource-group "test-rg" \
@@ -57,7 +57,7 @@ Examples:
 
 	rootCmd.Flags().StringVarP(&subscriptionID, "subscription-id", "s", "", "Azure subscription ID")
 	rootCmd.Flags().StringVarP(&resourceGroup, "resource-group", "g", "", "Resource group to clean up")
-	rootCmd.Flags().StringSliceVarP(&resourceTypes, "resource-types", "t", []string{"all"}, "Comma-separated list of resource types to clean up (all,disk,image,imageversion,vm,nic,ip,vnet,routetable)")
+	rootCmd.Flags().StringSliceVarP(&resourceTypes, "resource-types", "t", []string{"all"}, "Comma-separated list of resource types to clean up (all,disk,image,imageversion,vm,nic,ip,vnet,routetable,nsg)")
 	rootCmd.Flags().DurationVarP(&maxAge, "max-age", "a", 24*time.Hour, "Maximum age of resources to keep (e.g., 24h, 7d)")
 	rootCmd.Flags().StringVarP(&protectionTag, "protection-tag", "p", "do-not-delete", "Tag name that prevents deletion (resources with this tag will be skipped)")
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Show what would be deleted without executing")
