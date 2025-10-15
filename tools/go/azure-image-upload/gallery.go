@@ -21,6 +21,7 @@ type createImageDefinitionOpts struct {
 	tags                  map[string]*string
 	acceleratedNetworking bool
 	deleteIfNecessary     bool
+	deleteJobs            int
 	trustedLaunch         bool
 }
 
@@ -83,9 +84,20 @@ func createImageDefinition(ctx context.Context, clients *AzureClients, opts *cre
 			log.Printf("Deleting %d image versions in parallel", len(versionNames))
 			errChan := make(chan error, len(versionNames))
 
+			// Stick job IDs in a queue
+			jobChan := make(chan int, opts.deleteJobs)
+			for i := 0; i < opts.deleteJobs; i++ {
+				jobChan <- i
+			}
+
 			for _, versionName := range versionNames {
 				go func(vName string) {
-					log.Printf("Deleting image version: %s", vName)
+					// Wait for available job ID
+					id := <-jobChan
+					// Put job ID back in queue for other image versions
+					defer func() { jobChan <- id }()
+					log.Printf("Deleting image version: %s in job %d", vName, id)
+
 					versionDeletePoller, err := clients.ImageVersions.BeginDelete(ctx, opts.resourceGroup, opts.galleryName, opts.definitionName, vName, nil)
 					if err != nil {
 						log.Printf("Failed to start deletion of image version %s: %v", vName, err)
