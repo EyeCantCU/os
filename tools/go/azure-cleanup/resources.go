@@ -19,6 +19,8 @@ const (
 	ResourceTypeImage        ResourceType = "image"
 	ResourceTypeImageVersion ResourceType = "imageversion"
 	ResourceTypeVM           ResourceType = "vm"
+	ResourceTypeNIC          ResourceType = "nic"
+	ResourceTypeIP           ResourceType = "ip"
 )
 
 var validResourceTypes = []ResourceType{
@@ -27,6 +29,8 @@ var validResourceTypes = []ResourceType{
 	ResourceTypeImage,
 	ResourceTypeImageVersion,
 	ResourceTypeVM,
+	ResourceTypeNIC,
+	ResourceTypeIP,
 }
 
 // Deletion sets define the order of resource deletion
@@ -39,6 +43,10 @@ var deletionSets = [][]ResourceType{
 	{
 		ResourceTypeDisk,
 		ResourceTypeImage,
+		ResourceTypeNIC,
+	},
+	{
+		ResourceTypeIP,
 	},
 }
 
@@ -96,6 +104,14 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 		allResources = append(allResources, resources...)
 	}
 
+	if shouldIncludeResourceType(ResourceTypeIP) {
+		resources, err := getPublicIPAddresses(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get gallery image versions: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
 	return allResources, nil
 }
 
@@ -113,6 +129,8 @@ func deleteResource(ctx context.Context, clients *AzureClients, resource *Resour
 		return deleteImageVersion(ctx, clients, resource.Name)
 	case ResourceTypeVM:
 		return deleteVirtualMachine(ctx, clients, resource.Name)
+	case ResourceTypeIP:
+		return deletePublicIPAddress(ctx, clients, resource.Name)
 	default:
 		return fmt.Errorf("unsupported resource type for deletion: %s", resource.ResourceType)
 	}
