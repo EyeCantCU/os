@@ -125,6 +125,7 @@ func TestCollectLogs(t *testing.T) {
 		id  files.ID
 	}{
 		{cmd: []string{"journalctl", "-b0"}, id: files.JournalCtlB0},
+		{cmd: []string{"bootctl", "--no-pager"}, id: files.BootCtl},
 		{cmd: []string{"systemd-analyze"}, id: files.SystemdAnalyze},
 		{cmd: []string{"systemd-analyze", "critical-chain"}, id: files.SystemdCriticalChain},
 	}

@@ -16,4 +16,5 @@ const (
 	NestedQemuConsole
 	ComplianceHTMLReport
 	ComplianceXMLResults
+	BootCtl
 )
