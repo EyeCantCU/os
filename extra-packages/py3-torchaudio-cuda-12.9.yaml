@@ -1,0 +1,214 @@
+package:
+  name: py3-torchaudio-cuda-12.9
+  version: 2.8.0
+  epoch: 1
+  description: Data manipulation and transformation for audio signal processing
+  resources:
+    cpu: 16
+    memory: 40Gi
+  copyright:
+    - license: BSD-2-Clause
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: "$1"
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.(\d+)$'
+    replace: "cu$1$2"
+    to: cuda-pyvariant
+
+vars:
+  pypi-package: torchaudio
+
+environment:
+  contents:
+    packages:
+      - ccache
+      - cmake
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - ninja
+      - nvidia-cuda-nvcc-gcc-${{vars.cuda-version}}
+      - py3-supported-build-base-dev
+      - py3-supported-torch-cuda-${{vars.cuda-version}}-dev
+  environment:
+    CFLAGS: "-Wno-error=nonnull -Wno-nonnull"
+    CXXFLAGS: "-Wno-error=nonnull -Wno-nonnull"
+    # Not having this makes the log at least 4x bigger
+    NVCC_APPEND_FLAGS: --compiler-options -fdelete-null-pointer-checks
+    BUILD_VERSION: ${{package.version}}+${{vars.cuda-pyvariant}}
+    CMAKE_CUDA_ARCHITECTURES: all
+    PATH: "$PATH:/usr/local/cuda-${{vars.cuda-version}}/bin"
+    TORCH_CUDA_ARCH_LIST: "5.2 6.0 6.1 7.0+PTX 8.0 8.6 8.7 8.9 9.0"
+    TORCH_NVCC_FLAGS: "-Xfatbin -compress-all"
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+
+data:
+  - name: py-versions
+    items:
+      3.10:
+      3.11:
+      3.12:
+      3.13:
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pytorch/audio.git
+      tag: v${{package.version}}
+      expected-commit: 6e1c7fe9ff6d82b8665d0a46d859d3357d2ebaaa
+
+  - runs: ccache -F 0 -M 0
+
+subpackages:
+  - name: libtorchaudio-cuda-${{vars.cuda-version}}
+    description: C++ torchaudio library
+    dependencies:
+      runtime:
+        - libtorch-cuda-${{vars.cuda-version}}
+        - sox-ng-dev
+    pipeline:
+      - uses: cmake/configure
+        with:
+          opts: |
+            -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${{vars.cuda-version}} \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc \
+            -DUSE_SYSTEM_NVTX=1 \
+            -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}"
+      - uses: cmake/build
+      - uses: cmake/install
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/lib
+          mv ${{targets.subpkgdir}}/usr/torchaudio/lib/*.so ${{targets.subpkgdir}}/usr/lib
+          rm -rf ${{targets.subpkgdir}}/usr/torchaudio/
+      - uses: strip
+    test:
+      pipeline:
+        # Torchaudio is moving towards deprecating C bindings, they do not have headers for it anymore even
+        - uses: test/tw/ldd-check
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+    description: ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-torch-cuda-${{vars.cuda-version}}
+        - py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}-shared
+        - sox-ng-dev
+        - sox-ng
+    pipeline:
+      - uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - name: move shared libraries
+        runs: |
+          mkdir -p bin-save/${{range.key}}/torchaudio
+          mkdir -p bin-save/${{range.key}}/torio
+          mv ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/torchaudio/lib/*.so bin-save/${{range.key}}/torchaudio
+          mv ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/torio/lib/*.so bin-save/${{range.key}}/torio
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - ffmpeg
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.pypi-package}}
+        - runs: |
+            python${{range.key}} <<'EOF' | grep -F -e "${{package.version}}"
+            import torchaudio
+            print(torchaudio.__version__)
+            EOF
+
+            # This will be deprecated by torchaudio in the next release (2.9), C-based code will just straight up be removed from it
+            # Redirecting to stderr disabled the deprecation message
+            python${{range.key}} <<'EOF' 2>/dev/null | grep -E -e "aifc.*aiffc.*aiff.*aif.*al.*au"
+            import torchaudio
+            print(torchaudio.utils.sox_utils.list_read_formats())
+            EOF
+
+            # This is fine since we do not want to ship deprecated versions of FFMPEG
+            python${{range.key}} <<'EOF' 2>&1 | grep -E -e "Tried.*6.*5.*4"
+            import torchaudio
+            print(torchaudio.utils.ffmpeg_utils.get_audio_encoders())
+            EOF
+
+            rm -f output.wav
+            ffmpeg -f lavfi -i "sine=f=1000:d=2" output.wav
+
+            python${{range.key}} <<'EOF' 2>/dev/null | tee output.txt
+            import torchaudio
+            audio_info = torchaudio.info("output.wav")
+            print(audio_info.sample_rate)
+            print(audio_info.encoding)
+            print(audio_info.num_channels)
+            EOF
+
+            get_line() {
+              sed -n "${1}p" output.txt | grep -F -e "${2}"
+            }
+            get_line 1 "44100"
+            get_line 2 "PCM_S"
+            get_line 3 "1"
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}-shared
+    description: Shared objects for compatibility with FFMPeg versions ${{vars.pypi-package}}
+    options:
+      # These are split up because they link to old versions on FFMPEG (on purpose)
+      # And we still want dependency resolution for everything that are not these .so files
+      no-depends: true
+    dependencies:
+      runtime:
+        - libgomp
+    pipeline:
+      - name: move shared libraries
+        runs: |
+          mkdir -p bin-save/${{range.key}}
+          mkdir -p ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/torchaudio/lib
+          mkdir -p ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/torio/lib
+          mv bin-save/${{range.key}}/torchaudio/*.so ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/torchaudio/lib
+          mv bin-save/${{range.key}}/torio/*.so ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/torio/lib
+      - uses: strip
+
+  - name: py3-supported-${{vars.pypi-package}}-${{vars.cuda-version}}
+    description: meta package providing ${{vars.pypi-package}} for supported python versions.
+    dependencies:
+      runtime:
+        - py3.10-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+        - py3.11-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+        - py3.12-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+        - py3.13-${{vars.pypi-package}}-cuda-${{vars.cuda-version}}
+    test:
+      pipeline:
+        - uses: test/metapackage
+        - uses: python/import
+          with:
+            python: python3.10
+            import: ${{vars.pypi-package}}
+        - uses: python/import
+          with:
+            python: python3.11
+            import: ${{vars.pypi-package}}
+        - uses: python/import
+          with:
+            python: python3.12
+            import: ${{vars.pypi-package}}
+        - uses: python/import
+          with:
+            python: python3.13
+            import: ${{vars.pypi-package}}
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/emptypackage
