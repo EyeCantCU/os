@@ -354,3 +354,7 @@ func diffSorted(a, b []string) {
 		fmt.Printf("  + %s\n", b[j])
 	}
 }
+
+func wolfictl(ctx context.Context) error {
+	return nil
+}
