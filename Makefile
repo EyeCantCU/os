@@ -296,6 +296,7 @@ $(ARCH_OUT_D)/aws-%/publish.s3.json: $(ARCH_OUT_D)/aws-%/disk.raw $(ARCH_OUT_D)/
 		--arch $(ARCH) \
 		--s3-bucket $(AWS_S3_BUCKET) \
 		--vmdk-path $(dir $@)disk.vmdk \
+		--awsvars-path $(dir $@)uefi-data.aws \
 		--edk2vars-path $(dir $@)uefi-data.fd)
 
 .PHONY: publish-azure
