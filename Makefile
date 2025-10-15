@@ -10,11 +10,7 @@ define list_cloud_images
 	$(notdir $(wildcard configs/$1-*))
 endef
 
-# return a true-y value if the given variable has been set by the user
-define is_explicitly_set
-$(or $(findstring environment,$(origin $(1))),\
-     $(findstring command line,$(origin $(1))))
-endef
+shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
 disks_aws := $(call list_cloud_images,aws)
 disks_gcp := $(call list_cloud_images,gcp)
@@ -404,6 +400,14 @@ $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	  --output=$(patsubst %-build,%,$@) \
 	  configs/$*/build.yaml
 
+shellcheck: .shellcheck
+.shellcheck: $(shell_scripts)
+	@rc=0;for script in $(shell_scripts); do \
+	    echo "shellcheck $$script"; \
+	    shellcheck "$$script" || rc=$$?; \
+	done; exit $$rc
+	@touch $@
+
 .PHONY: clean
 clean:
 	rm -Rf output builder apkoaas *.raw $(CGR_INSTALL_REPO)
@@ -437,10 +441,6 @@ endif
 ifneq ($(filter-out $(arches),$(ARCH)),)
   $(error ARCH '$(ARCH)' not supported. Must be one of $(arches))
 endif
-
-.PHONY: convert
-convert:
-	./hack/convert.sh
 
 .PHONY: azure-marketplace-install-extension
 azure-marketplace-install-extension:
