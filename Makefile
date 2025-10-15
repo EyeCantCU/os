@@ -242,7 +242,7 @@ else ifeq ($(PUBLISH_TARGET),production)
   RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),ona)
   # TODO: some IaC mechanism to define where an image goes when it publishes to S3.
-  AWS_S3_BUCKET=s3://chainguard-s3-pubtest # TOOD: Flip to customer bucket when they're ready
+  AWS_S3_BUCKET=s3://chainguard-ona-amis
 else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
