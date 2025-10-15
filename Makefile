@@ -19,6 +19,8 @@ disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
 disks_rpi := $(call list_cloud_images,rpi)
 
+# Exclude images with release candidate kernel
+group_qemu_nonrc := $(filter-out %-rc,$(call list_cloud_images,generic))
 group_aws_ecs := $(filter aws-ecs-%,$(call list_cloud_images,aws))
 group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
 group_aws_main := $(filter-out aws-ecs-%,$(filter-out aws-eks-%,$(call list_cloud_images,aws)))
@@ -74,7 +76,7 @@ disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
 disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
 disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
 
-.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-vmware list-rpi
+.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-rpi
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -85,6 +87,8 @@ list-gcp:
 	@for n in $(disks_gcp); do echo $$n; done
 list-qemu:
 	@for n in $(disks_qemu); do echo $$n; done
+list-qemu-nonrc:
+	@for n in $(group_qemu_nonrc); do echo $$n; done
 list-vmware:
 	@for n in $(disks_vmware); do echo $$n; done
 list-rpi:
