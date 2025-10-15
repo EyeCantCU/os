@@ -112,6 +112,14 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 		allResources = append(allResources, resources...)
 	}
 
+	if shouldIncludeResourceType(ResourceTypeNIC) {
+		resources, err := getNetworkInterfaces(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get gallery image versions: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
 	return allResources, nil
 }
 
@@ -131,6 +139,8 @@ func deleteResource(ctx context.Context, clients *AzureClients, resource *Resour
 		return deleteVirtualMachine(ctx, clients, resource.Name)
 	case ResourceTypeIP:
 		return deletePublicIPAddress(ctx, clients, resource.Name)
+	case ResourceTypeNIC:
+		return deleteNetworkInterface(ctx, clients, resource.Name)
 	default:
 		return fmt.Errorf("unsupported resource type for deletion: %s", resource.ResourceType)
 	}
