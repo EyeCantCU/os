@@ -6,12 +6,15 @@ SPDX-License-Identifier: Apache-2.0
 package utils
 
 import (
+	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"chainguard.dev/apko/pkg/build/types"
 )
@@ -95,6 +98,18 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 	return append(cmd, []string{"-cpu", "cortex-a53", "-accel", "tcg"}...)
 }
 
+func randomCID() uint32 {
+	rand.Seed(time.Now().UnixNano())
+	var cid uint32
+	for {
+		cid = rand.Uint32()
+		if cid > 2 {
+			break
+		}
+	}
+	return cid
+}
+
 func generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []string {
 	cmd := []string{
 		"qemu-system-x86_64",
@@ -109,6 +124,7 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 		"-drive", "if=pflash,format=raw,unit=0,file=" + ovmf + ",readonly=on",
 		"-drive", "if=pflash,format=raw,unit=1,file=" + varsPath,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
+		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()),
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
 		"-netdev", "user,id=id1," + getHostFwd(),

@@ -3,6 +3,7 @@ package qemu
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,18 @@ func GetOVMFFirmwarePath(arch types.Architecture) string {
 	return fmt.Sprintf("/usr/share/qemu/edk2-%s-code.fd", arch.ToQEmu())
 }
 
+func randomCID() uint32 {
+	rand.Seed(time.Now().UnixNano())
+	var cid uint32
+	for {
+		cid = rand.Uint32()
+		if cid > 2 {
+			break
+		}
+	}
+	return cid
+}
+
 // GenerateQEMUCommand generates a QEMU command line for the given configuration
 func GenerateQEMUCommand(config QEMUConfig) []string {
 	consolePath := filepath.Join(config.TempDir, "console.log")
@@ -77,6 +90,7 @@ func GenerateQEMUCommand(config QEMUConfig) []string {
 		"-serial", "file:"+consolePath,
 		"-monitor", "unix:"+monitorPath+",server,nowait",
 		"-device", "virtio-rng-pci",
+		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()),
 		"-drive", "if=pflash,format=raw,file="+config.FirmwarePath+",readonly=on",
 		"-drive", "if=virtio,format=raw,file="+config.DiskPath,
 		"-netdev", "user,id=net0",
