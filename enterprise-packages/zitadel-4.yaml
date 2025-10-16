@@ -1,6 +1,6 @@
 package:
   name: zitadel-4
-  version: "4.3.1"
+  version: "4.4.0"
   epoch: 0
   description: Identity infrastructure, simplified for you.
   resources:
@@ -20,6 +20,7 @@ environment:
     packages:
       - busybox
       - ca-certificates-bundle
+      - curl
       - go
       - node-gyp
       - nodejs
@@ -37,45 +38,38 @@ environment:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 4012c2e2fb9bc6ca9f115532ed2c69b2f8a51a06
+      expected-commit: fd22d99f5b562af9f34dc6431859cc3eca692e41
       repository: https://github.com/zitadel/zitadel
       tag: v${{package.version}}
 
-  - name: Generate coreapi
-    # Use sed to update Makefile to use our pnpm version instead of installing with npx
-    runs: |
-      npm install -g sass
-      v=$(pnpm --version)
-      sed -i -E "s/(\"packageManager\"*: *\"pnpm@)[^\"]+\"/\1${v}\"/" package.json
-      sed -i -E "s/npx pnpm/pnpm/g" Makefile
-      export GOBIN="$GOPATH/bin"
-      export PATH="$PATH:/home/build/.cache/go/bin"
-      make core_api
-
-  - name: Build dependencies
-    runs: |
-      export GOBIN="$GOPATH/bin"
-      export PATH="$PATH:/home/build/.cache/go/bin"
-      make core_build
-      make console_build
-
-  - runs: |
-      mkdir -p internal/api/ui/console/static
-      cp -r console/dist/console/* internal/api/ui/console/static
-
   - uses: go/bump
     with:
+      skip-initial-tidy: true
+      tidy: false
       deps: |-
         github.com/go-viper/mapstructure/v2@v2.4.0
 
-  - uses: go/build
-    with:
-      output: zitadel
-      packages: .
-      ldflags: |-
-        -X github.com/zitadel/zitadel/cmd/build.version=v${{package.version}}
-        -X github.com/zitadel/zitadel/cmd/build.date=$(TZ="UTC" date +"%Y-%m-%dT%TZ")
-        -X github.com/zitadel/zitadel/cmd/build.commit=$(git rev-parse HEAD)
+  - name: Configure build tooling
+    runs: |
+      npm install -g sass
+      # Ensure our pnpm version is used
+      v=$(pnpm --version)
+      sed -i -E "s/(\"packageManager\"*: *\"pnpm@)[^\"]+\"/\1${v}\"/" package.json
+      pnpm install
+
+      # We want to build locally:
+      # https://nx.dev/docs/reference/nx-cloud/config#disabling-connections-to-nx-cloud
+      sed -i '2a\  "neverConnectToCloud": true,' nx.json
+
+  - name: Build the API package tarball (but just install the built binary)
+    runs: |
+      arch="amd64"
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        arch="arm64"
+      fi
+      ZITADEL_VERSION="${{package.version}}" pnpm nx run api:pack-linux-${arch}
+      mkdir -p ${{targets.destdir}}/usr/bin
+      install -p -m 0755 .artifacts/bin/linux/${arch}/zitadel ${{targets.destdir}}/usr/bin/zitadel
 
 subpackages:
   - name: ${{package.name}}-compat
@@ -118,8 +112,9 @@ test:
       ZITADEL_EXTERNALSECURE: false
     contents:
       packages:
-        - postgresql
-        - postgresql-client
+        # 18 not supported as of 4.3.3: https://github.com/zitadel/zitadel/issues/10712
+        - postgresql<18
+        - postgresql-client<18
         - ca-certificates-bundle
         - procps
     accounts:
@@ -133,7 +128,7 @@ test:
   pipeline:
     - name: Verify zitadel installation
       runs: |
-        zitadel -v | grep -q "v${{package.version}}" || exit 1
+        zitadel -v | grep -q "${{package.version}}" || exit 1
         zitadel --help
     - name: "Install and start postgres"
       working-directory: /app
@@ -158,7 +153,7 @@ test:
         - name: "Run Zitadel"
           uses: test/daemon-check-output
           with:
-            start: zitadel start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled 2>&1 &
+            start: zitadel start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled
             timeout: 30
             expected_output: |
               server is listening on
