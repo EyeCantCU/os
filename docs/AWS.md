@@ -33,11 +33,17 @@ VMs for both arches to a set of accounts. But it should be possible in
 the future to create a workflow that would be able to do that. Or like
 an aws-cli script.
 
-### To perform direct AMI share
-1. Update awspub/ configs
+### To perform direct share of untested AMI
+1. Update awspub/arch/$image.yaml config
 2. In share, add AWS account id, or AWS org arn, or AWS OU arn
 3. Merge the pr
 4. subsequent publications will share newly built AMIs with the update list of receipients.
+
+### To perform direct share of tested AMI
+1. Update awspub/arch/$image-share.yaml config
+2. In share, add AWS account id, or AWS org arn, or AWS OU arn
+3. Merge the pr
+4. subsequent publications will share newly built AMIs with the update list of receipients if integration tests pass.
 5. If possible preffer marketplace route, as AMIs there are from a verified publisher and mirrored to all regions
 
 ### To update direct AMI region publication
