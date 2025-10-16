@@ -1,0 +1,285 @@
+package:
+  name: seata
+  version: "2.5.0"
+  epoch: 0
+  description: "A distributed transaction solution with high performance and ease to use for microservices architecture"
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  java-version: 8
+
+data:
+  - name: openjdk-versions
+    items:
+      8: "/usr/lib/jvm/java-1.8-openjdk"
+      17: "/usr/lib/jvm/java-17-openjdk"
+      21: "/usr/lib/jvm/java-21-openjdk"
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - py3-build-base-dev
+      - python3
+      - rsync
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/incubator-seata
+      tag: v${{package.version}}
+      expected-commit: 989db47c77fcfdc60879821962be619ecbe6b70a
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties-dependencies.yaml
+      pom: dependencies/pom.xml
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties-build.yaml
+      pom: build/pom.xml
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps-server.yaml
+      pom: server/pom.xml
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps-namingserver.yaml
+      pom: namingserver/pom.xml
+
+  - runs: |
+      mvn clean install "-T$(nproc)C" -Pimage -Dmaven.test.skip=true -Dimage.publish.skip=true
+
+subpackages:
+  - name: ${{package.name}}-server
+    description: "A distributed transaction solution with high performance and ease to use for microservices architecture."
+    dependencies:
+      runtime:
+        - glibc-locale-en
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/usr/share/java/seata-server"
+          mkdir -p "${{targets.contextdir}}/seata-server/classes" \
+            "${{targets.contextdir}}/seata-server/resources"
+          mkdir -p "${{targets.contextdir}}/usr/share/java/seata-server/libs"
+          cp -r server/target/lib/* "${{targets.contextdir}}/usr/share/java/seata-server/libs"
+          cp -r server/src/main/resources/jdbc "${{targets.contextdir}}/usr/share/java/seata-server/libs"
+          cp -r server/target/classes/* "${{targets.contextdir}}/seata-server/resources"
+          rsync -a --include="*/" --include="*.class" --exclude="*" server/target/classes/ "${{targets.contextdir}}/seata-server/classes/"
+          printf '%s' "/seata-server/resources:/seata-server/classes:/seata-server/libs/*" > "${{targets.contextdir}}/seata-server/jib-classpath-file"
+          printf '%s' "org.apache.seata.server.ServerApplication" > "${{targets.contextdir}}/seata-server/jib-main-class-file"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - openjdk-${{vars.java-version}}-default-jdk
+            - bash
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tmp/seata-test/conf /tmp/seata-test/logs /tmp/seata-test/sessionStore
+              cat > /tmp/seata-test/conf/application.yml <<EOF
+              server:
+                port: 7091
+              spring:
+                application:
+                  name: seata-server
+                main:
+                  web-application-type: none
+              logging:
+                config: classpath:logback-spring.xml
+                file:
+                  path: \${log.home:\${user.home}/logs/seata}
+              seata:
+                config:
+                  type: file
+                registry:
+                  type: file
+                store:
+                  mode: file
+                  file:
+                    dir: sessionStore
+              EOF
+            start: |
+              $JAVA_HOME/bin/java \
+                -Xmx512m \
+                -Xms512m \
+                -Dlog.home=/tmp/seata-test/logs \
+                -Dapp.home=/tmp/seata-test \
+                -Dbasedir=/tmp/seata-test \
+                -Dspring.config.location=/tmp/seata-test/conf/application.yml \
+                -cp "/seata-server/resources:/seata-server/classes:/usr/share/java/seata-server/libs/*" \
+                org.apache.seata.server.ServerApplication
+            expected_output: |
+              Server started, service listen port: 7091
+            post: |
+              curl -s -w '%{http_code}' http://localhost:7091/health | grep "ok" | grep "200"
+
+  - name: ${{package.name}}-server-oci-entrypoint
+    description: "Entrypoint package for seata-server"
+    dependencies:
+      runtime:
+        - bash-binsh
+        - coreutils
+        - sed
+        - gawk
+        - tzdata
+        - ${{package.name}}-server
+    pipeline:
+      - runs: |
+          mkdir -p  "${{targets.contextdir}}/seata-server"
+          printf '%s' "/seata-server/resources:/seata-server/classes:/seata-server/libs/*" > "${{targets.contextdir}}/seata-server/jib-classpath-file"
+          printf '%s' "org.apache.seata.server.ServerApplication" > "${{targets.contextdir}}/seata-server/jib-main-class-file"
+          ln -s /usr/share/java/seata-server/libs "${{targets.contextdir}}/seata-server"
+          cp server/src/main/resources/docker/seata-server-entrypoint.sh "${{targets.contextdir}}/seata-server-entrypoint.sh"
+          cp distribution/bin/seata-setup.sh "${{targets.contextdir}}/seata-setup.sh"
+          chmod +x "${{targets.contextdir}}/seata-setup.sh" "${{targets.contextdir}}/seata-server-entrypoint.sh"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - ${{package.name}}-server
+            - openjdk-${{vars.java-version}}
+            - seata-openjdk-${{vars.java-version}}-compat
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            start: sh -c 'export JAVA_HOME=/opt/java/openjdk; export PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; /seata-server-entrypoint.sh'
+            expected_output: |
+              Server started, service listen port: 8091
+            post: |
+              curl -s -w '%{http_code}' http://localhost:8091/health | grep "ok" | grep "200"
+
+  - name: ${{package.name}}-namingserver
+    description: "Seata's native registry center"
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jdk
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/usr/share/java/seata-namingserver/libs"
+          cp -r namingserver/target/lib/* "${{targets.contextdir}}/usr/share/java/seata-namingserver/libs"
+          mkdir -p "${{targets.contextdir}}/seata-naming-server/classes" \
+          "${{targets.contextdir}}/seata-naming-server/resources"
+          # The inconsistent case styles ("namingserver" and "naming-server") are intentional and follow seata's mixed casing practice
+          cp -r namingserver/target/classes/* "${{targets.contextdir}}/seata-naming-server/resources"
+          rsync -a --include="*/" --include="*.class" --exclude="*" namingserver/target/classes/ "${{targets.contextdir}}/seata-naming-server/classes/"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - openjdk-${{vars.java-version}}
+            - bash
+            - openssl
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tmp/seata-naming-test/conf /tmp/seata-naming-test/logs
+              cat > /tmp/seata-naming-test/conf/application.yml <<EOF
+              server:
+                port: 7081
+              spring:
+                application:
+                  name: seata-namingserver
+              logging:
+                config: classpath:logback-spring.xml
+                file:
+                  path: \${log.home:\${user.home}/logs/seata}
+              heartbeat:
+                threshold: 90000
+                period: 60000
+              seata:
+                security:
+                  secretKey: ${SECRET_KEY}
+                  tokenValidityInMilliseconds: 1800000
+                  csrf-ignore-urls: /naming/v1/**,/api/v1/naming/**
+                  ignore:
+                    urls: /,/**/*.css,/**/*.js,/**/*.html,/**/*.map,/**/*.svg,/**/*.png,/**/*.jpeg,/**/*.ico,/api/v1/auth/login,/version.json,/naming/v1/health,/error
+              EOF
+            start: |
+              $JAVA_HOME/bin/java \
+                -Xmx512m \
+                -Xms512m \
+                -Dlog.home=/tmp/seata-naming-test/logs \
+                -Dapp.name=seata-namingserver \
+                -Dapp.home=/tmp/seata-naming-test \
+                -Dbasedir=/tmp/seata-naming-test \
+                -Dspring.config.location=/tmp/seata-naming-test/conf/application.yml \
+                -cp "/seata-naming-server/resources:/seata-naming-server/classes:/usr/share/java/seata-namingserver/libs/*" \
+                org.apache.seata.namingserver.NamingserverApplication
+            expected_output: |
+              Started NamingserverApplication
+              Seata Console can be accessed at http://localhost:7081
+            post: |
+              curl -s -w '%{http_code}' http://localhost:7081/naming/v1/health | grep "true"
+              curl -s http://localhost:7081/version.json | grep ${{package.version}}
+
+  - name: ${{package.name}}-namingserver-oci-entrypoint
+    description: "Entrypoint package for seata-namingserver"
+    dependencies:
+      runtime:
+        - bash
+        - ${{package.name}}-namingserver
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/seata-naming-server"
+          printf '%s' "/seata-naming-server/resources:/seata-naming-server/classes:/seata-naming-server/libs/*" > "${{targets.contextdir}}/seata-naming-server/jib-classpath-file"
+          printf '%s' "org.apache.seata.namingserver.NamingserverApplication" > "${{targets.contextdir}}/seata-naming-server/jib-main-class-file"
+          ln -s /usr/share/java/seata-namingserver/libs "${{targets.contextdir}}/seata-naming-server/"
+          cp namingserver/src/main/resources/docker/seata-naming-server-entrypoint.sh "${{targets.contextdir}}/seata-naming-server-entrypoint.sh"
+          cp distribution/bin/seata-namingserver-setup.sh "${{targets.contextdir}}/seata-namingserver-setup.sh"
+          chmod +x "${{targets.contextdir}}/seata-namingserver-setup.sh" "${{targets.contextdir}}/seata-naming-server-entrypoint.sh"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - openjdk-${{vars.java-version}}
+            - seata-openjdk-${{vars.java-version}}-compat
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            start: sh -c 'export JAVA_HOME=/opt/java/openjdk; export PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; /seata-naming-server-entrypoint.sh'
+            expected_output: |
+              Started NamingserverApplication
+              Seata Console can be accessed at http://localhost:8081
+            post: |
+              curl -s -w '%{http_code}' http://localhost:8081/index.html | grep "200"
+              curl -s http://localhost:8081/index.html | grep "<title>"
+              curl -s http://localhost:8081/index.html | grep "<html"
+              curl -s http://localhost:8081/index.html | grep "</html>"
+
+  - range: openjdk-versions
+    name: ${{package.name}}-openjdk-${{range.key}}-compat
+    description: "Compatibility package providing and /opt/java/openjdk symlinks"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/opt/java"
+          ln -sf ${{range.value}} "${{targets.contextdir}}/opt/java/openjdk"
+    test:
+      pipeline:
+        - runs: |
+            stat /opt/java/openjdk
+
+update:
+  enabled: true
+  github:
+    identifier: apache/incubator-seata
+    use-tag: true
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/emptypackage
