@@ -85,7 +85,7 @@ Examples:
 	rootCmd.Flags().StringSliceVar(&regions, "regions", strings.Split(defaultRegions, ","), "Target regions")
 	rootCmd.Flags().StringToStringVar(&tags, "tags", map[string]string{"env": "dev"}, "Resource tags (key=value)")
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
-	rootCmd.Flags().BoolVar(&acceleratedNetworking, "accelerated-networking", false, "Enable accelerated networking support")
+	rootCmd.Flags().BoolVar(&acceleratedNetworking, "accelerated-networking", true, "Enable accelerated networking support")
 	rootCmd.Flags().BoolVar(&deleteIfNecessary, "delete-if-necessary", false, "Delete and recreate image definition if conflicts occur")
 	rootCmd.Flags().IntVar(&deleteJobs, "delete-jobs", runtime.NumCPU()+1, "Parallel jobs for deletion")
 	rootCmd.Flags().StringSliceVar(&dbHashes, "db-hash", []string{}, "Secureboot db base64 encoded hashes to add")
