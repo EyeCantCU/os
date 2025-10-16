@@ -1,0 +1,81 @@
+package:
+  name: k8s-agents-operator-fips
+  version: 0.32.0
+  epoch: 0
+  description: "New Relic Kubernetes agents operator for auto-instrumentation"
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/newrelic/k8s-agents-operator
+      tag: v${{package.version}}
+      expected-commit: e2c44c134417ff6822642b0db6bcfc4c76266970
+
+  - uses: go/build
+    with:
+      packages: ./cmd/main.go
+      output: operator
+      ldflags: |
+        -X github.com/newrelic/k8s-agents-operator/internal/version.version=${{package.version}}
+        -X github.com/newrelic/k8s-agents-operator/internal/version.buildDate=$(date -u -d "@$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")
+      go-package: go-fips
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - 'rc\d+$'
+    - 'k8s-' # charts
+  github:
+    identifier: newrelic/k8s-agents-operator
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+        - mkcert
+    environment:
+      OPERATOR_NAMESPACE: default
+      ENABLE_WEBHOOKS: "false"
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Check help and version output
+      runs: |
+        set -euo pipefail
+        operator --help
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Apply CRDs
+      runs: |
+        set -euo pipefail
+        kubectl apply -f https://raw.githubusercontent.com/newrelic/k8s-agents-operator/v${{package.version}}/config/crd/bases/newrelic.com_instrumentations.yaml
+        kubectl wait --for=condition=Established crd instrumentations.newrelic.com --timeout=60s
+    - name: Test operator daemon
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/k8s-webhook-server/serving-certs/
+          mkcert -install
+          mkcert -key-file /tmp/k8s-webhook-server/serving-certs/tls.key -cert-file /tmp/k8s-webhook-server/serving-certs/tls.crt localhost
+        start: operator --leader-elect=false --metrics-secure=false
+        timeout: 30
+        expected_output: |
+          starting server
+          starting manager
+        post: |
+          set -euo pipefail
+          wait-for-it localhost:8081 -t 30
+          curl -fsSL http://localhost:8081/healthz | grep -q "ok"
+          curl -fsSL http://localhost:8081/readyz | grep -q "ok"
