@@ -138,6 +138,13 @@ func launchCmd() *cobra.Command {
 					HardwareProfile: &armcompute.HardwareProfile{
 						VMSize: utils.ToPtr(armcompute.VirtualMachineSizeTypes(vmSize)),
 					},
+					SecurityProfile: &armcompute.SecurityProfile{
+						SecurityType: utils.ToPtr(armcompute.SecurityTypesTrustedLaunch),
+						UefiSettings: &armcompute.UefiSettings{
+							SecureBootEnabled: utils.ToPtr(true),
+							VTpmEnabled:       utils.ToPtr(true),
+						},
+					},
 					StorageProfile: &armcompute.StorageProfile{
 						ImageReference: &armcompute.ImageReference{
 							ID: &imageURI,
