@@ -48,7 +48,7 @@ gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
 	go build -o apkoaas
 
-$(TOOLS_D)/%: tools/go/%/*.go
+tools/%: tools/go/%/*.go
 	go build -o tools/$* ./tools/go/$*
 
 .PHONY: test-gotest test-generic
