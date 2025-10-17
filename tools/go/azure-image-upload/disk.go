@@ -227,3 +227,15 @@ func getExistingDiskID(ctx context.Context, clients *AzureClients, diskName, res
 
 	return *disk.ID, nil
 }
+
+func destroyDisk(ctx context.Context, clients *AzureClients, diskName, resourceGroup string) error {
+	if _, err := getExistingDiskID(ctx, clients, diskName, resourceGroup); err != nil {
+		return nil
+	}
+	poller, err := clients.Disks.BeginDelete(ctx, resourceGroup, diskName, nil)
+	if err != nil {
+		return err
+	}
+	_, err = poller.PollUntilDone(ctx, nil)
+	return err
+}

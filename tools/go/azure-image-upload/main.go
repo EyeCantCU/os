@@ -25,6 +25,7 @@ var (
 	existingDisk          bool
 	diskName              string
 	uploadOnly            bool
+	destroyUploadedDisk   bool
 	regions               []string
 	tags                  map[string]string
 	subscriptionID        string
@@ -82,6 +83,7 @@ Examples:
 	rootCmd.Flags().BoolVar(&existingDisk, "existing-disk", false, "Use existing disk instead of creating new one")
 	rootCmd.Flags().StringVar(&diskName, "disk-name", "", "Disk name (default: same as name)")
 	rootCmd.Flags().BoolVar(&uploadOnly, "upload-only", false, "Only upload disk, don't create gallery image")
+	rootCmd.Flags().BoolVar(&destroyUploadedDisk, "destroy-disk", true, "Destroy disk after upload. Noop if --existing-disk is used.")
 	rootCmd.Flags().StringSliceVar(&regions, "regions", strings.Split(defaultRegions, ","), "Target regions")
 	rootCmd.Flags().StringToStringVar(&tags, "tags", map[string]string{"env": "dev"}, "Resource tags (key=value)")
 	rootCmd.Flags().IntVar(&diskSizeGB, "disk-size", 30, "Size to expand VHD to in GB")
@@ -222,6 +224,14 @@ func runUpload(cmd *cobra.Command, args []string) error {
 	err = createImageVersion(ctx, clients, opts, verbose)
 	if err != nil {
 		return fmt.Errorf("failed to create image version: %w", err)
+	}
+
+	if !existingDisk && destroyUploadedDisk {
+		log.Printf("Cleaning up uploaded disk %s in resource group %s\n", diskName, resourceGroup)
+		err = destroyDisk(ctx, clients, diskName, resourceGroup)
+		if err != nil {
+			log.Printf("warning: failed to destroy disk %s in resource group %s\n", diskName, resourceGroup)
+		}
 	}
 
 	err = outputResults(ctx, clients, gallery, definitionName, imageVersion, resourceGroup, verbose)
