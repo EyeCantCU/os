@@ -19,6 +19,10 @@ test_debug_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(test_debug_targets): test-debug/%:
 	stereo make test-debug $*
 
+compile_targets = $(foreach name,$(pkgs),compile/$(name))
+$(compile_targets): compile/%:
+	@stereo make compile $*
+
 # Archive Process Workflow Targets
 .PHONY: deps-resolve deps-build deps-image deps-vm deps-seed deps-version-streams
 .PHONY: archive archive-generate withdraw validate-withdrawn
