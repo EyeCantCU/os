@@ -18,6 +18,7 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH
     --s3-bucket BUCKET  S3 bucket URL (e.g., s3://bucket-name)
     --azure-account ACCOUNT  Azure storage account name
     --azure-container CONTAINER  Azure storage container name
+    --rpi-upload         Upload to Raspberry Pi image service
 
   Optional arguments:
     --raw-path RAW_PATH  Path to the raw disk image
@@ -34,11 +35,13 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH
     --signed-az-url-expiry DURATION   Expiry duration for Azure signed URLs (e.g., 12 hours, 24 hours) [12 hours]
     --signed-s3-url-expiry DURIATION  Expiry duration (in seconds) for Azure signed URLs (e.g., 43200) [43200 (12 hours)]
     --azure-storage-tier TIER Access tier for Azure blobs [cool]
+    --rpi-upload-secret SECRET  RPI upload secret (or use RPI_UPLOAD_SECRET env var)
     -v | --verbose       Be more verbose
     -h | --help         Show this help
 
   Environment variables:
     GCP_PROJECT - if set, gcloud commands will use --project=GCP_PROJECT
+    RPI_UPLOAD_SECRET - authentication secret for RPI upload service
 
 EOF
 }
@@ -260,9 +263,89 @@ derive_s3_path_prefix() {
     echo "${awsarch}/${name}/${timestamp}"
 }
 
+validate_rpi_filename() {
+    local filename="$1"
+
+    if [[ ! "$filename" =~ ^rpi-generic-(base|docker)-arm64-[0-9]{8}-[0-9]{6}\.raw\.gz$ ]]; then
+        stderr "ERROR: RPI filename must match pattern: rpi-generic-{base|docker}-arm64-YYYYMMDD-HHMMSS.raw.gz"
+        stderr "       Got: $filename"
+        return 1
+    fi
+    return 0
+}
+
+upload_rpi_file() {
+    local raw_path="$1"
+    local artifact_prefix="$2"
+    local arch="$3"
+    local upload_secret="$4"
+
+    cleanup_and_fail() {
+        rm -f "$gzipped_path"
+        return 1
+    }
+
+    if [ "$arch" != "aarch64" ] && [ "$arch" != "arm64" ]; then
+        stderr "ERROR: RPI upload only supports arm64/aarch64 architecture, got: $arch"
+        return 1
+    fi
+
+    if [ ! -f "$raw_path" ]; then
+        stderr "ERROR: Raw disk image not found: $raw_path"
+        return 1
+    fi
+
+    local gzipped_path="${raw_path}.gz"
+    local rpi_filename="${artifact_prefix}.raw.gz"
+
+    validate_rpi_filename "$rpi_filename" || return 1
+
+    info "Compressing raw disk image for RPI upload"
+    if ! gzip -c "$raw_path" > "$gzipped_path"; then
+        stderr "ERROR: Failed to gzip raw disk image"
+        return 1
+    fi
+
+    info "Requesting upload token for RPI image: $rpi_filename"
+    local token_response
+    token_response=$(curl -sX POST "https://data.chainguard.dev/upload-rpi" \
+        -H "Authorization: Bearer ${upload_secret}" \
+        -H "Content-Type: application/json" \
+        -d "{\"pathname\":\"$rpi_filename\"}") || {
+        stderr "ERROR: Failed to request upload token"
+        cleanup_and_fail
+    }
+
+    if echo "$token_response" | grep -q '"error"'; then
+        stderr "ERROR: Token request failed: $token_response"
+        cleanup_and_fail
+    fi
+
+    local token url
+    token=$(echo "$token_response" | grep -o '"token":"[^"]*"' | sed 's/"token":"//;s/"//')
+    url=$(echo "$token_response" | grep -o '"url":"[^"]*"' | sed 's/"url":"//;s/"//')
+
+    if [ -z "$token" ] || [ -z "$url" ]; then
+        stderr "ERROR: Failed to extract token or URL from response"
+        cleanup_and_fail
+    fi
+
+    info "Uploading RPI image to $url"
+    if ! curl -sX PUT "$url" \
+        -H "Authorization: Bearer $token" \
+        -H "x-content-type: application/gzip" \
+        --data-binary "@$gzipped_path"; then
+        stderr "ERROR: Failed to upload RPI image"
+        cleanup_and_fail
+    fi
+
+    rm -f "$gzipped_path"
+    echo "$url"
+}
+
 main() {
     local short_opts="hv"
-    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,s3-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,edk2vars-path:,awsvars-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,sign-s3-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,signed-s3-url-expiry:,azure-storage-tier:"
+    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,s3-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,edk2vars-path:,awsvars-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,sign-s3-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,signed-s3-url-expiry:,azure-storage-tier:,rpi-upload,rpi-upload-secret:"
     local getopt_out=""
     if ! getopt_out=$(getopt --name "${0##*/}" \
         --options "${short_opts}" --long "${long_opts}" -- "$@"); then
@@ -274,6 +357,7 @@ main() {
     local name="" timestamp="" arch="" gcs_bucket="" azure_account="" azure_container="" azure_storage_tier="cool" raw_path="" qcow2_path="" vmdk_path="" vmdk_flat_path="" edk2vars_path="" awsvars_path=""
     local artifact_prefix="" sign_gcs_urls=false sign_az_urls=false signed_gcs_url_expiry="12h" signed_az_url_expiry="12 hours"
     local s3_bucket="" sign_s3_urls=false signed_s3_url_expiry="43200"
+    local rpi_upload=false rpi_upload_secret="${RPI_UPLOAD_SECRET:-}"
 
     while [ $# -ne 0 ]; do
         case "$1" in
@@ -300,6 +384,8 @@ main() {
             --signed-az-url-expiry) signed_az_url_expiry="$2"; shift;;
             --signed-s3-url-expiry) signed_s3_url_expiry="$2"; shift;;
             --azure-storage-tier) azure_storage_tier="$2"; shift;;
+            --rpi-upload) rpi_upload=true;;
+            --rpi-upload-secret) rpi_upload_secret="$2"; shift;;
             --) shift; break;;
             *) stderr "ERROR: Unknown option: $1"; Usage 1>&2; return 1;;
         esac
@@ -312,8 +398,8 @@ main() {
         return 1
     fi
 
-    if [ -z "$gcs_bucket" ] && [ -z "$azure_account" ] && [ -z "$s3_bucket" ]; then
-        stderr "ERROR: At least one storage destination must be specified (--gcs-bucket, --s3-bucket, or --azure-account/--azure-container)"
+    if [ -z "$gcs_bucket" ] && [ -z "$azure_account" ] && [ -z "$s3_bucket" ] && [ "$rpi_upload" != true ]; then
+        stderr "ERROR: At least one storage destination must be specified (--gcs-bucket, --s3-bucket, --azure-account/--azure-container, or --rpi-upload)"
         Usage 1>&2
         return 1
     fi
@@ -358,6 +444,27 @@ main() {
     if [ -n "$awsvars_path" ] && [ ! -f "$awsvars_path" ]; then
         stderr "ERROR: AWS UEFI vars not found: $awsvars_path"
         return 1
+    fi
+
+    if [ "$rpi_upload" = true ]; then
+        if [ -z "$raw_path" ]; then
+            stderr "ERROR: --raw-path is required for RPI upload"
+            Usage 1>&2
+            return 1
+        fi
+        if [ -z "$rpi_upload_secret" ]; then
+            stderr "ERROR: RPI upload secret is required (use --rpi-upload-secret or RPI_UPLOAD_SECRET env var)"
+            Usage 1>&2
+            return 1
+        fi
+        command -v curl >/dev/null 2>&1 || {
+            stderr "ERROR: 'curl' not found in PATH (required for RPI upload)"
+            return 1
+        }
+        command -v gzip >/dev/null 2>&1 || {
+            stderr "ERROR: 'gzip' not found in PATH (required for RPI upload)"
+            return 1
+        }
     fi
 
     if [ -n "$gcs_bucket" ]; then
@@ -619,6 +726,13 @@ main() {
             aws_json+="$part"
         done
         json_sections+=("\"aws\": { $aws_json }")
+    fi
+
+    if [ "$rpi_upload" = true ]; then
+        local rpi_url
+        rpi_url=$(upload_rpi_file "$raw_path" "$artifact_prefix" "$arch" "$rpi_upload_secret") || return 1
+        local rpi_filename="${artifact_prefix}.raw.gz"
+        json_sections+=("\"rpi\": { \"url\": \"$rpi_url\", \"filename\": \"$rpi_filename\" }")
     fi
 
     printf "{\n"

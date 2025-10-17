@@ -375,6 +375,7 @@ $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-ge
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
 		--gcs-bucket $(RPI_GCSBUCKET) \
+		--rpi-upload \
 		--raw-path $(dir $@)disk.raw)
 
 # we use the stdout of awspub publish to indicate the thing was published.
@@ -426,7 +427,7 @@ install-deps:
 	--option=Dpkg::Options::=--force-confold \
 	--option=Dpkg::options::=--force-unsafe-io \
 	install --no-install-recommends \
-	cpu-checker parallel python3-venv qemu-system-x86 qemu-utils'
+	cpu-checker curl gzip parallel python3-venv qemu-system-x86 qemu-utils'
 	kvm-ok
 
 show-vars:
