@@ -1,5 +1,6 @@
 TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-TOOLS_D = $(TOP_D)/tools
+TOOLS_SUBD = tools
+TOOLS_D = $(TOP_D)/$(TOOLS_SUBD)
 HASH := \#
 
 # when converting from an existing image, we stuff these in.
@@ -48,8 +49,8 @@ gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
 	go build -o apkoaas
 
-tools/%: tools/go/%/*.go
-	go build -o tools/$* ./tools/go/$*
+$(TOOLS_SUBD)/%: $(TOOLS_SUBD)/go/%/*.go
+	go build -o $(TOOLS_SUBD)/$* ./$(TOOLS_SUBD)/go/$*
 
 .PHONY: test-gotest test-generic
 include cgr-install.mk
@@ -119,17 +120,17 @@ vhd_targets = $(foreach name,$(names),vhd-$(name))
 $(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
 
 %.qcow2: %.raw
-	./tools/convert-image $< $@
+	./$(TOOLS_SUBD)/convert-image $< $@
 
 # VMware-specific VMDK conversion (monolithicFlat for ESXi compatibility)
 $(ARCH_OUT_D)/vmware-%/disk.vmdk: $(ARCH_OUT_D)/vmware-%/disk.raw
-	./tools/convert-image --vmdk-format monolithicFlat $< $@
+	./$(TOOLS_SUBD)/convert-image --vmdk-format monolithicFlat $< $@
 
 %.vmdk: %.raw
-	./tools/convert-image $< $@
+	./$(TOOLS_SUBD)/convert-image $< $@
 
 %.vhd: %.raw
-	./tools/convert-image $< $@
+	./$(TOOLS_SUBD)/convert-image $< $@
 
 disk_debug_targets = $(foreach name,$(names),disk-debug-$(name))
 .PHONY: $(disk_debug_targets)
@@ -256,7 +257,7 @@ awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
 awspub-%: AWSSSM=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)
 awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
-	./tools/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
+	./$(TOOLS_SUBD)/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
 
 .PHONY: aws-create aws-create-% aws-publish aws-publish-%
 # these are just so human can type 'make aws-create-aws-base' to do the create/publish
@@ -296,7 +297,7 @@ bespoke-publish-s3-aws-ecs-full-request-6943: $(ARCH_OUT_D)/aws-ecs-full-request
 $(ARCH_OUT_D)/aws-%/publish.s3.json: AWSNAME=$(PREFIX)-$*-$(AWSARCH)
 $(ARCH_OUT_D)/aws-%/publish.s3.json: $(ARCH_OUT_D)/aws-%/disk.raw $(ARCH_OUT_D)/aws-%/disk.vmdk
 	@mkdir -p $(dir $@)
-	$(call capture_stdout,$@, ./tools/generic-image-upload \
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
 		--name $(AWSNAME) \
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
@@ -311,9 +312,9 @@ $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name))): publish-a
 
 $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-$*-$(AZARCH)
 $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: _AZTAGS=$(AZTAGS),local-name=azure-$*
-$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(TOOLS_D)/azure-image-upload $(ARCH_OUT_D)/azure-%/disk.raw
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(TOOLS_SUBD)/azure-image-upload $(ARCH_OUT_D)/azure-%/disk.raw
 	@$(call capture_stdout,$@,\
-		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+		./$(TOOLS_SUBD)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
 		$(addprefix --db-hash=,$(shell cat $(dir $@)db-b64-hashes.txt)) \
 		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(AZ_IMAGEUPLOAD_FLAGS) $(dir $@)disk.raw)
@@ -336,7 +337,7 @@ $(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name))): publish-q
 
 $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/disk.raw $(ARCH_OUT_D)/generic-%/disk.qcow2
 	@mkdir -p $(dir $@)
-	$(call capture_stdout,$@, ./tools/generic-image-upload \
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
 		--name generic-$* \
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
@@ -354,7 +355,7 @@ $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name))): publis
 
 $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.vmdk $(ARCH_OUT_D)/vmware-%/disk-flat.vmdk
 	@mkdir -p $(dir $@)
-	$(call capture_stdout,$@, ./tools/generic-image-upload \
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
 		--name vmware-$* \
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
@@ -370,7 +371,7 @@ $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name))): publish
 
 $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-generic-%/disk.raw
 	@mkdir -p $(dir $@)
-	$(call capture_stdout,$@, ./tools/generic-image-upload \
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
 		--name rpi-generic-$* \
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
