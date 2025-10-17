@@ -1,6 +1,6 @@
 package:
   name: keycloak-fips-26.4
-  version: "26.4.0"
+  version: "26.4.1"
   epoch: 0 # GHSA-3p8m-j85q-pgmj
   description: Open Source Identity and Access Management For Modern Applications and Services
   copyright:
@@ -34,6 +34,7 @@ environment:
       - busybox
       - gcc-14-default
       - openjdk-${{vars.java-version}}-default-jdk
+      - unzip
   environment:
     LANG: en_US.UTF-8
 
@@ -42,7 +43,7 @@ pipeline:
     with:
       repository: https://github.com/keycloak/keycloak
       tag: ${{package.version}}
-      expected-commit: 4e25e47b3c3619b3a0593448e1dfc0dd786cfbe1
+      expected-commit: 802e43c58ee8989a1beb8e5d905aa73c1ca21e4b
 
   - uses: patch
     with:
@@ -103,6 +104,60 @@ pipeline:
       ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
 
 subpackages:
+  - name: ${{package.name}}-operator
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jdk
+      provides:
+        - keycloak-operator-fips=${{package.full-version}}
+    pipeline:
+      - name: "build and install files"
+        runs: |
+          cd operator
+          ../mvnw clean package
+
+          # NOTE: the maven build has created a .zip with the app
+          # but the zip has an embedded path component we want to get rid of, something like
+          # 'usr/share/java/keycloak-operator-26.4.0/'. We will unpack the zip then rename
+          # the 'keycloak-operator-26.4.0' directory to 'quarkus-app'
+          # this is because previous versions of the package may use this path in images or other components
+          destdir="${{targets.subpkgdir}}/usr/share/java"
+          mkdir -p "$destdir"
+          maven_name="keycloak-operator-${{package.version}}"
+          unzip "target/${maven_name}.zip" -d "$destdir"
+          mv "${destdir}/${maven_name}" "${destdir}/quarkus-app"
+
+          ls -lr "$destdir"
+    test:
+      pipeline:
+        - name: "expected initialization error test"
+          runs: |
+            # This only runs in k8s but make sure it errors correctly
+            java -Djava.util.logging.manager=org.jboss.logmanager.LogManager \
+              -jar /usr/share/java/quarkus-app/quarkus-run.jar 2>&1 | grep "Couldn't retrieve the currently connected namespace"
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: keycloak-operator-fips
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: ${{package.name}}-operator-compat
+    dependencies:
+      provides:
+        - keycloak-operator-fips-compat=${{package.full-version}}
+    pipeline:
+      - name: "install files"
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}"/opt/
+          ln -s /usr/share/java/quarkus-app/ "${{targets.subpkgdir}}"/opt/keycloak
+    test:
+      pipeline:
+        - name: "verify expected link exists"
+          runs: readlink /opt/keycloak
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: keycloak-operator-fips-compat
+            real-pkg-name: ${{subpkg.name}}
+
   # NOTE: This is forked from the non-FIPS keycloak-iamguarded-compat package so that
   # the steps copying Keycloak binaries to the expected path include the required
   # BC FIPS Jars
@@ -226,6 +281,9 @@ subpackages:
                   #!/bin/sh -e
                   echo "127.0.0.1 postgresql" >> /etc/hosts
                   echo "$(hostname) postgresql" >> /etc/hosts
+                  addgroup keycloak
+                  adduser -D -G keycloak -h /opt/iamguarded/keycloak keycloak
+                  chown -R keycloak:keycloak /opt/iamguarded/keycloak
                 start: |
                   env "IAMGUARDED_APP_NAME=keycloak" \
                     "APP_VERSION=${{package.version}}" \

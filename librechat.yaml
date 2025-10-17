@@ -1,0 +1,146 @@
+package:
+  name: librechat
+  version: "0.8.0"
+  epoch: 1 # GHSA-mm7p-fcc7-pg87
+  description: "Multi-model AI chat interface supporting OpenAI, Anthropic, and other providers"
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - busybox
+      - ca-certificates-bundle
+      - jemalloc
+      - nodejs-${{vars.nodejs-version}}
+      - npm
+      - py3-pip
+      - python3
+      - sqlite-libs
+      - uv
+      - yarn
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - crane
+      - jemalloc
+      - jq
+      - nodejs-${{vars.nodejs-version}}
+      - npm
+      - scanelf
+
+vars:
+  nodejs-version: "20"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/danny-avila/LibreChat
+      tag: v${{package.version}}
+      expected-commit: b7d13cec6f3a63c7b81f5781f6b5cab289e33d70
+      cherry-picks: |
+        main/20282f32c8c2ab476b9abfaaf60bc899ab041a4bc: Remediate GHSA-mm7p-fcc7-pg87
+
+  - name: Install dependencies
+    runs: |
+      touch .env
+      npm config set fetch-retry-maxtimeout 600000
+      npm config set fetch-retries 5
+      npm config set fetch-retry-mintimeout 15000
+      npm ci --no-audit
+
+  - name: Build frontend
+    runs: |
+      NODE_OPTIONS="--max-old-space-size=2048" npm run frontend
+
+  - name: npm cache clean
+    runs: |
+      npm cache clean --force
+
+  - name: Install package contents
+    runs: |
+      mkdir -p ${{targets.destdir}}/app
+      cp -r api client config packages redis-config ${{targets.destdir}}/app/
+      cp -r node_modules ${{targets.destdir}}/app/
+      cp package.json package-lock.json ${{targets.destdir}}/app/
+      cp .env ${{targets.destdir}}/app/
+
+      # Create necessary runtime directories
+      mkdir -p ${{targets.destdir}}/app/client/public/images
+      mkdir -p ${{targets.destdir}}/app/api/logs
+      mkdir -p ${{targets.destdir}}/app/uploads
+
+  - name: Cleanup musl libraries
+    runs: |
+      scanelf -R -n . | grep -i musl | awk '{print $NF}' | xargs rm -rf
+
+  # Mitigate esbuild Vulnerabilities
+  - runs: |
+      rm -f ${{targets.destdir}}/app/node_modules/@esbuild/linux-*/bin/esbuild
+      rm -f ${{targets.destdir}}/app/node_modules/esbuild/bin/esbuild
+      rm -f ${{targets.destdir}}/app/node_modules/.bin/esbuild
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    pipeline:
+      # The dockerfile doesn't mention it but the image has an entrypoint, "docker inspect librechat/librechat:latest | grep entrypoint"
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          crane export node:${{vars.nodejs-version}}-alpine - | tar -xOf - usr/local/bin/docker-entrypoint.sh > docker-entrypoint.sh
+
+          # Verify the SHA256 hash of the entrypoint script
+          EXPECTED_SHA="a15ac9589c04baf9da95b08e0e79b5cf1d75ab8dc64e06a5e68e4ceb0ad7c8ea"
+          ACTUAL_SHA=$(sha256sum docker-entrypoint.sh | awk '{print $1}')
+
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: docker-entrypoint.sh hash mismatch!"
+            exit 1
+          fi
+
+          install -Dm755 docker-entrypoint.sh ${{targets.subpkgdir}}/usr/local/bin/docker-entrypoint.sh
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/local/bin/docker-entrypoint.sh
+
+  - name: ${{package.name}}-dev
+    description: Development files for ${{package.name}}
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+test:
+  environment:
+    environment:
+      MONGO_URI: "mongodb://127.0.0.1:27017/LibreChat"
+      HOST: "0.0.0.0"
+      PORT: "3080"
+    contents:
+      packages:
+        - mongod
+  pipeline:
+    - name: Test backend with MongoDB
+      working-directory: /app
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Start MongoDB in background
+          mkdir -p /tmp/mongodb
+          mongod --dbpath /tmp/mongodb --port 27017 --bind_ip 127.0.0.1 > /tmp/mongodb.log 2>&1 &
+          sleep 5
+        start: npm run backend
+        timeout: 30
+        expected_output: |
+          Connected to MongoDB
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
