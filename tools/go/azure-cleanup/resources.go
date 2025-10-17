@@ -201,7 +201,7 @@ func filterResourcesForDeletion(resources []*ResourceInfo, nameRegex, excludeNam
 }
 
 // deleteResourcesInSets deletes resources in the proper dependency order using sets
-func deleteResourcesInSets(ctx context.Context, clients *AzureClients, resources []*ResourceInfo, attempts int, verbose, dryRun bool) (int, []error) {
+func deleteResourcesInSets(ctx context.Context, clients *AzureClients, resources []*ResourceInfo, attempts, maxJobs int, verbose, dryRun bool) (int, []error) {
 	var totalDeleted int
 	var allErrors []error
 
@@ -232,7 +232,7 @@ func deleteResourcesInSets(ctx context.Context, clients *AzureClients, resources
 		}
 
 		// Delete resources in this set in parallel
-		deleted, errors := deleteResourcesInParallel(ctx, clients, setResources, attempts, verbose, dryRun)
+		deleted, errors := deleteResourcesInParallel(ctx, clients, setResources, attempts, maxJobs, verbose, dryRun)
 		totalDeleted += deleted
 		allErrors = append(allErrors, errors...)
 
@@ -245,40 +245,53 @@ func deleteResourcesInSets(ctx context.Context, clients *AzureClients, resources
 	return totalDeleted, allErrors
 }
 
-// deleteResourcesInParallel deletes a slice of resources in parallel
-func deleteResourcesInParallel(ctx context.Context, clients *AzureClients, resources []*ResourceInfo, attempts int, verbose, dryRun bool) (int, []error) {
+// deleteResourcesInParallel deletes a slice of resources in parallel with job queue limiting concurrency
+func deleteResourcesInParallel(ctx context.Context, clients *AzureClients, resources []*ResourceInfo, attempts, maxJobs int, verbose, dryRun bool) (int, []error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var deleted int
 	var errors []error
 
+	// Create a job queue channel to limit concurrency
+	jobQueue := make(chan *ResourceInfo, len(resources))
+
+	// Add all resources to the job queue
 	for _, resource := range resources {
+		jobQueue <- resource
+	}
+	close(jobQueue)
+
+	// Start worker goroutines up to maxJobs limit
+	for i := 0; i < maxJobs && i < len(resources); i++ {
 		wg.Add(1)
-		go func(res *ResourceInfo) {
+		go func() {
 			defer wg.Done()
 
-			if dryRun {
-				log.Printf("DRY RUN: Would delete %s (%s)", res.Name, res.Type)
-				mu.Lock()
-				deleted++
-				mu.Unlock()
-				return
-			}
+			// Process jobs from the queue
+			for res := range jobQueue {
+				if dryRun {
+					log.Printf("DRY RUN: Would delete %s (%s)", res.Name, res.Type)
+					mu.Lock()
+					deleted++
+					mu.Unlock()
+					continue
+				}
 
-			log.Printf("Deleting %s (%s)...", res.Name, res.Type)
+				log.Printf("Deleting %s (%s)...", res.Name, res.Type)
 
-			if err := deleteResourceWithRetry(ctx, clients, res, attempts); err != nil {
-				log.Printf("Failed to delete %s (%s): %v", res.Name, res.Type, err)
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("failed to delete %s: %w", res.Name, err))
-				mu.Unlock()
-			} else {
-				log.Printf("Successfully deleted %s (%s)", res.Name, res.Type)
-				mu.Lock()
-				deleted++
-				mu.Unlock()
+				if err := deleteResourceWithRetry(ctx, clients, res, attempts); err != nil {
+					log.Printf("Failed to delete %s (%s): %v", res.Name, res.Type, err)
+					mu.Lock()
+					errors = append(errors, fmt.Errorf("failed to delete %s: %w", res.Name, err))
+					mu.Unlock()
+				} else {
+					log.Printf("Successfully deleted %s (%s)", res.Name, res.Type)
+					mu.Lock()
+					deleted++
+					mu.Unlock()
+				}
 			}
-		}(resource)
+		}()
 	}
 
 	wg.Wait()

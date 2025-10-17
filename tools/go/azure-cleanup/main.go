@@ -22,6 +22,7 @@ var (
 	namePattern        string
 	excludeNamePattern string
 	retryAttempts      int
+	jobs               int
 )
 
 func main() {
@@ -50,7 +51,11 @@ Examples:
 
   # Clean up with route table support
   azure-cleanup --subscription-id "abc123" --resource-group "test-rg" \
-                --max-age 24h --resource-types "routetable,networksecuritygroup"`,
+                --max-age 24h --resource-types "routetable,networksecuritygroup"
+
+  # Limit parallel deletions to 5 jobs at once
+  azure-cleanup --subscription-id "abc123" --resource-group "test-rg" \
+                --max-age 24h --jobs 5`,
 		RunE: run,
 	}
 
@@ -62,6 +67,9 @@ Examples:
 	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "Show what would be deleted without executing")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.Flags().IntVar(&retryAttempts, "retries", 3, "Allowed number of retries per-resource for deletion.")
+	// Set at the refill rate for subscription level delete request throttling
+	// https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/request-limits-and-throttling
+	rootCmd.Flags().IntVar(&jobs, "jobs", 10, "Maximum number of parallel deletions to run at once")
 	rootCmd.Flags().StringVar(&namePattern, "name-pattern", "", "Regular expression pattern for resource names to include")
 	rootCmd.Flags().StringVar(&excludeNamePattern, "exclude-name-pattern", "", "Regular expression pattern for resource names to exclude")
 
@@ -149,7 +157,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Delete resources in sets with proper ordering
-	deleted, deleteErrors := deleteResourcesInSets(ctx, clients, resourcesToDelete, retryAttempts, verbose, dryRun)
+	deleted, deleteErrors := deleteResourcesInSets(ctx, clients, resourcesToDelete, retryAttempts, jobs, verbose, dryRun)
 
 	if dryRun {
 		log.Printf("DRY RUN complete: %d resources would be deleted, %d protected, %d too young, %d filtered",
