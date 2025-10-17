@@ -17,7 +17,7 @@ package:
   # with the `version:` field.
   # 2. Created a new variable `mangled-package-version` to append `-ccs` to the
   # version.
-  version: "8.2.0.218"
+  version: "8.2.0.336"
   epoch: 0
   description: Community edition of Confluent Kafka.
   copyright:
@@ -31,8 +31,9 @@ package:
       - confluent-common-docker-ub
       - confluent-docker-utils
       - confluent-kafka-images-kafka
-      - openjdk-17-default-jvm-bcfips
-      - openjdk-17-jre-bcfips
+      - openjdk-17-default-jvm
+      - openjdk-17-jre
+      - openjdk-bcfips-policy-140-3-j17
 
 environment:
   contents:
@@ -40,7 +41,7 @@ environment:
       - busybox
       - ca-certificates-bundle
       - curl
-      - gradle-8
+      - gradle-9
       - openjdk-17
       - sbt
   environment:
@@ -56,7 +57,7 @@ var-transforms:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 77b304d46a2a1f4fae848af2d1b8a728b7e5941b
+      expected-commit: f284d0b4ca33840073dd1ef703781c4588485ddd
       repository: https://github.com/confluentinc/kafka
       tag: v${{vars.mangled-package-version}}
 
@@ -127,35 +128,61 @@ test:
         # Configure KRaft storage to initialize cluster metadata
         bin/kafka-storage.sh format --config config/server.properties --cluster-id $(bin/kafka-storage.sh random-uuid) --standalone
 
-        # Start Kafka
-        nohup bin/kafka-server-start.sh config/server.properties > /dev/null 2>&1 &
+        # Start Kafka with more verbose logging
+        echo "Starting Kafka server..."
+        nohup bin/kafka-server-start.sh config/server.properties > kafka-server.log 2>&1 &
         KAFKA_PID=$!
-        sleep 5
+
+        # Wait longer for Kafka to fully start
+        echo "Waiting for Kafka to start..."
+        sleep 10
+
+        # Check if Kafka is actually running
+        if ! kill -0 $KAFKA_PID 2>/dev/null; then
+          echo "ERROR: Kafka server failed to start"
+          exit 1
+        fi
 
         TOPIC_NAME="test-topic"
         PARTITIONS=1
         REPLICATION_FACTOR=1
 
         # Create a Kafka topic
+        echo "Creating topic ${TOPIC_NAME}..."
         bin/kafka-topics.sh --create --topic "${TOPIC_NAME}" --partitions "${PARTITIONS}" --replication-factor "${REPLICATION_FACTOR}" --if-not-exists --bootstrap-server localhost:9092
 
-        # Produce a test message
-        echo "Hello Kafka" | bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}"
+        # Verify topic was created
+        echo "Verifying topic creation..."
+        bin/kafka-topics.sh --describe --topic "${TOPIC_NAME}" --bootstrap-server localhost:9092
 
-        # Consume the message
-        consumed_message=$(timeout 10 bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}" --from-beginning --max-messages 1)
+        # Produce a test message with explicit acks
+        echo "Producing message..."
+        echo "Hello Kafka" | bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}" --property "acks=all" || {
+          echo "ERROR: Failed to produce message"
+          exit 1
+        }
 
-        # Verify the message
-        if [[ "${consumed_message}" == "Hello Kafka" ]]; then
-          echo "Successfully produced and consumed a test message."
+        # Wait a moment for message to be written
+        sleep 2
+
+        # Consume message - capture both stdout and stderr separately
+        bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}" --from-beginning --timeout-ms 5000 > consumed_message.txt 2> consumer_errors.txt || true
+
+        # Check if we got the message (ignore timeout errors)
+        if grep -q "Hello Kafka" consumed_message.txt; then
+          echo "SUCCESS: Message was successfully produced and consumed"
+          echo "Consumed message: $(cat consumed_message.txt)"
         else
-          echo "Failed to verify the consumed message."
+          echo "FAILED: Could not find expected message"
+          echo "=== Consumed message ==="
+          cat consumed_message.txt
+          echo "=== Consumer errors ==="
+          cat consumer_errors.txt
+          exit 1
         fi
 
-        # Clean up the test topic
+        # Clean up
         bin/kafka-topics.sh --delete --topic "${TOPIC_NAME}" --bootstrap-server localhost:9092
-
-        # Kill Kafka
         kill "${KAFKA_PID}"
 
 # Need to use Git poller as confluent blocks GitHub API requests from GH runners
