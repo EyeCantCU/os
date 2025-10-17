@@ -423,11 +423,14 @@ clean:
 
 install-deps:
 	sudo sh -c 'apt-get --quiet update && \
-	apt-get --quiet --assume-yes \
-	--option=Dpkg::Options::=--force-confold \
-	--option=Dpkg::options::=--force-unsafe-io \
-	install --no-install-recommends \
-	cpu-checker curl gzip parallel python3-venv qemu-system-x86 qemu-utils'
+	   apt-get --quiet --assume-yes \
+	     --option=Dpkg::Options::=--force-confold \
+	     --option=Dpkg::options::=--force-unsafe-io \
+	     install --no-install-recommends \
+	       cpu-checker curl gzip parallel python3-venv qemu-system-x86 qemu-utils'
+	sudo sh -c 'for p in kvm vhost-net vhost-vsock; do \
+		d=/dev/$$p; [ -e "$$d" ] || { echo "no $$d"; continue; } ; \
+		chmod ugo+rw $$d && ls -l $$d || exit; done'
 	kvm-ok
 
 show-vars:

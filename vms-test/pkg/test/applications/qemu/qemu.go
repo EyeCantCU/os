@@ -22,6 +22,7 @@ type QEMUConfig struct {
 	UseKVM       bool
 	Memory       string
 	TempDir      string
+	VhostCID     int // 0 : pick random CID, > 0: use that CID, < 0: do not add vhost-vsock-pci
 }
 
 // CreateTestDisk creates a minimal blank disk image for QEMU testing
@@ -90,12 +91,22 @@ func GenerateQEMUCommand(config QEMUConfig) []string {
 		"-serial", "file:"+consolePath,
 		"-monitor", "unix:"+monitorPath+",server,nowait",
 		"-device", "virtio-rng-pci",
-		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()),
 		"-drive", "if=pflash,format=raw,file="+config.FirmwarePath+",readonly=on",
 		"-drive", "if=virtio,format=raw,file="+config.DiskPath,
 		"-netdev", "user,id=net0",
 		"-device", "virtio-net,netdev=net0",
 	)
+
+	var cid uint32
+	if config.VhostCID == 0 {
+		cid = randomCID()
+	} else if config.VhostCID > 0 {
+		cid = uint32(config.VhostCID)
+	}
+
+	if cid > 0 {
+		cmd = append(cmd, "-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", cid))
+	}
 
 	return cmd
 }
