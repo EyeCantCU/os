@@ -1,0 +1,121 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Cleanup unneeded resources in Azure"
+
+# Run ~3 hours after build-publish to hopefully catch
+# resources from the previous day's build-publish run
+# as soon as they turn old enough to delete.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      notify-slack:
+        type: boolean
+        required: false
+        default: false
+        description: Notify slack when the workflow finishes.
+      notify-slack-success:
+        type: boolean
+        required: false
+        default: true
+        description: Send notifications on success as well as failure.
+
+permissions: {}
+
+# Allow only one workflow run at a time
+concurrency:
+  group: 'cleanup-azure'
+  cancel-in-progress: false
+
+jobs:
+  cleanup-azure:
+    runs-on: ubuntu-8-core
+
+    permissions:
+      id-token: write # federated identity
+      contents: read # checkout source
+
+    strategy:
+      fail-fast: false
+
+    steps:
+      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Make cleanerupper
+        run: |
+          make tools/azure-cleanup
+
+      - name: Login to Azure staging
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # generated in mono https://github.com/chainguard-dev/mono/tree/main/env/azure/chainguard-vms-staging/iac/200-infra
+          client-id: "c0acffef-1388-4428-be1c-dd84b8cbb070"
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: "ad60e736-b0ce-432e-b77c-4b8218f452ae"
+
+      - name: Cleanup Test Resources in Azure Staging
+        run: |
+          ./tools/azure-cleanup --subscription-id=ad60e736-b0ce-432e-b77c-4b8218f452ae --resource-group chainguard-vms-staging \
+              --max-age=12h \
+              --protection-tag=do-not-delete \
+              --exclude-name-pattern='.*do-not-delete.*' \
+              --resource-types=disk \
+              --verbose \
+              --dry-run # TODO: remove this flag when we confirm output is sane.
+
+      - name: Cleanup Images in Azure Staging
+        # Keep images around for 2 weeks for debugging
+        run: |
+          ./tools/azure-cleanup --subscription-id=ad60e736-b0ce-432e-b77c-4b8218f452ae --resource-group chainguard-vms-staging \
+              --max-age=336h \
+              --protection-tag=do-not-delete \
+              --exclude-name-pattern='.*do-not-delete.*' \
+              --resource-types=image,imageversion \
+              --verbose \
+              --dry-run # TODO: remove this flag when we confirm output is sane.
+
+      - name: Login to Azure prod
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # https://github.com/chainguard-dev/mono/blob/main/env/azure/chainguard-vms-prod/iac/200-infra/oidc-postsubmit-partnercenter.tf
+          client-id: "aac166ff-e6b3-4963-a22e-713d12d1c0f9"
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: "ad60e736-b0ce-432e-b77c-4b8218f452ae"
+
+      # Cleanup old disks from azure-image-upload
+      # TOOD: destroy this disks immediately in azure-image-upload and remove this.
+      - name: Cleanup Disks in Azure Prod
+        run: |
+          ./tools/azure-cleanup --subscription-id=ad60e736-b0ce-432e-b77c-4b8218f452ae --resource-group chainguard-vms-prod \
+              --max-age=12h \
+              --protection-tag=do-not-delete \
+              --name-pattern='chainguard-[a-zA-Z0-9.-]+' \
+              --exclude-name-pattern='.*do-not-delete.*' \
+              --resource-types=disk \
+              --verbose \
+              --dry-run # TODO: remove this flag when we confirm output is sane.
+
+      - uses: './.github/actions/notify-slack'
+        if: ${{ (inputs.notify-slack-success || failure()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
+          title: ${{ github.workflow }} ${{ job.status }}
+          message-color: ${{ job.status == 'success' && '#3fb950' || '#f85149'}}
+          text: |
+            For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          unfurl-links: true
