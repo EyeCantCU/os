@@ -27,7 +27,7 @@ import (
 	"strings"
 
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/utils"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"

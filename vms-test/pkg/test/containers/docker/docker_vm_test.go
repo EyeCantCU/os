@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 )
 
 const (

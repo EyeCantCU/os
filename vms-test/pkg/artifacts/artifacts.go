@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/metrics"
 )
 
 var (

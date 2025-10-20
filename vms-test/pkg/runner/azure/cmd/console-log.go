@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/azure/azutil"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/azure/azutil"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/spf13/cobra"

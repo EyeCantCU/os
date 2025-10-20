@@ -6,8 +6,8 @@ import (
 	"log"
 	"os"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils/sshutils"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"

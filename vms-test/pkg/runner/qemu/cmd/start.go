@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util/qmp"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils/sshutils"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util/qmp"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 )

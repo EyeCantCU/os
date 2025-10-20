@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts"
 	"github.com/spf13/cobra"
 )
 

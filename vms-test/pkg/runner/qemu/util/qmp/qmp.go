@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util"
 )
 
 // Command represents a QMP command to be sent to the QEMU monitor.

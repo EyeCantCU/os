@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 )
 
 // TestQemuX86 runs a basic qemu-system-x86_64 VM and verifies it works

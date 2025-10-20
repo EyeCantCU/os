@@ -7,8 +7,8 @@ import (
 	"net"
 	"testing"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/systemd"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/systemd"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 	"github.com/vishvananda/netlink"
 )
 

@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"chainguard.dev/apkoaas/pkg/cli"
+	"chainguard.dev/wolfi-vm/pkg/cli"
 	"github.com/chainguard-dev/clog"
 )
 

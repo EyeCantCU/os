@@ -27,8 +27,8 @@ import (
 	apkfs "chainguard.dev/apko/pkg/apk/fs"
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/converter"
-	"chainguard.dev/apkoaas/pkg/utils"
+	"chainguard.dev/wolfi-vm/pkg/converter"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"gopkg.in/yaml.v3"
 )
 

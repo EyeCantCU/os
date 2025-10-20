@@ -19,8 +19,8 @@ import (
 
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/converter"
-	"chainguard.dev/apkoaas/pkg/utils"
+	"chainguard.dev/wolfi-vm/pkg/converter"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"github.com/chainguard-dev/clog"
 )
 

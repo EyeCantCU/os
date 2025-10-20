@@ -24,9 +24,9 @@ import (
 	"strings"
 
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/converter"
-	"chainguard.dev/apkoaas/pkg/converter/tar2efi"
-	"chainguard.dev/apkoaas/pkg/utils"
+	"chainguard.dev/wolfi-vm/pkg/converter"
+	"chainguard.dev/wolfi-vm/pkg/converter/tar2efi"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

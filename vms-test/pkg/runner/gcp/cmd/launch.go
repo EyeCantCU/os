@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils/sshutils"
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/spf13/cobra"

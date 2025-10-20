@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/util"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/util"
 	"github.com/spf13/cobra"
 )
 

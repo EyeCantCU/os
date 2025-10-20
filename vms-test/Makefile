@@ -20,7 +20,7 @@ shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
 all: runners tests cmds
 
-$(go_tools_bin): go.mod pkg/tools/tools.go
+$(go_tools_bin): ../go.mod pkg/tools/tools.go
 	@mkdir -p tools/
 	@TOOL_PKG=$(filter %/$(@F),${go_tools}); \
 	TOOL=$$TOOL_PKG; \

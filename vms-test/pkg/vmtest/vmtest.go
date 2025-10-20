@@ -8,7 +8,7 @@ import (
 	"time"
 
 	// Import this so that any package importing this also gets the flags declared by artifacts
-	_ "chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
+	_ "chainguard.dev/wolfi-vm/vms-test/pkg/artifacts"
 )
 
 // Context returns an appropriate context for the given test.

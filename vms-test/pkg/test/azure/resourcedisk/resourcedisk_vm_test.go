@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/systemd"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/systemd"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 	"github.com/moby/sys/mountinfo"
 )
 

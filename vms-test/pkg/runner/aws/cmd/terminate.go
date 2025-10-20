@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/aws/util"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/aws/util"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"

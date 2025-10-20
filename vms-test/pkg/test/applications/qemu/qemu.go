@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util"
 )
 
 // QEMUConfig holds configuration for QEMU VM execution
