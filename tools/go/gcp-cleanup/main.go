@@ -143,7 +143,7 @@ func shouldClean(s string) bool {
 }
 
 func waitForQuery() {
-	i <- requestQueue
+	i := <-requestQueue
 	go func() {
 		time.Sleep(time.Second)
 		requestQueue <- i
