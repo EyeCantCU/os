@@ -68,6 +68,8 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	ok := true
+
 	if shouldClean("instances") {
 		if verbose {
 			log.Println("Cleaning instances")
@@ -79,6 +81,7 @@ func run(cmd *cobra.Command, args []string) error {
 		for _, e := range errs {
 			fmt.Println(e)
 		}
+		ok = ok && len(errs) < 1
 	}
 	if shouldClean("disks") {
 		if verbose {
@@ -91,6 +94,7 @@ func run(cmd *cobra.Command, args []string) error {
 		for _, e := range errs {
 			fmt.Println(e)
 		}
+		ok = ok && len(errs) < 1
 	}
 	if shouldClean("networks") {
 		if verbose {
@@ -103,6 +107,7 @@ func run(cmd *cobra.Command, args []string) error {
 		for _, e := range errs {
 			fmt.Println(e)
 		}
+		ok = ok && len(errs) < 1
 	}
 	if shouldClean("images") {
 		if verbose {
@@ -115,6 +120,11 @@ func run(cmd *cobra.Command, args []string) error {
 		for _, e := range errs {
 			fmt.Println(e)
 		}
+		ok = ok && len(errs) < 1
+	}
+
+	if !ok {
+		return fmt.Errorf("failed to delete some resources")
 	}
 
 	return nil
