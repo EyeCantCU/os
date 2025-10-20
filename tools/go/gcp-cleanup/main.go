@@ -25,6 +25,8 @@ var (
 	namePattern        string
 	excludeNamePattern string
 	retryAttempts      int
+	deletesPerSecond   int
+	requestQueue       chan int
 )
 
 func main() {
@@ -42,6 +44,7 @@ func main() {
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.Flags().StringVar(&namePattern, "name-pattern", "", "Regular expression pattern for resource names to include")
 	rootCmd.Flags().StringVar(&excludeNamePattern, "exclude-name-pattern", "", "Regular expression pattern for resource names to exclude")
+	rootCmd.Flags().IntVar(&deletesPerSecond, "dps", 10, "Number of delete requests allowed per second")
 
 	rootCmd.MarkFlagRequired("project")
 
@@ -139,6 +142,14 @@ func shouldClean(s string) bool {
 	return false
 }
 
+func waitForQuery() {
+	i <- requestQueue
+	go func() {
+		time.Sleep(time.Second)
+		requestQueue <- i
+	}()
+}
+
 func mkPolicyFromFlags() (cleanerupper.PolicyFunc, error) {
 	namePatternRe, err := regexp.Compile(namePattern)
 	if err != nil {
@@ -147,6 +158,11 @@ func mkPolicyFromFlags() (cleanerupper.PolicyFunc, error) {
 	excludeNamePatternRe, err := regexp.Compile(excludeNamePattern)
 	if err != nil {
 		return nil, err
+	}
+
+	requestQueue = make(chan int, deletesPerSecond)
+	for i := 0; i < deletesPerSecond; i++ {
+		requestQueue <- i
 	}
 
 	t := time.Now().Add(time.Duration(-1) * maxAge)
@@ -224,6 +240,15 @@ func mkPolicyFromFlags() (cleanerupper.PolicyFunc, error) {
 			return false
 		}
 
-		return t.After(created)
+		if !t.After(created) {
+			return false
+		}
+		/* Delaying the signal to delete the resource or not is kind of an awkward
+		 * way to control concurrency but it's the only way the upstream library
+		 * has to limit the amount of deletion requests done at once.
+		 */
+
+		waitForQuery()
+		return true
 	}, nil
 }
