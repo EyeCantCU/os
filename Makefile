@@ -302,6 +302,7 @@ $(ARCH_OUT_D)/aws-%/publish.s3.json: $(ARCH_OUT_D)/aws-%/disk.raw $(ARCH_OUT_D)/
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
 		--s3-bucket $(AWS_S3_BUCKET) \
+		--sbom-path $(dir $@)syft.sbom.json \
 		--vmdk-path $(dir $@)disk.vmdk \
 		--awsvars-path $(dir $@)uefi-data.aws \
 		--edk2vars-path $(dir $@)uefi-data.fd)
@@ -347,6 +348,7 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 		--raw-path $(dir $@)disk.raw \
 		--qcow2-path $(dir $@)disk.qcow2 \
 		--edk2vars-path $(dir $@)uefi-data.fd \
+		--sbom-path $(dir $@)syft.sbom.json \
 		--sign-gcs-urls --sign-az-urls)
 
 .PHONY: publish-vmware
@@ -363,6 +365,7 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 		--azure-container $(VMWARE_AZSTORAGECONTAINER) \
 		--raw-path $(dir $@)disk.raw \
 		--vmdk-path $(dir $@)disk.vmdk \
+		--sbom-path $(dir $@)syft.sbom.json \
 		--vmdk-flat-path $(dir $@)disk-flat.vmdk)
 
 .PHONY: publish-rpi
