@@ -37,6 +37,7 @@ func debugCmd() *cobra.Command {
 	var arch string
 	var ovmf string
 	var pubkey string
+	var snapshot bool
 
 	cmd := &cobra.Command{
 		Use:     "debug",
@@ -62,13 +63,14 @@ func debugCmd() *cobra.Command {
 			// standardize everywhere
 			arch := types.ParseArchitecture(arch).ToAPK()
 
-			return DebugCmd(ctx, efiDisk, arch, ovmf, pubkey)
+			return DebugCmd(ctx, efiDisk, arch, ovmf, pubkey, snapshot)
 		},
 	}
 
 	cmd.Flags().StringVarP(&pubkey, "pubkey", "p", "auto", "public key to supply to vm")
 	cmd.Flags().StringVar(&arch, "arch", "", "arch to build the disk")
 	cmd.Flags().StringVar(&ovmf, "ovmf", "", "uefi file to boot")
+	cmd.Flags().BoolVar(&snapshot, "snapshot", false, "use qcow2 snapshots to avoid modifying disk files")
 
 	return cmd
 }
@@ -119,7 +121,7 @@ func getUserPubkeys() ([]string, error) {
 	return ret, nil
 }
 
-func DebugCmd(ctx context.Context, efiDisk, arch, ovmf, pubkey string) error {
+func DebugCmd(ctx context.Context, efiDisk, arch, ovmf, pubkey string, snapshot bool) error {
 	if ovmf == "" {
 		ovmfDir, err := os.MkdirTemp("", "")
 		if err != nil {
@@ -156,6 +158,21 @@ func DebugCmd(ctx context.Context, efiDisk, arch, ovmf, pubkey string) error {
 		args = append(args, []string{
 			"-smbios", "type=1,product=cgr.dev/qemu/v1",
 			"-smbios", "type=11,value=cgr.dev/qemu/v1/ssh-pubkey=" + pubkeys}...)
+	}
+
+	// Apply snapshot mode if requested
+	if snapshot {
+		var cleanup func() error
+		var err error
+		args, cleanup, err = utils.Snapshotify(args)
+		if err != nil {
+			return fmt.Errorf("failed to create snapshots: %w", err)
+		}
+		defer func() {
+			if err := cleanup(); err != nil {
+				log.Printf("warning: %v", err)
+			}
+		}()
 	}
 
 	cmd := exec.Command(args[0], args[1:]...)

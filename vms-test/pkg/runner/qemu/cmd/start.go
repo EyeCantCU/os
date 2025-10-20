@@ -106,6 +106,30 @@ func Start(ctx context.Context, dir, pkdata string, arch types.Architecture) err
 		[]string{"-smbios", "type=1,product=cgr.dev/qemu/v1",
 			"-smbios", "type=11,value=cgr.dev/qemu/v1/ssh-pubkey=" + pkdata}...)
 
+	startwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get working dir: %w", err)
+	}
+
+	if err = os.Chdir(dir); err != nil {
+		return fmt.Errorf("failed chdir to %s: %v", dir, err)
+	}
+
+	var cleanup func() error
+	args, cleanup, err = util.Snapshotify(args)
+	if err != nil {
+		return fmt.Errorf("failed to create snapshots: %w", err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			log.Printf("warning: %v", err)
+		}
+	}()
+
+	if err = os.Chdir(startwd); err != nil {
+		return fmt.Errorf("failed chdir back")
+	}
+
 	sigs := make(chan os.Signal, 1)
 	var sigReceived os.Signal
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -152,7 +176,7 @@ func Start(ctx context.Context, dir, pkdata string, arch types.Architecture) err
 		log.Printf("ssh available on %s:%d\n", sshAddr, sshPort)
 	}()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

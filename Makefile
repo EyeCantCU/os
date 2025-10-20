@@ -139,12 +139,12 @@ $(disk_debug_targets): disk-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw
 run_targets = $(foreach name,$(names),run-$(name))
 .PHONY: $(run_targets)
 $(run_targets): run-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
-	$(TOP_D)/apkoaas debug --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk.raw
+	$(TOP_D)/apkoaas debug --snapshot --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk.raw
 
 run_debug_targets = $(foreach name,$(names),run-debug-$(name))
 .PHONY: $(run_debug_targets)
 $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$(ARCH).fd
-	$(TOP_D)/apkoaas debug --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk-debug.raw
+	$(TOP_D)/apkoaas debug --snapshot --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk-debug.raw
 
 debug_shell_targets = $(foreach name,$(names),debug-shell-$(name))
 .PHONY: $(debug_shell_targets)
