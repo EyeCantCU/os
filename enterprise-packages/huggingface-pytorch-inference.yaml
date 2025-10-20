@@ -1,0 +1,167 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: huggingface-pytorch-inference
+  version: 2.6.1_git20251016
+  epoch: 0
+  description: AWS Deep Learning Containers are pre-built Docker images that make it easier to run popular deep learning frameworks and tools on AWS.
+  copyright:
+    # EXCEPT FOR "smdistributed.dataparallel and smdistributed.modelparallel are released under the AWS Customer Agreement."
+    # https://github.com/aws/deep-learning-containers?tab=License-1-ov-file
+    - license: Apache-2.0
+  # These are the dependencies specified by the upstream image, not all are strictly required for it to be functional but not including these will be an issue
+  # since this image is meant to be a development environment with Python Notebooks for developers using Amazon Sagemaker and the Huggingtorch tooling
+  # Check: https://huggingface.co/docs/sagemaker/en/dlcs/available
+  dependencies:
+    runtime:
+      - automake
+      - build-base
+      - bzip2
+      - cmake
+      - cuda-toolkit-${{vars.cuda-version}}
+      - curl
+      - emacs
+      - ffmpeg
+      - git
+      - glib
+      - huggingface-pytorch-inference-compat
+      - hwloc
+      - jq
+      - libcurl-openssl4
+      - libffi-dev
+      - libgomp
+      - libjpeg-dev
+      - libpng-dev
+      - libsm
+      - libxext
+      - libxrender-dev
+      - llvm
+      - mesa-glx
+      - ncurses-dev
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+      - openjdk-17-default-jdk
+      - openmpi
+      - openssl
+      - openssl-dev
+      - py${{vars.python-version}}-accelerate-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-boto3
+      - py${{vars.python-version}}-captum
+      - py${{vars.python-version}}-charset-normalizer
+      - py${{vars.python-version}}-cryptography
+      - py${{vars.python-version}}-cython
+      - py${{vars.python-version}}-diffusers-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-h5py
+      - py${{vars.python-version}}-hf-transfer
+      - py${{vars.python-version}}-idna
+      - py${{vars.python-version}}-ipython
+      - py${{vars.python-version}}-kenlm
+      - py${{vars.python-version}}-packaging
+      - py${{vars.python-version}}-pandas
+      - py${{vars.python-version}}-parso
+      - py${{vars.python-version}}-pillow
+      - py${{vars.python-version}}-pip
+      - py${{vars.python-version}}-prompt-toolkit
+      - py${{vars.python-version}}-pyarrow
+      - py${{vars.python-version}}-pyopenssl
+      - py${{vars.python-version}}-pyyaml
+      - py${{vars.python-version}}-requests
+      - py${{vars.python-version}}-sagemaker-huggingface-inference-toolkit
+      - py${{vars.python-version}}-scipy
+      - py${{vars.python-version}}-setuptools
+      - py${{vars.python-version}}-torch-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-torchaudio-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-torchdata-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-tqdm
+      - py${{vars.python-version}}-triton-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-urllib3
+      - py${{vars.python-version}}-zstandard
+      - python3
+      - python3-dev
+      - readline-dev
+      - sqlite-dev
+      - tk-dev
+      - unzip
+      - vim
+      - wget
+      - xz
+      - zlib-dev
+
+vars:
+  cuda-version: 12.9
+  python-version: 3.13
+  # same as upstream, arbitrary choice as it should work on other java versions as well
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - busybox
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aws/deep-learning-containers.git
+      expected-commit: 58473eb0a969d73f926ce15ffca9031ea67f81ad
+      branch: master
+
+  - runs: |
+      install -Dpm0755 huggingface/build_artifacts/inference/config.properties ${{targets.destdir}}/etc/sagemaker-mms.properties
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility subpackage for upstream image
+    pipeline:
+      - runs: |
+          install -Dpm0755 huggingface/build_artifacts/inference/mms-entrypoint.py ${{targets.destdir}}/usr/local/bin/dockerd-entrypoint.py
+          install -Dpm0755 -t ${{targets.destdir}}/usr/local/bin/ huggingface/build_artifacts/inference/cuda-compatibility-lib.sh
+          install -Dpm0755 -t ${{targets.destdir}}/usr/local/bin/ src/deep_learning_container.py
+
+update:
+  enabled: true
+  git: {}
+  schedule:
+    period: monthly
+    reason: |
+      Monthly checks ensure we don't miss updates while avoiding excessive build triggers.
+      There also is no way to consistently track changes specifically for this image due to
+      there not being any consistent tags for changes when this image gets modified. This
+      repository is also a catch-all for all the amazon deep learning images so there are
+      unrelated updates to this all the time in the repository.
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+        - jq
+        - openjdk-${{vars.java-version}}-default-jdk
+  pipeline:
+    - uses: test/daemon-check-output
+      with:
+        # Ignore `ERROR` messages due to multi-model-server constantly retrying, having ERROR on the logs doesnt indicate it broke
+        error_strings: "NULL"
+        start: |
+          env \
+            HF_MODEL_ID="distilbert/distilbert-base-uncased-finetuned-sst-2-english" \
+            HF_TASK="text-classification" \
+            HF_OPTIMUM_BATCH_SIZE=1 \
+            HF_OPTIMUM_SEQUENCE_LENGTH=128 \
+            python3 /usr/local/bin/dockerd-entrypoint.py serve
+        expected_output: |
+          Management
+          distilbert
+        post: |
+          wait-for-it localhost:8080
+          curl \
+            --request POST \
+            --url http://localhost:8080/invocations \
+            --header "Content-Type: application/json" \
+            --data "{\"inputs\": \"Linky is the best!\"}" | \
+            jq -rc .[].label | grep -F -e "POSITIVE"
+
+          curl \
+            --request POST \
+            --url http://localhost:8080/invocations \
+            --header "Content-Type: application/json" \
+            --data "{\"inputs\": \"Security vulnerabilities are the worst.\"}" | \
+            jq -rc .[].label | grep -F -e "NEGATIVE"
