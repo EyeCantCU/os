@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
@@ -54,7 +55,7 @@ func testQemuNative(t *testing.T, arch types.Architecture) {
 	ctx := vmtest.Context(t)
 
 	// Check prerequisites
-	if !CanUseKVM() {
+	if !utils.CanUseKVM() {
 		t.Fatal("KVM is not available - this is required for native testing")
 	}
 

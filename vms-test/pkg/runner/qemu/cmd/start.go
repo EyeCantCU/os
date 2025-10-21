@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils/sshutils"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util/qmp"
@@ -116,7 +117,7 @@ func Start(ctx context.Context, dir, pkdata string, arch types.Architecture) err
 	}
 
 	var cleanup func() error
-	args, cleanup, err = util.Snapshotify(args)
+	args, cleanup, err = utils.Snapshotify(args)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshots: %w", err)
 	}

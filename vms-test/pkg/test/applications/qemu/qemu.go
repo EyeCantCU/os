@@ -171,11 +171,6 @@ func TerminateVM(ctx context.Context, workDir string) error {
 	return err
 }
 
-// CanUseKVM checks if KVM acceleration is available
-func CanUseKVM() bool {
-	return util.CanUseKVM()
-}
-
 // CheckQEMUBinary verifies that the required QEMU binary is available
 func CheckQEMUBinary(arch types.Architecture) error {
 	qemuBinary := fmt.Sprintf("qemu-system-%s", arch.ToQEmu())
