@@ -356,6 +356,8 @@ publish-vmware: $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$
 $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name))): publish-vmware-%: $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.vmdk $(ARCH_OUT_D)/vmware-%/disk-flat.vmdk
+    # Modify the VMDK descriptor file with the full name of the resulting disk-flat.vmdk
+	@sed -i "s/disk-flat.vmdk/vmware-$*-${GCPARCH}-${BUILD_TIMESTAMP}-flat.vmdk/" $(dir $@)disk.vmdk
 	@mkdir -p $(dir $@)
 	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
 		--name vmware-$* \
