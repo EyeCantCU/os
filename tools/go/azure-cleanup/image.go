@@ -66,8 +66,8 @@ func getImages(ctx context.Context, clients *AzureClients, resourceGroup string)
 	return resources, nil
 }
 
-func deleteImage(ctx context.Context, client *armcompute.ImagesClient, resourceName string) error {
-	poller, err := client.BeginDelete(ctx, resourceGroup, resourceName, nil)
+func deleteImage(ctx context.Context, clients *AzureClients, resourceName string) error {
+	poller, err := clients.Images.BeginDelete(ctx, resourceGroup, resourceName, nil)
 	if err != nil {
 		return err
 	}
@@ -145,11 +145,11 @@ func getImageVersions(ctx context.Context, clients *AzureClients, resourceGroup 
 	return resources, nil
 }
 
-func deleteImageVersion(ctx context.Context, clients *AzureClients, resource *ResourceInfo) error {
+func deleteImageVersion(ctx context.Context, clients *AzureClients, resourceName string) error {
 	// Parse the resource name: galleryName/imageName/versionName
-	parts := strings.Split(resource.Name, "/")
+	parts := strings.Split(resourceName, "/")
 	if len(parts) != 3 {
-		return fmt.Errorf("invalid gallery image version name format: %s", resource.Name)
+		return fmt.Errorf("invalid gallery image version name format: %s", resourceName)
 	}
 
 	galleryName := parts[0]

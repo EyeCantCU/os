@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 )
 
 func getDisks(ctx context.Context, clients *AzureClients, resourceGroup string) ([]*ResourceInfo, error) {
@@ -35,8 +33,8 @@ func getDisks(ctx context.Context, clients *AzureClients, resourceGroup string) 
 	return resources, nil
 }
 
-func deleteDisk(ctx context.Context, client *armcompute.DisksClient, resourceName string) error {
-	poller, err := client.BeginDelete(ctx, resourceGroup, resourceName, nil)
+func deleteDisk(ctx context.Context, clients *AzureClients, resourceName string) error {
+	poller, err := clients.Disks.BeginDelete(ctx, resourceGroup, resourceName, nil)
 	if err != nil {
 		return err
 	}

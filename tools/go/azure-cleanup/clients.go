@@ -6,6 +6,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 )
 
@@ -16,6 +17,9 @@ type AzureClients struct {
 	Galleries            *armcompute.GalleriesClient
 	GalleryImages        *armcompute.GalleryImagesClient
 	GalleryImageVersions *armcompute.GalleryImageVersionsClient
+	VirtualMachines      *armcompute.VirtualMachinesClient
+	PublicIP             *armnetwork.PublicIPAddressesClient
+	NetworkInterfaces    *armnetwork.InterfacesClient
 }
 
 func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClients, error) {
@@ -54,6 +58,21 @@ func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClien
 	clients.GalleryImageVersions, err = armcompute.NewGalleryImageVersionsClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gallery image versions client: %w", err)
+	}
+
+	clients.VirtualMachines, err = armcompute.NewVirtualMachinesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create virtual machines client: %w", err)
+	}
+
+	clients.PublicIP, err = armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create public IP addresses client: %w", err)
+	}
+
+	clients.NetworkInterfaces, err = armnetwork.NewInterfacesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create network interfaces client: %w", err)
 	}
 
 	return clients, nil
