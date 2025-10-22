@@ -1,0 +1,171 @@
+package:
+  name: ruby3.3-gitlab-mail_room
+  version: "0.0.27"
+  epoch: 0
+  description: A fork of https://www.github.com/tpitale/mail_room.
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - bash
+      - procps
+      # Required for sidekiq: https://gitlab.com/gitlab-org/ruby/gems/gitlab-mail_room/-/tree/master#sidekiq
+      - ruby${{vars.rubyMM}}-charlock_holmes
+      # Required for postback: https://gitlab.com/gitlab-org/ruby/gems/gitlab-mail_room/-/tree/master#postback
+      - ruby${{vars.rubyMM}}-faraday
+      - ruby${{vars.rubyMM}}-json
+      - ruby${{vars.rubyMM}}-jwt
+      - ruby${{vars.rubyMM}}-net-imap
+      - ruby${{vars.rubyMM}}-oauth2
+      # Required for que: https://gitlab.com/gitlab-org/ruby/gems/gitlab-mail_room/-/tree/master#que
+      - ruby${{vars.rubyMM}}-pg
+      - ruby${{vars.rubyMM}}-redis
+      - ruby${{vars.rubyMM}}-redis-namespace
+      # Webrick is required for healthcheck: https://gitlab.com/gitlab-org/ruby/gems/gitlab-mail_room/-/tree/master#health_check
+      - ruby${{vars.rubyMM}}-webrick
+      - ruby-${{vars.rubyMM}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - ruby${{vars.rubyMM}}-oauth2
+      - ruby-${{vars.rubyMM}}
+      - ruby-${{vars.rubyMM}}-dev
+
+# The gem is still require'd as 'mail_room'
+vars:
+  gem: mail_room
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: f9e77f6fe0907d9bb4b435f013c0d7e587f3ee27
+      repository: https://gitlab.com/gitlab-org/ruby/gems/gitlab-mail_room
+      tag: v${{package.version}}
+
+  - runs: |
+      # Extract oauth2 version from installed package and bump it in gemspec
+      OAUTH2_VERSION=$(gem list --local oauth2 | sed -n 's/.*(\([0-9.]*\)).*/\1/p')
+      sed -i.bak -E \
+        "s/(add_dependency[[:space:]]*['\"]oauth2['\"][[:space:]]*,[[:space:]]*(\[[[:space:]]*)?)['\"]~>[[:space:]]*[0-9]+(\.[0-9]+){1,2}['\"]/\\1\"= ${OAUTH2_VERSION}\"/" \
+        ${{vars.gem}}.gemspec
+
+  # The gem name is gitlab-mail_room, but the gemspec is still named "mail_room"
+  - uses: ruby/build
+    with:
+      gem: ${{vars.gem}}
+
+  - uses: ruby/install
+    with:
+      gem: gitlab-${{vars.gem}}
+      version: ${{package.version}}
+
+  - uses: ruby/clean
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 79173
+
+var-transforms:
+  - from: ${{package.name}}
+    match: ^ruby(\d\.\d+)-.*
+    replace: $1
+    to: rubyMM
+
+test:
+  pipeline:
+    - uses: test/tw/gem-check
+      with:
+        require: |
+          mail_room
+    - uses: test/tw/ldd-check
+    - name: Basic Delivery Test
+    - runs: |
+        gem install 'minitest' 'webmock' 'mail'
+        ruby - <<'RUBY'
+        # frozen_string_literal: true
+
+        require 'minitest/autorun'
+        require 'webmock/minitest'
+        require 'mail'
+
+        # Load our gem
+        require 'mail_room'
+
+        # Ensure these files are loaded (sometimes the top-level require is lazy)
+        begin; require 'mail_room/delivery/postback'; rescue LoadError; end
+        begin; require 'mail_room/mailbox'; rescue LoadError; end
+
+        WebMock.disable_net_connect!(allow_localhost: true)
+
+        def resolve_const(path)
+          path.split('::').inject(Object) { |m, c| m.const_get(c) }
+        rescue NameError
+          nil
+        end
+
+        class PostbackDeliveryTest < Minitest::Test
+          def setup
+            @delivery_url = 'https://internal.example/hooks/mail-room'
+            @mailbox_class  = resolve_const('MailRoom::Mailbox')
+            @postback_class = resolve_const('MailRoom::Delivery::Postback')
+
+            skip 'MailRoom::Mailbox not found'  unless @mailbox_class
+            skip 'MailRoom::Delivery::Postback not found' unless @postback_class
+
+            WebMock.reset!
+          end
+
+          def build_mail(message_id: '<abc123@example.com>')
+            Mail.new do
+              from       'alice@example.com'
+              to         'support@example.com'
+              subject    'Hello'
+              message_id message_id
+              body       'Hi there'
+              date       Time.now
+            end
+          end
+
+          def test_posts_raw_message_body_to_the_configured_url
+            raw = build_mail.encoded
+
+            # Expect the raw RFC822 as the request body
+            stub_request(:post, @delivery_url)
+              .with { |req| req.body == raw }
+              .to_return(status: 202, body: '{"ok":true}', headers: { 'Content-Type' => 'application/json' })
+
+            # Build a minimal Mailbox (no real network happens). Mailbox will:
+            # - select delivery_method 'postback'
+            # - turn delivery_options hash into Postback::Options
+            mailbox = @mailbox_class.new(
+              name: 'inbox',
+              email: 'inbox@example.com',
+              password: 'x',
+              host: 'imap.example.test',
+              port: 993,
+              delivery_method: 'postback',
+              delivery_options: {
+                delivery_url: @delivery_url
+              }
+            )
+
+            delivery = mailbox.delivery # -> MailRoom::Delivery::Postback with proper Options
+
+            # Support both deliver(raw) and deliver(raw, mailbox_name:, uid:) signatures
+            ok = if delivery.method(:deliver).arity.abs >= 2
+                  delivery.deliver(raw, mailbox_name: 'support', uid: 1)
+                else
+                  delivery.deliver(raw)
+                end
+
+            assert_equal true, !!ok, 'delivery should return truthy'
+            assert_requested :post, @delivery_url, times: 1
+          end
+        end
+        RUBY

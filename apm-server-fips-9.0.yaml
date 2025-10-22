@@ -1,7 +1,7 @@
 package:
   name: apm-server-fips-9.0
-  version: "9.0.5"
-  epoch: 1
+  version: "9.0.8"
+  epoch: 0
   description: Elastic APM is an application performance monitoring system built on the Elastic Stack
   copyright:
     - license: Elastic-2.0
@@ -14,7 +14,7 @@ pipeline:
     with:
       repository: https://github.com/elastic/apm-server
       tag: v${{package.version}}
-      expected-commit: 728dec46214ad183f6e93fa226ad51e0ac5a8465
+      expected-commit: dcbf31f01f567362b629ccc8a71a96bd185384c0
 
   - runs: |
       mkdir -p ${{targets.contextdir}}/usr/share/apm-server
@@ -26,7 +26,7 @@ pipeline:
   - uses: go/build
     with:
       packages: ./x-pack/apm-server
-      go-package: go-fips
+      go-package: go-fips-1.24
       output: apm-server
       tags: grpcnotrace,requirefips,ms_tls13kdf,relaxfips
       ldflags: |
@@ -61,14 +61,9 @@ update:
 test:
   environment:
     environment:
-      ES_PIPE: "/tmp/elasticsearch"
       ES_JAVA_HOME: /usr/lib/jvm/java-21-openjdk
-      ELASTIC_USER: "elastictest"
-      ELASTIC_PASSWORD: "MySuperSecureP@ssword123"
-      ELASTICSEARCH_USERNAME: "elastictest"
-      ELASTICSEARCH_PASSWORD: "MySuperSecureP@ssword123"
       ELASTICSEARCH_HOST: "http://localhost:9200"
-      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+      ELASTICSEARCH_PASSWORD: "MySuperSecureP@ssword123"
       JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
       JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
     contents:
@@ -127,7 +122,7 @@ test:
     - name: "Test Elasticsearch and Kibana integration"
       runs: |
         # allow running in bubblewrap and docker - ES_RUN blank for bubblewrap,
-        # set to "sudo -E -u elasticsearch" when running in docekr as root
+        # set to "sudo -E -u elasticsearch" when running in docker as root
         ES_RUN=""
         if [ "$(id -u)" -eq 0 ] ; then
           useradd elasticsearch
@@ -135,57 +130,57 @@ test:
           sudo chown elasticsearch:elasticsearch -fR /usr/share/elasticsearch
         fi
 
-        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
-        -alias "localhost" \
-        -genkeypair \
-        -keyalg RSA \
-        -dname CN="localhost" \
-        -ext ku:c=dig,keyEncipherment \
-        -ext san=dns:localhost,ip:127.0.0.1,ip:0:0:0:0:0:0:0:1 \
-        -storetype bcfks \
-        -storepass $KEYSTORE_PASSWORD -keypass $KEYSTORE_PASSWORD
+        # Create Elasticsearch keystore with FIPS-compliant password (required even without security)
+        printf "${ELASTICSEARCH_PASSWORD}\n${ELASTICSEARCH_PASSWORD}\n" | $ES_RUN /usr/share/elasticsearch/bin/elasticsearch-keystore create -p
 
-        $ES_RUN /usr/share/elasticsearch/bin/elasticsearch-keystore create -p <<EOF
-        ${KEYSTORE_PASSWORD}
-        ${KEYSTORE_PASSWORD}
-        EOF
+        # Start Elasticsearch with no security
+        echo "${ELASTICSEARCH_PASSWORD}" | $ES_RUN /usr/share/elasticsearch/bin/elasticsearch \
+          -Ediscovery.type=single-node \
+          -Expack.security.enabled=false \
+          -p /tmp/elasticsearch.pid > elasticsearch.log 2>&1 &
 
-        $ES_RUN /usr/share/elasticsearch/bin/elasticsearch-keystore add xpack.security.transport.ssl.keystore.secure_password  <<EOF
-        ${KEYSTORE_PASSWORD}
-        ${KEYSTORE_PASSWORD}
-        EOF
-
-        $ES_RUN /usr/share/elasticsearch/bin/elasticsearch-users useradd "${ELASTIC_USER}" -p "${ELASTIC_PASSWORD}" -r superuser,kibana_system
-        # Create FIFO pipe for passing Elastic KeyStore password
-        mkfifo "${ES_PIPE}"
-        tail -f "${ES_PIPE}" | $ES_RUN /usr/share/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid > elasticsearch.log 2>&1 &
-        sleep 1
-
-        # Write password to pipe
-        cat > "${ES_PIPE}" << EOF
-        ${KEYSTORE_PASSWORD}
-        EOF
-
-        wait-for-it localhost:9200 --timeout=60
-        STATUS=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" -u $ELASTIC_USER:$ELASTIC_PASSWORD | jq -r '.status')
-
-        if [ "$STATUS" == "green" ]; then
-          echo "Elasticsearch cluster is green."
-        else
-          echo "Elasticsearch cluster is not green. Status: $STATUS"
+        # Wait for Elasticsearch
+        if ! wait-for-it localhost:9200 --timeout=60; then
+          echo "Elasticsearch failed to start. Logs:"
+          cat elasticsearch.log
+          exit 1
         fi
 
-        echo -e "elasticsearch.username: \"$ELASTIC_USER\"\n\
-        elasticsearch.password: \"$ELASTIC_PASSWORD\"\n\
-        elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+        # Confirm Elasticsearch status before continuing
+        STATUS=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+        echo "Elasticsearch status: $STATUS"
 
-        /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
-        wait-for-it localhost:5601 --timeout=60
+        # Wait for green status
+        timer_start=$(date +%s)
+        while [ "$STATUS" != "green" ]
+        do
+          timer_now=$(date +%s)
+          STATUS=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+          echo "Elasticsearch status: $STATUS"
+          if [ $(( timer_now - timer_start )) -gt 60 ]
+          then
+            echo "Timed out waiting for Elasticsearch!"
+            exit 1
+          fi
+          sleep 2
+        done
+
+        # Simple Kibana config without authentication
+        echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+
+        # Prevent node from running in FIPS mode for non-fips Kibana
+        NODE_OPTIONS="--openssl-config=/dev/null" /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
+        KIBANA_PID=$!
+        sleep 5
+
+        if ! wait-for-it localhost:5601 --timeout=60; then
+          echo "Kibana failed to start. Logs:"
+          cat kibana.log | head -50
+          exit 1
+        fi
 
         apm-server -e -c /usr/share/apm-server/apm-server.yml \
           -E output.elasticsearch.hosts=localhost:9200 \
-          -E output.elasticsearch.username=$ELASTIC_USER \
-          -E output.elasticsearch.password=$ELASTIC_PASSWORD \
           -E output.elasticsearch.ssl.verification_mode="none" \
           -E apm-server.host=localhost:8200 \
           -E apm-server.kibana.host="localhost:5601" \

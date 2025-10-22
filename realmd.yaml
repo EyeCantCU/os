@@ -1,0 +1,120 @@
+package:
+  name: realmd
+  version: 0.17.1
+  epoch: 0
+  description: Kerberos realm enrollment service
+  copyright:
+    - license: LGPL-2.1-or-later
+  dependencies:
+    runtime:
+      # Mentioned by configuration during runtime, required for most operations
+      # https://gitlab.freedesktop.org/realmd/realmd/-/blob/master/service/realmd-defaults.conf
+      # https://gitlab.freedesktop.org/realmd/realmd/-/blob/master/service/realmd-redhat.conf
+      - adcli
+      - authselect
+      - freeipa
+      - oddjob
+      - samba-common-tools
+      - samba-winbind-clients
+      - sssd
+      - systemd
+      - winbind
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - build-base
+      - busybox
+      - gettext-dev
+      - krb5-dev
+      - openldap-dev
+      - pkgconf-dev
+      - polkit-dev
+      - systemd-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://gitlab.freedesktop.org/realmd/realmd.git
+      tag: ${{package.version}}
+      expected-commit: e80a3ca95672e91772b70d0d8b3fccc52cd0c868
+
+  - uses: autoconf/configure
+    with:
+      # realmd does not have proper defaults without specifying a "distro" so we just use the redhat default
+      opts: |
+        --with-distro=redhat \
+        --sbindir=/usr/bin \
+        --with-systemd-unit-dir=/usr/lib/systemd/system \
+        --disable-doc
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+subpackages:
+  - name: ${{package.name}}-lang
+    description: ${{package.name}} locale files
+    pipeline:
+      - uses: split/locales
+
+update:
+  enabled: true
+  git: {}
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: messagebus
+          gid: 65532
+      users:
+        - username: messagebus
+          gid: 65532
+          uid: 65532
+    contents:
+      packages:
+        - dbus
+        - shadow
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Smoke tests
+      runs: |
+        /usr/libexec/realmd --help | grep -e "realmd \[OPTION.*\] realmd$"
+        realm --help 2>&1 | grep -F -e "realm discover"
+    - name: Create users required by dbus-daemon configuration
+      runs: |
+        {
+          dbus-daemon --system 2>&1 || true
+        } | sed \
+          -e 's/dbus.*: Unknown username//g' \
+          -e 's/in message bus configuration file//g' \
+          -e 's/\"//g' \
+          -e 's/dbus-daemon.*//' | \
+          uniq | \
+          xargs -n1 useradd
+    - name: Test RealMD server functionality
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # SetUID bit here is necessary so that realmd can run privileged actions
+          chmod u+s /usr/libexec/dbus-daemon-launch-helper
+
+          mkdir -p /run/dbus
+
+          DBUS_PID=$(dbus-daemon --nopidfile --system --print-pid)
+        start: |
+          /usr/libexec/realmd -d
+        timeout: 60
+        expected_output: |
+          DEBUG: starting service
+          DEBUG: connected to bus
+          DEBUG: claimed name on bus: org.freedesktop.realmd
+        post: |
+          busctl status org.freedesktop.realmd | grep -F -e "/usr/libexec/realmd"
+
+          busctl introspect org.freedesktop.realmd /org/freedesktop/realmd/Samba | grep -F -e "${{package.version}}"
+          busctl introspect org.freedesktop.realmd /org/freedesktop/realmd/Samba | grep -F -e "Samba"
+          busctl introspect org.freedesktop.realmd /org/freedesktop/realmd/Samba | grep -F -e "GetAll"

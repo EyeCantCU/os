@@ -1,0 +1,111 @@
+#nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
+package:
+  name: bootc-image-builder
+  # version can be gotten with:
+  # git show -s --format=%cd --date=format:'0_git%Y%m%d%H%M%S' $commit
+  version: "0_git20250828085034"
+  epoch: 2 # GHSA-x4rx-4gw3-53p4
+  description: A container for deploying bootable container images.
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  commit: bee702b1d41ee31477bc477e7d992299a28c80da
+  # tags are CONTAINERS_STORAGE_THIN_TAGS from build.sh
+  tags: "containers_image_openpgp,exclude_graphdriver_btrfs,exclude_graphdriver_devicemapper"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/osbuild/bootc-image-builder
+      branch: main
+      expected-commit: ${{vars.commit}}
+
+  - name: Try to verify tags have not changed
+    runs: |
+      tags=${{vars.tags}}
+      spacetags=$(echo "$tags" | tr ',' ' ')
+      grepstr=$(printf 'CONTAINERS_STORAGE_THIN_TAGS="%s"' "$spacetags")
+      grep -F "$grepstr" build.sh || {
+        set +x
+        echo "FATAL: build.sh did not contain '$grepstr'"
+        echo "FATAL: please update tags value"
+        exit 1
+      } 1>&2
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/ulikunitz/xz@v0.5.15
+        github.com/docker/docker@v28.3.3
+      modroot: bib
+
+  - uses: go/build
+    with:
+      modroot: bib
+      packages: ./cmd/bootc-image-builder
+      tags: ${{vars.tags}}
+      output: bootc-image-builder
+
+  - runs: |
+      cd bib
+      # from build.sh
+      bdir="${{targets.contextdir}}/usr/bin"
+      mkdir -p "$bdir"
+      for arch in amd64 arm64; do
+        if [ "$arch" = "$(go env GOARCH)" ]; then
+            continue
+        fi
+
+        GOARCH="$arch" go build -ldflags="-s -w" -o $bdir/bib-canary-$arch ./cmd/cross-arch/
+      done
+
+test:
+  pipeline:
+    - name: Version Check
+      runs: |
+        set +x
+        fail() { echo "FAIL" "$@" 1>&2; exit 1; }
+
+        cmd="bootc-image-builder version"
+        $cmd > version.out ||
+            fail "bootc-image-builder version returned $?"
+
+        echo "$" "$cmd"
+        cat version.out
+
+        vout=$(cat version.out)
+        rev_exp=$(echo "${{vars.commit}}" | head -c 6)
+        rev_found=$(awk '$1 ~ /build_revision/ { print $2 }' version.out)
+        [ -n "$rev_found" ] ||
+          fail "did not find build_revision in output of '$cmd'. output: $vout"
+        buildtime=$(awk '$1 ~ /build_time/ { print $2 }' version.out)
+        [ -n "$buildtime" ] ||
+          fail "did not find build_time in output of '$cmd'. output: $vout"
+
+        # expect that build_revision contains the first 6 chars of
+        case "$rev_found" in
+          ${rev_exp}*)
+            echo "PASS: build_revision ($rev_found) in output of '$cmd'" \
+              "matched built commit (${{vars.commit}})";;
+          *) fail "commit '$rev_exp' not found in '$cmd'. output: $vout";;
+        esac
+
+        # expect that build_time matches the version we specified
+        # expected format like: 2025-08-01T18:33:14Z
+        # package version is just YYYYMMDDHHmmSS
+        btfound=$(echo "$buildtime" | sed 's,[^0-9],,g')
+        myver=${{package.version}}
+        mybt=${myver##*_git}
+        if [ "$mybt" = "$btfound" ]; then
+          echo "PASS: build_time ($btfound) in output of '$cmd' matched timestamp" \
+            "from package version ($mybt)"
+        else
+          fail "build_time in '$cmd' output was not '$mybt': $vout"
+        fi
+
+update:
+  enabled: false
+  exclude-reason: there are no tags or releases of bootc-image-builder
+  github:
+    identifier: osbuild/bootc-image-builder

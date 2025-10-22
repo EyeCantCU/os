@@ -1,0 +1,81 @@
+package:
+  name: seaweedfs-fips
+  version: "3.98"
+  epoch: 0 # GHSA-2464-8j7c-4cjm
+  description: SeaweedFS is a fast distributed storage system for blobs, objects, files.
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/seaweedfs/seaweedfs
+      tag: ${{package.version}}
+      expected-commit: 76520583c6669f3be56e41a601f550f86911d8fb
+
+  - uses: go/build
+    with:
+      packages: ./weed
+      output: weed
+      go-package: go-fips-md5
+      ldflags: -X github.com/seaweedfs/seaweedfs/weed/util/version.COMMIT=$(git rev-parse HEAD)
+
+  - name: Add config file
+    runs: |
+      mkdir -p ${{targets.destdir}}/etc/seaweedfs
+      cp ./docker/filer.toml ${{targets.destdir}}/etc/seaweedfs/filer.toml
+
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    description: Entrypoint for SeaweedFS in OCI containers
+    dependencies:
+      runtime:
+        - dash-binsh
+    pipeline:
+      - runs: |
+          install -Dm755 docker/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
+    test:
+      environment:
+        contents:
+          packages:
+            - "${{package.name}}"
+      pipeline:
+        - runs: |
+            test -x /entrypoint.sh
+            /entrypoint.sh help | grep -F "SeaweedFS"
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - wait-for-it
+    environment:
+      MASTER_PORT: "9333"
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Version and help commands"
+      runs: |
+        weed version |  grep -F "${{package.version}}"
+        weed help | grep -F "SeaweedFS"
+    - name: "Test master server startup and API"
+      uses: test/daemon-check-output
+      with:
+        start: weed master -ip=0.0.0.0 -port="${MASTER_PORT}" -mdir=/tmp/seaweedfs-test
+        timeout: 45
+        expected_output: |
+          Start Seaweed Master
+          No existing leader found!
+          Initializing new cluster
+        post: |
+          wait-for-it "localhost:${MASTER_PORT}" -t 30
+
+          curl -sf "http://localhost:${MASTER_PORT}/cluster/status" | grep -F "Leader"
+          curl -sf "http://localhost:${MASTER_PORT}/dir/assign" | jq -e ".fid and .url"
+          curl -sf "http://localhost:${MASTER_PORT}/dir/status" | jq -e ".Topology"
+
+update:
+  enabled: true
+  github:
+    identifier: seaweedfs/seaweedfs

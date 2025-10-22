@@ -1,0 +1,90 @@
+#!/bin/sh
+# shellcheck disable=SC3043
+fail() { echo "$@" 1>&2; exit 1; }
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} [ -v ] cmd [args]
+
+   Execute cmd with a chainctl auth token in enviromment.
+   Token audience can be set via AUDIENCE environmen variable whic
+   defaults to apk.cgr.dev.
+
+   with-auth knows how to handle adding auth to 
+    * curl - add '--user "user:<tok>"'
+    * apk - set HTTP_AUTH env to 'basic:<audience>:user:<tok>'
+
+   Any other commands will have environment variable 'AUTH_TOK'
+   set to the contents of the token.
+
+   If command has been invoked with SUDO, it will drop perms to
+   SUDO_GID to get the token.  If command is sudo, it will
+   invoke sudo with "env" args to have environment pass through.
+
+   Examples:
+      $ with-auth sudo apk add workstation-v2-home-mounter
+
+      $ with-auth curl --silent https://apk.cgr.dev/chainguard-private/x86_64/APKINDEX.tar.gz | tar xvzf -
+      ...
+      -rw-r--r-- 0/0        31502617 1969-12-31 19:00 APKINDEX
+      -rw-r--r-- 0/0               0 1969-12-31 19:00 DESCRIPTION
+
+      $ with-auth sh -c 'echo \$AUTH_TOK'
+      eyJhbGciOiJSUz....kdq8
+EOF
+}
+
+token() {
+    local audience="$1" myuid=""
+    set -- chainctl auth token --audience="$audience"
+    [ -z "${SUDO_UID}" ] && { "$@"; return; }
+    myuid=$(id -u) || { echo "id -u failed. seriously" 1>&2; return 1; }
+    [ "$myuid" = "0" ] && set -- sudo "--user=#${SUDO_UID}" "$@"
+    "$@"
+}
+
+withenv() {
+    local env="$1"
+    shift
+    if [ -n "$SUDO" ]; then
+        set -- "$SUDO" "$env" "$@"
+        [ "$verbose" = "true" ] && echo "$@" | sed -e "s/$tok/<token>/" 1>&2
+        exec "$@"
+    fi
+    if [ "$verbose" = "true" ]; then
+        echo "$env" "$@" | sed -e "s/$tok/<token>/" 1>&2
+    fi
+    # shellcheck disable=SC2163
+    eval "$env" exec '"$@"'
+}
+
+main() {
+    local SUDO="" audience="${AUDIENCE:-apk.cgr.dev}" verbose="false"
+    if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+        Usage
+        exit 0
+    fi
+    if [ "$1" = "-v" ]; then
+        verbose=true
+        shift
+    fi
+    tok=$(token "$audience") || fail "failed to get token for AUDIENCE=$audience"
+    if [ "${1##*/}" = "sudo" ]; then
+        SUDO="$1"
+        shift
+    fi
+    case "$1" in
+        curl|*/curl)
+            p="$1"; shift
+            set -- "$p" --user "user:$tok" "$@"
+            [ "$verbose" = "true" ] && echo "$@" | sed -e "s/$tok/<token>/" 1>&2
+            exec "$@"
+            ;;
+        apk|*/apk)
+            withenv HTTP_AUTH="basic:$audience:user:$tok" "$@";;
+    esac
+
+    # unknown. just put AUTH_TOK in environment.
+    withenv AUTH_TOK="$tok" "$@"
+}
+
+main "$@"

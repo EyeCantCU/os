@@ -1,0 +1,122 @@
+package:
+  name: nginx-otel-mainline
+  version: 0.1.2
+  epoch: 1
+  description: NGINX OpenTelemetry module for mainline nginx
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - c-ares
+  options:
+    # This package builds a dynamic module that is statically linked with its dependencies
+    no-depends: true
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - c-ares-dev
+      - curl-dev
+      - nginx-src-main
+      - openssl-dev
+      - pcre-dev
+      - pkgconf
+      - re2-dev
+      - systemd-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/nginxinc/nginx-otel
+      tag: v${{package.version}}
+      expected-commit: 72d8eed53af4c2cd6f3e30a2efe0e38d66f5e176
+
+  - runs: |
+      # Configure nginx to prepare objs directory for module build
+      ./auto/configure --with-compat
+    working-directory: /usr/src/nginx
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DNGX_OTEL_NGINX_BUILD_DIR=/usr/src/nginx/objs
+
+  - uses: cmake/build
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/etc/nginx/modules
+      mkdir -p ${{targets.contextdir}}/usr/lib/nginx/modules
+      mkdir -p ${{targets.contextdir}}/var/lib/nginx/
+
+      ln -sf /usr/lib/nginx/modules ${{targets.contextdir}}/var/lib/nginx/modules
+
+      install -Dm755 output/ngx_otel_module.so ${{targets.contextdir}}/usr/lib/nginx/modules/
+
+      # Create opt-in module configuration
+      echo 'load_module "modules/ngx_otel_module.so";' > ${{targets.contextdir}}/etc/nginx/modules/10_otel.conf
+
+  - uses: strip
+
+test:
+  environment:
+    contents:
+      packages:
+        - binutils
+        - curl
+        - nginx-mainline
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/ldd-check
+    - runs: |
+        # Verify module files exist
+        test -f /usr/lib/nginx/modules/ngx_otel_module.so
+        test -f /etc/nginx/modules/10_otel.conf
+
+        # Verify module configuration syntax
+        grep -q 'load_module "modules/ngx_otel_module.so";' /etc/nginx/modules/10_otel.conf
+
+        # Verify OpenTelemetry symbols are present
+        nm -D /usr/lib/nginx/modules/ngx_otel_module.so | grep -q opentelemetry
+
+        # Test configuration syntax
+        echo 'include /etc/nginx/modules/10_otel.conf;
+        user nobody;
+        events { }
+        http {
+            otel_exporter { endpoint localhost:4317; }
+            otel_trace on;
+            server {
+                listen 8080;
+                location / { return 200 "nginx-otel module loaded successfully"; }
+            }
+        }' > /tmp/test-nginx.conf
+
+        nginx -t -c /tmp/test-nginx.conf
+    - uses: test/daemon-check-output
+      with:
+        start: nginx -c /tmp/test-nginx.conf -g 'daemon off; error_log /dev/stderr info;'
+        timeout: 10
+        post: |
+          # Wait for nginx to start listening on port 8080
+          wait-for-it localhost:8080 -t 5
+          # Make HTTP request to verify nginx is serving with otel module loaded
+          response=$(curl -s http://localhost:8080/)
+          if echo "$response" | grep -q "nginx-otel module loaded successfully"; then
+            echo "nginx-otel module test successful"
+          else
+            echo "Failed to get expected response from nginx"
+            exit 1
+          fi
+        expected_output: |
+          start worker process
+
+update:
+  enabled: true
+  github:
+    identifier: nginxinc/nginx-otel
+    use-tag: true
+    strip-prefix: v

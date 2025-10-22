@@ -1,0 +1,341 @@
+package:
+  name: text-generation-inference
+  description: "Large Language Model Text Generation Inference"
+  epoch: 0
+  version: "3.3.6"
+  target-architecture:
+    - x86_64
+  copyright:
+    - license: Apache-2.0
+    - license: BSD-3-Clause # Because of the kernel https://huggingface.co/kernels-community/rotary.
+  resources:
+    cpu: 64
+    memory: 192Gi
+  options:
+    no-depends: true
+
+vars:
+  cuda-version: "12.8"
+  cuda-major-version: "12"
+  cudnn-version: 9
+  gcc-version: 13
+  import: text_generation_server
+  home: /usr/share/text-generation-inference
+
+data:
+  - name: py-versions
+    items:
+      3.11: '311' # Following upstream https://github.com/huggingface/text-generation-inference/blob/v3.3.5/Dockerfile#L52
+
+environment:
+  environment:
+    TORCH_CUDA_ARCH_LIST: "8.0;8.6;9.0+PTX" # We target architectures like upstream's: https://github.com/huggingface/text-generation-inference/blob/v3.3.5/Dockerfile#L76
+    HF_HOME: /data
+    HF_HUB_ENABLE_HF_TRANSFER: 1
+    HF_KERNELS_CACHE: /kernels
+    PORT: 80
+    EXLLAMA_NO_FLASH_ATTN: 1
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    CUDA_VERSION: "${{vars.cuda-version}}"
+    PATH: /usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cargo-c
+      - ccache
+      - cmake
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - curl
+      - gcc-${{vars.gcc-version}}-default
+      - libtorch-cuda-${{vars.cuda-version}}-dev=2.7.1-r6
+      - libtorch-cuda-${{vars.cuda-version}}=2.7.1-r6
+      - ninja
+      - ninja-build
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - openssl-dev
+      - protobuf-dev
+      # TODO: temporary workaround since the multi py version
+      # metapackage doesn't satisfy 2.7.1 and 0.22.1 of torch
+      # and torchvision respectively.
+      - py3.11-torch-cuda-${{vars.cuda-version}}=2.7.1-r6
+      - py3.11-torchvision-cuda-${{vars.cuda-version}}=0.22.1-r0
+      - python-3.11-dev
+      - rsync
+      - rust
+      - uv
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/huggingface/text-generation-inference.git
+      tag: v${{package.version}}
+      expected-commit: efb94e0d3db6aba9d464bc9a2f83191146203152
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{package.name}}
+    options:
+      no-depends: true
+    dependencies:
+      provides:
+        - py3-${{package.name}}
+      provider-priority: ${{range.value}}
+      runtime:
+        - busybox # wanted by openssf-compiler-options/gcc
+        - cuda-toolkit-${{vars.cuda-version}}
+        - gcc-${{vars.gcc-version}}-default
+        - libtorch-cuda-${{vars.cuda-version}}=2.7.1-r6
+        - nvidia-cuda-cudart-${{vars.cuda-version}}
+        - nvidia-libcublas-${{vars.cuda-version}}
+        - nvidia-libcusparse-${{vars.cuda-version}}
+        - py${{range.key}}-torch-cuda-${{vars.cuda-version}}=2.7.1-r6
+        - py${{range.key}}-torchvision-cuda-${{vars.cuda-version}}=0.22.1-r0
+        - python-${{range.key}}-dev
+    pipeline:
+      - name: Build rust components
+        runs: cargo build --profile release-opt --jobs 16
+      - name: Creates a uv venv and setup
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          uv venv --python ${{range.key}}
+          uv pip install pip setuptools packaging
+      - name: Include torch api headers for Torch toolkit
+        runs: |
+          # Torch toolkit doesnt include by default these paths
+          # and there is no clean way to override the include path.
+          for file in $(ls -1 /usr/include/torch/csrc/api/include/torch); do
+            ln -s /usr/include/torch/csrc/api/include/torch/$file /usr/include/torch/$file
+          done
+      - name: Prepare installdir
+        runs: mkdir -p ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install Flash Attention kernels
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p flash-att-builder
+          cp ./server/Makefile-flash-att Makefile
+          source .venv/bin/activate && make build-flash-attention
+          cp -r ./flash-attention/build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+          cp -r ./flash-attention/csrc/layer_norm/build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+          cp -r ./flash-attention/csrc/rotary/build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install Flash Attention v2 kernel
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p flash-att-v2-builder
+          cp ./server/Makefile-flash-att-v2 Makefile
+          source .venv/bin/activate && make build-flash-attention-v2-cuda
+          cp .venv/lib/python${{range.key}}/site-packages/flash_attn_2_cuda.cpython-311-x86_64-linux-gnu.so \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install exllama kernels
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p exllama-kernels-builder
+          cp -r ./server/exllama_kernels/* .
+          source .venv/bin/activate && python setup.py build
+          cp -r ./build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install exllama kernels v2
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p exllamav2-kernels-builder
+          cp -r ./server/Makefile-exllamav2 Makefile
+          source .venv/bin/activate && make build-exllamav2
+          cp -r ./exllamav2/build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install awq kernels
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p awq-kernels-builder
+          cp -r server/Makefile-awq Makefile
+          source .venv/bin/activate && make build-awq
+          cp -r ./llm-awq/awq/kernels/build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install custom kernels
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p custom-kernels-builder
+          cp -r server/custom_kernels/* .
+          source .venv/bin/activate && python setup.py build
+          cp -r ./build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install mamba kernels
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p mamba-builder
+          cp server/Makefile-selective-scan Makefile
+          source .venv/bin/activate && make build-all
+          cp -r mamba/build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+          cp -r causal-conv1d/build/lib.linux-${{build.arch}}-cpython-311/* \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Build and install flashinfer
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          mkdir -p flashinfer-builder
+          cp server/Makefile-flashinfer Makefile
+          source .venv/bin/activate && make install-flashinfer
+          cp -r .venv/lib/python${{range.key}}/site-packages/flashinfer \
+            ${{targets.contextdir}}/${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/
+      - name: Install server
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          source .venv/bin/activate
+          cd server
+          uv sync --frozen \
+            --extra gen \
+            --extra bnb \
+            --extra accelerate \
+            --extra compressed-tensors \
+            --extra quantize \
+            --extra peft \
+            --extra outlines \
+            --no-install-project \
+            --active
+          make gen-server-raw
+      - name: Download and install kernels
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          source .venv/bin/activate
+          cd server
+          COUNT=0
+          MAX_RETRIES=20
+          until kernels download .; do
+            COUNT=$((COUNT+1))
+            if [ "$COUNT" -ge "$MAX_RETRIES" ]; then
+              echo "kernels download failed after $MAX_RETRIES attempts."
+              exit 1
+            fi
+            echo "kernels download failed. Retrying ($COUNT/$MAX_RETRIES)..."
+            sleep 2
+          done
+          cp -r /kernels ${{targets.contextdir}}/
+      - name: Build server with extra features
+        runs: |
+          export PYTHONPATH=/usr/lib/python${{range.key}}/site-packages
+          source .venv/bin/activate
+          cd server
+          uv sync \
+            --frozen \
+            --extra gen \
+            --extra bnb \
+            --extra accelerate \
+            --extra compressed-tensors \
+            --extra quantize \
+            --extra peft \
+            --extra outlines \
+            --active \
+            --python=${{range.key}}
+          uv pip install nvidia-nccl-cu12==2.25.1
+      - name: Cleanup virtual env
+        runs: uv pip uninstall torch # We get it at system level, from APK.
+      - name: Install server and proto
+        runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.home}}
+          cp -r server ${{targets.contextdir}}/${{vars.home}}/
+          cp -r proto ${{targets.contextdir}}/${{vars.home}}/
+      - name: Install the benchmarker, the router and the launcher
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          install -Dm755 ./target/release-opt/text-generation-benchmark ${{targets.contextdir}}/usr/local/bin/text-generation-benchmark
+          install -Dm755 ./target/release-opt/text-generation-router ${{targets.contextdir}}/usr/local/bin/text-generation-router
+          install -Dm755 ./target/release-opt/text-generation-launcher ${{targets.contextdir}}/usr/local/bin/text-generation-launcher
+      - name: Package python components
+        runs: |
+          sed -i "s|include-system-site-packages = false|include-system-site-packages = true|g" .venv/pyvenv.cfg
+
+          # Include virtual environment's site-packages in system path
+          mkdir -p ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages
+          echo ${{vars.home}}/.venv/lib/python${{range.key}}/site-packages > \
+            ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/${{package.name}}.pth
+
+          # Symlink scripts to path
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for script in ${{vars.home}}/.venv/bin/*; do
+            ln -s $script ${{targets.contextdir}}/usr/bin/$(basename $script)
+          done
+
+          # Fix Python path in shebangs
+          for f in $(find .venv/bin -type f -executable); do
+            sed -i 's#/home/build/.venv/bin/python3#/usr/bin/python${{range.key}}#' $f
+          done
+
+          # Install virtual environment
+          rsync -az .venv/ ${{targets.contextdir}}${{vars.home}}/.venv/
+      - name: Cleanup /usr/local
+        runs: |
+          for file in \
+            $(find ${{targets.contextdir}}/usr/local/bin/ -name text-generation-* -executable); do \
+            mv $file ${{targets.contextdir}}/usr/bin/; \
+          done
+      - name: Patch world writable files
+        runs: chmod 0755 ${{targets.contextdir}}/usr/share/text-generation-inference/.venv/.lock
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - libcuda-stub-cuda-${{vars.cuda-version}}-dev
+        environment:
+          PYTHONPATH: /usr/lib/python${{range.key}}/site-packages:${{vars.home}}/server:${{vars.home}}/proto:${{vars.home}}/.venv/lib/python${{range.key}}/site-packages
+      pipeline:
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+        - runs: ${{vars.home}}/.venv/bin/text-generation-server --help
+        - name: Test serving tiny-gpt2 model
+          uses: test/daemon-check-output
+          with:
+            # PATH is reset by the start commands in this pipeline, so this is a workaround.
+            # text-generation-launcher execs text-generation-server in the end.
+            setup: |
+              ln -s ${{vars.home}}/.venv/bin/text-generation-server \
+                /usr/bin/text-generation-server
+            start: |
+              text-generation-launcher --model-id=sshleifer/tiny-gpt2
+            expected_output: |
+              Successfully downloaded weights
+              Starting shard
+              Using Attention
+            timeout: 30
+        # We exclude from the dependency check:
+        # - bitsandbytes/libbitsandbytes_cuda118.so and bitsandbytes/libbitsandbytes_cuda117.so,
+        #   since we support CUDA 12.4 and their following dependencies are missing in upstream too:
+        #   - libcudart.so.11.0
+        #   - libcublas.so.11
+        #   - libcublasLt.so.1
+        #   - libcusparse.so.11
+        # - nvidia/cufile/lib/libcufile_rdma.so.1, since their dependenceis are missing from upstream too:
+        #   - libmlx5.so.1
+        #   - librdmacm.so.1
+        #   - libibverbs.so.1
+        - uses: test/tw/ldd-check
+          with:
+            extra-library-paths: "${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/torch/lib:/usr/lib/python3.11/site-packages/torch/lib"
+            exclude-files: |
+              ${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/nvidia/cufile/lib/libcufile_rdma.so.1
+              ${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/bitsandbytes/libbitsandbytes_cuda117.so
+              ${{vars.home}}/.venv/lib/python${{range.key}}/site-packages/bitsandbytes/libbitsandbytes_cuda118.so
+
+  - name: ${{package.name}}-compat
+    description: OCI compatibility package for text-generation-inference
+    dependencies:
+      runtime:
+        - bash
+    pipeline:
+      - runs: sed -i 's|/usr/src/.venv|${{vars.home}}/.venv|g' ./tgi-entrypoint.sh
+      - name: Install the entrypoint
+        runs: |
+          install -Dm755 ./tgi-entrypoint.sh ${{targets.contextdir}}/tgi-entrypoint.sh
+    test:
+      pipeline:
+        - runs: test -f /tgi-entrypoint.sh
+
+update:
+  enabled: true
+  github:
+    identifier: huggingface/text-generation-inference
+    strip-prefix: v

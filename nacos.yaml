@@ -1,0 +1,122 @@
+package:
+  name: nacos
+  version: "3.1.0"
+  epoch: 0
+  description: Nacos is an easy-to-use platform designed for dynamic service discovery and configuration and service management.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash-binsh
+      - busybox
+      - curl
+      - iputils
+      - libstdc++
+      - ncurses
+      - openjdk-${{vars.java-version}}-jre
+      - vim
+
+vars:
+  # Main pom.xml uses Java 17; Docker image uses openjdk-17; Spring boot 3.x uses Java 17+
+  # No documentation / roadmap showing when they will upgrade
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - gnutar
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    LANG: en_US.UTF-8
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/alibaba/nacos
+      tag: ${{package.version}}
+      expected-commit: 2cbe8ae611ba9b011548b3cf7e407f25f856f4e3
+
+  - uses: maven/pombump
+
+  - runs: |
+      mvn -T$(nproc)C -Prelease-nacos -DskipTests -Drat.skip=true clean install -e -U --no-transfer-progress --fail-fast
+
+      dest=${{targets.contextdir}}/usr/share/java/${{package.name}}
+      mkdir -p $dest
+
+      tar -xzv -C $dest -f distribution/target/nacos-server-${{package.version}}.tar.gz --strip-components=1
+
+      # Add JVM args to startup scripts for patched jraft-core compatibility
+      sed -i '/^JAVA_OPT=/ s/"$/ --add-opens=java.base\/java.util=ALL-UNNAMED --add-opens=java.base\/java.lang=ALL-UNNAMED --add-opens=java.base\/java.lang.reflect=ALL-UNNAMED"/' $dest/bin/startup.sh
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/home
+          ln -sf ../usr/share/java/${{package.name}} ${{targets.contextdir}}/home
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - jq
+        - wait-for-it
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+  pipeline:
+    - name: "Test ${{package.name}} server startup and basic functionality"
+      working-directory: /home/${{package.name}}/bin
+      runs: |
+        # Set dummy values in the application.properties file for testing
+        sed -i 's/^nacos.core.auth.enabled=.*/nacos.core.auth.enabled=false/' ../conf/application.properties
+        sed -i 's/^nacos.core.auth.plugin.nacos.token.secret.key=.*/nacos.core.auth.plugin.nacos.token.secret.key=VGVzdFRva2VuRm9yTmFjb3NUZXN0aW5nVGhhdElzTG9uZ0Vub3VnaEZvclRoZVJlcXVpcmVtZW50cw==/' ../conf/application.properties
+        sed -i 's/^nacos.core.auth.server.identity.key=.*/nacos.core.auth.server.identity.key=serverIdentity/' ../conf/application.properties
+        sed -i 's/^nacos.core.auth.server.identity.value=.*/nacos.core.auth.server.identity.value=security/' ../conf/application.properties
+
+        sh startup.sh -m standalone
+
+        if ! wait-for-it localhost:8848 -t 30; then
+          echo "=== Server startup failed ==="
+          cat ../logs/startup.log ../logs/nacos.log 2>/dev/null
+          ps aux | grep nacos; netstat -tlnp | grep 8848
+          exit 1
+        fi
+
+        if ! curl -f -s http://localhost:8848/nacos/actuator/health | jq -e '.status == "UP"' >/dev/null; then
+          echo "=== Health check failed ==="
+          curl -v http://localhost:8848/nacos/actuator/health
+          exit 1
+        fi
+
+        CREATE_RESPONSE=$(curl -f -X POST "http://localhost:8848/nacos/v1/cs/configs" -d "dataId=test.config" -d "group=DEFAULT_GROUP" -d "content=test.value=hello")
+        if [ "$CREATE_RESPONSE" != "true" ]; then
+          echo "=== Config creation failed: $CREATE_RESPONSE ==="
+          exit 1
+        fi
+
+        sleep 2
+        RESPONSE=$(curl -s "http://localhost:8848/nacos/v1/cs/configs?dataId=test.config&group=DEFAULT_GROUP")
+        if ! echo "$RESPONSE" | grep -q "test.value=hello"; then
+          echo "=== Config verification failed ==="
+          echo "Expected: test.value=hello, Got: $RESPONSE"
+          exit 1
+        fi
+
+update:
+  enabled: true
+  github:
+    identifier: alibaba/nacos

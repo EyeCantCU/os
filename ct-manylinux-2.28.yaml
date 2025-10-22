@@ -1,7 +1,8 @@
+#nolint:update-identifier-must-match-git-repository
 package:
   name: ct-manylinux-2.28
-  version: 1.27.0
-  epoch: 1
+  version: "1.28.0"
+  epoch: 15
   description: "the cross native toolchain for manylinux 2.28"
   copyright:
     - license: GPL-3.0-or-later
@@ -11,26 +12,143 @@ package:
     cpu: 16
     memory: 16Gi
   dependencies:
+    runtime:
+      - ${{package.name}}-gcc-${{vars.gcc-default-version}}
+      - oldlibstdcxx-2.28
     replaces:
       # because we must replace the empty clang config file
       - openssf-compiler-options
+      # because we must replace its replacement clang config file
+      - oldglibc-2.28
       # because we want system fallback linker scripts point to us too
       - glibc-dev
       # because intrisics are gcc specific, and there is no gcc-15 support in crosstool-ng yet
-      - gcc-14-default
+      - gcc-${{vars.gcc-default-version}}-default
 
 environment:
   contents:
     packages:
       - build-base
+      # When bumping crosstool-ng, ct-manylinux-2.28/upgrade-configs.sh
+      # can be used to bump configs
       - crosstool-ng~${{package.version}}
-      - gcc-14-default
+      - gcc-${{vars.gcc-default-version}}-default
+      - oldlibstdcxx-2.28 # for ABI testing
+      - rpm
 
 vars:
-  # note also update the ct configs
-  gcc-version: 14
+  gcc-default-version: 14
+  # This variable selects a target libstdc++ ABI. It maps to a base GCC version
+  # that provided that ABI (80 = GCC 8.0, 48 == GCC 4.8). The libstdc++ that
+  # provided by GCC 8.0 is our target ABI for manylinux-2.28.
+  toolset-nonsharedver: 80
+  # These are also in oldlibstdcxx-2.28.yaml, and they need to match.
+  gcc-13-expected-nonshared-missing-aarch64: >-
+    _ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE@GLIBCXX_3.4.11 _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE11_S_allocateERS3_m _ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE11_S_allocateERS3_m
+  gcc-13-expected-nonshared-extra-aarch64: >-
+    _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructEmc _ZNKSt10filesystem7__cxx114path8iteratordeEv _ZNSt10filesystem11equiv_filesEPKcRK4statS1_S4_RSt10error_code
+  gcc-13-expected-nonshared-missing-x86_64: >-
+    _ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE@GLIBCXX_3.4.11 _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE11_S_allocateERS3_m _ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE11_S_allocateERS3_m
+  gcc-13-expected-nonshared-extra-x86_64: >-
+    _ZNSt10filesystem11equiv_filesEPKcRK4statS1_S4_RSt10error_code _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructEmc
+  gcc-14-expected-nonshared-missing-aarch64: >-
+    _ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE@GLIBCXX_3.4.11
+  gcc-14-expected-nonshared-extra-aarch64: >-
+    _ZNSt12_Destroy_auxILb0EE9__destroyIPNSt10filesystem7__cxx114path5_CmptEEEvT_S7_
+  gcc-14-expected-nonshared-missing-x86_64: >-
+    _ZNSt18condition_variable4waitERSt11unique_lockISt5mutexE@GLIBCXX_3.4.11
+  gcc-14-expected-nonshared-extra-x86_64: >-
+    _ZNSt12_Destroy_auxILb0EE9__destroyIPNSt10filesystem7__cxx114path5_CmptEEEvT_S7_
+
+# note also update the ct configs and patches
+data:
+  - name: gcc-versions
+    items:
+      13:
+      14:
 
 pipeline:
+  - working-directory: gcc-toolset-14-gcc
+    uses: git-checkout
+    with:
+      repository: https://git.almalinux.org/rpms/gcc-toolset-14-gcc
+      tag: imports/c8/gcc-toolset-14-gcc-14.2.1-7.1.el8_10
+      expected-commit: 62cb63d4a3ddb6b77a5a69794f2b8f76c3a25ad1
+
+  - working-directory: gcc-toolset-13-gcc
+    uses: git-checkout
+    with:
+      repository: https://git.almalinux.org/rpms/gcc-toolset-13-gcc
+      tag: imports/c8/gcc-toolset-13-gcc-13.3.1-2.2.el8_10
+      expected-commit: 0e3b5669d1f5d0f01ff31a2686f9b29e46e9982e
+
+  - name: "Munge gcc-toolset patches so crosstool-ng will apply them"
+    working-directory: gcc-toolset-14-gcc
+    runs: |
+      rpmspec --parse SPECS/gcc.spec > SPECS/gcc.spec.parsed
+      grep -E '^Patch[0-9]+:' < SPECS/gcc.spec.parsed > SPECS/gcc.patches
+      patchdir="../patches/gcc/14.3.0"
+      i=0
+      while read -r patchref filename; do
+        # ct-ng applies patches in the order returned by readdir(). While
+        # that's not guaranteed to be a predictable/sorted order, it
+        # currently works. Rename each patch file to include a numerical
+        # prefix that represents the order it was found in the spec file.
+        i=$((i + 1))
+        newname="$(printf %04d $i)-$(echo "${patchref}" | tr : -)-${filename}"
+        case "$filename" in
+          gcc14-pr118509.patch)
+            # Already upstream in GCC 14.3.0
+            continue
+            ;;
+          isl-rh2155127.patch)
+            # Already upstream in 0.26
+            continue
+            ;;
+          *)
+            ;;
+        esac
+        mkdir -p "$patchdir"
+        cp "SOURCES/$filename" "$patchdir/$newname"
+        # Convert any -p0 patches to -p1 patches
+        grep '^--- a/' "$patchdir/$newname" || \
+          sed -i -e 's!^--- !&a/!' -e 's!^+++ !&b/!' "$patchdir/$newname"
+      done < SPECS/gcc.patches
+
+  - name: "Munge gcc-toolset patches so crosstool-ng will apply them"
+    working-directory: gcc-toolset-13-gcc
+    runs: |
+      rpmspec --parse SPECS/gcc.spec > SPECS/gcc.spec.parsed
+      grep -E '^Patch[0-9]+:' < SPECS/gcc.spec.parsed > SPECS/gcc.patches
+      patchdir="../patches/gcc/13.4.0"
+      i=0
+      while read -r patchref filename; do
+        # ct-ng applies patches in the order returned by readdir(). While
+        # that's not guaranteed to be a predictable/sorted order, it
+        # currently works. Rename each patch file to include a numerical
+        # prefix that represents the order it was found in the spec file.
+        i=$((i + 1))
+        newname="$(printf %04d $i)-$(echo "${patchref}" | tr : -)-${filename}"
+        case "$filename" in
+          gcc13-znver5.patch|gcc13-vector-merge-*.patch)
+            # These don't apply to 13.4.0, but are also for archs
+            # we don't build for, so just skip them.
+            continue
+            ;;
+          isl-rh2155127.patch)
+            # Already upstream in 0.26
+            continue
+            ;;
+          *)
+            ;;
+        esac
+        mkdir -p "$patchdir"
+        cp "SOURCES/$filename" "$patchdir/$newname"
+        # Convert any -p0 patches to -p1 patches
+        grep '^--- a/' "$patchdir/$newname" || \
+          sed -i -e 's!^--- !&a/!' -e 's!^+++ !&b/!' "$patchdir/$newname"
+      done < SPECS/gcc.patches
+
   # Note ct-ng has all mirrors and checksums built-in, but doing fetch
   # instead to run the ct-ng build offline, and to make all of these
   # urls get surfaced in sbom
@@ -44,8 +162,15 @@ pipeline:
   - uses: fetch
     working-directory: src
     with:
-      uri: https://ftpmirror.gnu.org/gnu/gcc/gcc-14.2.0/gcc-14.2.0.tar.xz
-      expected-sha256: a7b39bc69cbf9e25826c5a60ab26477001f7c08d85cec04bc0e29cabed6f3cc9
+      uri: https://ftpmirror.gnu.org/gnu/gcc/gcc-14.3.0/gcc-14.3.0.tar.xz
+      expected-sha256: e0dc77297625631ac8e50fa92fffefe899a4eb702592da5c32ef04e2293aca3a
+      extract: false
+
+  - uses: fetch
+    working-directory: src
+    with:
+      uri: https://ftpmirror.gnu.org/gnu/gcc/gcc-13.4.0/gcc-13.4.0.tar.xz
+      expected-sha256: 9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5
       extract: false
 
   - uses: fetch
@@ -86,8 +211,8 @@ pipeline:
   - uses: fetch
     working-directory: src
     with:
-      uri: https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.tar.xz
-      expected-sha256: e79dcc6eb86695c6babfb07c2861912b635d5075c6cd1cd0567d1ea155f80d6e
+      uri: https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.13.12.tar.xz
+      expected-sha256: 611fbb669cf5539da48137a9c052becd499f3f862afaf21ab84cea3966221242
       extract: false
 
   - uses: fetch
@@ -107,8 +232,8 @@ pipeline:
   - uses: fetch
     working-directory: src
     with:
-      uri: https://ftpmirror.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz
-      expected-sha256: 277807353a6726978996945af13e52829e3abd7a9a5b7fb2793894e18f1fcbb2
+      uri: https://ftpmirror.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.xz
+      expected-sha256: b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01
       extract: false
 
   - uses: fetch
@@ -133,71 +258,13 @@ pipeline:
       extract: false
 
   - runs: |
-      # setup config
-      mv config.${{build.arch}} .config
-
-      # consistency check
-      grep -q 'CT_GCC_VERSION="${{vars.gcc-version}}.' .config
-
-      # parallel build
-      ct-ng build.0
-
       # Setup usr-merge
       mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr/lib
       ln -s usr/lib ${{targets.destdir}}/usr/lib/oldglibc/lib
       ln -s usr/lib ${{targets.destdir}}/usr/lib/oldglibc/lib64
       ln -s lib ${{targets.destdir}}/usr/lib/oldglibc/usr/lib64
 
-      # start building the frankenstein's monster
-      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr
-      mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-      mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-      cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include ${{targets.destdir}}/usr/lib/oldglibc/usr/
-      mv x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-version}}/*.a ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
-
-      # ship gcc built-in headers that sometimes mask or reference glibc headers, without merging them into /usr/lib/oldglibc/usr/include/
-      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}
-      cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-version}}/include ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}
-      cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{vars.gcc-version}}/include-fixed ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}
-      cp -vr x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/
-
-      prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
-      # Fix aarch64 non-linker script libm
-      if [ "${{build.arch}}" = "aarch64" ]; then
-        rm -f $prefix/libm.so
-        ln -s libm.so.6 $prefix/libm.so
-        # New glibc on aarch64 has libmvec and has linker scripts, but 2.28 on
-        # aarch64 did not, hence create custom public linker scripts to
-        # override modern glibc on aarch64 linker scripts
-        cat <<EOF >${{targets.destdir}}/usr/lib/libm.a
-      /* GNU ld script
-      */
-      OUTPUT_FORMAT(elf64-littleaarch64)
-      GROUP ( /usr/lib/oldglibc/usr/lib/libm.a )
-      EOF
-        cat <<EOF >${{targets.destdir}}/usr/lib/libm.so
-      /* GNU ld script
-      */
-      OUTPUT_FORMAT(elf64-littleaarch64)
-      GROUP ( /usr/lib/oldglibc/usr/lib/libm.so.6 )
-      EOF
-      fi
-      # fixup glibc linker scripts due to relocation
-      case "${{build.arch}}" in
-        x86_64)
-          linker_files="$prefix/libc.so $prefix/libm.so $prefix/libm.a"
-          ;;
-        aarch64)
-          linker_files="$prefix/libc.so"
-          ;;
-      esac
-      sed -i 's| /lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-      sed -i 's| /usr/lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-      sed -i 's| /lib/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
-
-      # override system linker scripts too
-      cp $linker_files ${{targets.destdir}}/usr/lib
-
+  - runs: |
       # make all unsupported headers from system glibc error out, as
       # not supported on glibc 2.28 builds. This stops autoconf from
       # finding them, and apps using them and failing to link.
@@ -207,6 +274,8 @@ pipeline:
         echo '#error Not supported on 2.28 builds' > ${{targets.destdir}}/usr/include/$header
       done
 
+  - name: Toolchain integration - gcc
+    runs: |
       # Toolchain integration. Ideally I want to use sysroot but still
       # somehow also allow using public things. This is the next best
       # thing.
@@ -215,29 +284,272 @@ pipeline:
       + -pthread
 
       *cc1plus:
-      + -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}} -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include/c++/${{vars.gcc-version}}/backward -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include-fixed -I/usr/lib/oldglibc/usr/include -I/usr/include
+      + %{!nostdinc:%{!nostdinc++:-nostdinc++ -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include/c++/%:getenv(OLDGLIBC_GCC_MAJOR_VER /)) -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include/c++/%:getenv(OLDGLIBC_GCC_MAJOR_VER /${{build.arch}}-linux-gnu)) -isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include/c++/%:getenv(OLDGLIBC_GCC_MAJOR_VER /backward))}}
 
       *cpp:
-      + -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include -I/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-version}}/include-fixed -I/usr/lib/oldglibc/usr/include -I/usr/include
+      + %{!nostdinc:-nostdinc -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include) -idirafter /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /include-fixed) -idirafter /usr/lib/oldglibc/usr/include -idirafter /usr/include}
 
       *link:
-      + -L/usr/lib/oldglibc/usr/lib -ldl -lutil -lanl --allow-shlib-undefined
+      + -L/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/%:getenv(OLDGLIBC_GCC_MAJOR_VER /) -L/usr/lib/oldglibc/usr/lib -ldl -lutil -lanl --allow-shlib-undefined
       EOF
 
+  - name: Toolchain integration - clang
+    runs: |
       mkdir -p ${{targets.destdir}}/etc/clang
       cat <<EOF >${{targets.destdir}}/etc/clang/oldglibc.cfg
-      -I/usr/lib/oldglibc/usr/include
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}/${{build.arch}}-linux-gnu
-      -I/usr/lib/oldglibc/usr/include/c++/${{vars.gcc-version}}/backward
-      -L/usr/lib/oldglibc/usr/lib
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}/${{build.arch}}-linux-gnu
+      -stdlib++-isystem /usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}}/include/c++/${{vars.gcc-default-version}}/backward
+      -L/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{vars.gcc-default-version}} -L/usr/lib/oldglibc/usr/lib
       -ldl -lutil -lanl
       -Wl,--allow-shlib-undefined
       EOF
 
-      # override gcc-wrapper to statically link libgcc and libstdc++ which are of higher ABI than allowed by manylinux 2.28
+  - name: override gcc-wrapper to statically link libgcc and libstdc++ which are of higher ABI than allowed by manylinux 2.28
+    runs: |
       mkdir -p ${{targets.destdir}}/usr/local/bin/
       cp gcc-wrapper ${{targets.destdir}}/usr/local/bin/
+
+  - name: add a clang-wrapper for things we can't do via config files
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/lib/oldglibc/bin
+      cp clang-wrapper ${{targets.destdir}}/usr/lib/oldglibc/bin
+      ln -s ../../lib/oldglibc/bin/clang-wrapper \
+        ${{targets.destdir}}/usr/local/bin/clang
+      ln -s ../../lib/oldglibc/bin/clang-wrapper \
+        ${{targets.destdir}}/usr/local/bin/clang++
+
+subpackages:
+  - range: gcc-versions
+    name: ${{package.name}}-gcc-${{range.key}}
+    description: "gcc-${{range.key}} for manylinux 2.28"
+    dependencies:
+      runtime:
+        - ${{package.name}}=${{package.full-version}}
+    pipeline:
+      # start building the frankenstein's monster
+      - runs: |
+          cp config.${{build.arch}}-gcc-${{range.key}} .config
+          # consistency check
+          grep -q "CT_GCC_VERSION=\"${{range.key}}." .config
+      - runs: |
+          # FIXME: avoid doing a full bootstrap for each version
+          # (abusing ct-ng STOP/RESTART doesn't work because it checks that the config did not change)
+          ct-ng build.0
+      - if: ${{build.arch}} == 'aarch64' && ${{context.name}} == "${{package.name}}-gcc-13"
+        uses: test/oldlibstdc++
+        with:
+          oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+          newlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++.so.6"
+          nonsharedlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++_nonshared${{vars.toolset-nonsharedver}}.a"
+          cc: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc/xgcc"
+          cc-prefix-dir: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc"
+          expected-nonshared-missing: ${{vars.gcc-13-expected-nonshared-missing-aarch64}}
+          expected-nonshared-extra: ${{vars.gcc-13-expected-nonshared-extra-aarch64}}
+      - if: ${{build.arch}} == 'x86_64' && ${{context.name}} == "${{package.name}}-gcc-13"
+        uses: test/oldlibstdc++
+        with:
+          oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+          newlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++.so.6"
+          nonsharedlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++_nonshared${{vars.toolset-nonsharedver}}.a"
+          cc: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc/xgcc"
+          cc-prefix-dir: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc"
+          expected-nonshared-missing: ${{vars.gcc-13-expected-nonshared-missing-x86_64}}
+          expected-nonshared-extra: ${{vars.gcc-13-expected-nonshared-extra-x86_64}}
+      - if: ${{build.arch}} == 'aarch64' && ${{context.name}} == "${{package.name}}-gcc-14"
+        uses: test/oldlibstdc++
+        with:
+          oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+          newlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++.so.6"
+          nonsharedlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++_nonshared${{vars.toolset-nonsharedver}}.a"
+          cc: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc/xgcc"
+          cc-prefix-dir: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc"
+          expected-nonshared-missing: ${{vars.gcc-14-expected-nonshared-missing-aarch64}}
+          expected-nonshared-extra: ${{vars.gcc-14-expected-nonshared-extra-aarch64}}
+      - if: ${{build.arch}} == 'x86_64' && ${{context.name}} == "${{package.name}}-gcc-14"
+        uses: test/oldlibstdc++
+        with:
+          oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+          newlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++.so.6"
+          nonsharedlib: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/${{build.arch}}-linux-gnu/libstdc++-v3/src/.libs/libstdc++_nonshared${{vars.toolset-nonsharedver}}.a"
+          cc: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc/xgcc"
+          cc-prefix-dir: ".build/${{build.arch}}-linux-gnu/build/build-cc-gcc-final/gcc"
+          expected-nonshared-missing: ${{vars.gcc-14-expected-nonshared-missing-x86_64}}
+          expected-nonshared-extra: ${{vars.gcc-14-expected-nonshared-extra-x86_64}}
+      - name: "save off full libraries for oldlibstdc++-2.28's tests"
+        runs: |
+          gcc_target_platform="${{build.arch}}-linux-gnu"
+          mkdir -p ${{targets.contextdir}}/usr/lib/${{context.name}}/test
+          (cd .build/$gcc_target_platform/build/build-cc-gcc-final/$gcc_target_platform/libstdc++-v3/src/.libs && tar -cz *) > \
+            "${{targets.contextdir}}/usr/lib/${{context.name}}/test/libs.tar.gz"
+      - name: move static C++ libs to gcc-private directories
+        runs: |
+          FULLPATH="${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}"
+          mkdir -p "$FULLPATH"
+          mv ./x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/lib*++*.a "$FULLPATH"
+      - name: install nonshared.a libs
+        runs: |
+          FULLPATH="${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}"
+          mkdir -p "$FULLPATH"
+          cp -vr .build/*-linux-gnu/build/build-cc-gcc-final/*-linux-gnu/libstdc++-v3/src/.libs/libstdc++_nonshared${{vars.toolset-nonsharedver}}.a "$FULLPATH"/libstdc++_nonshared.a
+          cp -vr .build/*-linux-gnu/build/build-cc-gcc-final/*-linux-gnu/libgfortran/.libs/libgfortran_nonshared${{vars.toolset-nonsharedver}}.a "$FULLPATH"/libgfortran_nonshared.a
+      - name: install ld scripts
+        runs: |
+          FULLPATH="${{targets.destdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}"
+          mkdir -p "$FULLPATH"
+          case "${{build.arch}}" in
+            aarch64)
+              oformat="OUTPUT_FORMAT(elf64-littleaarch64)"
+              ;;
+            x86_64)
+              oformat="OUTPUT_FORMAT(elf64-x86-64)"
+              ;;
+            *)
+              echo "ERROR: Unknown build arch: ${{build.arch}}" 1>&2
+              exit 1
+              ;;
+          esac
+
+          cat <<EOF > "$FULLPATH"/libstdc++.so
+          /* GNU ld script
+             Use the shared library, but some functions are only in
+             the static library, so try that secondarily. Finally,
+             because we use --as-needed by default in our hardening
+             flags, we need to try libstdc++.so again to pick up any
+             additional symbols the static library uses. */
+          ${oformat}
+          INPUT ( /usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6 -lstdc++_nonshared /usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6 )
+          EOF
+
+          # FIXME: Add test case
+          cat <<EOF > "$FULLPATH"/libgfortran.so
+          /* GNU ld script
+             Use the shared library, but some functions are only in
+             the static library, so try that secondarily. Finally,
+             because we use --as-needed by default in our hardening
+             flags, we need to try libstdc++.so again to pick up any
+             additional symbols the static library uses. */
+          ${oformat}
+          INPUT ( /usr/lib/libgfortran.so.5 -lgfortran_nonshared /usr/lib/libgfortran.so.5 )
+          EOF
+      - name: common files should come from the default gcc build
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+
+          mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+          mv x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/lib/* ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+          cp -vr x-tools/*-linux-gnu/*-linux-gnu/sysroot/usr/include ${{targets.destdir}}/usr/lib/oldglibc/usr/
+          mv x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/*.a ${{targets.destdir}}/usr/lib/oldglibc/usr/lib/
+      - name: remove oldglibc libstdc++ .so's; oldlibstdc++ will be used instead
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+          rm "${{targets.destdir}}/usr/lib/oldglibc/usr/lib"/libstdc++*
+      - name: Fix aarch64 non-linker script libm
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+          [ "${{build.arch}}" = "aarch64" ] || exit 0
+
+          prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
+          rm -f $prefix/libm.so
+          ln -s libm.so.6 $prefix/libm.so
+          # New glibc on aarch64 has libmvec and has linker scripts, but 2.28 on
+          # aarch64 did not, hence create custom public linker scripts to
+          # override modern glibc on aarch64 linker scripts
+          cat <<EOF >${{targets.destdir}}/usr/lib/libm.a
+          /* GNU ld script
+          */
+          OUTPUT_FORMAT(elf64-littleaarch64)
+          GROUP ( /usr/lib/oldglibc/usr/lib/libm.a )
+          EOF
+          cat <<EOF >${{targets.destdir}}/usr/lib/libm.so
+          /* GNU ld script
+          */
+          OUTPUT_FORMAT(elf64-littleaarch64)
+          GROUP ( /usr/lib/oldglibc/usr/lib/libm.so.6 )
+          EOF
+      - name: fixup glibc linker scripts due to relocation
+        runs: |
+          [ "${{range.key}}" = "${{vars.gcc-default-version}}" ] || exit 0
+
+          prefix="${{targets.destdir}}/usr/lib/oldglibc/usr/lib"
+          case "${{build.arch}}" in
+            x86_64)
+              linker_files="$prefix/libc.so $prefix/libm.so $prefix/libm.a"
+              ;;
+            aarch64)
+              linker_files="$prefix/libc.so"
+              ;;
+          esac
+          sed -i 's| /lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+          sed -i 's| /usr/lib64/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+          sed -i 's| /lib/| /usr/lib/oldglibc/usr/lib/|g' $linker_files
+
+          # override system linker scripts too
+          cp $linker_files ${{targets.destdir}}/usr/lib
+      - name: gcc-specific files
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/
+          # ship gcc built-in headers that sometimes mask or reference glibc headers, without merging them into /usr/lib/oldglibc/usr/include/
+          mkdir -p ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/include ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr ./x-tools/*-linux-gnu/lib/gcc/*-linux-gnu/${{range.key}}/include-fixed ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}
+          cp -vr x-tools/*-linux-gnu/*-linux-gnu/include/c++ ${{targets.contextdir}}/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/include/
+    test:
+      environment:
+        contents:
+          packages:
+            - gcc-${{range.key}}
+      pipeline:
+        - uses: test/compiler/smoke
+          with:
+            cc: gcc-${{range.key}}
+            cxx: g++-${{range.key}}
+        - uses: test/compiler/hardening-check
+          with:
+            cc: gcc-${{range.key}}
+        - uses: test/compiler/oldglibc
+          with:
+            cc: gcc-${{range.key}}
+            cxx: g++-${{range.key}}
+        - name: "unpack the saved-off libstdc++.so"
+          runs: |
+            tar xvfz "/usr/lib/${{context.name}}/test/libs.tar.gz"
+        - if: ${{build.arch}} == 'aarch64' && ${{context.name}} == "${{package.name}}-gcc-13"
+          uses: test/oldlibstdc++
+          with:
+            oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+            newlib: "libstdc++.so.6"
+            nonsharedlib: "/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/libstdc++_nonshared.a"
+            cc: "gcc-${{range.key}}"
+            expected-nonshared-missing: ${{vars.gcc-13-expected-nonshared-missing-aarch64}}
+            expected-nonshared-extra: ${{vars.gcc-13-expected-nonshared-extra-aarch64}}
+        - if: ${{build.arch}} == 'x86_64' && ${{context.name}} == "${{package.name}}-gcc-13"
+          uses: test/oldlibstdc++
+          with:
+            oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+            newlib: "libstdc++.so.6"
+            nonsharedlib: "/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/libstdc++_nonshared.a"
+            cc: "gcc-${{range.key}}"
+            expected-nonshared-missing: ${{vars.gcc-13-expected-nonshared-missing-x86_64}}
+            expected-nonshared-extra: ${{vars.gcc-13-expected-nonshared-extra-x86_64}}
+        - if: ${{build.arch}} == 'aarch64' && ${{context.name}} == "${{package.name}}-gcc-14"
+          uses: test/oldlibstdc++
+          with:
+            oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+            newlib: "libstdc++.so.6"
+            nonsharedlib: "/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/libstdc++_nonshared.a"
+            cc: "gcc-${{range.key}}"
+            expected-nonshared-missing: ${{vars.gcc-14-expected-nonshared-missing-aarch64}}
+            expected-nonshared-extra: ${{vars.gcc-14-expected-nonshared-extra-aarch64}}
+        - if: ${{build.arch}} == 'x86_64' && ${{context.name}} == "${{package.name}}-gcc-14"
+          uses: test/oldlibstdc++
+          with:
+            oldlib: "/usr/lib/oldlibstdc++/usr/lib/libstdc++.so.6"
+            newlib: "libstdc++.so.6"
+            nonsharedlib: "/usr/lib/oldglibc/usr/lib/gcc/${{host.triplet.gnu}}/${{range.key}}/libstdc++_nonshared.a"
+            cc: "gcc-${{range.key}}"
+            expected-nonshared-missing: ${{vars.gcc-14-expected-nonshared-missing-x86_64}}
+            expected-nonshared-extra: ${{vars.gcc-14-expected-nonshared-extra-x86_64}}
 
 test:
   environment:
@@ -251,10 +563,11 @@ test:
         - aom
         - aom-dev
         - aom-libs
+        - clang
         - dav1d-dev
         - expat-dev
         - fontconfig-dev
-        - gcc-14-default
+        - gcc-${{vars.gcc-default-version}}-default
         - harfbuzz-dev
         - lame-dev
         - libogg-dev
@@ -278,7 +591,19 @@ test:
         - x265-dev
         - yasm
         - zeromq-dev
+        - oldlibstdcxx-2.28
   pipeline:
+    - uses: test/compiler/smoke
+      with:
+        cc: clang
+        cxx: clang++
+    - uses: test/compiler/hardening-check
+      with:
+        cc: clang
+    - uses: test/compiler/oldglibc
+      with:
+        cc: clang
+        cxx: clang++
     - uses: git-checkout
       with:
         destination: openssl

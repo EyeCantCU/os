@@ -1,0 +1,157 @@
+package:
+  name: camunda-keycloak-26.3-iamguarded-compat
+  version: "26.3.5"
+  epoch: 0
+  description: Camunda fork of Keycloak
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - keycloak-${{vars.major-minor-version}}-iamguarded-compat~${{package.version}}
+    provides:
+      - camunda-keycloak-iamguarded-compat=${{package.full-version}}
+    replaces:
+      - keycloak-${{vars.major-minor-version}}-iamguarded-compat
+
+# this is a replacement of keycloak-iamguarded-compat for camunda keycloak, which is a fork of bitnami-keycloak
+# the "upstream repo" for this package can be found at https://github.com/camunda/camunda-keycloak
+# we do not clone it becaue there is no new code to build, we just copy the built code from other packages
+# this package MUST be built after keycloak-iamguarded-compat is built, so that the versions will line up
+# if there are any vulnerabilities in this package, it should be enough to fix them in keycloak-iamguarded-compat, then trigger a rebuild of this package
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+  - from: ${{package.version}}
+    match: ^(\d+)\.(\d+).*
+    replace: $1.$2
+    to: major-minor-version
+
+vars:
+  java-version: 21
+
+environment:
+  contents:
+    packages:
+      - aws-advanced-jdbc-wrapper
+      - aws-sdk-java-v2
+      - busybox
+      - dash-binsh
+      - keycloak-${{vars.major-minor-version}}-iamguarded-compat~${{package.version}}
+      - keycloak-metrics-spi
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - runs: |
+      export KC_DB=postgres
+      cd /opt/iamguarded/keycloak
+      cp /usr/share/java/aws-advanced-jdbc-wrapper.jar ./providers
+      cp /usr/share/java/aws-sdk-v2/* ./providers
+      cp /usr/share/java/keycloak-metrics-spi/keycloak-metrics-spi.jar ./providers
+      ./bin/kc.sh build
+
+      mkdir -p ${{targets.contextdir}}/opt/iamguarded/keycloak/providers
+      cp -r /opt/iamguarded/keycloak/providers/* ${{targets.contextdir}}/opt/iamguarded/keycloak/providers
+
+      mkdir -p ${{targets.contextdir}}/opt/iamguarded/keycloak/lib/quarkus
+      cp -r /opt/iamguarded/keycloak/lib/quarkus/* ${{targets.contextdir}}/opt/iamguarded/keycloak/lib/quarkus
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - postgresql
+        - postgresql-client
+        - shadow
+        - sudo-rs
+        - jq
+        - glibc-locale-en
+    accounts:
+      groups:
+        - groupname: nonroot
+          gid: 65532
+      users:
+        - username: nonroot
+          gid: 65532
+          uid: 65532
+      run-as: 0
+    environment:
+      PGDATA: /tmp/test_db
+      PGUSER: bn_keycloak
+      PGDB: iamguarded_keycloak
+      ALLOW_EMPTY_PASSWORD: yes
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      KC_CACHE: ispn
+      KC_CACHE_CONFIG_FILE: cache-ispn.xml
+      KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: $KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+  pipeline:
+    - uses: iamguarded/test-compat
+      with:
+        package: keycloak
+        version: ${{vars.major-version}}
+    - name: "version and help tests"
+      runs: |
+        /opt/iamguarded/keycloak/bin/kc.sh --version
+        /opt/iamguarded/keycloak/bin/kc.sh --help
+        /opt/iamguarded/keycloak/bin/kcadm.sh --help
+        /opt/iamguarded/keycloak/bin/kcreg.sh --help
+    - working-directory: /tmp
+      pipeline:
+        - name: "Test database creation"
+          with:
+            setup: echo "127.0.0.1 postgresql" >> /etc/hosts
+          runs: |
+            useradd $PGUSER
+            sudo -u $PGUSER initdb -D ${PGDATA}
+            sudo -u $PGUSER pg_ctl -D ${PGDATA} -l /tmp/logfile start
+            sudo -u $PGUSER createdb ${PGDB}
+            sudo -u $PGUSER psql -lqt | cut -d \| -f 1 | grep -qw ${PGDB}
+        - name: "start daemon on localhost"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              #!/bin/sh -e
+              echo "127.0.0.1 postgresql" >> /etc/hosts
+              echo "$(hostname) postgresql" >> /etc/hosts
+            start: |
+              env "BITNAMI_APP_NAME=keycloak" \
+                "APP_VERSION=${{package.version}}" \
+                "PATH=/opt/iamguarded/keycloak/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+                "KEYCLOAK_ENABLE_HEALTH_ENDPOINTS=true" \
+                /opt/iamguarded/scripts/keycloak/entrypoint.sh \
+                /opt/iamguarded/scripts/keycloak/run.sh
+            timeout: 60
+            expected_output: |
+              keycloak setup finished!
+              server listening on
+              Keycloak ${{package.version}}
+              Profile dev activated.
+            post: |
+              #!/bin/sh -e
+              url=http://localhost:9000/health/ready
+              response=$(curl -fsS --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 0 --retry-max-time 40 "$url") || {
+                echo "curl ${url} failed $?"
+                exit 1
+              }
+              echo "$response" | jq .status | grep -q UP || {
+                echo "response from $url did not contain \"UP\""
+                echo "response: $response"
+                exit 1
+              }
+              echo "$url had expected output: $response"
+
+update:
+  # The upstream repos releases contains a 'nightly' release. Which we want to
+  # exclude from discovery.
+  ignore-regex-patterns:
+    - ".*nightly.*"
+  enabled: true
+  github:
+    identifier: keycloak/keycloak
+    tag-filter: 26.3.

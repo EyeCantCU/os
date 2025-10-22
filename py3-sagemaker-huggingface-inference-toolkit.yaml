@@ -1,0 +1,130 @@
+package:
+  name: py3-sagemaker-huggingface-inference-toolkit
+  version: 2.6.0
+  epoch: 0
+  description: SageMaker Hugging Face Inference Toolkit is an open-source library for serving Transformers and Diffusers models on Amazon SageMaker
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  pypi-package: sagemaker-huggingface-inference-toolkit
+  import: sagemaker_huggingface_inference_toolkit
+  java-version: 8
+
+environment:
+  contents:
+    packages:
+      - py3-supported-build-base-dev
+
+data:
+  - name: py-versions
+    items:
+      # Librosa lacks support for 3.10, which fails due to scipy being compiled with older version of numpy
+      3.11:
+      3.12:
+      3.13:
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aws/sagemaker-huggingface-inference-toolkit.git
+      tag: v${{package.version}}
+      expected-commit: 69bc5ef978e1acce63386c10aa2fdb97c92c977e
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}
+    description: ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      runtime:
+        # None of PyTorch, TensorFlow >= 2.0, or Flax have been found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+        # Include pytorch on the image because it can depend on cuda or not
+        - openjdk-${{vars.java-version}}
+        - py${{range.key}}-huggingface-hub
+        - py${{range.key}}-librosa
+        - py${{range.key}}-model-archiver-bin
+        - py${{range.key}}-multi-model-server-bin
+        - py${{range.key}}-phonemizer
+        - py${{range.key}}-pillow
+        - py${{range.key}}-pyctcdecode
+        - py${{range.key}}-retrying
+        - py${{range.key}}-sagemaker-inference
+        - py${{range.key}}-torch-cuda-12.9
+        - py${{range.key}}-transformers
+    pipeline:
+      - uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-bin
+    description: Executable binaries for ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-${{vars.pypi-package}}
+    pipeline:
+      - uses: split/bin
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - wait-for-it
+            - jq
+            - openjdk-${{vars.java-version}}-default-jdk
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            # Ignore `ERROR` messages due to multi-model-server constantly retrying, having ERROR on the logs doesnt indicate it broke
+            error_strings: "NULL"
+            setup: |
+              tee /etc/sagemaker-mms.properties <<EOF
+              model_store=/opt/ml/model
+              option.model_id=/opt/ml/model
+              load_models=ALL
+              inference_address=http://0.0.0.0:8080
+              management_address=http://0.0.0.0:8081
+              enable_envvars_config=true
+              EOF
+            start: |
+              env \
+                HF_MODEL_ID="distilbert/distilbert-base-uncased-finetuned-sst-2-english" \
+                HF_TASK="text-classification" \
+                HF_OPTIMUM_BATCH_SIZE=1 \
+                HF_OPTIMUM_SEQUENCE_LENGTH=128 \
+                serve
+            expected_output: |
+              Management
+              distilbert
+            post: |
+              wait-for-it localhost:8080
+              curl \
+                --request POST \
+                --url http://localhost:8080/invocations \
+                --header "Content-Type: application/json" \
+                --data "{\"inputs\": \"Linky is the best!\"}" | \
+                jq -rc .[].label | grep -F -e "POSITIVE"
+
+              curl \
+                --request POST \
+                --url http://localhost:8080/invocations \
+                --header "Content-Type: application/json" \
+                --data "{\"inputs\": \"Security vulnerabilities are the worst.\"}" | \
+                jq -rc .[].label | grep -F -e "NEGATIVE"
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/emptypackage

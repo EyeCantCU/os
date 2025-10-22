@@ -1,0 +1,157 @@
+package:
+  name: py3-multi-model-server
+  version: 1.1.11
+  epoch: 0
+  description: Multi Model Server (MMS) is a flexible and easy to use tool for serving deep learning models trained using any ML/DL framework.
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  pypi-package: multi-model-server
+  import: mms.model_service
+  # This package is built with Java 8 as this is the only supported version for _building_.
+  # At runtime, this can be run with any java version up to (at least) openJDK 17. Upstream image
+  # huggingface-inference-toolkit uses OpenJDK 17 as the runtime version
+  java-version: 8
+
+environment:
+  environment:
+    # Straight from their README, check if they changed it somehow
+    MODEL_ARCHIVE: https://s3.amazonaws.com/model-server/model_archive_1.0/squeezenet_v1.1.mar
+    JAVA_HOME: /usr/lib/jvm/java-1.${{vars.java-version}}-openjdk
+  contents:
+    packages:
+      - bash
+      - openjdk-${{vars.java-version}}-default-jdk
+      - py3-supported-build-base-dev
+      - py3-supported-mxnet
+      - py3-supported-pillow
+      - py3-supported-pip
+      - py3-supported-psutil
+      - py3-supported-python-dev
+      - python3
+
+data:
+  - name: py-versions
+    items:
+      3.10:
+      3.11:
+      3.12:
+      3.13:
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/awslabs/multi-model-server.git
+      tag: v${{package.version}}
+      expected-commit: 440759888ac63b97274ac21b72371187950970fe
+
+  # NOOP after Python3.4
+  - working-directory: model-archiver
+    runs: |
+      sed -i 's/enum-compat//g' ./setup.py
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-model-archiver
+    description: model-archiver installed for python${{range.key}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-future
+        - py${{range.key}}-mxnet
+    pipeline:
+      - working-directory: model-archiver
+        uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: model_archiver
+
+  - range: py-versions
+    name: py${{range.key}}-model-archiver-bin
+    description: Executable binaries for model-archiver installed for python${{range.key}}
+    dependencies:
+      provider-priority: ${{range.value}}
+      provides:
+        - py3-model-archiver
+        - py3-model-archiver-bin
+      runtime:
+        - py${{range.key}}-model-archiver
+    pipeline:
+      - uses: split/bin
+    test:
+      pipeline:
+        - uses: test/tw/help-check
+          with:
+            bins: model-archiver
+            expect-contains: Model Archiver Tool
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}
+    description: ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-future
+        - py${{range.key}}-model-archiver
+        - py${{range.key}}-mxnet
+        - py${{range.key}}-pillow
+        - py${{range.key}}-psutil
+    pipeline:
+      - uses: py/pip-build-install
+        with:
+          python: python${{range.key}}
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-bin
+    description: Executable binaries for ${{vars.pypi-package}} installed for python${{range.key}}
+    dependencies:
+      provider-priority: ${{range.value}}
+      provides:
+        - py3-${{vars.pypi-package}}
+        - py3-${{vars.pypi-package}}-bin
+      runtime:
+        - py${{range.key}}-${{vars.pypi-package}}
+    pipeline:
+      - uses: split/bin
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - wait-for-it
+            - openjdk-${{vars.java-version}}-default-jdk
+      pipeline:
+        - uses: test/daemon-check-output
+          with:
+            setup: |
+              curl -O https://s3.amazonaws.com/model-server/inputs/kitten.jpg
+            start: multi-model-server --models squeezenet=${MODEL_ARCHIVE} --foreground
+            expected_output: |
+              Management
+              squeezenet
+            post: |
+              wait-for-it localhost:8080
+              curl -X POST http://127.0.0.1:8080/predictions/squeezenet -T kitten.jpg | grep -F -e "Egyptian cat"
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/emptypackage

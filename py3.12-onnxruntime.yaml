@@ -1,21 +1,21 @@
 package:
   name: py3.12-onnxruntime
-  version: "1.22.2"
+  version: "1.23.1"
   epoch: 0
   description: Cross-platform, high performance ML inferencing and training accelerator
-  copyright:
-    - license: MIT
   resources:
     cpu: 20
     memory: 50Gi
+  copyright:
+    - license: MIT
   dependencies:
     runtime:
-      - py${{vars.py-version}}-coloredlogs
-      - py${{vars.py-version}}-flatbuffers
-      - py${{vars.py-version}}-numpy
-      - py${{vars.py-version}}-packaging
-      - py${{vars.py-version}}-protobuf
-      - py${{vars.py-version}}-sympy
+      - py${{vars.python-version}}-coloredlogs
+      - py${{vars.python-version}}-flatbuffers
+      - py${{vars.python-version}}-numpy-2.2
+      - py${{vars.python-version}}-packaging
+      - py${{vars.python-version}}-protobuf
+      - py${{vars.python-version}}-sympy
 
 vars:
   pypi-package: onnxruntime
@@ -23,14 +23,14 @@ vars:
 environment:
   contents:
     packages:
-      - abseil-cpp-dev
+      - bash
+      - cmake-3
       - eigen-dev
-      - protobuf
+      - patch
       - protobuf-dev
-      - py${{vars.py-version}}-build-base-dev
-      - py${{vars.py-version}}-numpy
-      - python-${{vars.py-version}}
-      - re2-dev
+      - py${{vars.python-version}}-build-base-dev
+      - py${{vars.python-version}}-numpy-2.2
+      - python-${{vars.python-version}}
       - zlib-dev
   environment:
     # This seems to be required to compile `abseil`
@@ -41,59 +41,49 @@ var-transforms:
   - from: ${{package.name}}
     match: 'py(\d+\.\d+)-.*'
     replace: '$1'
-    to: py-version
+    to: python-version
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/microsoft/onnxruntime.git
       tag: v${{package.version}}
-      expected-commit: 5630b081cd25e4eccc7516a652ff956e51676794
+      expected-commit: d9b2048791efb5804fe3d53a04b4971256addebf
+      recurse-submodules: true
+      cherry-picks: |
+        main/d6e712c5b7b6260a61e54d1fe40107cf5366ee77: Update semver.h to fix compilation error under linux
 
-  - runs: |
-      # Find system abseil-cpp
-      sed 's|ABSL_PATCH_COMMAND}|&\n\ \ \ \ \FIND_PACKAGE_ARGS NAMES absl|g' \
-        -i cmake/external/abseil-cpp.cmake
-
-      # Allow building with GCC 15, FIXME: remove this from this package
-      # This line got fixed on https://github.com/microsoft/onnxruntime/commit/f7619dc93f592ddfc10f12f7145f9781299163a0
-      sed -i 's|#include <unordered_set>|&\n#include <cstdint>|' onnxruntime/core/optimizer/transpose_optimization/optimizer_api.h
-
-  - uses: cmake/configure
-    with:
-      output-dir: build
-      opts: |
-        --compile-no-warning-as-error \
-        -S cmake \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-        -DCMAKE_BUILD_TYPE=None \
-        -DCMAKE_INSTALL_PREFIX=/usr \
-        -Donnxruntime_ENABLE_PYTHON=ON \
-        -Donnxruntime_BUILD_SHARED_LIB=ON \
-        -Donnxruntime_BUILD_UNIT_TESTS=OFF \
-        -DBUILD_TESTING=OFF \
-        -Donnxruntime_ENABLE_TRAINING=ON \
-        -Donnxruntime_ENABLE_LAZY_TENSOR=OFF \
-        -Donnxruntime_USE_MPI=ON \
-        -Donnxruntime_USE_DNNL=OFF \
-        -Donnxruntime_USE_PREINSTALLED_EIGEN=ON \
-        -DCMAKE_CXX_STANDARD=17 \
-        -DPython_EXECUTABLE=/usr/bin/python${{vars.py-version}}
-
-  - uses: cmake/build
-    with:
-      output-dir: build
+  # NOTE: this sets some 'magic' apparently, otherwise we would use the 'cmake/build' pipeline.
+  # review in future upstream releases
+  - name: "build using upstream wrapper script"
+    runs: |
+      ./build.sh --build --update --config Release --build_shared_lib --parallel --compile_no_warning_as_error \
+        --skip_submodule_sync --allow_running_as_root --skip_tests --enable_pybind --build_wheel \
+        --cmake_extra_defines \
+          CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          CMAKE_INSTALL_PREFIX=/usr \
+          onnxruntime_ENABLE_PYTHON=ON \
+          onnxruntime_BUILD_SHARED_LIB=ON \
+          onnxruntime_BUILD_UNIT_TESTS=OFF \
+          BUILD_TESTING=OFF \
+          onnxruntime_ENABLE_TRAINING=ON \
+          onnxruntime_ENABLE_LAZY_TENSOR=OFF \
+          onnxruntime_USE_MPI=ON \
+          onnxruntime_USE_DNNL=OFF \
+          onnxruntime_USE_PREINSTALLED_EIGEN=ON \
+          CMAKE_CXX_STANDARD=17 \
+          Python_EXECUTABLE=/usr/bin/python${{vars.python-version}}
 
   - name: Fix Python build
     runs: |
       # Manually fix https://github.com/microsoft/onnxruntime/issues/24570
       mkdir onnxruntime/capi
       python setup.py --help # We have to call it like this once to generate the file we need.
-      cp -r build/onnxruntime/* onnxruntime
+      cp -r build/Linux/Release/onnxruntime/* onnxruntime
 
   - uses: py/pip-build-install
     with:
-      python: python${{vars.py-version}}
+      python: python${{vars.python-version}}
 
   - uses: strip
 
@@ -107,17 +97,17 @@ test:
   environment:
     contents:
       packages:
-        - python-${{vars.py-version}}
-        - py${{vars.py-version}}-pip
-        - py${{vars.py-version}}-${{vars.pypi-package}}
+        - python-${{vars.python-version}}
+        - py${{vars.python-version}}-pip
+        - py${{vars.python-version}}-${{vars.pypi-package}}
   pipeline:
     - uses: test/tw/ldd-check
     - uses: test/tw/pip-check
       with:
-        python: python${{vars.py-version}}
+        python: python${{vars.python-version}}
     - uses: python/import
       with:
-        python: python${{vars.py-version}}
+        python: python${{vars.python-version}}
         import: ${{vars.pypi-package}}
     - runs: |
         python3 <<'EOF' | grep -F -e "${{package.version}}" -e "CPU"

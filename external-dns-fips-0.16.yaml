@@ -1,0 +1,97 @@
+package:
+  name: external-dns-fips-0.16
+  version: "0.16.1"
+  epoch: 2 # GHSA-vvgc-356p-c3xw
+  description: Configure external DNS servers (AWS Route53, Google CloudDNS and others) for Kubernetes Ingresses and Services.
+  copyright:
+    - license: Apache-2.0
+      paths:
+        - "*"
+  dependencies:
+    provides:
+      - external-dns-fips=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - go-fips
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes-sigs/external-dns
+      tag: v${{package.version}}
+      expected-commit: 017f7687ca393138b565e51757a6fa8010902066
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/golang-jwt/jwt/v5@v5.2.2
+        golang.org/x/net@v0.38.0
+
+  # We need to disable the "-s" ldflags for the build to be FIPS.
+  - uses: go/remove-cgo-enabled-0
+    with:
+      seds: |
+        s,CGO_ENABLED=0[ ]*,,g
+        s,-w -s,-w,g
+
+  - runs: |
+      # Our global LDFLAGS conflict with a Makefile parameter
+      unset LDFLAGS
+      make build
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mv build/external-dns ${{targets.destdir}}/usr/bin/
+
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      provides:
+        - external-dns-fips-iamguarded-compat=${{package.full-version}}
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: external-dns
+          version: ${{vars.major-version}}
+      - name: Create symlinks
+        runs: |
+          mkdir -p "${{targets.contextdir}}/opt/iamguarded/external-dns/bin"
+          ln -s /usr/bin/external-dns "${{targets.contextdir}}/opt/iamguarded/external-dns/bin/external-dns"
+      - uses: iamguarded/finalize-compat
+        with:
+          package: external-dns
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - runs: |
+            /opt/iamguarded/external-dns/bin/external-dns --version
+            /opt/iamguarded/external-dns/bin/external-dns --help
+        - uses: iamguarded/test-compat
+          with:
+            package: external-dns
+            version: ${{vars.major-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes-sigs/external-dns
+    strip-prefix: v
+    tag-filter: v0.16.
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        external-dns --help
+    - runs: |
+        external-dns --version

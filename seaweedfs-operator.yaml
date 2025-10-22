@@ -1,0 +1,91 @@
+package:
+  name: seaweedfs-operator
+  version: "1.0.5"
+  epoch: 0
+  description: seaweedfs kubernetes operator
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/seaweedfs/seaweedfs-operator
+      tag: ${{package.version}}
+      expected-commit: 9095ff3c2aba72cd370a0f24eaede22e1da5f55f
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.35.0
+        golang.org/x/net@v0.38.0
+        golang.org/x/image@v0.18.0
+        golang.org/x/oauth2@v0.27.0
+      replaces: github.com/golang-jwt/jwt=github.com/golang-jwt/jwt/v4@v4.5.2
+
+  - uses: go/build
+    with:
+      packages: ./cmd/main.go
+      output: manager
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    description: Compatibility package to provide binary at expected upstream location
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          ln -sf /usr/bin/manager ${{targets.contextdir}}/manager
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - name: Smoke tests
+          runs: |
+            /manager --help 2>&1 | grep -F "/manager"
+
+update:
+  enabled: true
+  github:
+    identifier: seaweedfs/seaweedfs-operator
+
+test:
+  environment:
+    contents:
+      packages:
+        - mkcert
+        - curl
+  pipeline:
+    - name: Check version and help output
+      runs: |
+        set -o pipefail
+        manager --help 2>&1 | grep -F "manager"
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Apply CRDs and test operator startup
+      runs: |
+        set -o pipefail
+        kubectl apply -f https://raw.githubusercontent.com/seaweedfs/seaweedfs-operator/${{package.version}}/config/crd/bases/seaweed.seaweedfs.com_seaweeds.yaml --server-side
+    - name: Test operator daemon
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/k8s-webhook-server/serving-certs/
+          mkcert -install
+          mkcert -key-file /tmp/k8s-webhook-server/serving-certs/tls.key -cert-file /tmp/k8s-webhook-server/serving-certs/tls.crt localhost
+        start: manager
+        timeout: 30
+        expected_output: |
+          starting manager
+          starting server
+          Registering webhook
+          Starting webhook server
+        post: |
+          curl -ksfL http://localhost:8081/healthz

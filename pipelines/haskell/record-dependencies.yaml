@@ -1,0 +1,145 @@
+# See fetch-dependencies.yaml for usage instructions.
+#
+name: "Record Cabal dependencies"
+
+needs:
+  packages:
+    - python3
+
+inputs:
+  project-file:
+    description: "Name of Cabal project file"
+    default: "cabal.project"
+
+pipeline:
+  - runs: cabal update
+
+  - runs: |
+      if [ "${{inputs.project-file}}" = cabal.project ]; then
+        cabal freeze
+      else
+        cabal freeze --project-file="${{inputs.project-file}}"
+      fi
+
+  # "cabal freeze" generates a freeze file that identifies versions of all
+  # dependencies, but it doesn't freeze package descriptions (which may be
+  # revised on Hackage), and it doesn't record hash digests of packages or
+  # their descriptions.  Rectify these problems and generate a home-grown
+  # lock file.
+  - name: "Record Cabal dependencies"
+    runs: |
+      python3 <<'EOF'
+      import hashlib
+      import json
+      import re
+      import subprocess
+      import tempfile
+      from operator import itemgetter
+      from pathlib import Path
+
+      # This is an extremely simplistic parser, but it should be good
+      # enough.
+      in_constraints = False
+      constraints: list[tuple[str, str]] = []
+      with Path("${{inputs.project-file}}.freeze").open() as freeze:
+          for line in freeze:
+              if line.startswith("constraints:"):
+                  in_constraints = True
+                  line = line.removeprefix("constraints:").strip()
+              elif in_constraints:
+                  if not line.startswith(" "):
+                      break
+                  line = line.strip()
+              else:
+                  continue
+
+              if m := re.match(r"^any\.([^ =]+) *==([^,]*)", line):
+                  # Skip packages that are provided by GHC and that Cabal
+                  # won't install without --allow-boot-library-installs, or
+                  # that don't reliably exist on Hackage with useful
+                  # versions.
+                  #
+                  # This still overshoots slightly in some cases because it
+                  # doesn't understand which packages are part of the
+                  # project currently being built: for example, when
+                  # building GHC itself, this results in us unnecessarily
+                  # recording dependencies on packages such as array and
+                  # binary.  However, this is typically harmless.
+                  if m.group(1) not in {
+                      "base",
+                      "ghc-boot-th",
+                      "ghc-heap",
+                      "ghc-internal",
+                      "ghc-prim",
+                      "integer-simple",
+                      "integer-gmp",
+                      "rts",
+                      "template-haskell",
+                  }:
+                      constraints.append((m.group(1), m.group(2)))
+
+      # Download all the frozen dependencies.  Throw away the unpacked results.
+      with tempfile.TemporaryDirectory() as download_name:
+          download_path = Path(download_name)
+          for name, version in constraints:
+              subprocess.run(["cabal", "get", f"{name}-{version}"], check=True)
+
+      # Poke through the cache to find all the downloaded files.
+      cache = Path.home() / ".cache/cabal/packages/hackage.haskell.org"
+      package_paths: list[Path] = []
+      for dirpath, dirnames, filenames in cache.walk():
+          if dirpath != cache:
+              for filename in filenames:
+                  if filename.endswith(".tar.gz"):
+                      package_paths.append(dirpath / filename)
+
+      deps: list[dict[str, str]] = []
+      for package_path in package_paths:
+          dep: dict[str, str] = {}
+          dep["package"] = package_path.parts[-3]
+          dep["version"] = package_path.parts[-2]
+          with package_path.open(mode="rb") as package_file:
+              dep["src_sha256"] = hashlib.file_digest(
+                  package_file, "sha256"
+              ).hexdigest()
+          deps.append(dep)
+
+      # The index may contain multiple copies of the same file with
+      # different x-revision properties.  Since this is just for
+      # bootstrapping, it's easiest to just let tar(1) extract the whole
+      # thing to a temporary directory; the last version of a file in the
+      # index will win.
+      with tempfile.TemporaryDirectory() as index_name:
+          index_path = Path(index_name)
+          subprocess.run(
+              ["tar", "-C", index_path, "-xf", cache / "01-index.tar.gz"],
+              check=True,
+          )
+          for dep in deps:
+              package = dep["package"]
+              version = dep["version"]
+              cabal_path = index_path / package / version / f"{package}.cabal"
+              with cabal_path.open(mode="rb") as cabal_file:
+                  cabal_data = cabal_file.read()
+              x_revision_lines = [
+                  line
+                  for line in cabal_data.decode().splitlines()
+                  if line.lower().startswith("x-revision:")
+              ]
+              if x_revision_lines:
+                  dep["cabal_revision"] = x_revision_lines[0].split()[1]
+                  dep["cabal_sha256"] = hashlib.sha256(cabal_data).hexdigest()
+
+      print("Copy and paste the following into ${{package.name}}/hackage-dependencies.json:")
+      print()
+
+      print(
+          json.dumps(
+              sorted(deps, key=lambda dep: dep["package"].lower()),
+              indent=2,
+              sort_keys=True,
+          )
+      )
+      EOF
+
+  - runs: exit 1

@@ -2,8 +2,8 @@ package:
   name: datadog-agent-fips
   # This package has two git checkouts. For each new release, the commit SHA for
   # DataDog/integrations-core must also be updated.
-  version: "7.69.1"
-  epoch: 0 # CVE-2025-47907
+  version: "7.71.2"
+  epoch: 0 # GHSA-jc7w-c686-c4v9
   description: "Collect events and metrics from your hosts that send data to Datadog."
   copyright:
     - license: Apache-2.0
@@ -20,8 +20,12 @@ package:
       - libseccomp
       - shadow
 
+capabilities:
+  add:
+    - CAP_SYS_ADMIN # This is needed to run unshare(1).
+
 vars:
-  py-version: "3.12"
+  python-version: "3.12"
   destd: /opt/datadog-agent
 
 var-transforms:
@@ -59,7 +63,6 @@ environment:
       # https://github.com/DataDog/datadog-agent/blob/95f4d66f5fb0c10940e0f9b8fc2ab33f0c6099f0/omnibus/config/software/datadog-agent-integrations-py3-dependencies.rb
       - freetds-dev
       # - gstatus # TODO: Required by gluster
-      - gcc-14-default
       - gnutar
       - go-fips-1.24
       - krb5-dev
@@ -73,8 +76,8 @@ environment:
       - ninja
       - openssl-config-fipshardened
       - procps-dev
-      - py${{vars.py-version}}-build-base-dev
-      - py${{vars.py-version}}-semver
+      - py${{vars.python-version}}-build-base-dev
+      - py${{vars.python-version}}-semver
       - systemd-dev
       - util-linux-misc # unshare
       - wget # Required for downloading clang-12 and kernel headers from debian
@@ -99,18 +102,16 @@ pipeline:
     with:
       repository: https://github.com/DataDog/datadog-agent
       tag: ${{package.version}}
-      expected-commit: 4380b6cad392159ae67b194102c3a7b645ca1e6d
+      expected-commit: a13e1609206501722c3dab6e3329f9087b7d7b92
 
   - runs: |
       sed -i'' 's/v1\.3\.7/v1.6.1/g' go.mod
 
-  # Recent commit to the init.go code changed some of the logic of Python path resolving
-  # for the embedded Python, causing issues. Let's revert the commit to return to the previous
-  # behavior. This change was introduced for MacOS use-cases, so not relevant to Linux.
+  # Apply build fixes for system-probe compilation
   # https://github.com/DataDog/datadog-agent/pull/31426
   - uses: patch
     with:
-      patches: dont-import-python-relatively.patch fix-7.66.0-ftbfs.patch
+      patches: fix-7.66.0-ftbfs.patch
 
   # Ensure that we don't run into nvidia GPU issues at runtime.
   - runs: |
@@ -121,17 +122,19 @@ pipeline:
   # these won't leak into the package.
   - runs: |
       # install `invoke` and its dependencies
-      python${{vars.py-version}} -m pip install invoke requests toml pyyaml packaging codeowners
+      python${{vars.python-version}} -m pip install invoke requests toml pyyaml packaging codeowners
 
       # install `gitlab`
-      python${{vars.py-version}} -m pip install python-gitlab
+      python${{vars.python-version}} -m pip install python-gitlab
 
   - uses: go/bump
     with:
+      go-version: "1.24.7" # package built w/ go-fips-1.24 - keeps tidy at 1.24.7, otherwise go mod tidy fails
       replaces: github.com/mholt/archiver/v3=github.com/anchore/archiver/v3@v3.5.2
       show-diff: true
 
   - if: ${{build.arch}} == 'aarch64'
+    name: Install clang-12
     runs: |
       mkdir -p /usr/src
       wget -O arch.deb http://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-headers-${LINUX_HEADERS_VERSION}-arm64_${LINUX_KERNEL_VERSION}_arm64.deb
@@ -144,6 +147,7 @@ pipeline:
       echo "3d4ad804b7c85007686548cbc917ab067bf17eaedeab43d9eb83d3a683d8e9d4  /tmp/clang.tar.xz" | sha256sum --check
 
   - if: ${{build.arch}} == 'x86_64'
+    name: Install clang-12
     runs: |
       mkdir -p /usr/src
       wget -O arch.deb http://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-headers-${LINUX_HEADERS_VERSION}-amd64_${LINUX_KERNEL_VERSION}_amd64.deb
@@ -157,11 +161,13 @@ pipeline:
       echo "6b3cc55d3ef413be79785c4dc02828ab3bd6b887872b143e3091692fc6acefe7  /tmp/clang.tar.xz" | sha256sum --check
 
   # need to link libpcap.a to /home/build/dev/lib/libpcap.a else the build will attempt to download libpcap
-  - runs: |
+  - name: Create libpcap.a symlink expected by the build
+    runs: |
       mkdir -p /home/build/dev/lib
       ln -s /usr/lib/libpcap.a /home/build/dev/lib/libpcap.a
 
-  - runs: |
+  - name: Build the System Probe
+    runs: |
       wget -O common.deb http://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-headers-${LINUX_HEADERS_VERSION}-common_${LINUX_KERNEL_VERSION}_all.deb
       dpkg -x common.deb /tmp/common
       ln -s /tmp/common/usr/src/linux-headers-${LINUX_HEADERS_VERSION}-common /usr/src/linux-headers-${LINUX_HEADERS_VERSION}-common
@@ -180,15 +186,29 @@ pipeline:
 
       # Build once to correctly setup links/generates. The system-probe we end
       # up using will be part of the multicall below.
+      #
+      # Do not bundle BPF probes in the Go embedded FS:
+      #--bundle-ebpf # This makes oom-kill.o to fail because it expects it to be embedded in the Go binary at /build, because
+      # of this: https://github.com/DataDog/datadog-agent/blob/eab078f2e713852de8e4f4c168ea009065841903/pkg/ebpf/co_re.go#L71
+      # where c.coreDir is by default: /opt/datadog-agent/embedded/share/system-probe/ebpf/co-re
+      # but is then overwritten to /build when the Go build tag ebpf_bindata, here:
+      # https://github.com/DataDog/datadog-agent/blob/eab078f2e713852de8e4f4c168ea009065841903/pkg/ebpf/bytecode/asset_reader_bindata.go#L29
+      # and the build tag is set when the inboke task flag --bundle-ebpf is set, ehre:
+      # https://github.com/DataDog/datadog-agent/blob/17329b350f3e31ef8bb7906e842e1989486ec097/tasks/system_probe.py#L830
+      # Instead, when the Go build tag ebpf_bindata / --bundle-ebpf Invoke task flag are not set, the directory is not overwriten and remains
+      # /opt/datadog-agent/embedded/share/system-probe/ebpf/co-re, here:
+      # https://github.com/DataDog/datadog-agent/blob/eab078f2e713852de8e4f4c168ea009065841903/pkg/ebpf/bytecode/asset_reader_nobindata.go#L18.
+      # which is where object files like the oom-kill.o BPF CO-RE programs live, hence can be loaded correctly.
       if [ "$(id -u)" -gt 0 ]; then
         # on rootless systems let's use unshare to build
         unshare --user --map-root-user \
-          invoke -e system-probe.build --bundle-ebpf
+          invoke -e system-probe.build
       else
-        invoke -e system-probe.build --bundle-ebpf
+        invoke -e system-probe.build
       fi
 
-  - runs: |
+  - name: Ensure Go dependencies
+    runs: |
       export PATH=$PATH:$GOPATH/bin
       mkdir -p "$GOPATH/src/github.com/DataDog/"
       ln -sf /home/build/ "$GOPATH"/src/github.com/DataDog/datadog-agent
@@ -196,16 +216,53 @@ pipeline:
 
       invoke -e deps
 
-  - runs: |
+  # RtLoader: https://github.com/DataDog/datadog-agent/tree/main/rtloader
+  - name: Build the RtLoader wrapper
+    runs: |
       invoke -e rtloader.make \
-        --install-prefix="${{targets.destdir}}/usr" \
+        --install-prefix="${{targets.contextdir}}${{vars.destd}}/embedded" \
         --cmake-options="\
-          -DCMAKE_INSTALL_BINDIR=/usr/bin \
+          -DCMAKE_INSTALL_BINDIR=bin \
           -DCMAKE_INSTALL_LIBDIR=lib \
           -DCMAKE_CXX_FLAGS=-Os \
           -DCMAKE_C_FLAGS=-Os"
       invoke -e rtloader.install
 
+  - name: Setup Python libraries and symlinks
+    runs: |
+      # Create embedded directory
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/bin
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib
+
+      # Create Python 3.12 directory structure to match what the subpackage will create
+      # subpackage expects this directory structure to exist when it runs
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12/site-packages
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12/lib-dynload
+
+      # Copy Python 3.12 standard library from system
+      if [ -d /usr/lib/python3.12 ]; then
+        cp -r /usr/lib/python3.12/* ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12/
+      fi
+
+      # Create Python binary symlinks
+      cd ${{targets.contextdir}}${{vars.destd}}/embedded/bin
+      ln -sf python3.12 python3
+      ln -sf python3 python
+
+      # Symlink Python libraries needed by rtloader (matching upstream structure)
+      # Note: Only libpython3.12.so.1.0 exists in /usr/lib/ - the other two don't exist
+      # We symlink to avoid library conflicts with python-3.12-base package
+      ln -sf /usr/lib/libpython3.12.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython3.12.so.1.0
+      ln -sf /usr/lib/libpython3.12.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython3.12.so
+      ln -sf /usr/lib/libpython3.12.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython3.so
+
+      # Create ld.so.conf.d entry to make embedded lib directory discoverable
+      mkdir -p ${{targets.contextdir}}/etc/ld.so.conf.d
+      echo "${{vars.destd}}/embedded/lib" > ${{targets.contextdir}}/etc/ld.so.conf.d/datadog-agent-embedded.conf
+
+  - name: Build the agent
+    runs: |
       # Default includes [process-agent, security-agent, trace-agent]. Add in
       # the `system-probe` as well, which saves us ~140Mb.
       invoke -e agent.build \
@@ -213,12 +270,13 @@ pipeline:
         --bundle trace-agent \
         --bundle system-probe \
         --bundle security-agent \
-        --exclude-rtloader \
         --no-development \
-        --bundle-ebpf \
+        --python-home-3=/opt/datadog-agent/embedded \
         --embedded-path /usr/lib
+        #--bundle-ebpf # Same as above for the system-probe.build Invoke task.
 
-  - runs: |
+  - name: Install the agent and its components
+    runs: |
       mkdir -p \
         ${{targets.contextdir}}${{vars.destd}}/bin/agent \
         ${{targets.contextdir}}${{vars.destd}}/embedded/bin
@@ -299,7 +357,15 @@ subpackages:
             ${{targets.contextdir}}/conf.d \
             ${{targets.contextdir}}/checks.d \
             ${{targets.contextdir}}${{vars.destd}}/embedded \
+            ${{targets.contextdir}}${{vars.destd}}/embedded/lib/ossl-modules \
+            ${{targets.contextdir}}${{vars.destd}}/embedded/ssl \
             ${{targets.contextdir}}${{vars.destd}}/bin/agent/dist
+
+          # Preserve lib-dynload directory from main package
+          # subpackage overwrites embedded dir but loses lib-dynload with codec modules
+          if [ -d ${{vars.destd}}/embedded/lib/python3.12/lib-dynload ]; then
+            cp -r ${{vars.destd}}/embedded/lib/python3.12/lib-dynload ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12/
+          fi
 
           cp -r ${{vars.destd}}/embedded/share ${{targets.contextdir}}${{vars.destd}}/embedded/share
 
@@ -310,6 +376,15 @@ subpackages:
 
           cp -r Dockerfiles/agent/entrypoint.d ${{targets.contextdir}}/opt/entrypoints
 
+          # The Datadog Agent initializes FIPS under its 'embedded' runtime tree:
+          #
+          #   /opt/datadog-agent/embedded/ssl/openssl.cnf
+          #   /opt/datadog-agent/embedded/lib/ossl-modules/
+          #
+          # Copy rather than symlink to keep the embedded tree self-contained.
+          cp /usr/lib/ossl-modules/fips.so ${{targets.contextdir}}${{vars.destd}}/embedded/lib/ossl-modules/fips.so
+          cp /etc/ssl/openssl.cnf ${{targets.contextdir}}${{vars.destd}}/embedded/ssl/openssl.cnf
+
   - name: datadog-agent-core-integrations-fips
     dependencies:
       runtime:
@@ -317,7 +392,7 @@ subpackages:
         - busybox
         - coreutils
         - findutils
-        - python-${{vars.py-version}}-base
+        - python-${{vars.python-version}}-base
     pipeline:
       - working-directory: /home/integrations
         pipeline:
@@ -334,22 +409,22 @@ subpackages:
               SOURCE_DATE_EPOCH=315532800
 
               # Create virtual environment
-              python${{vars.py-version}} -m venv .venv
+              python${{vars.python-version}} -m venv .venv
 
               # Install locked dependencies
-              .venv/bin/pip${{vars.py-version}} install --require-hashes --only-binary=:all: --no-deps -r .deps/resolved/linux-${{build.arch}}_${{vars.py-version}}.txt
+              .venv/bin/pip${{vars.python-version}} install --require-hashes --only-binary=:all: --no-deps -r .deps/resolved/linux-${{build.arch}}_${{vars.python-version}}.txt
 
               excludes="datadog_checks_base datadog_checks_dev datadog_checks_tests_helper docker_daemon esxi teleport"
               checks=$(invoke -r /home/build agent.collect-integrations /home/integrations/ 3 linux --excluded "$excludes")
 
               # Install core, downloader, and dependencies
-              .venv/bin/pip${{vars.py-version}} install \
+              .venv/bin/pip${{vars.python-version}} install \
                 "./datadog_checks_base[deps, http]" \
                 "./datadog_checks_downloader" \
                 $(echo ${checks} | xargs -n1 echo | sed 's|^|./|')
 
               # Remediate GHSA-5rjg-fvgr-3xxf
-              .venv/bin/pip${{vars.py-version}} install --upgrade setuptools==78.1.1 protobuf==5.29.5
+              .venv/bin/pip${{vars.python-version}} install --upgrade setuptools==78.1.1 protobuf==5.29.5
 
               find .venv -name "*.pyc" -delete
               find .venv -name "__pycache__" -exec rm -rf {} +
@@ -358,7 +433,7 @@ subpackages:
               find .venv -name "pymqe.cpython*.so" -delete
 
               mkdir -p ${{targets.contextdir}}${{vars.destd}}
-              .venv/bin/pip${{vars.py-version}} freeze > ${{targets.contextdir}}${{vars.destd}}/final_constraints-py3.txt
+              .venv/bin/pip${{vars.python-version}} freeze > ${{targets.contextdir}}${{vars.destd}}/final_constraints-py3.txt
 
               # Include the agent's requirements for the core integrations.
               cp requirements-agent-release.txt ${{targets.contextdir}}${{vars.destd}}/
@@ -418,6 +493,10 @@ subpackages:
           cp ./install_info ${{targets.subpkgdir}}/etc/datadog-agent/
           cp ./datadog-cluster.yaml ${{targets.subpkgdir}}/etc/datadog-agent/
     test:
+      environment:
+        contents:
+          packages:
+            - go-fips-1.24 # package built w/ go-fips-1.24 - keeps go at 1.24.7, otherwise test/go-check-fips fails
       pipeline:
         - runs: |
             datadog-cluster-agent version
@@ -457,6 +536,10 @@ subpackages:
               output: fakeintake
               go-package: go-fips
     test:
+      environment:
+        contents:
+          packages:
+            - go-fips-1.24 # package built w/ go-fips-1.24 - keeps go at 1.24.7, otherwise test/go-check-fips fails
       pipeline:
         - runs: |
             fakeintake --help
@@ -598,11 +681,16 @@ test:
         - datadog-agent-fakeintake-fips=${{package.full-version}}
         - datadog-agent-core-integrations-fips=${{package.full-version}}
         - mkcert
+        - go-fips-1.24 # package built w/ go-fips-1.24 - keeps go at 1.24.7, otherwise test/go-check-fips fails
     environment:
       # cannot use vars.destd here. https://github.com/chainguard-dev/melange/issues/1402
       # setting PATH here has no effect.
       mypath: /opt/datadog-agent/bin/agent:/opt/datadog-agent/embedded/bin
   pipeline:
+    - name: Ensure the probes (e.g. oom-kill.o BPF executable) are not lookup in the Go embedded FS
+      runs: |
+        { go version -m ${{vars.destd}}/bin/agent/agent | grep build | grep "tags=" | grep "ebpf_bindata"; } \
+          && exit 1
     - name: Ensure the agent's requirements.txt for integrations is included
       runs: |
         PATH=$mypath:$PATH
@@ -614,12 +702,12 @@ test:
     - name: Ensure checks can be loaded (base)
       uses: python/import
       with:
-        python: ${{vars.destd}}/embedded/bin/python${{vars.py-version}}
+        python: ${{vars.destd}}/embedded/bin/python${{vars.python-version}}
         import: datadog_checks.base
     - name: Ensure checks can be loaded (downloader)
       uses: python/import
       with:
-        python: ${{vars.destd}}/embedded/bin/python${{vars.py-version}}
+        python: ${{vars.destd}}/embedded/bin/python${{vars.python-version}}
         import: datadog_checks.downloader
     - name: Execute bins
       runs: |

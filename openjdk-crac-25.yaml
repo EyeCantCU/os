@@ -1,0 +1,309 @@
+package:
+  name: openjdk-crac-25
+  version: "25.0.0.36"
+  epoch: 0
+  description: "OpenJDK ${{vars.java-version}} with CRaC patches"
+  copyright:
+    - license: GPL-2.0-or-later
+  resources:
+    memory: 64Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-jre
+      - crac-criu
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(.*)\.(\d+)$
+    replace: $1+$2
+    to: mangled-package-version
+  - from: ${{vars.mangled-package-version}}
+    match: ^(\d+)\.0\.0\+(\d+)$
+    replace: $1+$2
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+)\..*$
+    replace: "$1"
+    to: java-version
+
+environment:
+  contents:
+    packages:
+      - alsa-lib-dev
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cups-dev
+      - file
+      - fontconfig-dev
+      - freetype-dev
+      - giflib-dev
+      - lcms2-dev
+      - libffi-dev
+      - libjpeg-turbo-dev
+      - libx11-dev
+      - libxext-dev
+      - libxi-dev
+      - libxrandr-dev
+      - libxrender-dev
+      - libxt-dev
+      - libxtst-dev
+      - openjdk-${{vars.java-version}}-default-jdk
+      - zip
+  environment:
+    # This is needed to work around the error date 1970-01-01T00:00:00Z is not within the valid range 1980-01-01T00:00:02Z to 2099-12-31T23:59:59Z
+    SOURCE_DATE_EPOCH: 315532900
+    TARGET_JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk-crac
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/canonical/openjdk-${{vars.java-version}}-crac
+      tag: jdk-${{vars.mangled-package-version}}
+      expected-commit: 0b571f2e6e2b5be9abaec1a12dd8524f3923778a
+
+  - working-directory: /home/build/googletest
+    pipeline:
+      - uses: fetch
+        with:
+          uri: https://github.com/google/googletest/archive/v1.15.2.tar.gz
+          expected-sha512: 9046841044a2bf7edfd96854ad9c44ffae4fcb9fb59a075b367507c0762a98eb32cb6968d46663228272e26321e96f4dd287c95baa22c6af9bad902b8b6ede4e
+
+  - runs: chmod +x configure
+
+  # Note that despite using --with-extra-cflags, --with-extra-cxxflags, and
+  # --with-extra-ldflags, the configure still produces warnings like:
+  # https://github.com/wolfi-dev/os/issues/18747
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --with-extra-cflags="$CFLAGS" \
+        --with-extra-cxxflags="$CXXFLAGS" \
+        --with-extra-ldflags="$LDFLAGS" \
+        --with-boot-jdk=/usr/lib/jvm/java-${{vars.java-version}}-openjdk \
+        --prefix="$TARGET_JAVA_HOME" \
+        --with-vendor-name=wolfi \
+        --with-vendor-url=https://wolfi.dev \
+        --with-vendor-bug-url=https://github.com/wolfi-dev/os/issues \
+        --with-version-opt="wolfi-r${{package.epoch}}" \
+        --disable-warnings-as-errors \
+        --disable-precompiled-headers \
+        --enable-dtrace=no \
+        --with-zlib=system \
+        --with-debug-level=release \
+        --with-native-debug-symbols=internal \
+        --with-jvm-variants=server \
+        --with-jtreg=no  \
+        --with-libpng=system \
+        --with-jvm-variants=server \
+        --with-libjpeg=system \
+        --with-giflib=system \
+        --with-lcms=system \
+        --with-gtest="/home/build/googletest" \
+        --with-version-pre="no" \
+        --with-version-string=""
+
+  - runs: make jdk-image
+
+  # Check we built something valid
+  - runs: |
+      _java_bin="./build/*-server-release/images/jdk/bin"
+
+      $_java_bin/javac -d . HelloWorld.java
+      $_java_bin/java HelloWorld
+
+      # run the gtest unittest suites
+      make test-hotspot-gtest
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/$TARGET_JAVA_HOME
+      cp -r build/*-server-release/images/jdk/* "${{targets.destdir}}"/$TARGET_JAVA_HOME
+      rm "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/src.zip
+
+  - name: "Link CRaC patched CRIU to JDK"
+    runs: ln -sf /usr/sbin/crac-criu "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/criu
+
+subpackages:
+  - name: "${{package.name}}-dbg"
+    description: "OpenJDK CRaC ${{vars.java-version}} Java Debug Symbols"
+    pipeline:
+      - uses: split/debug
+    dependencies:
+      runtime:
+        - ${{package.name}}
+
+  - name: "${{package.name}}-jre"
+    description: "OpenJDK CRaC ${{vars.java-version}} Java Runtime Environment"
+    dependencies:
+      runtime:
+        - alsa-lib
+        - freetype
+        - giflib
+        - libfontconfig1
+        - libjpeg-turbo
+        - libx11
+        - libxext
+        - libxi
+        - libxrender
+        - libxtst
+        - ${{package.name}}-jre-base
+        - ttf-dejavu
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libawt_xawt.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libfontmanager.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libjavajpeg.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libjawt.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libjsound.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/liblcms.so \
+              "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib/libsplashscreen.so \
+              "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib
+
+  - name: "${{package.name}}-jre-base"
+    description: "OpenJDK CRaC ${{vars.java-version}} Java Runtime Environment (headless)"
+    dependencies:
+      runtime:
+        - java-common
+        - java-cacerts
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/lib \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/bin
+          for i in java \
+                    jfr \
+                    jrunscript \
+                    jwebserver \
+                    keytool \
+                    rmiregistry; do
+            mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/bin/$i "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/bin/$i
+          done
+
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/legal "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/conf "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/release "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          cp ASSEMBLY_EXCEPTION \
+              LICENSE \
+              README.md \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+          # symlink to shared java cacerts store
+          rm -f "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib/security/cacerts
+          ln -sf /etc/ssl/certs/java/cacerts \
+            "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME/lib/security/cacerts
+
+          # symlink for `java-common` to work (which expects jre in $TARGET_JAVA_HOME/jre)
+          ln -sf . "${{targets.subpkgdir}}/$TARGET_JAVA_HOME/jre"
+
+  - name: "${{package.name}}-jmods"
+    description: "OpenJDK CRaC ${{vars.java-version}} jmods"
+    dependencies:
+      provides:
+        - openjdk-jmods=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/jmods \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+  # Disabled doc subpackage for now.
+  # Upstream has switched from troff manpages in the repository to pandoc.
+  # See: https://bugs.openjdk.org/browse/JDK-8344056
+  # - name: "${{package.name}}-doc"
+  #   description: "OpenJDK CRaC ${{vars.java-version}} Documentation"
+  #   pipeline:
+  #     - runs: |
+  #         mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+  #         mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/man \
+  #            "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+  - name: "${{package.name}}-demos"
+    description: "OpenJDK CRaC ${{vars.java-version}} Demos"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+          mv "${{targets.destdir}}"/$TARGET_JAVA_HOME/demo \
+             "${{targets.subpkgdir}}"/$TARGET_JAVA_HOME
+
+  - name: "${{package.name}}-default-jvm"
+    description: "Use the ${{package.name}} JVM as the default JVM"
+    dependencies:
+      runtime:
+        - ${{package.name}}-jre
+      provides:
+        - default-jvm=1.${{vars.java-version}}
+        - default-jvm-lts=1.${{vars.java-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/jvm
+          ln -sf java-${{vars.java-version}}-openjdk-crac "${{targets.subpkgdir}}"/usr/lib/jvm/default-jvm
+
+  - name: "${{package.name}}-default-jdk"
+    description: "Use the ${{package.name}} JVM as the default JVM with the JDK installed"
+    dependencies:
+      runtime:
+        - ${{package.name}}-default-jvm
+        - ${{package.name}}
+      provides:
+        - default-jdk=1.${{vars.java-version}}
+        - default-jdk-lts=1.${{vars.java-version}}
+
+update:
+  enabled: true
+  version-transform:
+    - match: ^(\d+\.\d+\.\d+)\+(\d+)$
+      replace: $1.$2
+    - match: ^(\d+)\+(\d+)$
+      replace: $1.0.0.$2
+  github:
+    identifier: canonical/openjdk-25-crac
+    strip-prefix: jdk-
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-default-jdk
+        - ${{package.name}}-jmods
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk-crac
+  pipeline:
+    # Test a basic Hello World
+    - working-directory: basic
+      runs: |
+        javac HelloWorld.java
+        java HelloWorld | grep -qi "Hello World!"
+    # Test a basic HTTP connection
+    - working-directory: basic
+      runs: |
+        javac RequestTest.java
+        java RequestTest | grep -qi "Successfully connected to example.org"
+    # Test modules
+    - working-directory: advanced/module-project
+      runs: |
+        mkdir output
+        javac -d output --module-source-path modules $(find modules -name "*.java")
+
+        # Create a jar with the compiled classes
+        jar --verbose --create --file app.jar \
+          --main-class dev.chainguard.module.main.Main \
+          --module-version 1.0 \
+          -C output/test.modules . \
+          -C output/main.app .
+
+        # Test the jar
+        java -jar app.jar
+
+        # Test jlink
+        jlink --verbose --module-path "app.jar:$JAVA_HOME/jmods" \
+          --add-modules test.modules \
+          --output test-project-jre
+
+        # Test custom JRE
+        test-project-jre/bin/java -jar app.jar
