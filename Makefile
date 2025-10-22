@@ -315,9 +315,9 @@ $(ARCH_OUT_D)/awspub/share/%.json: output/awspub.mapping $(ARCH_OUT_D)/awspub/cr
 	awspub create --config-mapping=output/awspub.mapping $(ARCH_OUT_D)/awspub/share/$*.yaml)
 
 # we use the stdout of awspub publish to indicate the thing was published.
-$(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
+$(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/share/%.json $(ARCH_OUT_D)/awspub/share/%.yaml
 	@$(call capture_stdout,$@,\
-	awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
+	awspub publish --config-mapping=output/awspub.mapping $(ARCH_OUT_D)/awspub/share/$*.yaml)
 
 .PHONY: bespoke-publish-s3-aws-ecs-full-request-6943
 bespoke-publish-s3-aws-ecs-full-request-6943: $(ARCH_OUT_D)/aws-ecs-full-request-6943/publish.s3.json
