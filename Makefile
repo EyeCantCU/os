@@ -66,7 +66,7 @@ $(test_targets_qemu): test-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
 		QEMU_VMS=$* ./vms-test/helpers/test-wolfi-vm \
 	    --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results"
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi ovas-vmware
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-aws-ecs: $(foreach name,$(group_aws_ecs),disk-$(name))
 disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
@@ -76,6 +76,7 @@ disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
 disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
 disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
+ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
 
 .PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-rpi
 list-all:
@@ -119,12 +120,20 @@ vhd_targets = $(foreach name,$(names),vhd-$(name))
 .PHONY: $(vhd_targets)
 $(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
 
+ova_targets = $(foreach name,$(disks_vmware),ova-$(name))
+.PHONY: $(ova_targets)
+$(ova_targets): ova-%: $(ARCH_OUT_D)/%/disk.ova
+
 %.qcow2: %.raw
 	./$(TOOLS_SUBD)/convert-image $< $@
 
 # VMware-specific VMDK conversion (monolithicFlat for ESXi compatibility)
 $(ARCH_OUT_D)/vmware-%/disk.vmdk: $(ARCH_OUT_D)/vmware-%/disk.raw
 	./$(TOOLS_SUBD)/convert-image --vmdk-format monolithicFlat $< $@
+
+# VMware OVA package creation (uses architecture-specific templates)
+$(ARCH_OUT_D)/vmware-%/disk.ova: $(ARCH_OUT_D)/vmware-%/disk.raw TEMPLATE/ova/$(ARCH)/vmware-esxi.yaml
+	./$(TOOLS_SUBD)/convert-image --ova-template TEMPLATE/ova/$(ARCH)/vmware-esxi.yaml $< $@
 
 %.vmdk: %.raw
 	./$(TOOLS_SUBD)/convert-image $< $@
@@ -355,7 +364,7 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 publish-vmware: $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name)))
 $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name))): publish-vmware-%: $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.vmdk $(ARCH_OUT_D)/vmware-%/disk-flat.vmdk
+$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.vmdk $(ARCH_OUT_D)/vmware-%/disk-flat.vmdk $(ARCH_OUT_D)/vmware-%/disk.ova
     # Modify the VMDK descriptor file with the full name of the resulting disk-flat.vmdk
 	@sed -i "s/disk-flat.vmdk/vmware-$*-${GCPARCH}-${BUILD_TIMESTAMP}-flat.vmdk/" $(dir $@)disk.vmdk
 	@mkdir -p $(dir $@)
@@ -368,7 +377,8 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 		--raw-path $(dir $@)disk.raw \
 		--vmdk-path $(dir $@)disk.vmdk \
 		--sbom-path $(dir $@)syft.sbom.json \
-		--vmdk-flat-path $(dir $@)disk-flat.vmdk)
+		--vmdk-flat-path $(dir $@)disk-flat.vmdk \
+		--ova-path $(dir $@)disk.ova)
 
 .PHONY: publish-rpi
 publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
@@ -433,7 +443,8 @@ install-deps:
 	     --option=Dpkg::Options::=--force-confold \
 	     --option=Dpkg::options::=--force-unsafe-io \
 	     install --no-install-recommends \
-	       cpu-checker curl gzip parallel python3-venv qemu-system-x86 qemu-utils'
+	       cpu-checker curl gzip parallel python3-lxml python3-venv python3-yaml \
+		   qemu-system-x86 qemu-utils zlib1g-dev'
 	sudo sh -c 'for p in kvm vhost-net vhost-vsock; do \
 		d=/dev/$$p; [ -e "$$d" ] || { echo "no $$d"; continue; } ; \
 		chmod ugo+rw $$d && ls -l $$d || exit; done'
