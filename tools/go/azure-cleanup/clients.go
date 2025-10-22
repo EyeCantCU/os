@@ -20,6 +20,10 @@ type AzureClients struct {
 	VirtualMachines      *armcompute.VirtualMachinesClient
 	PublicIP             *armnetwork.PublicIPAddressesClient
 	NetworkInterfaces    *armnetwork.InterfacesClient
+	VNet                 *armnetwork.VirtualNetworksClient
+	RouteTable           *armnetwork.RouteTablesClient
+	Subnet               *armnetwork.SubnetsClient
+	NetworkSecurityGroup *armnetwork.SecurityGroupsClient
 }
 
 func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClients, error) {
@@ -73,6 +77,26 @@ func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClien
 	clients.NetworkInterfaces, err = armnetwork.NewInterfacesClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network interfaces client: %w", err)
+	}
+
+	clients.VNet, err = armnetwork.NewVirtualNetworksClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create virtual networks client: %w", err)
+	}
+
+	clients.RouteTable, err = armnetwork.NewRouteTablesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create route tables client: %w", err)
+	}
+
+	clients.Subnet, err = armnetwork.NewSubnetsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create subnets client: %w", err)
+	}
+
+	clients.NetworkSecurityGroup, err = armnetwork.NewSecurityGroupsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create network security groups client: %w", err)
 	}
 
 	return clients, nil

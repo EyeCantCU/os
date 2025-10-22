@@ -14,13 +14,16 @@ import (
 type ResourceType string
 
 const (
-	ResourceTypeAll          ResourceType = "all"
-	ResourceTypeDisk         ResourceType = "disk"
-	ResourceTypeImage        ResourceType = "image"
-	ResourceTypeImageVersion ResourceType = "imageversion"
-	ResourceTypeVM           ResourceType = "vm"
-	ResourceTypeNIC          ResourceType = "nic"
-	ResourceTypeIP           ResourceType = "ip"
+	ResourceTypeAll                  ResourceType = "all"
+	ResourceTypeDisk                 ResourceType = "disk"
+	ResourceTypeImage                ResourceType = "image"
+	ResourceTypeImageVersion         ResourceType = "imageversion"
+	ResourceTypeVM                   ResourceType = "vm"
+	ResourceTypeNIC                  ResourceType = "nic"
+	ResourceTypeIP                   ResourceType = "ip"
+	ResourceTypeVnet                 ResourceType = "vnet"
+	ResourceTypeRouteTable           ResourceType = "routetable"
+	ResourceTypeNetworkSecurityGroup ResourceType = "nsg"
 )
 
 var validResourceTypes = []ResourceType{
@@ -31,6 +34,9 @@ var validResourceTypes = []ResourceType{
 	ResourceTypeVM,
 	ResourceTypeNIC,
 	ResourceTypeIP,
+	ResourceTypeVnet,
+	ResourceTypeRouteTable,
+	ResourceTypeNetworkSecurityGroup,
 }
 
 // Deletion sets define the order of resource deletion
@@ -47,6 +53,13 @@ var deletionSets = [][]ResourceType{
 	},
 	{
 		ResourceTypeIP,
+	},
+	{
+		ResourceTypeVnet,
+	},
+	{
+		ResourceTypeRouteTable,
+		ResourceTypeNetworkSecurityGroup,
 	},
 }
 
@@ -99,7 +112,7 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 	if shouldIncludeResourceType(ResourceTypeVM) {
 		resources, err := getVirtualMachines(ctx, clients, resourceGroup)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get gallery image versions: %w", err)
+			return nil, fmt.Errorf("failed to get VMs: %w", err)
 		}
 		allResources = append(allResources, resources...)
 	}
@@ -107,7 +120,7 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 	if shouldIncludeResourceType(ResourceTypeIP) {
 		resources, err := getPublicIPAddresses(ctx, clients, resourceGroup)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get gallery image versions: %w", err)
+			return nil, fmt.Errorf("failed to get IP addresses: %w", err)
 		}
 		allResources = append(allResources, resources...)
 	}
@@ -115,7 +128,31 @@ func getAllResourcesInGroup(ctx context.Context, clients *AzureClients, resource
 	if shouldIncludeResourceType(ResourceTypeNIC) {
 		resources, err := getNetworkInterfaces(ctx, clients, resourceGroup)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get gallery image versions: %w", err)
+			return nil, fmt.Errorf("failed to get NICs: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
+	if shouldIncludeResourceType(ResourceTypeVnet) {
+		resources, err := getVirtualNetworks(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get networks: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
+	if shouldIncludeResourceType(ResourceTypeRouteTable) {
+		resources, err := getVirtualNetworks(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get route tables: %w", err)
+		}
+		allResources = append(allResources, resources...)
+	}
+
+	if shouldIncludeResourceType(ResourceTypeNetworkSecurityGroup) {
+		resources, err := getVirtualNetworks(ctx, clients, resourceGroup)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get network security groups: %w", err)
 		}
 		allResources = append(allResources, resources...)
 	}
@@ -141,6 +178,12 @@ func deleteResource(ctx context.Context, clients *AzureClients, resource *Resour
 		return deletePublicIPAddress(ctx, clients, resource.Name)
 	case ResourceTypeNIC:
 		return deleteNetworkInterface(ctx, clients, resource.Name)
+	case ResourceTypeVnet:
+		return deleteVirtualNetwork(ctx, clients, resource.Name)
+	case ResourceTypeRouteTable:
+		return deleteRouteTable(ctx, clients, resource.Name)
+	case ResourceTypeNetworkSecurityGroup:
+		return deleteNetworkSecurityGroup(ctx, clients, resource.Name)
 	default:
 		return fmt.Errorf("unsupported resource type for deletion: %s", resource.ResourceType)
 	}
