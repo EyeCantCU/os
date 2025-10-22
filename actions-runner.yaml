@@ -1,0 +1,139 @@
+package:
+  name: actions-runner
+  version: "2.329.0"
+  epoch: 1
+  description: The Runner for GitHub Actions
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - bash
+      - ca-certificates-bundle
+      - curl
+      - docker
+      - docker-cli-buildx
+      - icu-libs
+      - krb5-libs
+      - lttng-ust
+      - openssl
+      - posix-libc-utils
+      - zlib
+  options:
+    # Bypass APK dependency resolution to avoid musl conflicts
+    # The pre-built runner binaries are statically linked against musl libc,
+    # but APK's dependency resolver conflicts with musl package installation
+    no-depends: true
+
+vars:
+  # github actions-runner targets .NET 8.0, use .NET 8 SDK to match upstream
+  # should be bumped according to - https://github.com/actions/runner/blob/main/src/dev.sh#L20
+  dotnet-sdk-version: "8"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - dotnet-${{vars.dotnet-sdk-version}}-sdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/actions/runner
+      tag: v${{package.version}}
+      expected-commit: c76c59996c8fa32e989164a5a695efb12608ae5a
+
+  - name: Verify .NET SDK version matches upstream
+    runs: |
+      # Extract .NET SDK version from upstream dev.sh file
+      # https://github.com/actions/runner/blob/main/src/dev.sh#L20
+      upstream_dotnet_version=$(grep -E "DOTNET_VERSION|dotnet.*version" src/dev.sh | head -1 | sed 's/.*=//' | tr -d '"' | tr -d "'")
+
+      # Convert our version to match upstream format (e.g., "9" -> "9.0")
+      our_version="${{vars.dotnet-sdk-version}}.0"
+
+      if [ "$our_version" != "$upstream_dotnet_version" ]; then
+        echo "WARNING: Expected .NET SDK version: $our_version from melange.yaml but found $upstream_dotnet_version upstream" >&2
+        echo "Consider updating dotnet-sdk-version in vars section" >&2
+      else
+        echo "✓ .NET SDK version matches upstream: $upstream_dotnet_version"
+      fi
+
+  - name: Build from source using our .NET SDK
+    runs: |
+      # Create the runnerversion file that dev.sh expects
+      echo "${{package.version}}" > runnerversion
+
+      # Determine runtime ID based on architecture
+      ARCH=${{build.arch}}
+      if [[ "$ARCH" == "aarch64" ]]; then
+        RUNTIME_ID="linux-arm64"
+      elif [[ "$ARCH" == "x86_64" ]]; then
+        RUNTIME_ID="linux-x64"
+      fi
+
+      # Build the runner using dotnet msbuild directly
+      # bypass dev.sh and call MSBuild targets directly to use our dotnet-sdk and nodejs
+      dotnet msbuild -t:Build -p:PackageRuntime="${RUNTIME_ID}" -p:BUILDCONFIG="Release" -p:RunnerVersion="${{package.version}}" src/dir.proj
+
+      # Create layout using dotnet msbuild
+      dotnet msbuild -t:layout -p:PackageRuntime="${RUNTIME_ID}" -p:BUILDCONFIG="Release" -p:RunnerVersion="${{package.version}}" src/dir.proj
+
+      mkdir -p "${{targets.destdir}}/usr/share/actions-runner"
+      cp -r _layout/* "${{targets.destdir}}/usr/share/actions-runner/"
+
+      # .NET expects liblttng-ust.so.0 but we have liblttng-ust.so.1
+      mkdir -p "${{targets.destdir}}/usr/lib"
+      ln -sf liblttng-ust.so.1 "${{targets.destdir}}/usr/lib/liblttng-ust.so.0"
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package for the ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/home"
+          ln -sf /usr/share/actions-runner "${{targets.contextdir}}/home/runner"
+    test:
+      pipeline:
+        - runs: |
+            test -L /home/runner
+            test "$(readlink /home/runner)" = "/usr/share/actions-runner"
+
+update:
+  enabled: true
+  github:
+    identifier: actions/runner
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - python3
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/ldd-check
+    - runs: |
+        # Core testing requires github credentials, testing is limited to binary check
+        /usr/share/actions-runner/bin/Runner.Listener --version | grep ${{package.version}}
+        test -x /usr/share/actions-runner/run.sh
+
+        export RUNNER_ALLOW_RUNASROOT=1
+        /usr/share/actions-runner/config.sh --help | grep -q "Configures the runner"
+
+        # configuration process with mock server to validate authentication flow
+        # Start mock server and wait for it to be ready
+        python3 /home/build/mock-server.py &
+        mock_pid=$!
+        wait-for-it -t 10 localhost:8080
+
+        # with timeout to prevent hanging
+        timeout 30s /usr/share/actions-runner/config.sh --unattended --url http://localhost:8080/fake --token dummy --name test --work /tmp --labels self-hosted,linux | grep -q "Self-hosted runner registration"
+
+        # Cleanup mock server
+        kill $mock_pid
