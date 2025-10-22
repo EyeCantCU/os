@@ -1,0 +1,79 @@
+package:
+  name: pgextwlist-17
+  version: 1.19
+  epoch: 0
+  description: PostgreSQL extension whitelisting extension
+  copyright:
+    - license: PostgreSQL
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '^pgextwlist-(\d+)$'
+    replace: $1
+    to: pg-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      # Project has a hard requirement on clang-19 else emits this error make: /usr/bin/clang: No such file or directory
+      - clang-19
+      - postgresql-${{vars.pg-version}}-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/dimitri/pgextwlist
+      expected-commit: 89f0ccb42323eaaa0708e619c3d473bfd76b2306
+      tag: v${{package.version}}
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - runs: |
+      LIBDIR=$(pg_config --pkglibdir)
+      mkdir -p ${{targets.destdir}}${LIBDIR}/plugins
+      ln -sf ${LIBDIR}/pgextwlist.so ${{targets.destdir}}${LIBDIR}/plugins/pgextwlist.so
+
+  - uses: strip
+
+test:
+  environment:
+    contents:
+      packages:
+        - postgresql-${{vars.pg-version}}
+        - postgresql-${{vars.pg-version}}-client
+        - postgresql-${{vars.pg-version}}-contrib
+        - shadow
+        - sudo-rs
+        - glibc-locales
+        - wait-for-it
+    accounts:
+      run-as: 0
+    environment:
+      PGUSER: wolfi
+  pipeline:
+    - name: Testing package functionality
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          useradd $PGUSER
+          sudo -u $PGUSER initdb -D /tmp/pgdata --auth=trust 2>&1
+          cat pgextwlist.conf >> /tmp/pgdata/postgresql.conf
+          sudo -u $PGUSER pg_ctl start -w -D /tmp/pgdata -l /tmp/pgdata/pg_log 2>&1
+          sudo -u $PGUSER psql -h /tmp -d postgres -c "CREATE ROLE testuser WITH LOGIN;"
+          sudo -u $PGUSER psql -h /tmp -d postgres -c "GRANT CREATE ON DATABASE postgres TO testuser;"
+        start: sudo -u $PGUSER psql -h /tmp -d postgres -U testuser -c "create extension bloom;"
+        expected_output: |
+          permission denied to create extension "bloom"
+        error_strings: |
+          CREATE EXTENSION
+    - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  github:
+    identifier: dimitri/pgextwlist
+    strip-prefix: v
