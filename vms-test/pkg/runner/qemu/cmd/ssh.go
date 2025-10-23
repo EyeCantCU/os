@@ -138,6 +138,7 @@ func runRemoteCmd() *cobra.Command {
 func waitForSSHCmd() *cobra.Command {
 	var vmdir string
 
+	var addr string
 	cmd := &cobra.Command{
 		Use:   "wait-for-ssh",
 		Short: "wait for ssh to be ready",
@@ -145,13 +146,16 @@ func waitForSSHCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			ctx := cmd.Context()
 
-			vmdir = args[0]
+			hostPort := addr
+			if hostPort == "" {
+				vmdir = args[0]
 
-			sshAddr, sshPort, err := getSSHPortAddr(ctx, filepath.Join(vmdir, "qmp.sock"))
-			if err != nil {
-				log.Fatalf("Failed to get ssh port from %s: %v", vmdir, err)
+				sshAddr, sshPort, err := getSSHPortAddr(ctx, filepath.Join(vmdir, "qmp.sock"))
+				if err != nil {
+					log.Fatalf("Failed to get ssh port from %s: %v", vmdir, err)
+				}
+				hostPort = fmt.Sprintf("%s:%d", sshAddr, sshPort)
 			}
-			hostPort := fmt.Sprintf("%s:%d", sshAddr, sshPort)
 
 			log.Printf("Waiting for hostkey from %s", hostPort)
 			key, err := sshutils.WaitForSSHHostKey(ctx, hostPort, time.Duration(500*time.Millisecond))
@@ -164,5 +168,6 @@ func waitForSSHCmd() *cobra.Command {
 		},
 	}
 
+	cmd.Flags().StringVar(&addr, "addr", "", "address host:port")
 	return cmd
 }
