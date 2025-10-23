@@ -127,11 +127,7 @@ $(ova_targets): ova-%: $(ARCH_OUT_D)/%/disk.ova
 %.qcow2: %.raw
 	./$(TOOLS_SUBD)/convert-image $< $@
 
-# VMware-specific VMDK conversion (monolithicFlat for ESXi compatibility)
-$(ARCH_OUT_D)/vmware-%/disk.vmdk: $(ARCH_OUT_D)/vmware-%/disk.raw
-	./$(TOOLS_SUBD)/convert-image --vmdk-format monolithicFlat $< $@
-
-# VMware OVA package creation (uses architecture-specific templates)
+# VMWare OVA's
 $(ARCH_OUT_D)/vmware-%/disk.ova: $(ARCH_OUT_D)/vmware-%/disk.raw TEMPLATE/ova/$(ARCH)/vmware-esxi.yaml
 	./$(TOOLS_SUBD)/convert-image --ova-template TEMPLATE/ova/$(ARCH)/vmware-esxi.yaml $< $@
 
@@ -364,9 +360,7 @@ $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/
 publish-vmware: $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name)))
 $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name))): publish-vmware-%: $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.vmdk $(ARCH_OUT_D)/vmware-%/disk-flat.vmdk $(ARCH_OUT_D)/vmware-%/disk.ova
-    # Modify the VMDK descriptor file with the full name of the resulting disk-flat.vmdk
-	@sed -i "s/disk-flat.vmdk/vmware-$*-${GCPARCH}-${BUILD_TIMESTAMP}-flat.vmdk/" $(dir $@)disk.vmdk
+$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.ova
 	@mkdir -p $(dir $@)
 	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
 		--name vmware-$* \
@@ -375,9 +369,7 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 		--azure-account $(AZSTORAGEACCOUNT) \
 		--azure-container $(VMWARE_AZSTORAGECONTAINER) \
 		--raw-path $(dir $@)disk.raw \
-		--vmdk-path $(dir $@)disk.vmdk \
 		--sbom-path $(dir $@)syft.sbom.json \
-		--vmdk-flat-path $(dir $@)disk-flat.vmdk \
 		--ova-path $(dir $@)disk.ova)
 
 .PHONY: publish-rpi
