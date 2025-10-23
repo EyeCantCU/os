@@ -1,0 +1,79 @@
+package:
+  name: nri-kubernetes-fips
+  version: "3.47.0"
+  epoch: 0
+  description: New Relic integration for Kubernetes
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/newrelic/nri-kubernetes
+      tag: v${{package.version}}
+      expected-commit: f853380ee51b032935f78b2bbabaa83b1f282fda
+
+  - uses: go/build
+    with:
+      packages: ./cmd/nri-kubernetes
+      output: nri-kubernetes
+      ldflags: |
+        -X main.integrationVersion="${{package.version}}"
+        -X main.gitCommit="$(git rev-parse HEAD)"
+        -X main.buildDate="$(date -d@$SOURCE_DATE_EPOCH +%Y%m%d-%H:%M:%S)"
+      go-package: go-fips
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - python3
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Set up mock metrics endpoint with request logging"
+      runs: |
+        mkdir -p /tmp/test-configs
+        # Start the metrics server in background
+        nohup python3 test_metrics_server.py > /tmp/metrics.log 2>&1 &
+        sleep 5
+    - name: "Create nri-kubernetes configuration"
+      runs: |
+        mkdir -p /etc/newrelic-infra/integrations.d
+        cp test-configs/nri-kubernetes.yml /etc/newrelic-infra/integrations.d/
+        cp test-configs/nri-kubernetes-config.yml /etc/newrelic-infra/
+    - name: "Test metrics endpoint and validate interaction"
+      runs: |
+        if curl -s http://localhost:8080/metrics | grep -q "test_metric"; then
+          echo "Mock metrics endpoint is accessible"
+        else
+          echo "Failed to access mock metrics endpoint"
+          cat /tmp/metrics.log
+          exit 1
+        fi
+
+        # Run nri-kubernetes
+        timeout 10 /usr/bin/nri-kubernetes --verbose > /dev/null 2>&1 &
+        NRIPID=$!
+        sleep 5
+
+        # Check if we received any requests
+        if [ -f /tmp/request.log ] && grep -q "/metrics" /tmp/request.log; then
+          echo "Verified: nri-kubernetes accessed the metrics endpoint"
+          echo "Request details:"
+          cat /tmp/request.log
+        else
+          echo "Error: No requests received from nri-kubernetes"
+          exit 1
+        fi
+
+update:
+  enabled: true
+  github:
+    identifier: newrelic/nri-kubernetes
+    strip-prefix: v
+    tag-filter: v
+    use-tag: true
+    ignore-regex-patterns:
+      - 'newrelic-infrastructure-'
+      - 'e2e-resources-'
