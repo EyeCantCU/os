@@ -1,0 +1,121 @@
+package:
+  name: rook-fips
+  version: "1.18.4"
+  epoch: 0
+  description: Storage Orchestration for Kubernetes
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/rook/rook
+      tag: v${{package.version}}
+      expected-commit: 682f3527f01aa917b108e198893b3e4972c7a8a3
+
+  - uses: go/build
+    with:
+      packages: ./cmd/rook
+      output: rook
+      ldflags: -X 'github.com/rook/rook/pkg/version.Version=${{package.version}}'
+      go-package: go-fips
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      mv images/ceph/toolbox.sh ${{targets.destdir}}/usr/bin/
+
+      mkdir -p ${{targets.destdir}}/etc/rook-external
+      mv deploy/examples/create-external-cluster-resources.* ${{targets.destdir}}/etc/rook-external
+
+      mv deploy/examples/monitoring ${{targets.destdir}}/etc/ceph-monitoring
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-oci-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - s5cmd
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -f ${{targets.destdir}}/usr/bin/rook ${{targets.subpkgdir}}/usr/local/bin/rook
+          ln -sf /usr/bin/toolbox.sh ${{targets.subpkgdir}}/usr/local/bin/toolbox.sh
+    test:
+      environment:
+        contents:
+          packages:
+            - wolfi-base
+      pipeline:
+        - uses: test/tw/ver-check
+          with:
+            bins: rook
+            version-flag: version
+        - uses: test/tw/help-check
+          with:
+            bins: rook
+
+update:
+  enabled: true
+  github:
+    identifier: rook/rook
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - kubectl
+        - curl
+    environment:
+      ROOK_CURRENT_NAMESPACE_ONLY: "true"
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
+      POD_NAMESPACE: "rook-ceph"
+      POD_NAME: "rook-ceph-operator-test"
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: "true"
+    - name: Install CRDs
+      runs: |
+        kubectl apply -f https://raw.githubusercontent.com/rook/rook/v${{package.version}}/deploy/examples/crds.yaml
+        kubectl wait --for condition=established --timeout=60s crd/cephclusters.ceph.rook.io
+    - name: Create namespace and RBAC
+      runs: |
+        kubectl create namespace rook-ceph
+
+        kubectl create clusterrole rook-ceph-operator \
+          --verb=get,list,watch --resource=pods,services,endpoints \
+          --verb=get,list,watch --resource=nodes \
+          --verb=get,list,watch,create,update,patch,delete --resource=deployments,daemonsets,statefulsets \
+          --verb='*' --resource=cephclusters,cephblockpools,cephfilesystems,cephnfses,cephobjectstores,cephobjectstoreusers,cephrbdmirrors
+
+        kubectl create clusterrolebinding rook-ceph-operator \
+          --clusterrole=rook-ceph-operator \
+          --serviceaccount=default:default
+
+        kubectl apply -f - <<EOF
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: rook-ceph-operator-test
+          namespace: rook-ceph
+        spec:
+          nodeName: kwok-node
+          serviceAccountName: default
+          containers:
+          - name: operator
+            image: rook-operator
+        EOF
+    - name: Test operator startup
+      uses: test/daemon-check-output
+      with:
+        start: |
+          rook ceph operator
+        expected_output: |
+          starting Rook-Ceph operator
+          failed to get operator base image ceph version
+        timeout: "30"
