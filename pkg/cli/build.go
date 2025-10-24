@@ -150,7 +150,8 @@ func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPa
 }
 
 func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, kcmdAppend, buildArch, arch, output string) error {
-	apkoTar, err := utils.CreateTar(ctx, buildFilePath, arch)
+	// Generate tar and SBOM using apko
+	apkoTar, apkoSBOMPaths, err := utils.CreateTar(ctx, buildFilePath, arch, filepath.Dir(output))
 	if err != nil {
 		return fmt.Errorf("error creating image.tar: %w", err)
 	}
@@ -201,32 +202,39 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 		return err
 	}
 
+	// Print apko-generated SBOM paths
+	for _, sbomPath := range apkoSBOMPaths {
+		fmt.Println(sbomPath)
+	}
+
+	// Generate syft SBOM
 	reopenedTar, err := os.Open(outputTar.Name())
 	if err != nil {
 		return err
 	}
 	defer reopenedTar.Close()
 
-	attestation, err := utils.CreateAttestation(ctx, reopenedTar)
+	syftSBOM, err := utils.CreateSyftSBOM(ctx, reopenedTar)
 	if err != nil {
 		return err
 	}
 
-	attestationFile, err := os.Create(filepath.Join(
+	syftSBOMFile, err := os.Create(filepath.Join(
 		filepath.Dir(outputTar.Name()),
 		"syft.sbom.json",
 	))
 	if err != nil {
 		return err
 	}
-	defer attestationFile.Close()
+	defer syftSBOMFile.Close()
 
-	_, err = io.Copy(attestationFile, attestation)
+	_, err = io.Copy(syftSBOMFile, syftSBOM)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println(attestationFile.Name())
+	fmt.Println(syftSBOMFile.Name())
+
 	fmt.Println(newName)
 	fmt.Println(output)
 	return nil

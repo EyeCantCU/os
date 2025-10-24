@@ -113,12 +113,12 @@ func buildImage(t *testing.T) v1.Layer {
 	return layer
 }
 
-func TestCreateAttestation(t *testing.T) {
+func TestCreateSyftSBOM(t *testing.T) {
 	layer := buildImage(t)
 
-	sbomdata, err := CreateAttestationFromLayer(context.Background(), layer)
+	sbomdata, err := CreateSyftSBOMFromLayer(context.Background(), layer)
 	if err != nil {
-		t.Fatalf("CreateAttestation() failed with %v", err)
+		t.Fatalf("CreateSyftSBOM() failed with %v", err)
 	}
 
 	testdata, err := os.Open("testdata/syft.sbom.json")
@@ -147,6 +147,6 @@ func TestCreateAttestation(t *testing.T) {
 			cmpopts.IgnoreUnexported(pkg.LicenseSet{}),
 			cmpopts.IgnoreUnexported(file.LocationSet{}),
 		)
-		t.Fatalf("Expected syft attestation is different from expected(-want +got):\n%s", diff)
+		t.Fatalf("Expected syft SBOM is different from expected(-want +got):\n%s", diff)
 	}
 }
