@@ -1,12 +1,7 @@
-# Based on discussion with ecosystem team (Pris), we have
-# decided to create airflow-core package in enterprise as
-# it is installed with `--user` unlike system site packages.
-# This is done to match with upstream apache/airflow:slim-latest
-# and address customer needs.
 package:
   name: airflow-core-2
   version: "2.11.0"
-  epoch: 7
+  epoch: 8
   description: Minimal Airflow core - Platform to programmatically author, schedule, and monitor workflows
   dependencies:
     runtime:
@@ -28,20 +23,19 @@ package:
   copyright:
     - license: Apache-2.0
 
-# As of now airflow is primarily available for python 3.12 and will break for python 3.13
-# For ref: https://airflow.apache.org/blog/airflow-2.9.0
 vars:
-  python-version: 3.12
+  venv-home: '/home/airflow/.local'
+  # Python support docs: https://airflow.apache.org/docs/apache-airflow/stable/installation/supported-versions.html
+  python-version: '3.12'
 
 environment:
   contents:
     packages:
       - busybox
+      - curl
       - patch
-      - py${{vars.python-version}}-build-bin
-      - py${{vars.python-version}}-pip
       - python-${{vars.python-version}}
-      - python-${{vars.python-version}}-dev
+      - uv
 
 pipeline:
   - uses: git-checkout
@@ -51,39 +45,52 @@ pipeline:
       expected-commit: d9ed7b94d033dc61ee1c05aafb9f1c1f7b82cfb2
 
   - runs: |
-      # Install airflow core, the upstream sets this as directory
-      export PYTHONUSERBASE=${{targets.destdir}}/home/airflow/.local
-      pip install --no-cache-dir --user apache-airflow[core]==${{package.version}}
+      curl -f https://raw.githubusercontent.com/apache/airflow/refs/tags/constraints-${{package.version}}/constraints-no-providers-${{vars.python-version}}.txt \
+           -o constraints-${{vars.python-version}}
 
-      # GHSA-8w49-h785-mj3c/GHSA-8495-4g3g-x7pr/GHSA-27mf-ghqm-j3j8/CVE-2025-27516
-      # GHSA-9548-qrrj-x5pj (aiohttp 3.12.14)
-      pip install --no-cache-dir --user \
-        "aiohttp>=3.12.14" \
-        "tornado>=6.4.2" \
-        "jinja2>=3.1.6"
-      pip install --no-cache-dir --user --force-reinstall packaging statsd werkzeug
+  - uses: py/tw/bump-constraints
+    with:
+      constraints-file: constraints-${{vars.python-version}}
+      packages: |
+        Flask-AppBuilder==4.5.3 # GHSA-p8q5-cvwx-wvwp
+        aiohttp==3.12.14 # CVE-2025-53643
+        aiosignal==1.4.0 # Needed by aiohttp 3.12.14
+        protobuf==5.29.5 # CVE-2025-4565
+        requests==2.32.4 # CVE-2024-47081
+        urllib3==2.5.0 # CVE-2025-50181, CVE-2025-50182
 
-      # Patch to effectively handle instances of md5 used for non-security purposes in airflow
-      # by adding usedforsecurity=False in hashlib wrapper.
-      # We can't use patch pipeline as we use pip install method
-      # which makes us patch after installation in site-packages
-      patch -p1 -d "${{targets.destdir}}/home/airflow/.local/lib/python3.12/site-packages" < handle-md5.patch
+  - runs: |
+      # Create and source virtual environment
+      uv venv ${{vars.venv-home}} --system-site-packages
+      source ${{vars.venv-home}}/bin/activate
 
-      # CVE-2024-6345 GHSA-cx63-2mw6-8hw5
-      # setuptools comes from airflow/providers/google/provider.yaml having
-      # gcloud-aio-auth>=4.0.0,<5.0.0 . gcloud-aio-auth 4 is backlevel and has
-      # setuptools in it's pyproject.toml 'tool.poetry.dependencies'
-      # The tldr; For that case it is not needed in runtime.
-       # remove pip since we don't need it and CVE scanners report vulnerabilites that are actually fixed
-      pip uninstall --yes setuptools pip
+      # Install airflow core
+      uv pip install apache-airflow==${{package.version}} \
+        --constraint constraints-${{vars.python-version}}
 
-      find . -name '__pycache__' -exec rm -rf {} +
+      # Uninstall pip and virtualenv from virtual environment
+      #
+      # pip doesn't need to be present in the virtual environment,
+      # the venv can be managed via a system installed package manager
+      #
+      # virtualenv vendors an outdated and unused pip wheel
+      uv pip uninstall pip virtualenv
 
-      # flask-appbuilder can't be upgraded as of 2025.06.13: causes test failures.
+      # Mark md5 as not used for security
+      patch -p1 -d ${{vars.venv-home}}/lib/python${{vars.python-version}}/site-packages < md5-not-usedforsecurity.patch
+
+      # Install virtual environment
+      mkdir -p ${{targets.contextdir}}/home/airflow
+      cp -a ${{vars.venv-home}} ${{targets.contextdir}}/home/airflow
+
+      # Ensure lockfile isn't world-writeable
+      chmod 644 ${{targets.contextdir}}/${{vars.venv-home}}/.lock
 
 # We can't re-use airflow-compat subpackage from airflow package in wolfi/os because it invoke full airflow and hence bloats size
 subpackages:
   - name: ${{package.name}}-compat
+    options:
+      no-depends: true
     dependencies:
       runtime:
         - ${{package.name}}
@@ -115,9 +122,8 @@ subpackages:
           # The first time you run Airflow, it will create a file called `airflow.cfg` in
           # `$AIRFLOW_HOME` directory
           # However, for production case it is advised to generate the configuration
-          export PYTHONPATH=${{targets.destdir}}/home/airflow/.local/lib/python${{vars.python-version}}/site-packages
-
-          ${{targets.destdir}}/home/airflow/.local/bin/airflow config list --defaults > ${{targets.contextdir}}/opt/airflow/"airflow.cfg"
+          source ${{vars.venv-home}}/bin/activate
+          airflow config list --defaults > ${{targets.contextdir}}/opt/airflow/airflow.cfg
 
           cp airflow/config_templates/default_webserver_config.py ${{targets.contextdir}}/
 
@@ -146,14 +152,14 @@ test:
   environment:
     contents:
       packages:
-        - python-${{vars.python-version}}
-        - airflow-compat
+        - ${{package.name}}-compat
         - bash
   pipeline:
     - runs: |
-        # Set environment variables
-        export PATH=/home/airflow/.local/bin:$PATH
-        export PYTHONUSERBASE=/home/airflow/.local
+        # Source venv
+        source ${{vars.venv-home}}/bin/activate
+
+        # Set airflow home
         export AIRFLOW_HOME=/opt/airflow
 
         # Initialize Airflow database
@@ -179,4 +185,7 @@ test:
 
         # Test Task Execution in DAG
         airflow tasks test test_dag test_task 2024-01-01 > /dev/null 2>&1|| (echo "Task execution failed!" && exit 1)
+    - uses: test/tw/pip-check
+      with:
+        python: ${{vars.venv-home}}/bin/python${{vars.python-version}}
     - uses: test/tw/ldd-check
