@@ -62,14 +62,6 @@ subpackages:
     description: ${{package.name}} development headers
     pipeline:
       - uses: split/dev
-      - if: ${{build.arch}} == 'aarch64'
-        runs: |
-          # Override bits/math-vector.h for aarch64 as latest glibc ships symbols that nvcc
-          # does not export ; more details:
-          # https://bugs.launchpad.net/ubuntu/+source/glibc/+bug/2033747
-          # https://github.com/OE4T/meta-tegra/commit/981245c8bf3164f16bd7f52fca6ea9c9fa8c349a
-          mkdir -p "${{targets.contextdir}}/usr/local/cuda-${{vars.cuda-version}}/include/bits"
-          install -m644 math-vector.h "${{targets.contextdir}}/usr/local/cuda-${{vars.cuda-version}}/include/bits/math-vector.h"
     dependencies:
       runtime:
         - ${{package.name}}
@@ -97,8 +89,13 @@ subpackages:
               std::cout << __GNUC__ << "\n";
             }
             EOF
+            if [ "$(g++ -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+              gxx_bin="g++"
+            else
+              gxx_bin="g++-${{vars.gcc-latest-major-version}}"
+            fi
             # Verify that the latest default gcc is available and works
-            "$nvcc" -ccbin g++-${{vars.gcc-latest-major-version}} \
+            "$nvcc" -ccbin "$gxx_bin" \
               "$tmpdir/gcc-version.cu" -o "$tmpdir/gcc-version"
             [ "$("$tmpdir/gcc-version")" = "${{vars.gcc-latest-major-version}}" ]
             # Attempt to verify that we build w/ the system gcc by default
@@ -124,6 +121,11 @@ subpackages:
             - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
       pipeline:
         - runs: |
+            [ "$(gcc -dumpversion)" = "${{vars.gcc-latest-major-version}}" ] || \
+              { echo "ERROR: gcc ${{vars.gcc-latest-major-version}} appears to have been version streamed." 1>&2;
+                echo "ERROR: Please update dependency to point at gcc-${{vars.gcc-latest-major-version}}" 1>&2;
+                exit 1; }
+        - runs: |
             nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
             tmpdir="$(mktemp -d)"
             trap "rm -rf $tmpdir" EXIT
@@ -137,7 +139,7 @@ subpackages:
             "$nvcc" "$tmpdir/gcc-version.cu" -o "$tmpdir/gcc-version"
             [ "$("$tmpdir/gcc-version")" = "${{vars.gcc-latest-major-version}}" ]
 
-  - name: nvcc-gcc-${{vars.cuda-version}}
+  - name: nvcc-${{vars.cuda-version}}-gcc-wrapper
     description: ${{package.name}} configured to use latest compatible gcc
     dependencies:
       runtime:
@@ -149,9 +151,14 @@ subpackages:
           mkdir -p "${{targets.contextdir}}$cuda_home/bin"
           for cmd in gcc g++; do
             wrapper="${{targets.contextdir}}$cuda_home/bin/$cmd"
-            cat > "$wrapper" << EOF
+            cat > "$wrapper" << 'EOF'
           #!/bin/sh
-          exec ${cmd}-${{vars.gcc-latest-major-version}} "\$@"
+          if [ "$(/usr/local/bin/${0##*/} -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+            gcc_bin="/usr/local/bin/${0##*/}"
+          else
+            gcc_bin="/usr/local/bin/${0##*/}-${{vars.gcc-latest-major-version}}"
+          fi
+          exec ${gcc_bin} "$@"
           EOF
             chmod +x "$wrapper"
           done
@@ -193,8 +200,13 @@ test:
     - uses: test/tw/ldd-check
     - name: Test .c files can be compiled
       runs: |
+        if [ "$(gcc -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+          gcc_bin="gcc"
+        else
+          gcc_bin="gcc-${{vars.gcc-latest-major-version}}"
+        fi
         nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
-        nvcc_cmd="$nvcc -ccbin gcc-${{vars.gcc-latest-major-version}}"
+        nvcc_cmd="$nvcc -ccbin $gcc_bin"
         tmpdir="$(mktemp -d)"
         trap "rm -rf $tmpdir" EXIT
         cat <<EOF > "$tmpdir/test-c.c"
@@ -207,8 +219,13 @@ test:
         "$tmpdir/test-c"
     - name: Test .cu files can be compiled
       runs: |
+        if [ "$(gcc -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+          gcc_bin="gcc"
+        else
+          gcc_bin="gcc-${{vars.gcc-latest-major-version}}"
+        fi
         nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
-        nvcc_cmd="$nvcc -ccbin gcc-${{vars.gcc-latest-major-version}}"
+        nvcc_cmd="$nvcc -ccbin $gcc_bin"
         tmpdir="$(mktemp -d)"
         trap "rm -rf $tmpdir" EXIT
         cat <<EOF > "$tmpdir/test-cu.cu"
