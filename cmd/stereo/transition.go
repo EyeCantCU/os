@@ -399,38 +399,14 @@ func removeVersionSuffix(libName string) string {
 	return libName
 }
 
-func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string, extraRepos []string, targetPackage string) (*PackageAnalysisResult, error) {
-	// Validate required parameters
-	if targetPackage == "" {
-		return nil, fmt.Errorf("targetPackage cannot be empty")
-	}
-
-	log.Printf("Analyzing APK repositories for packages with shared library dependencies")
-
-	rebuilds := make(map[string]*RebuildCandidate)
-	completed := make(map[string]*CompletedPackage)
-	skipped := make(map[string]*SkippedPackage)
-
-	// Build a map of which versions are actively provided by version stream packages
-	// Format: baseLib -> version -> provider package name
+// scanRepositoriesForPackages scans all repositories (dirToRepo + extraRepos) in a single pass
+// to build the version providers map and collect origin packages for analysis.
+// Returns versionProviders (baseLib -> version -> provider package), originPackages (originKey -> packageName -> packages), and error.
+func scanRepositoriesForPackages(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, arch string, extraRepos []string) (map[string]map[string]string, map[string]map[string][]*apk.Package, error) {
 	versionProviders := make(map[string]map[string]string)
+	originPackages := make(map[string]map[string][]*apk.Package)
 
-	// Compile regex patterns
-	compiledPatterns := make([]*regexp.Regexp, len(patterns))
-	for i, pattern := range patterns {
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("compiling pattern %s: %w", pattern, err)
-		}
-		compiledPatterns[i] = regex
-	}
-
-	// Scan all repositories in a single pass to:
-	// 1. Identify version stream providers (packages providing older library versions)
-	// 2. Collect packages by origin for dependency analysis
 	log.Printf("Scanning repositories to identify version stream providers and collect packages")
-
-	originPackages := make(map[string]map[string][]*apk.Package) // originKey -> packageName -> list of package versions
 
 	// Process dirToRepo repositories
 	for repo, repoURL := range dirToRepo {
@@ -526,6 +502,17 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 			}
 		}
 	}
+
+	return versionProviders, originPackages, nil
+}
+
+// categorizeOriginPackages analyzes origin packages and categorizes them into rebuild, completed, or skipped
+// based on their dependency versions and version stream pinning.
+// Returns maps of rebuilds, completed, and skipped packages.
+func categorizeOriginPackages(originPackages map[string]map[string][]*apk.Package, versionProviders map[string]map[string]string, compiledPatterns []*regexp.Regexp, patterns []string, targetVersions map[string][]string, targetPackage string) (map[string]*RebuildCandidate, map[string]*CompletedPackage, map[string]*SkippedPackage) {
+	rebuilds := make(map[string]*RebuildCandidate)
+	completed := make(map[string]*CompletedPackage)
+	skipped := make(map[string]*SkippedPackage)
 
 	// Build a set of version stream provider origins to exclude from rebuild checks
 	versionStreamOrigins := make(map[string]bool)
@@ -637,7 +624,6 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 					completedPackagesMap[packageName] = mostRecentPkg
 				}
 			}
-
 		}
 
 		// If any package from this origin needs rebuilding, create a rebuild candidate
@@ -704,6 +690,36 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 			}
 		}
 	}
+
+	return rebuilds, completed, skipped
+}
+
+func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string, extraRepos []string, targetPackage string) (*PackageAnalysisResult, error) {
+	// Validate required parameters
+	if targetPackage == "" {
+		return nil, fmt.Errorf("targetPackage cannot be empty")
+	}
+
+	log.Printf("Analyzing APK repositories for packages with shared library dependencies")
+
+	// Compile regex patterns
+	compiledPatterns := make([]*regexp.Regexp, len(patterns))
+	for i, pattern := range patterns {
+		regex, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compiling pattern %s: %w", pattern, err)
+		}
+		compiledPatterns[i] = regex
+	}
+
+	// Scan repositories to build version providers and collect origin packages
+	versionProviders, originPackages, err := scanRepositoriesForPackages(ctx, candidates, targetVersions, arch, extraRepos)
+	if err != nil {
+		return nil, fmt.Errorf("scanning repositories: %w", err)
+	}
+
+	// Categorize origin packages into rebuild/completed/skipped
+	rebuilds, completed, skipped := categorizeOriginPackages(originPackages, versionProviders, compiledPatterns, patterns, targetVersions, targetPackage)
 
 	// Convert maps to slices and return as structured result
 	result := &PackageAnalysisResult{
