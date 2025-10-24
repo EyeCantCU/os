@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 )
@@ -183,6 +184,7 @@ type createImageVersionOpts struct {
 	regions        []string
 	tags           map[string]*string
 	dbHashes       []string
+	Attempts       int
 }
 
 func createImageVersion(ctx context.Context, clients *AzureClients, opts *createImageVersionOpts, verbose bool) error {
@@ -234,7 +236,11 @@ func createImageVersion(ctx context.Context, clients *AzureClients, opts *create
 
 	log.Printf("Creating image version: %s for definition: %s", opts.version, opts.definitionName)
 
-	poller, err := clients.ImageVersions.BeginCreateOrUpdate(ctx, opts.resourceGroup, opts.galleryName, opts.definitionName, opts.version, imageVersion, nil)
+	makeVer := func() (*runtime.Poller[armcompute.GalleryImageVersionsClientCreateOrUpdateResponse], error) {
+		return clients.ImageVersions.BeginCreateOrUpdate(ctx, opts.resourceGroup, opts.galleryName, opts.definitionName, opts.version, imageVersion, nil)
+	}
+
+	poller, err := tryAPICall(makeVer, opts.Attempts)
 	if err != nil {
 		return fmt.Errorf("failed to start image version creation: %w", err)
 	}
