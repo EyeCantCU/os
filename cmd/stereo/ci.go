@@ -58,7 +58,7 @@ func unguardedCmd() *cobra.Command {
 			if ignoreFile != "" {
 				f, err := os.ReadFile(ignoreFile)
 				if err != nil {
-					return fmt.Errorf("reading ignore file %s: %w", err)
+					return fmt.Errorf("reading ignore file %s: %w", ignoreFile, err)
 				}
 				for line := range bytes.Lines(f) {
 					ignored[strings.TrimSpace(string(line))] = struct{}{}

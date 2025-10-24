@@ -296,7 +296,7 @@ func lockBuildDependencies(ctx context.Context, c *config.Configuration, cache *
 	if err != nil {
 		config := &bytes.Buffer{}
 		if err := json.NewEncoder(config).Encode(c.Environment); err != nil {
-			return nil, fmt.Errorf("encoding %s: %w", c.Name)
+			return nil, fmt.Errorf("encoding %s: %w", c.Name(), err)
 		}
 		return nil, fmt.Errorf("unable to lock image configuration: %w\nimage config:\n%s", err, config.String())
 	}
