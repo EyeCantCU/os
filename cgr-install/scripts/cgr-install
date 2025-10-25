@@ -476,9 +476,45 @@ EOF
       cd "$rootd/boot/loader/entries" && grep -- options *.conf )
 }
 
+uki_setup() {
+    # this expects to on a full 'bootd' and make changes to it (populating boot/loader/keys/auto)
+    local bootd="$1"
+    out=$(cd "$bootd" && set +f && set -- chainguard/*/linux
+        [ $# -eq 0 ] && { error "no kernel found" 1>&2; exit 1; };
+        echo "$# - $*" 1>&2
+        for f in "$@"; do [ -f "$f" ] && echo "$f" && exit 0; done
+        error "did not find kernel"
+        exit 1) || return 1
+    kernel="/$out"
+    # grab the version from chainguard/6.1.2/linux
+    ver=${out#chainguard/}
+    ver=${ver%/linux}
+
+    mkdir -p "$bootd"/EFI/Linux/ || {
+        stderr "failed creating uki_setup";
+        return 1;
+    }
+
+    ukify build \
+      --linux "$bootd/chainguard/$ver"/linux \
+      --uname "$ver" \
+      --cmdline "$(grep "options" "$bootd/loader/entries/chainguard-$ver.conf" | awk '{$1=""; print $0}')" \
+      --output "$bootd/EFI/Linux/CHAINGUARD-$ver.EFI"
+
+    # Ensure everything is alright
+    ukify inspect "$bootd/EFI/Linux/CHAINGUARD-$ver.EFI"|| {
+        stderr "failed creating CHAINGUARD-$ver.EFI in uki_setup";
+        return 1;
+    }
+    # Leave only systemd-boot and the UKI itself
+    # this will leave only BOOT${arch}.EFI and CHAINGUARD-$ver.EFI to be
+    # signed for secureboot
+    rm -rf "$bootd/chainguard/" "$bootd/loader/entries/"
+}
+
 secureboot_setup() {
-    # this expects to on a full 'rootd' and make changes to it (populating boot/loader/keys/auto)
-    local rootd="$1" outd="$2"
+    # this expects to on a full 'bootd' and make changes to it (populating boot/loader/keys/auto)
+    local bootd="$1" outd="$2"
     mkdir -p "$outd" || {
         stderr "failed creating $outd in secureboot_setup";
         return 1;
@@ -496,10 +532,10 @@ secureboot_setup() {
 
     ## Calculate hash list of all EFI apps (currently only systemd-boot) and kernels
     local out=""
-    out=$(find "$rootd/boot" -name "BOOT${EFI_SUFFIX}.EFI" -o -name linux) ||
-        { stderr "failed to find files to sign in in $rootd/boot"; return 1; }
+    out=$(find "$bootd" -name "BOOT${EFI_SUFFIX}.EFI" -o -name linux -o -name "CHAINGUARD*.EFI") ||
+        { stderr "failed to find files to sign in in $bootd/boot"; return 1; }
     [ -n "$out" ] ||
-        { stderr "did not find any files to sign under $rootd"; return 1; }
+        { stderr "did not find any files to sign under $bootd"; return 1; }
 
     local oifs="$IFS"
     IFS=$'\n';
@@ -581,11 +617,10 @@ secureboot_setup() {
         { stderr "failed to remove private key"; return 1; }
 
     ## Install systemd-boot auto enrollment .auth files
-    local espmp="boot"
-    vr stampdalf "$rootd/$espmp" mkdir -p "$rootd/$espmp/loader/keys/auto" ||
-        { stderr "failed to create $espmp/loader/keys/auto"; return 1; }
-    vr stampdalf "$rootd/$espmp" cp "$outd"/*.auth "$rootd/$espmp/loader/keys/auto" ||
-        { stderr "failed to copy rootd/$espmp -> $outd"; return 1; }
+    vr stampdalf "$bootd" mkdir -p "$bootd/loader/keys/auto" ||
+        { stderr "failed to create $bootd/loader/keys/auto"; return 1; }
+    vr stampdalf "$bootd" cp "$outd"/*.auth "$bootd/loader/keys/auto" ||
+        { stderr "failed to copy $bootd -> $outd"; return 1; }
 }
 
 get_install_option() {
