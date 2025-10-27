@@ -35,43 +35,42 @@ test:
       packages:
         - curl
         - python3
+        - wait-for-it
+    environment:
+      AGENT_PORT: "8001"
   pipeline:
     - uses: test/go-fips-check
-    - name: "Set up mock metrics endpoint with request logging"
-      runs: |
-        mkdir -p /tmp/test-configs
-        # Start the metrics server in background
-        nohup python3 test_metrics_server.py > /tmp/metrics.log 2>&1 &
-        sleep 5
-    - name: "Create nri-kubernetes configuration"
-      runs: |
-        mkdir -p /etc/newrelic-infra/integrations.d
-        cp test-configs/nri-kubernetes.yml /etc/newrelic-infra/integrations.d/
-        cp test-configs/nri-kubernetes-config.yml /etc/newrelic-infra/
-    - name: "Test metrics endpoint and validate interaction"
-      runs: |
-        if curl -s http://localhost:8080/metrics | grep -q "test_metric"; then
-          echo "Mock metrics endpoint is accessible"
-        else
-          echo "Failed to access mock metrics endpoint"
-          cat /tmp/metrics.log
-          exit 1
-        fi
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          set -o pipefail
 
-        # Run nri-kubernetes
-        timeout 10 /usr/bin/nri-kubernetes --verbose > /dev/null 2>&1 &
-        NRIPID=$!
-        sleep 5
+          python3 mock_agent.py > /tmp/agent.log 2>&1 &
+          AGENT_PID=$!
+          echo "${AGENT_PID}" > /tmp/agent.pid
 
-        # Check if we received any requests
-        if [ -f /tmp/request.log ] && grep -q "/metrics" /tmp/request.log; then
-          echo "Verified: nri-kubernetes accessed the metrics endpoint"
-          echo "Request details:"
-          cat /tmp/request.log
-        else
-          echo "Error: No requests received from nri-kubernetes"
-          exit 1
-        fi
+          # Wait for mock agent to be ready₹
+          wait-for-it "localhost:${AGENT_PORT}" -t 30
+
+          curl -sf "http://localhost:${AGENT_PORT}/" | grep -F "ready"
+
+          mkdir -p /etc/newrelic-infra
+          cp test-configs/nri-kubernetes-config.yml /etc/newrelic-infra/nri-kubernetes.yml
+        start: nri-kubernetes
+        timeout: 30
+        expected_output: |
+          New Relic Kubernetes integration Version
+          collecting in cluster config
+          using local kube config
+        post: |
+          set -o pipefail
+
+          # Kill the mock agent
+          kill -9 "$(cat /tmp/agent.pid)" 2>/dev/null || true
+          grep -F "Mock agent listening" /tmp/agent.log
 
 update:
   enabled: true
