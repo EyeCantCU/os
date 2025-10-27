@@ -44,11 +44,12 @@ pipeline:
 
   - runs: |
       # Generate gRPC proto files
-      python3.10 -m grpc_tools.protoc --proto_path=${PWD} --python_out=${PWD} --grpc_python_out=${PWD} api/v1/*.proto
+      python${{vars.python-version}} -m grpc_tools.protoc --proto_path=${PWD} --python_out=${PWD} --grpc_python_out=${PWD} api/v1/*.proto
 
       mkdir -p ${{targets.destdir}}/spamcheck
       cp -r api app server *.py ${{targets.destdir}}/spamcheck/
 
+      chmod -R u=rwX,g=rX,o=rX ${{targets.destdir}}/spamcheck/
       chmod +x ${{targets.destdir}}/spamcheck/main.py
       chmod +x ${{targets.destdir}}/spamcheck/health_check.py
 
@@ -57,18 +58,60 @@ subpackages:
     description: "Compatibility package to place binaries in the location expected by upstream"
     pipeline:
       - runs: |
-          mkdir -p ${{targets.destdir}}/usr/local/bin
-          ln -sf /spamcheck/main.py ${{targets.destdir}}/usr/local/bin/spamcheck
-          ln -sf /spamcheck/health_check.py ${{targets.destdir}}/usr/local/bin/health-check
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -sf /spamcheck/main.py ${{targets.subpkgdir}}/usr/local/bin/spamcheck
+          ln -sf /spamcheck/health_check.py ${{targets.subpkgdir}}/usr/local/bin/health-check
+    test:
+      pipeline:
+        - runs: |
+            readlink -v /usr/local/bin/spamcheck
+            readlink -v /usr/local/bin/health-check
 
 test:
   environment:
     environment:
       PYTHONPATH: /spamcheck
   pipeline:
+    - name: Verify all runtime dependencies are importable
+      runs: |
+        python${{vars.python-version}} <<'EOF'
+        import sys
+
+        # List of expected runtime dependencies based on upstream Pipfile
+        required_imports = [
+            ('cloudevents', 'cloudevents'),
+            ('distconfig', 'distconfig3'),
+            ('google.cloud.pubsub', 'google-cloud-pubsub'),
+            ('google.cloud.storage', 'google-cloud-storage'),
+            ('grpc', 'grpcio'),
+            ('grpc_reflection', 'grpcio-reflection'),
+            ('numpy', 'numpy'),
+            ('google.protobuf', 'protobuf'),
+            ('pythonjsonlogger', 'python-json-logger'),
+            ('yaml', 'pyyaml'),
+            ('tflite_runtime', 'tflite-runtime'),
+            ('ulid', 'ulid-py'),
+            ('vyper', 'vyper-config'),
+        ]
+
+        failed_imports = []
+        for module_name, package_name in required_imports:
+            try:
+                __import__(module_name)
+                print(f"✓ {package_name}: OK")
+            except ImportError as e:
+                print(f"✗ {package_name}: FAILED - {e}")
+                failed_imports.append(package_name)
+
+        if failed_imports:
+            print(f"\nMissing runtime dependencies: {', '.join(failed_imports)}")
+            sys.exit(1)
+        else:
+            print("\nAll runtime dependencies verified: PASS")
+        EOF
     - name: Test core application imports (without spam_classifiers)
       runs: |
-        python3.10 <<'EOF'
+        python${{vars.python-version}} <<'EOF'
         # Test imports that don't require spam_classifiers
         from app import config, logger, gcs, queue, event
         from app.deny_list import DenyList
