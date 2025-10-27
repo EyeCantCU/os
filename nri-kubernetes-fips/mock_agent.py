@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Mock New Relic agent that receives metrics from nri-kubernetes on port 8001.
-Logs all received data to /tmp/agent_received.log
+Mock agent that mimics newrelic-infra agent.
+
+nri-kubernetes sends metrics to the newrelic-infra agent (not directly to cloud).
+This mock listens on port 8001, accepts metrics, and logs them to /tmp/agent_received.log.
 """
 import http.server
 import socketserver
