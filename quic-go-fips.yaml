@@ -16,6 +16,7 @@ pipeline:
   - runs: |
       install -dm0755 "${{targets.destdir}}/usr/share/quic-go"
       git rev-parse HEAD | tee "${{targets.destdir}}/usr/share/quic-go/commit.txt"
+      install -Dpm0755 -t "${{targets.destdir}}/usr/libexec/quic-go/" interop/run_endpoint.sh
 
 subpackages:
   - name: quic-go-server-fips
@@ -28,10 +29,29 @@ subpackages:
           ldflags: -X github.com/quic-go/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)
           go-package: go-fips
     test:
+      environment:
+        contents:
+          packages:
+            - mkcert
       pipeline:
         - uses: test/go-fips-check
-        - runs: |
-            mkdir -p /logs
+        # There don't seem to be any tools able to interact with this server without the client that comes with quic-go
+        # socat doesn't work, neither netcat-openbsd, nothing, curl doesn't have http3/QUIC support compiled into it either
+        - name: Test server startup
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              echo "127.0.0.1 sim" >> /etc/hosts
+              mkdir -p /certs /logs
+              cd /certs
+              mkcert localhost
+              mv localhost.pem cert.pem
+              mv localhost-key.pem priv.key
+            start: |
+              env TESTCASE="chacha20" server
+            expected_output: " "
+            post: |
+              netstat -tulpn | grep -F -e ":::443"
 
   - name: quic-go-client-fips
     description: Client binary for quic-go
@@ -46,15 +66,28 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
         - runs: mkdir -p /logs
+        # Entire functionality relies on the server existing
+        - uses: test/tw/help-check
+          with:
+            bins: client
+            expect-contains: Usage of
 
   - name: quic-go-compat-fips
     description: Compatibility subpackage for upstream image
+    dependencies:
+      runtime:
+        - quic-go
+        - quic-go-client
+        - quic-go-server
+        - quic-network-simulator # Need this for the `setup.sh` and others
+        - quic-network-simulator-compat # /wait-for-it.sh
     pipeline:
       - runs: |
-          mkdir -p /quic-go
-          ln -s /usr/bin/server /quic-go/server
-          ln -s /usr/share/quic-go/commit.txt /quic-go/commit.txt
-          ln -s /usr/bin/client /quic-go/client
+          mkdir -p ${{targets.subpkgdir}}/quic-go
+          ln -s ../usr/share/quic-go/commit.txt ${{targets.subpkgdir}}/quic-go/commit.txt
+          ln -s ../usr/bin/server ${{targets.subpkgdir}}/quic-go/server
+          ln -s ../usr/bin/client ${{targets.subpkgdir}}/quic-go/client
+          ln -s ../usr/libexec/quic-go/run_endpoint.sh ${{targets.subpkgdir}}/quic-go/run_endpoint.sh
     test:
       pipeline:
         - uses: test/tw/symlink-check
@@ -65,6 +98,40 @@ update:
     strip-prefix: v
 
 test:
+  environment:
+    contents:
+      packages:
+        - quic-go-compat
+        - mkcert
+        - curl
+        - netcat-openbsd
   pipeline:
+    - uses: test/go-fips-check
     - runs: |
         stat /usr/share/quic-go/commit.txt | grep 0644
+    - name: Test server startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          echo "127.0.0.1 sim" >> /etc/hosts
+          mkdir -p /certs /logs
+          cd /certs
+          mkcert localhost
+          mv localhost.pem cert.pem
+          mv localhost-key.pem priv.key
+        start: |
+          sh -c 'cd /quic-go ; TESTCASE="chacha20" ./run_endpoint.sh'
+        expected_output: |
+          Running QUIC server.
+        post: |
+          netstat -tulpn | grep -F -e ":::443"
+
+          # We do not need the network simulator functionality of this repo to actually run client tests
+          nc -l sim 57832 &
+          SPOOF_SIM_SERVER=$!
+
+          mkdir -p /downloads/
+          echo "Hello, Linky!" | tee /downloads/linky
+
+          cd /quic-go
+          TESTCASE="chacha20" ROLE=client CLIENT_PARAMS=/linky ./run_endpoint.sh | grep -F -e "Starting QUIC client"
