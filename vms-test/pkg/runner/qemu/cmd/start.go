@@ -151,6 +151,8 @@ func Start(ctx context.Context, dir, pkdata string, arch types.Architecture) err
 		return err
 	}
 
+	log.Printf("Executing qemu: %s\n", utils.CmdPrintFormat(cmd))
+
 	if err := cmd.Start(); err != nil {
 		return err
 	}

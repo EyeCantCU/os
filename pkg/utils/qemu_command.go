@@ -7,7 +7,6 @@ package utils
 
 import (
 	"fmt"
-	"log"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -137,7 +136,6 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 	} else {
 		cmd = append(cmd, []string{"-cpu", "Haswell-v4", "-accel", "tcg"}...)
 	}
-	log.Printf("cmd: %v", cmd)
 	return cmd
 }
 

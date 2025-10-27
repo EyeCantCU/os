@@ -180,5 +180,7 @@ func DebugCmd(ctx context.Context, efiDisk, arch, ovmf, pubkey string, snapshot 
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 
+	log.Printf("Executing qemu: %s\n", utils.CmdPrintFormat(cmd))
+
 	return cmd.Run()
 }
