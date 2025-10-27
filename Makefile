@@ -264,24 +264,37 @@ awspub-%: AWSSSM=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)
 awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
 	./$(TOOLS_SUBD)/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
 
-.PHONY: aws-create aws-create-% aws-publish aws-publish-%
+.PHONY: aws-create aws-create-% aws-publish aws-publish-% aws-share aws-share-%
 # these are just so human can type 'make aws-create-aws-base' to do the create/publish
 $(foreach name,$(disks_aws),aws-image-create-$(name)): aws-image-create-%: $(ARCH_OUT_D)/awspub/create/%.json
+$(foreach name,$(disks_aws),aws-image-share-$(name)): aws-image-share-%: $(ARCH_OUT_D)/awspub/share/%.json
 $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
 
 aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
 aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
+aws-share: $(foreach name,$(disks_aws),aws-share-$(name))
 aws-publish-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-publish-$(name))
 aws-publish-aws-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
 aws-publish-aws-main: $(foreach name,$(group_aws_main),aws-image-publish-$(name))
 aws-create-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-create-$(name))
 aws-create-aws-eks: $(foreach name,$(group_aws_eks),aws-image-create-$(name))
 aws-create-aws-main: $(foreach name,$(group_aws_main),aws-image-create-$(name))
+aws-share-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-share-$(name))
+aws-share-aws-eks: $(foreach name,$(group_aws_eks),aws-image-share-$(name))
+aws-share-aws-main: $(foreach name,$(group_aws_main),aws-image-share-$(name))
 
 output/awspub.mapping:
 	mkdir -p output
 	echo "---" > $@
 	echo "BUILD_TIMESTAMP: $(BUILD_TIMESTAMP)" >> $@
+
+# The SECONDEXPANSION and wildcard make the -share.yaml prerequisite optional.
+# In which case, we end up with just a copy of the regular yaml.
+.SECONDEXPANSION:
+$(ARCH_OUT_D)/awspub/share/%.yaml: awspub/$(ARCH)/%.yaml $$(wildcard awspub/$(ARCH)/%-share.yaml)
+	@mkdir -p $(ARCH_OUT_D)/awspub/share
+	@$(call capture_stdout,$@,\
+	    yq eval-all '. as $$item ireduce ({}; . *+ $$item)' $^)
 
 # capture_stdout(output,command)
 # safely write the output of command to output
@@ -294,6 +307,17 @@ capture_stdout = rm -f "$(1)" && mkdir -p "$(dir $(1))" && \
 $(ARCH_OUT_D)/awspub/create/%.json: output/awspub.mapping $(ARCH_OUT_D)/%/disk.vmdk
 	@$(call capture_stdout,$@,\
 	awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
+
+# awspub checks checksums and metadata to see if an image was published already
+# so if this is run with a copy of the create yaml, it should be a noop.
+$(ARCH_OUT_D)/awspub/share/%.json: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json $(ARCH_OUT_D)/awspub/share/%.yaml
+	@$(call capture_stdout,$@,\
+	awspub create --config-mapping=output/awspub.mapping $(ARCH_OUT_D)/awspub/share/$*.yaml)
+
+# we use the stdout of awspub publish to indicate the thing was published.
+$(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/share/%.json $(ARCH_OUT_D)/awspub/share/%.yaml
+	@$(call capture_stdout,$@,\
+	awspub publish --config-mapping=output/awspub.mapping $(ARCH_OUT_D)/awspub/share/$*.yaml)
 
 .PHONY: bespoke-publish-s3-aws-ecs-full-request-6943
 bespoke-publish-s3-aws-ecs-full-request-6943: $(ARCH_OUT_D)/aws-ecs-full-request-6943/publish.s3.json
@@ -385,11 +409,6 @@ $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-ge
 		--gcs-bucket $(RPI_GCSBUCKET) \
 		--rpi-upload \
 		--raw-path $(dir $@)disk.raw)
-
-# we use the stdout of awspub publish to indicate the thing was published.
-$(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
-	@$(call capture_stdout,$@,\
-	awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
