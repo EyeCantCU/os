@@ -1,7 +1,7 @@
 package:
   name: nvidia-cuda-nvcc-13.0
   version: "13.0.48"
-  epoch: 0
+  epoch: 1
   description: CUDA NVCC
   copyright:
     - license: PROPRIETARY
@@ -26,7 +26,7 @@ var-transforms:
 vars:
   # Bumping this to 15 caused the compilation test to hang indefinitely as of
   # 13.0.48
-  gcc-major-version: 14
+  gcc-latest-major-version: 14
 
 pipeline:
   - assertions:
@@ -65,21 +65,108 @@ subpackages:
         - nvidia-libnvptxcompiler-${{vars.cuda-version}}-dev
         - nvidia-libnvvm-${{vars.cuda-version}}-dev
 
-  - name: nvidia-cuda-nvcc-gcc-${{vars.cuda-version}}
-    description: ${{package.name}} configured to use compatible gcc
+  - name: nvcc-${{vars.cuda-version}}-gcc
+    description: metapackage for the latest gcc version supported by ${{package.name}}
+    dependencies:
+      runtime:
+        # When the ${{vars.gcc-latest-major-version}} is the latest gcc, then
+        # this dependency should be gcc=~${{vars.gcc-latest-major-version}}.
+        # Otherwise, it should be gcc-${{vars.gcc-latest-major-version}}.
+        # The gcc=~ constraint will cause build-deps to fail in the window
+        # between gcc getting bumped to a new upstream and this package
+        # getting updated to depend on a version-streamed gcc instead. Just
+        # depending on "gcc" would allow build-deps to resolve, resulting
+        # in an attempt to use an unsupported gcc.
+        - gcc=~${{vars.gcc-latest-major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-dev
+            - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+      pipeline:
+        - runs: |
+            nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+            tmpdir="$(mktemp -d)"
+            trap "rm -rf $tmpdir" EXIT
+            cat > "$tmpdir/gcc-version.cu" << EOF
+            #include <iostream>
+
+            int main() {
+              std::cout << __GNUC__ << "\n";
+            }
+            EOF
+            if [ "$(g++ -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+              gxx_bin="g++"
+            else
+              gxx_bin="g++-${{vars.gcc-latest-major-version}}"
+            fi
+            # Verify that the latest default gcc is available and works
+            "$nvcc" -ccbin "$gxx_bin" \
+              "$tmpdir/gcc-version.cu" -o "$tmpdir/gcc-version"
+            [ "$("$tmpdir/gcc-version")" = "${{vars.gcc-latest-major-version}}" ]
+            # Attempt to verify that we build w/ the system gcc by default
+            # (which may fail if unsupported, that's OK)
+            rm -rf "$tmpdir"
+            test -x $(command -v g++)
+            tmpdir="$(mktemp -d)"
+            trap "rm -rf $tmpdir" EXIT
+            "$nvcc" -allow-unsupported-compiler \
+              "$tmpdir/gcc-version.cu" -o "$tmpdir/gcc-version" || exit 0
+            [ "$("$tmpdir/gcc-version")" = "$(g++ -dumpversion)" ]
+
+  - name: nvcc-${{vars.cuda-version}}-gcc-default
+    description: metapackage for the latest gcc version supported by ${{package.name}} as the system default
+    dependencies:
+      runtime:
+        # See comment block in nvcc-${{vars.cuda-version}}-gcc
+        - gcc=~${{vars.gcc-latest-major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-dev
+            - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+      pipeline:
+        - runs: |
+            [ "$(gcc -dumpversion)" = "${{vars.gcc-latest-major-version}}" ] || \
+              { echo "ERROR: gcc ${{vars.gcc-latest-major-version}} appears to have been version streamed." 1>&2;
+                echo "ERROR: Please update dependency to point at gcc-${{vars.gcc-latest-major-version}}" 1>&2;
+                exit 1; }
+        - runs: |
+            nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+            tmpdir="$(mktemp -d)"
+            trap "rm -rf $tmpdir" EXIT
+            cat > "$tmpdir/gcc-version.cu" << EOF
+            #include <iostream>
+
+            int main() {
+              std::cout << __GNUC__ << "\n";
+            }
+            EOF
+            "$nvcc" "$tmpdir/gcc-version.cu" -o "$tmpdir/gcc-version"
+            [ "$("$tmpdir/gcc-version")" = "${{vars.gcc-latest-major-version}}" ]
+
+  - name: nvcc-${{vars.cuda-version}}-gcc-wrapper
+    description: ${{package.name}} configured to use latest compatible gcc
     dependencies:
       runtime:
         - ${{package.name}}
-        - gcc-${{vars.gcc-major-version}}
+        - nvcc-${{vars.cuda-version}}-gcc
     pipeline:
       - runs: |
           cuda_home="/usr/local/cuda-${{vars.cuda-version}}"
           mkdir -p "${{targets.contextdir}}$cuda_home/bin"
           for cmd in gcc g++; do
             wrapper="${{targets.contextdir}}$cuda_home/bin/$cmd"
-            cat > "$wrapper" << EOF
+            cat > "$wrapper" << 'EOF'
           #!/bin/sh
-          exec ${cmd}-${{vars.gcc-major-version}} "\$@"
+          if [ "$(/usr/local/bin/${0##*/} -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+            gcc_bin="/usr/local/bin/${0##*/}"
+          else
+            gcc_bin="/usr/local/bin/${0##*/}-${{vars.gcc-latest-major-version}}"
+          fi
+          exec ${gcc_bin} "$@"
           EOF
             chmod +x "$wrapper"
           done
@@ -91,16 +178,19 @@ subpackages:
             - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
       pipeline:
         - runs: |
-            cuda_home="/usr/local/cuda-${{vars.cuda-version}}"
-            cat > gcc-version.cu << EOF
+            nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+            tmpdir="$(mktemp -d)"
+            trap "rm -rf $tmpdir" EXIT
+            cd "$tmpdir"
+            cat > "$tmpdir/gcc-version.cu" << EOF
             #include <iostream>
 
             int main() {
               std::cout << __GNUC__ << "\n";
             }
             EOF
-            "$cuda_home/bin/nvcc" gcc-version.cu -o gcc-version
-            [ "$(./gcc-version)" = "${{vars.gcc-major-version}}" ]
+            "$nvcc" "$tmpdir/gcc-version.cu" -o "$tmpdir/gcc-version"
+            [ "$("$tmpdir/gcc-version")" = "${{vars.gcc-latest-major-version}}" ]
 
 update:
   # No release-monitoring support for the multi-arch "enterprise" driver, only
@@ -108,5 +198,83 @@ update:
   enabled: false
 
 test:
+  environment:
+    contents:
+      packages:
+        # Used to check compat with latest GCC version
+        - gcc
+        # See comment block in nvcc-${{vars.cuda-version}}-gcc
+        - gcc=~${{vars.gcc-latest-major-version}}
+        - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+        - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
   pipeline:
     - uses: test/tw/ldd-check
+    - name: Test .c files can be compiled
+      runs: |
+        if [ "$(gcc -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+          gcc_bin="gcc"
+        else
+          gcc_bin="gcc-${{vars.gcc-latest-major-version}}"
+        fi
+        nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+        nvcc_cmd="$nvcc -ccbin $gcc_bin"
+        tmpdir="$(mktemp -d)"
+        trap "rm -rf $tmpdir" EXIT
+        cat <<EOF > "$tmpdir/test-c.c"
+        #include <math.h>
+        int main() {
+          return 0;
+        }
+        EOF
+        $nvcc_cmd -o "$tmpdir/test-c" "$tmpdir/test-c.c"
+        "$tmpdir/test-c"
+    - name: Test .cu files can be compiled
+      runs: |
+        if [ "$(gcc -dumpversion)" = "${{vars.gcc-latest-major-version}}" ]; then
+          gcc_bin="gcc"
+        else
+          gcc_bin="gcc-${{vars.gcc-latest-major-version}}"
+        fi
+        nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+        nvcc_cmd="$nvcc -ccbin $gcc_bin"
+        tmpdir="$(mktemp -d)"
+        trap "rm -rf $tmpdir" EXIT
+        cat <<EOF > "$tmpdir/test-cu.cu"
+        #include <math.h>
+        int main() {
+          return 0;
+        }
+        EOF
+        $nvcc_cmd -o "$tmpdir/test-cu" "$tmpdir/test-cu.cu"
+        "$tmpdir/test-cu"
+    - name: Test our gcc latest version configuration
+      runs: |
+        next_gcc_ver="$((${{vars.gcc-latest-major-version}} + 1))"
+        # There's currently no gcc-$ver command for the latest gcc
+        if [ "$(gcc -dumpversion)" = "$next_gcc_ver" ]; then
+          next_gcc_bin="gcc"
+        elif apk add "gcc-${next_gcc_ver}"; then
+          next_gcc_bin="gcc-${next_gcc_ver}"
+        else
+          # looks like no newer gcc is available
+          exit 0
+        fi
+        tmpdir="$(mktemp -d)"
+        trap "rm -rf $tmpdir" EXIT
+        cat <<EOF > "$tmpdir/test-cu.cu"
+        #include <math.h>
+        int main() {
+          return 0;
+        }
+        EOF
+        nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+        nvcc_cmd="$nvcc -ccbin $next_gcc_bin -o /dev/null $tmpdir/test-cu.cu"
+        log_file="$tmpdir/log"
+        if ! $nvcc_cmd > "$log_file" 2>&1 && \
+          grep "unsupported GNU version!" "$log_file"; then
+          exit 0
+        fi
+        echo "ERROR: config says the latest supported gcc is ${{vars.gcc-latest-major-version}}" 1>&2
+        echo "ERROR: expected using gcc-${next_gcc_ver} to fail with an unsupported compiler error" 1>&2
+        cat "$log_file"
+        exit 1
