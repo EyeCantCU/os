@@ -1,12 +1,7 @@
-# Based on discussion with ecosystem team (Pris), we have
-# decided to create airflow-core package in enterprise as
-# it is installed with `--user` unlike system site packages.
-# This is done to match with upstream apache/airflow:slim-latest
-# and address customer needs.
 package:
   name: airflow-core-3
   version: "3.1.0"
-  epoch: 0
+  epoch: 1
   description: Minimal Airflow core - Platform to programmatically author, schedule, and monitor workflows
   dependencies:
     runtime:
@@ -22,27 +17,25 @@ package:
       - mariadb
       - openssl
       - postgresql-client
-      - py${{vars.python-version}}-packaging # Airflow uses this at runtime for config loading
       - python-${{vars.python-version}}
     provides:
       - airflow-core=${{package.full-version}}
   copyright:
     - license: Apache-2.0
 
-# As of now (2025/04/28), airflow is primarily available for python 3.12 and will break for python 3.13
-# For ref: https://airflow.apache.org/blog/airflow-2.9.0
 vars:
-  python-version: 3.12
+  venv-home: '/home/airflow/.local'
+  # Python support docs: https://airflow.apache.org/docs/apache-airflow/stable/installation/supported-versions.html
+  python-version: '3.12'
 
 environment:
   contents:
     packages:
       - busybox
+      - curl
       - patch
-      - py${{vars.python-version}}-build-bin
-      - py${{vars.python-version}}-pip
       - python-${{vars.python-version}}
-      - python-${{vars.python-version}}-dev
+      - uv
 
 pipeline:
   - uses: git-checkout
@@ -52,21 +45,46 @@ pipeline:
       expected-commit: 54bd5d8cd9f6f477cc83445737614dec81c4323c
 
   - runs: |
-      # Install airflow core, the upstream sets this as directory (and therefore differs from our main airflow package)
-      export PYTHONUSERBASE=${{targets.destdir}}/home/airflow/.local
-      pip install --no-cache-dir --user apache-airflow[core]==${{package.version}} --no-warn-script-location
+      curl -f https://raw.githubusercontent.com/apache/airflow/refs/tags/constraints-${{package.version}}/constraints-no-providers-${{vars.python-version}}.txt \
+           -o constraints-${{vars.python-version}}
 
-      # Patch to effectively handle instances of md5 used for non-security purposes in airflow
-      # by adding usedforsecurity=False in hashlib wrapper.
-      # We can't use patch pipeline as we use pip install method
-      # which makes us patch after installation in site-packages
-      patch -p1 -d "${{targets.destdir}}/home/airflow/.local/lib/python3.12/site-packages" < handle-md5.patch
+  #- uses: py/tw/bump-constraints
+  #  with:
+  #    constraints-file: constraints-${{vars.python-version}}
+  #    packages: |
+  #      constraints==go # here
+  - runs: |
+      # Create and source virtual environment
+      uv venv ${{vars.venv-home}} --system-site-packages
+      source ${{vars.venv-home}}/bin/activate
 
-      find . -name '__pycache__' -exec rm -rf {} +
+      # Install airflow core
+      uv pip install apache-airflow==${{package.version}} \
+        --constraint constraints-${{vars.python-version}}
+
+      # Uninstall pip and virtualenv from virtual environment
+      #
+      # pip doesn't need to be present in the virtual environment,
+      # the venv can be managed via a system installed package manager
+      #
+      # virtualenv vendors an outdated and unused pip wheel
+      uv pip uninstall pip virtualenv
+
+      # Mark md5 as not used for security
+      patch -p1 -d ${{vars.venv-home}}/lib/python${{vars.python-version}}/site-packages < md5-not-usedforsecurity.patch
+
+      # Install virtual environment
+      mkdir -p ${{targets.contextdir}}/home/airflow
+      cp -a ${{vars.venv-home}} ${{targets.contextdir}}/home/airflow
+
+      # Ensure lockfile isn't world-writeable
+      chmod 644 ${{targets.contextdir}}/${{vars.venv-home}}/.lock
 
 # We can't re-use airflow-compat subpackage from airflow package in wolfi/os because it invoke full airflow and hence bloats size
 subpackages:
   - name: ${{package.name}}-compat
+    options:
+      no-depends: true
     dependencies:
       runtime:
         - ${{package.name}}
@@ -98,9 +116,8 @@ subpackages:
           # The first time you run Airflow, it will create a file called `airflow.cfg` in
           # `$AIRFLOW_HOME` directory
           # However, for production case it is advised to generate the configuration
-          export PYTHONPATH=${{targets.destdir}}/home/airflow/.local/lib/python${{vars.python-version}}/site-packages
-
-          ${{targets.destdir}}/home/airflow/.local/bin/airflow config list --defaults > ${{targets.contextdir}}/opt/airflow/"airflow.cfg"
+          source ${{vars.venv-home}}/bin/activate
+          airflow config list --defaults > ${{targets.contextdir}}/opt/airflow/airflow.cfg
 
           cp airflow-core/src/airflow/config_templates/default_webserver_config.py ${{targets.contextdir}}/
 
@@ -127,14 +144,14 @@ test:
   environment:
     contents:
       packages:
-        - python-${{vars.python-version}}
-        - airflow-core-3-compat
+        - ${{package.name}}-compat
         - bash
   pipeline:
     - runs: |
-        # Set environment variables
-        export PATH=/home/airflow/.local/bin:$PATH
-        export PYTHONUSERBASE=/home/airflow/.local
+        # Source virtual environment
+        source ${{vars.venv-home}}/bin/activate
+
+        # Set airflow home
         export AIRFLOW_HOME=/opt/airflow
 
         # Prevents warnings about example dags not being in the right place under /opt/airflow
@@ -167,4 +184,7 @@ test:
 
         # Test Task Execution in DAG
         airflow tasks test test_dag test_task 2024-01-01 || (echo "Task execution failed!" && exit 1)
+    - uses: test/tw/pip-check
+      with:
+        python: ${{vars.venv-home}}/bin/python${{vars.python-version}}
     - uses: test/tw/ldd-check

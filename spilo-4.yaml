@@ -1,16 +1,18 @@
 package:
   name: spilo-4
   version: "4.0.3"
-  epoch: 0
+  epoch: 23
   description: "Spilo - a PostgreSQL container image with streaming replication and failover"
   copyright:
     - license: "Apache-2.0"
   dependencies:
     runtime:
-      - bash-binsh
+      - bash
+      - bg_mon-${{vars.pg-version}}
+      - ca-certificates-bundle
+      - coreutils
       - curl
       - dumb-init
-      - etcd~${{vars.etcd-version}}
       - glibc
       - glibc-locale-en
       - jq
@@ -22,11 +24,9 @@ package:
       - pg_cron-${{vars.pg-version}}
       - pg_stat_kcache-${{vars.pg-version}}
       - pgbouncer
+      - pgextwlist-${{vars.pg-version}}
       - pgqd
       - postgis-${{vars.pg-version}}
-      - postgresql-${{vars.pg-version}}-client
-      - postgresql-${{vars.pg-version}}-client-base
-      - postgresql-${{vars.pg-version}}-contrib
       - py${{vars.python-version}}-etcd
       - py${{vars.python-version}}-kubernetes
       - py${{vars.python-version}}-plpython
@@ -46,10 +46,14 @@ package:
 environment:
   contents:
     packages:
+      - bash
       - brotli-dev
       - build-base
       - busybox
       - c-ares-dev
+      - ca-certificates-bundle
+      - git
+      - go
       - libarchive-tools
       - libcap-utils
       - lzo-dev
@@ -74,19 +78,45 @@ vars:
   pg-version: 17
   # Upstream runs with an older version of etcd which supports V2 API
   # https://github.com/zalando/spilo/blob/e382c904916696de53cb4c66c717fc8e0c4dcc3b/postgres-appliance/build_scripts/prepare.sh#L25.
-  # etcd~3.5 is the last supported version that CG ships that still supports V2 API
-  etcd-version: "3.5"
+  # Build etcd 3.3.27 directly in this package
+  etcd-version: "3.3.27"
+  etcd-commit: "973882f697a8db3d59815bf132c6c506434334bd"
+  pg-compat-binaries: >-
+    clusterdb createdb createuser dropdb dropuser initdb oid2name pg_amcheck pg_archivecleanup pg_basebackup pg_checksums pg_combinebackup pg_config pg_controldata pg_createsubscriber pg_ctl pg_dump pg_dumpall pg_isready pg_receivewal pg_recvlogical pg_resetwal pg_restore pg_rewind pg_test_fsync pg_test_timing pg_upgrade pg_verifybackup pg_waldump pg_walsummary pgbench postgres psql reindexdb vacuumdb vacuumlo
 
 pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/etcd-io/etcd
+      tag: v${{vars.etcd-version}}
+      expected-commit: ${{vars.etcd-commit}}
+      destination: etcd-src
+
+  - working-directory: etcd-src
+    runs: |
+      # etcd 3.3 uses GOPATH-based build system (pre-Go modules)
+      # Disable Go modules and set up GOPATH environment
+      export GO111MODULE=off
+      export ETCD_SETUP_GOPATH=1
+      export GO_BUILD_FLAGS="$GO_BUILD_FLAGS -buildvcs=false"
+      export GO_LDFLAGS="$GO_LDFLAGS -X github.com/coreos/etcd/version.Version=${{vars.etcd-version}}"
+      bash -x ./build
+      install -Dm755 bin/etcd "${{targets.destdir}}"/usr/bin/etcd
+      install -Dm755 bin/etcdctl "${{targets.destdir}}"/usr/bin/etcdctl
+
+  # Now build spilo
   - uses: git-checkout
     with:
       repository: "https://github.com/zalando/spilo.git"
       expected-commit: "7cb50bd64bcb98b4399806fffa09f563523b4c9f"
       tag: "${{vars.mangled-version}}"
 
+  - uses: patch
+    with:
+      patches: launch-sh-fix.patch
+
   - runs: |
       mkdir -p ${{targets.destdir}}/usr/bin
-      mkdir -p ${{targets.destdir}}/etc/service
       mkdir -p ${{targets.destdir}}/etc/runit/runsvdir/default
       mkdir -p ${{targets.destdir}}/scripts
       mkdir -p ${{targets.destdir}}${RW_DIR}/supervise
@@ -99,13 +129,13 @@ pipeline:
       # The etcd run script contains "dpkg" which needs changing to run on wolfi
       # https://github.com/zalando/spilo/blob/master/postgres-appliance/runit/etcd/run
       sed -i -E \
-        's|\$\([^)]+\) /bin/etcd --data-dir /run/etcd\.data|$ETCD_ARCH /usr/bin/etcd --data-dir /run/etcd.data|' \
+        's|\$\([^)]+\) /bin/etcd --data-dir /run/etcd\.data|'"${ETCD_ARCH}"' /usr/bin/etcd --data-dir /run/etcd.data|' \
         postgres-appliance/runit/etcd/run
 
       cp -r postgres-appliance/scripts/* postgres-appliance/bootstrap/* postgres-appliance/major_upgrade/* ${{targets.destdir}}/scripts/
       cp postgres-appliance/motd ${{targets.destdir}}/etc/
-      cp -r postgres-appliance/runit/* ${{targets.destdir}}/etc/service/
-      for d in ${{targets.destdir}}/etc/service/*; do
+      cp -r postgres-appliance/runit/* ${{targets.destdir}}/etc/runit/runsvdir/default/
+      for d in ${{targets.destdir}}/etc/runit/runsvdir/default/*; do
         chmod 755 "$d"/*
         ln -s ${RW_DIR}/supervise/"$(basename "$d")" "$d/supervise"
       done
@@ -114,15 +144,6 @@ pipeline:
       done
       echo "source /etc/motd" >> ${{targets.contextdir}}/etc/bash.bashrc
 
-  - runs: |
-      # Upstream images sets this capability here
-      # https://github.com/zalando/spilo/blob/3817421e685395e8bedd0126220f738ee025728a/postgres-appliance/build_scripts/prepare.sh#L14
-      # Copy binaries from util-linux-misc that need capabilities
-      cp /usr/bin/chrt ${{targets.destdir}}/usr/bin/
-      cp /usr/bin/renice ${{targets.destdir}}/usr/bin/
-      setcap "cap_sys_nice=+ep" ${{targets.destdir}}/usr/bin/chrt
-      setcap "cap_sys_nice=+ep" ${{targets.destdir}}/usr/bin/renice
-
 subpackages:
   - name: ${{package.name}}-compat
     description: "${{package.name}} compat package"
@@ -130,6 +151,9 @@ subpackages:
       runtime:
         - cronie
         - postgresql-${{vars.pg-version}}
+        - postgresql-${{vars.pg-version}}-client
+        - postgresql-${{vars.pg-version}}-client-base
+        - postgresql-${{vars.pg-version}}-contrib
       provides:
         - spilo-compat=${{package.full-version}}
     pipeline:
@@ -139,6 +163,7 @@ subpackages:
           mkdir -p ${{targets.subpkgdir}}/usr/sbin
           mkdir -p ${{targets.subpkgdir}}/etc/pgq
           mkdir -p ${{targets.subpkgdir}}$PGHOME
+      - runs: |
           install -m755 postgres-appliance/launch.sh ${{targets.subpkgdir}}/
           gcc -s -shared -fPIC -o ${{targets.subpkgdir}}/usr/local/lib/cron_unprivileged.so postgres-appliance/cron_unprivileged.c
           ln -s crond ${{targets.subpkgdir}}/usr/sbin/cron
@@ -147,13 +172,25 @@ subpackages:
           ln -s /etc/pgq/pgq_ticker.ini ${{targets.subpkgdir}}$PGHOME/pgq_ticker.ini
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/usr/lib/postgresql/${{vars.pg-version}}/bin
-          ln -s /usr/libexec/postgresql${{vars.pg-version}}/postgres ${{targets.subpkgdir}}/usr/lib/postgresql/${{vars.pg-version}}/bin/postgres
+          for binary in ${{vars.pg-compat-binaries}}; do
+            ln -s /usr/libexec/postgresql${{vars.pg-version}}/$binary \
+              ${{targets.subpkgdir}}/usr/lib/postgresql/${{vars.pg-version}}/bin/$binary
+          done
     test:
       pipeline:
         - uses: test/tw/ldd-check
         - uses: test/tw/symlink-check
           with:
             allow-absolute: true
+        - runs: |
+            # Verify all symlinked PostgreSQL binaries are executable
+            for binary in /usr/lib/postgresql/${{vars.pg-version}}/bin/*; do
+              test -x $binary
+            done
+            # Test a few key binaries to ensure they actually run
+            /usr/lib/postgresql/${{vars.pg-version}}/bin/postgres --version
+            /usr/lib/postgresql/${{vars.pg-version}}/bin/initdb --version
+            /usr/lib/postgresql/${{vars.pg-version}}/bin/pg_isready --version
 
 test:
   environment:
@@ -165,71 +202,42 @@ test:
         - postgresql-${{vars.pg-version}}-contrib
     environment:
       SPILO_PROVIDER: "local"
-      DEMO: true
-      DEBUG: true
       RW_DIR: /run
       PGLOG: /home/postgres/pgdata/pgroot/pg_log
       PGDATA: /home/postgres/pgdata/pgroot/data
       PGHOME: /home/postgres
       PGROOT: /home/postgres/pgdata/pgroot
-      WAL_SWIFT_BUCKET: False
-      PATRONIVERSION: "4.0.5"
-      USE_WALG_BACKUP: true
-      ETCD_ENABLE_V2: true
-      PATRONI_CONFIGURATION: |
-        scope: patroni_cls
-        name: pg_node1
-        restapi:
-          listen: 0.0.0.0:8008
-          connect_address: "172.17.0.3:8008"  # REPLACE with actual IP/FQDN
-        etcd3:
-          hosts:
-            - 127.0.0.1:2379
-        bootstrap:
-          post_init: /scripts/post_init.sh zalandos
-          dcs:
-            postgresql:
-              parameters:
-                cron.database_name: postgres
-                shared_preload_libraries: pg_cron,pg_stat_kcache,set_user
-                pg_stat_statements.max: '10000'
-
-        postgresql:
-          listen: 0.0.0.0:5432
-          connect_address: "172.17.0.3:5432"  # REPLACE with actual IP/FQDN
-          data_dir: /home/postgres/pgdata/pgroot/data
-          authentication:
-            replication:
-              username: replicator
-              password: rp1234
   pipeline:
     - name: Run and test ${{package.name}}
       uses: test/daemon-check-output
       with:
         setup: |
-          id -u postgres >/dev/null 2>&1 || adduser -D -H -h "$PGHOME" -s /sbin/nologin postgres
-          addgroup postgres root
+          if [ "${{build.arch}}" == "aarch64" ]; then
+            export ETCD_UNSUPPORTED_ARCH="arm64"
+          fi
+          id -u postgres >/dev/null 2>&1 || adduser -D -H -h "$PGHOME" -s /bin/bash postgres
+          addgroup -S crontab 2>/dev/null
+          mkdir -p /var/run
           install -d -o postgres -g root -m 0774 "$PGHOME"
-          chown postgres:root /home/postgres/pgq_ticker.ini
+          chown -R postgres:root "$PGHOME" "$RW_DIR"
         start: |
           /launch.sh init
         timeout: 30
         expected_output: |
-          setting up initial cluster version using v2 API
+          setting up the initial cluster version
           Selected new etcd server
           Success. You can now start the database server using
-          database system is ready to accept connections
+          /tmp:5432 - accepting connections
           GRANT ROLE
           You are now connected to database
         post: |
           pg_isready -h localhost -p 5432 -U postgres
-          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h localhost -p 5432 -U postgres -d postgres <<'SQL'
+          PGPASSWORD=postgres psql -v ON_ERROR_STOP=1 -h /tmp -p 5432 -U postgres -d postgres <<'SQL'
           CREATE TABLE IF NOT EXISTS test_table (id SERIAL PRIMARY KEY, data TEXT);
           INSERT INTO test_table (data) VALUES (\$\$test_data_\$\$ || now()::text);
           SELECT COUNT(*) FROM test_table;
           SQL
-        error_strings: |
-          Failed
+        error_strings: FATAL
 
 update:
   ignore-regex-patterns:
