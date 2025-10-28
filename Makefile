@@ -6,9 +6,14 @@ HASH := \#
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
 
+# Space-separated list of image names to exclude from all groups
+# Example: SKIP_IMAGES="aws-ecs-foo generic-base" make disks-aws-ecs
+SKIP_IMAGES = aws-ecs-fips-full-immutable aws-eks-1.31-fips-dev
+
 # list_cloud_images(cloud)
+# Returns list of images for the given cloud prefix, excluding any in SKIP_IMAGES
 define list_cloud_images
-	$(notdir $(wildcard configs/$1-*))
+	$(filter-out $(SKIP_IMAGES),$(notdir $(wildcard configs/$1-*)))
 endef
 
 shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
@@ -21,10 +26,10 @@ disks_vmware := $(call list_cloud_images,vmware)
 disks_rpi := $(call list_cloud_images,rpi)
 
 # Exclude images with release candidate kernel
-group_qemu_nonrc := $(filter-out %-rc,$(call list_cloud_images,generic))
-group_aws_ecs := $(filter aws-ecs-%,$(call list_cloud_images,aws))
-group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
-group_aws_main := $(filter-out aws-ecs-%,$(filter-out aws-eks-%,$(call list_cloud_images,aws)))
+group_qemu_nonrc := $(filter-out %-rc,$(disks_qemu))
+group_aws_ecs := $(filter aws-ecs-%,$(disks_aws))
+group_aws_eks := $(filter aws-eks-%,$(disks_aws))
+group_aws_main := $(filter-out aws-ecs-%,$(filter-out aws-eks-%,$(disks_aws)))
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
