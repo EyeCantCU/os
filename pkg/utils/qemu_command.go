@@ -56,12 +56,76 @@ func getHostFwd() string {
 	return "hostfwd=tcp:127.0.0.1:" + port + "-:22"
 }
 
+// ensureTPMRunning checks if swtpm is already running for the socket path,
+// and launches it with --daemon if not.
+func ensureTPMRunning(tpmSocketPath string) error {
+	stateDir := filepath.Join(filepath.Dir(tpmSocketPath), "swtpm-state")
+	// Check if swtpm is already running by checking for the socket
+	if _, err := os.Stat(tpmSocketPath); err == nil {
+		// Socket exists, assume swtpm is running
+		return nil
+	}
+
+	// Create TPM state directory
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return fmt.Errorf("failed to create TPM directory: %w", err)
+	}
+
+	// Launch swtpm with --daemon
+	cmd := exec.Command("swtpm", "socket",
+		"--tpmstate", "dir="+stateDir,
+		"--ctrl", "type=unixio,path="+tpmSocketPath,
+		"--tpm2",
+		"--log", "level=20",
+		"--daemon")
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start swtpm daemon: %w", err)
+	}
+
+	// Wait a bit for the socket to be created
+	for range 50 {
+		if _, err := os.Stat(tpmSocketPath); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("swtpm daemon started but socket not created after 5 seconds")
+}
+
+func getTPMArgs(socketPath string) []string {
+	tpmSocketPath := filepath.Join(
+		filepath.Dir(socketPath),
+		"swtpm-sock")
+	tpm := os.Getenv("WVM_TPM")
+	if tpm == "" || tpm == "0" || tpm == "false" {
+		return []string{}
+	}
+
+	// Ensure swtpm is running before returning args
+	if err := ensureTPMRunning(tpmSocketPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to start swtpm: %v\n", err)
+		return []string{}
+	}
+
+	// Use emulator mode (requires swtpm running on socket)
+	args := []string{
+		"-chardev", "socket,id=chrtpm,path=" + tpmSocketPath,
+		"-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+		"-device", "tpm-tis,tpmdev=tpm0",
+	}
+
+	return args
+}
+
 func generateArmCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []string {
 	cmd := []string{
 		"qemu-system-aarch64",
 		"-machine", "virt",
 		"-m", "4G"}
 	cmd = append(cmd, getDisplayArgs()...)
+	cmd = append(cmd, getTPMArgs(socketPath)...)
 	cmd = append(cmd, []string{
 		"-serial", "mon:stdio",
 		"-echr", "0x05",
@@ -115,6 +179,7 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 		"-m", "4G",
 	}
 	cmd = append(cmd, getDisplayArgs()...)
+	cmd = append(cmd, getTPMArgs(socketPath)...)
 	cmd = append(cmd, []string{
 		"-serial", "mon:stdio",
 		"-echr", "0x05",

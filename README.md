@@ -89,6 +89,8 @@ You can influence the qemu invocation created by `make run-<vmname>` with the fo
 
  * `WVM_VNC`: Start qemu with `-vnc` value other than the default `none`.  For example to listen on localhost port 5900 (vnc `:0`) you can set `WVM_VNC=localhost:0` and then connect to that with your vnc client.
 
+ * `WVM_TPM`: Start qemu with tpm emulation, using swtpm. Value of 1 will enable it, not specifying or value 0 will not enable it.for example `WVM_TPM=1`
+
 ## Adding a "backdoor" to an image.
 It can be tricky to figure out what is going wrong in a VM if you can't get log into it.
 
