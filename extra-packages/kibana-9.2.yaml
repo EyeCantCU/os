@@ -1,0 +1,200 @@
+package:
+  name: kibana-9.2
+  version: "9.2.0"
+  epoch: 0
+  description: Your window into the Elastic Stack
+  copyright:
+    - license: Apache-2.0
+    - license: BSD-3-Clause
+    - license: Elastic-2.0
+    - license: ISC
+    - license: MIT
+  resources:
+    cpu: 30 # max is 48 for arm64
+    memory: 48Gi
+  dependencies:
+    provides:
+      - kibana=${{package.full-version}}
+    runtime:
+      - libnspr # needed for the @kbn/screenshotting-plugin/chromium package
+      - libnss # needed for the @kbn/screenshotting-plugin/chromium package
+      - merged-usrsbin
+      - nodejs-22
+      - wolfi-baselayout
+
+# this will be resolved to 9 only
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - jq
+      - node-gyp
+      - nodejs~22.17.1
+      - python3
+      - wget
+      - yarn
+      - yq
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/kibana
+      tag: v${{package.version}}
+      expected-commit: 68626ce831ffb8e4138bb24ba8762a15a569a41c
+
+  - uses: patch
+    with:
+      patches: |
+        node-version-bypass.patch
+        enable-build-as-root.patch
+
+  - name: Mitigate CVEs
+    runs: |
+      resolutions='{"prismjs": "^1.30.0", "tar-fs": "^3.1.1"}'
+      jq --argjson resolutions "$resolutions" '.resolutions += $resolutions' package.json > temp.json && mv temp.json package.json
+
+      # Bump nodemailer to remediate GHSA-mm7p-fcc7-pg87
+      jq '.dependencies.nodemailer = "^7.0.7"' package.json > temp.json && mv temp.json package.json
+
+  - runs: |
+      export NODE_OPTIONS="--max-old-space-size=32768 --max-semi-space-size=8192"
+      yarn install --force-install
+
+      # moon explicitly excludes $HOME from being the workspace root
+      # (https://github.com/moonrepo/moon/blob/master/crates/app/src/systems/startup.rs#L58-L59),
+      # so we unset HOME for the build (and so have to explicitly mark it as
+      # safe for `git` which is used within the build)
+      HOME= git config --global --add safe.directory /home/build
+      HOME= yarn kbn bootstrap --allow-root
+
+      # builds fail in x86_64 CI without upping bazels available memory
+      echo "startup --host_jvm_args=-Xmx48g" >> ~/.bazelrc
+      HOME= node --optimize_for_size --gc-interval=100 scripts/build --release --skip-os-packages --skip-docker-ubi --skip-docker-fips
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/usr/share/kibana
+      tar xf target/kibana-${{package.version}}-linux-*.tar.gz -C ${{targets.destdir}}/usr/share/kibana --strip-components=1
+
+  - runs: |
+      rm -rf "${{targets.destdir}}"/usr/share/kibana/node_modules/puppeteer/.cache
+      rm -rf "${{targets.destdir}}"/usr/share/kibana/node/glibc-217/bin/node
+      ln -sf /usr/bin/node "${{targets.destdir}}"/usr/share/kibana/node/glibc-217/bin/node
+
+# kibana should not be using the "strip" pipeline as the only binaries being stripped are
+# ones provided by upstream - node and headless_shell browser ; it's better that our binaries
+# match upstream content ; also, for headless_shell, modifying it causes kibana to report an
+# error about SHA256 mismatch
+subpackages:
+  - name: ${{package.name}}-iamguarded
+    description: Your window into the Elastic Stack
+    dependencies:
+      provides:
+        - kibana-iamguarded=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox
+        - coreutils
+        - curl
+        - libnss # needed for the @kbn/screenshotting-plugin/chromium package
+        - libnspr # needed for the @kbn/screenshotting-plugin/chromium package
+        - merged-usrsbin
+        - nodejs-22
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: kibana
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/kibana
+          mkdir -p /opt/iamguarded/kibana/config.default
+          mkdir -p /opt/iamguarded/kibana/tmp
+          mkdir -p /opt/iamguarded/kibana/plugins.default
+          mkdir -p /iamguarded/kibana/data
+          mkdir -p /iamguarded/kibana/conf
+
+          cp -r ${{targets.destdir}}/usr/share/kibana/* /opt/iamguarded/kibana
+
+          # install necessary config
+          install -m644 config/kibana.yml /opt/iamguarded/kibana/config/kibana.yml
+          cp -r config/* /opt/iamguarded/kibana/config.default
+
+          /opt/iamguarded/scripts/kibana/postunpack.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for i in /opt/iamguarded/kibana/bin/*; do
+            name=$(basename "$i")
+            ln -sf /opt/iamguarded/kibana/bin/"$name" ${{targets.contextdir}}/usr/bin/"$name"
+          done
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+      - uses: iamguarded/finalize-compat
+        with:
+          package: kibana
+          version: ${{vars.major-minor-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: elasticsearch
+              gid: 1000
+          users:
+            - username: elasticsearch
+              uid: 1000
+              gid: 1000
+          run-as: 0
+        contents:
+          packages:
+            - yq
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: kibana
+            version: ${{vars.major-minor-version}}
+        - name: run kibana entrypoint script
+          uses: test/daemon-check-output
+          with:
+            start: /opt/iamguarded/scripts/kibana/entrypoint.sh /opt/iamguarded/scripts/kibana/run.sh
+            timeout: 30
+            expected_output: |
+              Starting Kibana setup
+        - uses: test/tw/ldd-check
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: kibana-iamguarded
+            real-pkg-name: ${{subpkg.name}}
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/kibana
+    strip-prefix: v
+    tag-filter-prefix: v9.2.
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+  pipeline:
+    - runs: |
+        export HOME=/usr/share/kibana
+        cd $HOME || exit
+        ./node/glibc-217/bin/node src/cli/dist.js | head -n 1 | jq -r .config.serviceVersion.value | grep ${{package.version}}
+    - uses: test/tw/ldd-check
+    - uses: test/virtualpackage
+      with:
+        virtual-pkg-name: kibana
+        real-pkg-name: ${{package.name}}
