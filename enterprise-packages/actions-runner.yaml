@@ -1,22 +1,29 @@
 package:
   name: actions-runner
   version: "2.329.0"
-  epoch: 1
+  epoch: 2
   description: The Runner for GitHub Actions
   copyright:
     - license: MIT
   dependencies:
     runtime:
+      # Exclude nodejs-25 since corepack depends on nodejs (resolves to nodejs-25)
+      # and both provide cmd:node, causing resolution conflicts
+      - "!nodejs-25"
       - bash
       - ca-certificates-bundle
+      - corepack
       - curl
       - docker
       - docker-cli-buildx
       - icu-libs
       - krb5-libs
       - lttng-ust
+      - nodejs-24
+      - npm
       - openssl
       - posix-libc-utils
+      - runner-container-hooks-k8s
       - zlib
   options:
     # Bypass APK dependency resolution to avoid musl conflicts
@@ -36,7 +43,11 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
+      - corepack
       - dotnet-${{vars.dotnet-sdk-version}}-sdk
+      - nodejs-24
+      - npm
+      - runner-container-hooks-k8s
 
 pipeline:
   - uses: git-checkout
@@ -81,6 +92,42 @@ pipeline:
       # Create layout using dotnet msbuild
       dotnet msbuild -t:layout -p:PackageRuntime="${RUNTIME_ID}" -p:BUILDCONFIG="Release" -p:RunnerVersion="${{package.version}}" src/dir.proj
 
+  - name: Copy k8s container hooks
+    runs: |
+      mkdir -p _layout/k8s _layout/k8s-novolume
+      cp /usr/share/actions-runner-container-hooks/k8s/index.js _layout/k8s/index.js
+      cp /usr/share/actions-runner-container-hooks/k8s/index.js _layout/k8s-novolume/index.js
+
+  - name: Setup externals/node24
+    runs: |
+      # the upstream has /externals directory, which has node binary, instead of running the upstream
+      # script which downloads pre-built release, we are using our own nodejs-24
+      # and creating the directory structure
+      mkdir -p _layout/externals/node24/bin
+      mkdir -p _layout/externals/node24/include
+      mkdir -p _layout/externals/node24/lib/node_modules
+      mkdir -p _layout/externals/node24/share
+
+      # Copy node binary
+      cp /usr/bin/node _layout/externals/node24/bin/node
+      chmod +x _layout/externals/node24/bin/node
+
+      # Copy node /includes and /share files
+      cp -r /usr/include/node _layout/externals/node24/include/
+      cp -r /usr/share/man _layout/externals/node24/share/
+      cp -r /usr/share/doc/node _layout/externals/node24/share/
+
+      # Copy npm and corepack modules
+      cp -r /usr/lib/node_modules/npm _layout/externals/node24/lib/node_modules/
+      cp -r /usr/share/node_modules/corepack _layout/externals/node24/lib/node_modules/
+
+      ln -sf ../lib/node_modules/npm/bin/npm-cli.js _layout/externals/node24/bin/npm
+      ln -sf ../lib/node_modules/npm/bin/npx-cli.js _layout/externals/node24/bin/npx
+
+      ln -sf ../lib/node_modules/corepack/dist/corepack.js _layout/externals/node24/bin/corepack
+
+  - name: Install files and fix lib
+    runs: |
       mkdir -p "${{targets.destdir}}/usr/share/actions-runner"
       cp -r _layout/* "${{targets.destdir}}/usr/share/actions-runner/"
 
@@ -98,10 +145,20 @@ subpackages:
           mkdir -p "${{targets.contextdir}}/home"
           ln -sf /usr/share/actions-runner "${{targets.contextdir}}/home/runner"
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - nodejs-24
+            - runner-container-hooks-k8s
       pipeline:
         - runs: |
             test -L /home/runner
             test "$(readlink /home/runner)" = "/usr/share/actions-runner"
+            test -d /home/runner/externals/node24
+            test -f /home/runner/externals/node24/bin/node
+            test -d /home/runner/k8s
+            test -d /home/runner/k8s-novolume
 
 update:
   enabled: true
