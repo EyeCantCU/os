@@ -1,0 +1,104 @@
+package:
+  name: ceph-csi-operator
+  version: "0.4.1"
+  epoch: 0
+  description: Kubernetes Operator which deploys Ceph CSI into Kubernetes clusters
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash-binsh
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ceph/ceph-csi-operator
+      tag: v${{package.version}}
+      expected-commit: d2d863bcaeec33cc96357456aafc026275ea3735
+
+  - uses: go/build
+    with:
+      output: manager
+      packages: ./cmd/main.go
+
+vars:
+  bin-name: manager
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          # Create relative symlink from /manager to /usr/bin/manager
+          ln -sf ./usr/bin/manager ${{targets.contextdir}}/manager
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+test:
+  environment:
+    contents:
+      packages:
+        - git
+        - curl
+        - kustomize
+        - kubectl
+        - wait-for-it
+    environment:
+      WATCH_NAMESPACE: "default"
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "8080"
+      OPERATOR_NAMESPACE: "default"
+      METRICS_PORT: "8081"
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: manager
+    - name: "Setup KWOK cluster"
+      uses: test/kwok/cluster
+    - name: "Install Ceph CSI Operator CRDs and test operator"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          set -o pipefail
+          WORK_DIR=$(mktemp -d)
+          cd "${WORK_DIR}"
+
+          # Clone the repository to get CRDs and sample configurations
+          git clone --depth=1 --branch v${{package.version}} https://github.com/ceph/ceph-csi-operator /tmp/ceph-csi-operator
+
+          # Install CRDs using kustomize
+          cd /tmp/ceph-csi-operator/config
+          kustomize build crd | kubectl apply --server-side=true -f -
+
+          # Wait for CRDs to be established
+          kubectl wait --for=condition=Established crd --all --timeout=60s
+
+          # Verify CRDs are installed
+          kubectl get crd | grep csi.ceph.io
+
+          # Create kubeconfig for operator
+          kubectl config view --minify --raw > /tmp/kubeconfig.yaml
+        start: env KUBECONFIG=/tmp/kubeconfig.yaml ${{vars.bin-name}} --leader-elect=false
+        timeout: 60
+        expected_output: |
+          Starting Controller
+          Starting workers
+        post: |
+          set -o pipefail
+          # Wait for metrics endpoint to be ready
+          wait-for-it "localhost:${METRICS_PORT}" -t 30
+
+          # Check metrics endpoint
+          curl -sf "http://127.0.0.1:${METRICS_PORT}/healthz" | grep -F "ok"
+
+update:
+  enabled: true
+  github:
+    identifier: ceph/ceph-csi-operator
+    strip-prefix: v
