@@ -156,7 +156,7 @@ jobs:
         run: |
           df -h || true
           echo "Building disk image: ${{ env.VM_IMAGE }}"
-          make ARCH="${VM_ARCH}" "disk-${VM_IMAGE}"
+          make SKIP_IMAGES="" ARCH="${VM_ARCH}" "disk-${VM_IMAGE}"
         env:
           TMPDIR: ${{ runner.temp }}
       - name: Scan disk
@@ -227,7 +227,7 @@ jobs:
         run: |
           arch="${{ env.VM_ARCH }}"
           echo "Creating AMI for ${{ env.VM_IMAGE }}"
-          make "aws-image-create-${{ env.VM_IMAGE }}" ARCH=$arch BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }} PREFIX=chainguard
+          make SKIP_IMAGES="" "aws-image-create-${{ env.VM_IMAGE }}" ARCH=$arch BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }} PREFIX=chainguard
 
       # AWS Testing
       - name: Configure AWS credentials for testing
@@ -293,7 +293,27 @@ jobs:
         run: |
           arch="${{ env.VM_ARCH }}"
           echo "Publishing ${{ env.VM_IMAGE }} to AWS Marketplace"
-          make "aws-image-publish-${{ env.VM_IMAGE }}" ARCH=$arch BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }} PREFIX=chainguard
+          make SKIP_IMAGES="" "aws-image-publish-${{ env.VM_IMAGE }}" ARCH=$arch BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }} PREFIX=chainguard
+
+      # AWS ECS: ONA S3 Publishing
+      - name: Configure AWS credentials for ONA S3
+        if: inputs.publish_to_production && inputs.cloud_platform == 'aws' && contains(inputs.image_name, 'ecs-full-request-6943')
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: "arn:aws:iam::607334848609:role/chainguard-ona-publication"
+          role-session-name: "wolfi-vm-one-time-ona-${{ github.run_id }}"
+          aws-region: "us-east-1"
+
+      - name: Publish ONA image to S3
+        if: inputs.publish_to_production && inputs.cloud_platform == 'aws' && contains(inputs.image_name, 'ecs-full-request-6943')
+        run: |
+          arch="${{ env.VM_ARCH }}"
+          echo "Publishing ${{ env.VM_IMAGE }} to ONA S3"
+          make SKIP_IMAGES="" bespoke-publish-s3-aws-ecs-full-request-6943 \
+            PREFIX=chainguard \
+            BUILD_TIMESTAMP=${{ env.BUILD_TIMESTAMP }} \
+            ARCH=$arch \
+            PUBLISH_TARGET=ona
 
       # GCP, QEMU & VMware: Publish to staging
       - name: Setup GCP for staging
@@ -316,13 +336,13 @@ jobs:
         if: inputs.cloud_platform == 'gcp'
         run: |
           arch="${{ env.VM_ARCH }}"
-          make "publish-gcp-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
+          make SKIP_IMAGES="" "publish-gcp-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
 
       - name: Publish QEMU image to staging
         if: inputs.cloud_platform == 'qemu'
         run: |
           arch="${{ env.VM_ARCH }}"
-          make "publish-qemu-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
+          make SKIP_IMAGES="" "publish-qemu-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
 
       # QEMU: Test in staging
       - name: Test QEMU image
@@ -368,14 +388,14 @@ jobs:
         if: inputs.publish_to_production && inputs.cloud_platform == 'gcp'
         run: |
           arch="${{ env.VM_ARCH }}"
-          make "publish-gcp-${{ env.VM_IMAGE }}" PRFEIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
+          make SKIP_IMAGES="" "publish-gcp-${{ env.VM_IMAGE }}" PRFEIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
 
       # QEMU: Publish to EAP
       - name: Publish QEMU image to EAP
         if: inputs.publish_to_production && inputs.cloud_platform == 'qemu' && (contains(inputs.image_name, 'agents-docker-dev') || contains(inputs.image_name, 'docker-dev'))
         run: |
           arch="${{ env.VM_ARCH }}"
-          make "publish-qemu-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
+          make SKIP_IMAGES="" "publish-qemu-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
 
       # Azure & VMware: Publish to staging
       - name: Setup Azure credentials for staging
@@ -390,7 +410,7 @@ jobs:
         if: inputs.cloud_platform == 'azure'
         run: |
           arch="${{ env.VM_ARCH }}"
-          make "publish-azure-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
+          make SKIP_IMAGES="" "publish-azure-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
 
       # Azure: Test in staging
       - name: Test Azure image in staging
@@ -419,7 +439,32 @@ jobs:
         if: inputs.publish_to_production && inputs.cloud_platform == 'azure'
         run: |
           arch="${{ env.VM_ARCH }}"
-          make "publish-azure-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
+          make SKIP_IMAGES="" "publish-azure-${{ env.VM_IMAGE }}" PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
+
+      # Azure: Marketplace publishing
+      - name: Setup Azure credentials for marketplace
+        if: inputs.publish_to_production && inputs.cloud_platform == 'azure' && inputs.image_name == 'azure-eap-dev'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: 'aac166ff-e6b3-4963-a22e-713d12d1c0f9'
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: 'ad60e736-b0ce-432e-b77c-4b8218f452ae'
+
+      - name: Update Azure Marketplace technical configuration
+        if: inputs.publish_to_production && inputs.cloud_platform == 'azure' && inputs.image_name == 'azure-eap-dev'
+        run: |
+          # Extract the image suffix to determine the correct marketplace configuration
+          # For example: azure-eap-dev -> eap-dev
+          image_suffix="${{ env.VM_IMAGE }}"
+          image_suffix="${image_suffix#azure-}"
+
+          echo "Updating Azure Marketplace for image: ${{ env.VM_IMAGE }} (suffix: ${image_suffix})"
+          make SKIP_IMAGES="" "azure-marketplace-update-technical-plan-${image_suffix}" \
+            AZRESOURCEGROUP="chainguard-vms-prod" \
+            AZGALLERY="eap_chainguard_vms" \
+            AZMARKETPLACE_PLAN=eap \
+            AZMARKETPLACE_OFFER=chainguard_vm_eap_standardboot \
+            AZNAME="chainguard-${image_suffix}"
 
       # VMware: Publish to staging (nothing useful to do except to download for local testing right now)
       - name: Publish VMware image to staging
@@ -430,7 +475,7 @@ jobs:
           image_suffix="${{ env.VM_IMAGE }}"
           image_suffix="${image_suffix#vmware-}"
           echo "Publishing VMware image to staging: ${{ env.VM_IMAGE }} (suffix: ${image_suffix})"
-          make "publish-vmware-${image_suffix}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
+          make SKIP_IMAGES="" "publish-vmware-${image_suffix}" PREFIX=chainguard PUBLISH_TARGET=staging ARCH=$arch
 
       # VMware: Publish to EAP
       - name: Publish VMware image to EAP
@@ -440,7 +485,7 @@ jobs:
           image_suffix="${{ env.VM_IMAGE }}"
           image_suffix="${image_suffix#vmware-}"
           echo "Publishing VMware image to EAP: ${{ env.VM_IMAGE }} (suffix: ${image_suffix})"
-          make "publish-vmware-${image_suffix}" PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
+          make SKIP_IMAGES="" "publish-vmware-${image_suffix}" PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
 
       - uses: './.github/actions/notify-slack'
         if: ${{ (inputs.notify_slack_success || !success()) && inputs.notify_slack }}
