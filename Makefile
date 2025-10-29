@@ -292,6 +292,7 @@ output/awspub.mapping:
 	mkdir -p output
 	echo "---" > $@
 	echo "BUILD_TIMESTAMP: $(BUILD_TIMESTAMP)" >> $@
+	echo "WOLFI_VM: $(TOP_D)" >> $@
 
 # The SECONDEXPANSION and wildcard make the -share.yaml prerequisite optional.
 # In which case, we end up with just a copy of the regular yaml.
