@@ -1,0 +1,127 @@
+package:
+  name: spamcheck
+  version: "3.5.3"
+  epoch: 0
+  description: Spamcheck is a gRPC-based spam classification service for GitLab
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - py${{vars.python-version}}-cloudevents
+      - py${{vars.python-version}}-distconfig3
+      - py${{vars.python-version}}-google-cloud-pubsub
+      - py${{vars.python-version}}-google-cloud-storage
+      - py${{vars.python-version}}-grpcio-1.76
+      - py${{vars.python-version}}-grpcio-reflection
+      - py${{vars.python-version}}-numpy
+      - py${{vars.python-version}}-protobuf
+      - py${{vars.python-version}}-python-json-logger
+      - py${{vars.python-version}}-pyyaml
+      - py${{vars.python-version}}-tflite-runtime
+      - py${{vars.python-version}}-ulid-py
+      - py${{vars.python-version}}-vyper-config
+      - python-${{vars.python-version}}-base
+
+vars:
+  import: spamcheck
+  # Python 3.10 is hardcoded to match upstream's as most of the package and its ML dependencies are specifically built and tested with Python 3.10
+  python-version: 3.10
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - py${{vars.python-version}}-grpcio-tools
+      - py${{vars.python-version}}-protobuf
+      - python-${{vars.python-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://gitlab.com/gitlab-org/gl-security/security-engineering/security-automation/spam/spamcheck.git
+      tag: v${{package.version}}
+      expected-commit: 1fcd02900134ad4e70df212c6157787d9cacc5d8
+
+  - runs: |
+      # Generate gRPC proto files
+      python${{vars.python-version}} -m grpc_tools.protoc --proto_path=${PWD} --python_out=${PWD} --grpc_python_out=${PWD} api/v1/*.proto
+
+      mkdir -p ${{targets.destdir}}/spamcheck
+      cp -r api app server *.py ${{targets.destdir}}/spamcheck/
+
+      chmod +x ${{targets.destdir}}/spamcheck/main.py
+      chmod +x ${{targets.destdir}}/spamcheck/health_check.py
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binaries in the location expected by upstream"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -sf /spamcheck/main.py ${{targets.subpkgdir}}/usr/local/bin/spamcheck
+          ln -sf /spamcheck/health_check.py ${{targets.subpkgdir}}/usr/local/bin/health-check
+    test:
+      pipeline:
+        - runs: |
+            test "$(readlink /usr/local/bin/spamcheck)" = "/spamcheck/main.py"
+            test "$(readlink /usr/local/bin/health-check)" = "/spamcheck/health_check.py"
+
+test:
+  environment:
+    environment:
+      PYTHONPATH: /spamcheck
+  pipeline:
+    - name: Verify all runtime dependencies are importable
+      runs: |
+        python${{vars.python-version}} <<'EOF'
+        import sys
+
+        # List of expected runtime dependencies based on upstream Pipfile
+        required_imports = [
+            ('cloudevents', 'cloudevents'),
+            ('distconfig', 'distconfig3'),
+            ('google.cloud.pubsub', 'google-cloud-pubsub'),
+            ('google.cloud.storage', 'google-cloud-storage'),
+            ('grpc', 'grpcio'),
+            ('grpc_reflection', 'grpcio-reflection'),
+            ('numpy', 'numpy'),
+            ('google.protobuf', 'protobuf'),
+            ('pythonjsonlogger', 'python-json-logger'),
+            ('yaml', 'pyyaml'),
+            ('tflite_runtime', 'tflite-runtime'),
+            ('ulid', 'ulid-py'),
+            ('vyper', 'vyper-config'),
+        ]
+
+        failed_imports = []
+        for module_name, package_name in required_imports:
+            try:
+                __import__(module_name)
+                print(f"✓ {package_name}: OK")
+            except ImportError as e:
+                print(f"✗ {package_name}: FAILED - {e}")
+                failed_imports.append(package_name)
+
+        if failed_imports:
+            print(f"\nMissing runtime dependencies: {', '.join(failed_imports)}")
+            sys.exit(1)
+        else:
+            print("\nAll runtime dependencies verified: PASS")
+        EOF
+    - name: Test core application imports (without spam_classifiers)
+      runs: |
+        python${{vars.python-version}} <<'EOF'
+        # Test imports that don't require spam_classifiers
+        from app import config, logger, gcs, queue, event
+        from app.deny_list import DenyList
+        import api.v1.spamcheck_pb2 as spam
+        import api.v1.health_pb2 as health
+        print("Core application imports: PASS")
+        EOF
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -ruby
+  git:
+    strip-prefix: v
