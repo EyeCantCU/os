@@ -1,0 +1,318 @@
+package:
+  name: foundationdb-7.3
+  version: "7.3.71"
+  epoch: 0
+  description: A Distributed database designed to handle large volumes of structured data across clusters of commodity servers
+  resources:
+    cpu: 32
+    memory: 128Gi
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - foundationdb=${{package.full-version}}
+    runtime:
+      - aws-sdk-cpp
+
+environment:
+  contents:
+    packages:
+      - aws-sdk-cpp-dev
+      - boost
+      - boost-dev
+      - build-base
+      - busybox
+      - ccache
+      - cmake-3
+      - coreutils
+      - curl
+      - curl-dev
+      - gcc-14-default
+      - glibc
+      - glibc-dev
+      - go
+      - libedit-dev
+      - lz4
+      - lz4-dev
+      - lz4-static
+      - mono
+      - msgpack-cxx-dev
+      - ninja
+      - openjdk-17-default-jdk
+      - openssl-dev
+      - procps
+      - procps-dev
+      - protobuf-dev
+      - python3
+      - python3-dev
+      - sqlite-libs
+      - toml11
+      - util-linux-dev
+      - valgrind
+      - wolfi-base
+      - zlib-dev
+      - zstd-dev
+      - zstd-static
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apple/foundationdb
+      tag: ${{package.version}}
+      expected-commit: 341404ebaa376c5247929cc8543dfd4bc3cf9e1a
+
+  - uses: patch
+    with:
+      patches: |
+        fix-open-mode.patch
+        fix-go-test.patch
+        fix-usrmerge-paths.patch
+        toml11-upgrade.patch
+        use-system-aws-sdk.patch
+
+  - uses: cmake/configure
+    with:
+      output-dir: fdb-build
+      opts: |
+        -Wno-dev \
+        -DFDB_RELEASE=ON \
+        -DUSE_CCACHE=ON \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_BINDIR=bin \
+        -DCMAKE_INSTALL_SBINDIR=bin \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_INSTALL_INCLUDEDIR=include \
+        -DCMAKE_INSTALL_SYSCONFDIR=etc \
+        -DCMAKE_INSTALL_LOCALSTATEDIR=var \
+        -DFORCE_BOOST_BUILD=OFF \
+        -DBOOST_ROOT=/usr \
+        -DUSE_JEMALLOC=OFF \
+        -DWITH_ROCKSDB=OFF \
+        -DBUILD_AWS_BACKUP=ON \
+        -DBUILD_AZURE_BACKUP=OFF \
+        -DWITH_DOCUMENTATION=OFF \
+        -DNO_MULTIREGION_TEST=ON \
+        -DNO_RESTART_TEST=ON \
+        -DBUILD_JAVA_BINDING=ON \
+        -DBUILD_GO_BINDING=ON \
+        -DBUILD_PYTHON_BINDING=ON \
+        -DCMAKE_CXX_FLAGS="-Wno-template-id-cdtor -Wno-missing-template-keyword -Wno-deprecated-declarations"
+
+  - working-directory: /home/build/fdb-build
+    pipeline:
+      - name: "Build FoundationDB"
+        runs: ninja -j20
+      - name: "Install FoundationDB"
+        runs: DESTDIR="${{targets.contextdir}}" ninja install
+      - name: "Remove all repititve build artifacts"
+        runs: |
+          # Based on cmake/InstallLayout.cmake of the project, it creates another copy of complete build artifacts.
+          # We can not remove it prior to the build through a patch or comment it out since it creates the versioned package destinations that are needed for the CMake exports.
+          rm -rf ${{targets.contextdir}}/usr/usr
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development headers
+    dependencies:
+      provides:
+        - foundationdb-dev=${{package.full-version}}
+    pipeline:
+      - uses: split/dev
+
+  - name: ${{package.name}}-libs
+    description: "Libraries for ${{package.name}}"
+    dependencies:
+      provides:
+        - foundationdb-libs=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib
+          mv "${{targets.destdir}}"/usr/lib/lib*.so "${{targets.subpkgdir}}"/usr/lib
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: "Verify main lib files"
+          runs: |
+            test -s /usr/lib/libfdb_c.so
+            test -s /usr/lib/libfdb_c_shim.so
+
+  - name: ${{package.name}}-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-libs
+        - bash
+        - tini
+        - tzutils
+        - perl # [TODO] perf package is also needed, parent[linux-tools]
+        - openssl
+        - bind-tools
+      provides:
+        - foundationdb-compat=${{package.full-version}}
+    pipeline:
+      - name: "Package entrypoint scripts and basic upstream configuration"
+        runs: |
+          # These directories will be moved under the ownership fdb:fdb at image level as per upstream
+          mkdir -p "${{targets.subpkgdir}}"/var/fdb/logs
+          mkdir -p "${{targets.subpkgdir}}"/var/fdb/tmp
+          mkdir -p "${{targets.subpkgdir}}"/var/fdb/lib
+          mkdir -p "${{targets.subpkgdir}}"/var/fdb/scripts
+          mkdir -p "${{targets.subpkgdir}}"/var/fdb/data
+          echo "${{package.version}}" > "${{targets.subpkgdir}}"/var/fdb/version
+          install -m755 packaging/docker/fdb.bash "${{targets.subpkgdir}}"/var/fdb/scripts/fdb.bash
+          install -m755 packaging/docker/fdb_single.bash "${{targets.subpkgdir}}"/var/fdb/scripts/fdb_single.bash
+      - name: "Add current version libs instead of multiversion (Old version lib files)"
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/fdb/multiversion
+          ln -s "/usr/lib/libfdb_c.so" "${{targets.subpkgdir}}"/usr/lib/fdb/multiversion/libfdb_c_${{package.version}}.so
+      - name: "Setup all symlinks for the other binaries that are a copy of fdbbackup"
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          for file in fdbdr fdbrestore backup_agent dr_agent fastrestore_tool; do
+            ln -sf /usr/bin/fdbbackup "${{targets.subpkgdir}}/usr/bin/${file}";
+          done
+      - name: "Fetch Brendan Gregg's FlameGraph utilities"
+        uses: git-checkout
+        with:
+          repository: https://github.com/brendangregg/FlameGraph
+          expected-commit: 90533539b75400297092f973163b8a7b067c66d3
+          branch: master
+      - name: "Add Brendan Gregg's FlameGraph utilities"
+        runs: |
+          # REF: https://github.com/apple/foundationdb/blob/7.3.69/packaging/docker/Dockerfile#L163
+          # https://github.com/brendangregg/FlameGraph/
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          # stackcollapse-perf.pl: A helper that processes perf (Linux perf tool) output into a folded stack format. This is the format that flamegraph.pl consumes.
+          # flamegraph.pl: Generates a flame graph SVG visualization from folded stack traces. Flame graphs are widely used to analyze CPU usage, hotspots, and performance bottlenecks.
+          echo "a682ac46497d6fdbf9904d1e405d3aea3ad255fcb156f6b2b1a541324628dfc0  flamegraph.pl" > flamegraph-sha.txt
+          echo "5bcfb73ff2c2ab7bf2ad2b851125064780b58c51cc602335ec0001bec92679a5  stackcollapse-perf.pl" >> flamegraph-sha.txt
+          sha256sum --quiet -c flamegraph-sha.txt
+          chmod +x stackcollapse-perf.pl flamegraph.pl
+          mv stackcollapse-perf.pl "${{targets.subpkgdir}}"/usr/bin/stackcollapse-perf.pl
+          mv flamegraph.pl "${{targets.subpkgdir}}"/usr/bin/flamegraph.pl
+    test:
+      environment:
+        environment:
+          FDB_PORT: 4500
+          FDB_CLUSTER_FILE: /var/fdb/fdb.cluster
+          FDB_NETWORKING_MODE: container
+          FDB_COORDINATOR: ""
+          FDB_COORDINATOR_PORT: ""
+          FDB_CLUSTER_FILE_CONTENTS: ""
+          FDB_PROCESS_CLASS: unset
+      pipeline:
+        - name: "Verify symlinks"
+          runs: |
+            test "$(readlink /usr/bin/fdbdr)" = "/usr/bin/fdbbackup"
+            test "$(readlink /usr/bin/fdbrestore)" = "/usr/bin/fdbbackup"
+            test "$(readlink /usr/bin/backup_agent)" = "/usr/bin/fdbbackup"
+            test "$(readlink /usr/bin/dr_agent)" = "/usr/bin/fdbbackup"
+            test "$(readlink /usr/bin/fastrestore_tool)" = "/usr/bin/fdbbackup"
+        - name: "Verify Entrypoint Script"
+          runs: |
+            /var/fdb/scripts/fdb.bash 2>&1 | grep -q "Starting FDB server on"
+            /var/fdb/scripts/fdb_single.bash 2>&1 | grep -q "Starting FDB server on"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -test
+    - snowflake-
+    - -rc
+  github:
+    identifier: apple/foundationdb
+    use-tag: true
+    tag-filter: 7.3
+
+test:
+  environment:
+    contents:
+      packages:
+        - foundationdb-compat=${{package.full-version}}
+    environment:
+      FDB_BASE: /tmp/fdbtest
+      CLUSTER: /tmp/fdbtest/fdb.cluster
+      DATADIR: /tmp/fdbtest/data
+      LOGDIR: /tmp/fdbtest/logs
+      BACKUP_BASE: /tmp/fdbtest/backup
+      FDB_PORT: 4500
+      FDB_COORDINATOR_PORT: 4500
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: "Version checks"
+      runs: |
+        dr_agent --version 2>&1 | grep -q "${{package.version}}"
+        fdbbackup --version 2>&1 | grep -q "${{package.version}}"
+        fdbcli --version 2>&1 | grep -q "${{package.version}}"
+        fdbdr --version 2>&1 | grep -q "${{package.version}}"
+        fdbmonitor --version 2>&1 | grep -q "${{package.version}}"
+        fdbrestore --version 2>&1 | grep -q "${{package.version}}"
+        fdbserver --version 2>&1 | grep -q "${{package.version}}"
+    - name: "Functional tests: FDB Server and Client"
+      runs: |
+        # Boot a single-node cluster
+        mkdir -p "${DATADIR}" "${LOGDIR}" "${BACKUP_BASE}"
+        # Minimal cluster file
+        printf 'foundationdb:1@127.0.0.1:%s\n' "${FDB_PORT}" > "${CLUSTER}"
+        # Start fdbserver
+        fdbserver -C "${CLUSTER}" -p "127.0.0.1:${FDB_PORT}" -d "${DATADIR}" -L "${LOGDIR}" >/dev/null 2>&1 & echo $! > "${FDB_BASE}/fdbserver.pid"
+        # Configure new, in-memory single-replica DB using fdbcli
+        fdbcli -C "${CLUSTER}" --exec "configure new single memory" 2>&1 | grep -q "Database created"
+        fdbcli -C "${CLUSTER}" --exec "status minimal" 2>&1 | grep -q "The database is available"
+        # FDB CLI tests
+        # Basic CRUD
+        fdbcli -C "${CLUSTER}" --exec "writemode on; begin; set foo bar; commit; get foo" > crud-results.txt
+        grep -q "Transaction started" crud-results.txt
+        grep -q "Committed" crud-results.txt
+        # Consistency validations
+        fdbcli -C "${CLUSTER}" --exec "consistencycheck" 2>&1 | grep -q "ConsistencyCheck is on"
+        fdbcli -C "${CLUSTER}" --exec "consistencyscan" 2>&1 | grep -q "consistency_scan_enabled"
+        # Version bump
+        fdbcli -C "${CLUSTER}" --exec "versionepoch set 1" 2>&1 | grep -q "Version epoch enabled"
+        fdbcli -C "${CLUSTER}" --exec "versionepoch commit" 2>&1 | grep -q "Current read version"
+        # Getversion
+        GETVERSION=$(fdbcli -C "${CLUSTER}" --exec "getversion")
+        # Default tenant
+        fdbcli -C "${CLUSTER}" --exec "usetenant" 2>&1 | grep -q "Using the default tenant"
+        # Complete status
+        fdbcli -C "${CLUSTER}" --exec "status" > status.txt
+        grep -q "Configuration" status.txt
+        grep -q "Client time" status.txt
+        # Advance read version
+        fdbcli -C "${CLUSTER}" --exec "advanceversion ${GETVERSION}" 2>&1 | grep -q "Current read version"
+        # Maintenance
+        fdbcli -C "${CLUSTER}" --exec "maintenance" 2>&1 | grep -q "No ongoing maintenance"
+        # Range config
+        fdbcli -C "${CLUSTER}" --exec "getrange foo" 2>&1 | grep -q "bar"
+        fdbcli -C "${CLUSTER}" --exec "rangeconfig show" 2>&1 | grep -q "numConfiguredRanges"
+        fdbcli -C "${CLUSTER}" --exec "hotrange" 2>&1 | grep -q "The following 1 storage servers can be queried"
+        # Security
+        # fdbcli -C "${CLUSTER}" --exec "lock" 2>&1 | grep -q "Database locked"
+        # Check lock
+        # fdbcli -C "${CLUSTER}" --exec "getrange foo" 2>&1 | grep -q "locked"
+    - name: "Functional Tests: fdbbackup"
+      runs: |
+        export FDB_CLUSTER_FILE=${CLUSTER}
+        mkdir -p ${BACKUP_BASE}
+        # Not adding wait flag (-w) since this backup takes long time
+        fdbbackup start -d "file://${BACKUP_BASE}-backup" 2>&1 | grep -q "successfully submitted"
+        fdbbackup status 2>&1 | grep -q "BackupUID"
+    - name: "Basic tests: fdbdr (disaster recovery) and fdbrestore"
+      runs: |
+        # Basic help checks for fdbdr and fdbrestore since fdbdr requires multi-cluster FDB setup and fdbrestore needs service endpoint like bucket_name to pull backup from.
+        fdbdr --help
+        fdbrestore --help
+    - name: "Functional tests: FDB Monitor"
+      uses: test/daemon-check-output
+      with:
+        start: fdbmonitor --conffile "$CLUSTER"
+        timeout: 30
+        expected_output: |
+          Started FoundationDB Process Monitor
+          Watching conf file
+          Loading configuration
