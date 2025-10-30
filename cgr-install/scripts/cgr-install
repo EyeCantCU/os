@@ -476,43 +476,110 @@ EOF
       cd "$rootd/boot/loader/entries" && grep -- options *.conf )
 }
 
+# uki_setup(bootd)
 uki_setup() {
-    # this expects to on a full 'bootd' and make changes to it (populating boot/loader/keys/auto)
-    local bootd="$1"
-    out=$(cd "$bootd" && set +f && set -- chainguard/*/linux
-        [ $# -eq 0 ] && { error "no kernel found" 1>&2; exit 1; };
-        echo "$# - $*" 1>&2
-        for f in "$@"; do [ -f "$f" ] && echo "$f" && exit 0; done
-        error "did not find kernel"
-        exit 1) || return 1
-    kernel="/$out"
-    # grab the version from chainguard/6.1.2/linux
-    ver=${out#chainguard/}
-    ver=${ver%/linux}
+    stampdalf_func "$1" _uki_setup "$@"
+}
 
-    vr stampdalf "$bootd" \
-        mkdir -p "$bootd"/EFI/Linux/ || {
-        stderr "failed creating uki_setup";
-        return 1;
-    }
+parse_loader_cfg() {
+    local cfg="$1" fname="$2" out=""
+    out=$(awk '$1 == fname { $1=""; printf("%s\n", $0);}' fname="$fname" "$cfg") ||
+        { stderr "parsing $cfg with awk failed"; return 1; }
+    # awk leaves a leading field separator
+    out=${out# }
+    [ -n "$out" ] || { stderr "$cfg had empty field $fname"; return 1; }
+    echo "$out"
+}
 
-    vr stampdalf "$bootd" \
-        ukify build \
-          --linux "$bootd/chainguard/$ver"/linux \
-          --uname "$ver" \
-          --cmdline "$(grep "options" "$bootd/loader/entries/chainguard-$ver.conf" | awk '{$1=""; print $0}')" \
-          --output "$bootd/EFI/Linux/CHAINGUARD-$ver.EFI"
+loader_config_to_uki() {
+    # read 'linux', 'version', and 'options' from systemd-boot loader config $cfg
+    # and write a ukifi'd version named <version>.efi to $outd
+    # paths in cfg are expected relative to $bootd
+    local outd="$1" cfg="$2" bootd="$3" sbarch="$4" stub="$5"
+    [ -f "$cfg" ] ||
+        { stderr "config $cfg - not a file"; return 1; }
+    [ -d "$outd" ] ||
+        { stderr "outd $outd - not a dir"; return 1; }
+    bootd=${bootd%/}
+
+    local kpath="" kver="" cmdline=""
+    kver=$(parse_loader_cfg "$cfg" version) || return 1
+    cmdline=$(parse_loader_cfg "$cfg" options) || return 1
+    kpath=$(parse_loader_cfg "$cfg" linux) || return 1
+    kpath=${kpath#/}
+    [ -f "$bootd/$kpath" ] ||
+        { stderr "linux entry $kpath not found in bootd $bootd"; return 1; }
+
+    local outfile="$outd/$kver.efi"
+    vr ukify build \
+          --linux="$bootd/$kpath" \
+          --efi-arch="$sbarch" \
+          --stub="$stub" \
+          --uname="$kver" \
+          --cmdline="$cmdline" \
+          --output="$outfile" ||
+          { stderr "ukify failed"; return 1; }
 
     # Ensure everything is alright
-    ukify inspect "$bootd/EFI/Linux/CHAINGUARD-$ver.EFI"|| {
-        stderr "failed creating CHAINGUARD-$ver.EFI in uki_setup";
+    vr ukify inspect "$outfile" || {
+        stderr "ukify inspect failed on $outfile"
         return 1;
     }
-    # Leave only systemd-boot and the UKI itself
-    # this will leave only BOOT${arch}.EFI and CHAINGUARD-$ver.EFI to be
-    # signed for secureboot
-    vr stampdalf "$bootd" \
-        rm -rf "$bootd/chainguard/" "$bootd/loader/entries/"
+}
+
+_uki_setup() {
+    # use the systemd stub from $rootd for arch $arch
+    #
+    # find loader entries under $bootd/loader
+    # for each loader config
+    #    call loader_config_to_uki for each with output to bootd/EFI/Linux
+    #    remove loader entry
+    # remove /loader if empty
+    local bootd="$1" rootd="$2" arch="$3" out="" kernel="" ver=""
+
+    local stub="" sbarch="" stub=""
+    case "$arch" in
+        x86_64) sbarch=x64;;
+        aarch64) sbarch=aa64;;
+        *) stderr "Unknown arch $arch in ukify_setup"; return 1;;
+    esac
+    stub="usr/lib/systemd/boot/efi/linux$sbarch.efi.stub"
+    [ -f "$rootd/$stub" ] ||
+        { stderr "no systemd stub in $stub under root $rootd"; return 1; }
+
+    local cfg="" cfgs=""
+    # shellcheck disable=SC2207
+    cfgs=( $( cd "$bootd" && find loader/ -name "*.conf" -type f) )
+
+    [ ${#cfgs[@]} -eq 0 ] &&
+        { stderr "no *.conf files found under loader/"; return 1; }
+
+    outd="$bootd/EFI/Linux"
+    mkdir -p "$outd" ||
+        { stderr "failed to create EFI/Linux in bootd"; return 1; }
+
+    debug 1 "ukify found ${#cfgs[@]} loader files"
+    bootd=${bootd%/}
+    for cfg in "${cfgs[@]}"; do
+        loader_config_to_uki "$outd" "$bootd/$cfg" "$bootd" "$sbarch" "$rootd/$stub" ||
+            { stderr "loader_config_to_uki on $cfg failed"; return 1; }
+        rm "$bootd/$cfg" ||
+            { stderr "failed removing $cfg"; return 1; }
+    done
+
+    # shellcheck disable=SC2178
+    local files=""
+    # shellcheck disable=SC2207
+    files=( $(cd "$bootd" && find loader ! -type d ) )
+    if [ ${#files} -eq 0 ]; then
+        debug 1 "loader/ is now empty, removing it"
+        rm -Rf "$bootd/loader"  ||
+            { stderr "failed removing empty loader/ dir in $bootd"; return 1; }
+    else
+        debug 1 "loader/ was not empty: ${files[*]}"
+    fi
+
+    return 0
 }
 
 secureboot_setup() {
@@ -533,10 +600,11 @@ secureboot_setup() {
             { stderr "Failed creating empty sig list for $ktype"; return 1; }
     done
 
-    ## Calculate hash list of all EFI apps (currently only systemd-boot) and kernels
+    ## Calculate hash list of all EFI apps and kernels
     local out=""
-    out=$(find "$bootd" -name "BOOT${EFI_SUFFIX}.EFI" -o -name linux -o -name "CHAINGUARD*.EFI") ||
-        { stderr "failed to find files to sign in in $bootd/boot"; return 1; }
+    out=$(find "$bootd" -type f \
+        '(' -name "*.EFI" -o -name "*.efi" -o -name linux ')') ||
+        { stderr "failed to find files to sign in in $bootd"; return 1; }
     [ -n "$out" ] ||
         { stderr "did not find any files to sign under $bootd"; return 1; }
 
@@ -977,11 +1045,19 @@ guest_install() {
     return 0
 }
 
+# stampdalf_func(dir, func, args) - call a function in a subprocess so stampdalf can track it.
+stampdalf_func() {
+    local d="$1"
+    shift
+    stampdalf "$d" cgr-install _callfunc "$@"
+}
+
 main() {
     case "$1" in
         -h|--help) Usage; return 0;;
         guest-install) shift; guest_install "$@";;
         "") bad_Usage "no subcommand given"; return 1;;
+        _callfunc) shift; "$@";;
         *) fail "unknown subcommand $1";;
     esac
 }
