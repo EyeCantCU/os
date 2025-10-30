@@ -1,0 +1,92 @@
+package:
+  name: longhorn-share-manager-fips-1.9
+  version: 1.9.2
+  epoch: 0
+  description: Longhorn Share Manager manages NFS exports for RWX volumes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - longhorn-share-manager-fips=${{package.full-version}}
+    runtime:
+      - coreutils
+      - e2fsprogs
+      - nfs-ganesha
+      - nfs-utils
+      - rpcbind
+      - xfsprogs
+
+# This package contains binaries that may be deployed on nodes. During
+# build-time link against an older glibc, to ensure go-fips built binaries
+# remain ABI compatible with old foreign host-os.
+environment:
+  contents:
+    packages:
+      - oldglibc~2.28
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/longhorn/longhorn-share-manager.git
+      tag: v${{package.version}}
+      expected-commit: ffd6716f0b9c27838dbc923a7e5ae82f9e9e3c9f
+
+  - uses: go/build
+    with:
+      packages: .
+      output: longhorn-share-manager
+      ldflags: |
+        -X main.Version=${{package.version}}
+      go-package: go-fips
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    dependencies:
+      provides:
+        - longhorn-share-manager-fips-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/
+          ln -s /usr/bin/longhorn-share-manager "${{targets.contextdir}}"/longhorn-share-manager
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-dangling: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - grpc-health-probe
+    environment:
+      FAST_FAILOVER: false
+      LEASE_LIFETIME: 60
+      GRACE_PERIOD: 30
+  pipeline:
+    - name: "Test binary help"
+      uses: test/tw/help-check
+      with:
+        bins: longhorn-share-manager
+    - name: "Functional test for daemon"
+      uses: test/daemon-check-output
+      with:
+        setup: mkdir -p /tmp/test-volume
+        start: longhorn-share-manager daemon --volume /tmp/test-volume --data-engine v1 --fs ext4
+        expected_output: |
+          Listening on share manager gRPC server :9600
+        post: |
+          grpc-health-probe -addr=localhost:9600 2>&1 | grep -q "SERVING"
+    - uses: test/go-fips-check
+
+update:
+  enabled: true
+  github:
+    identifier: longhorn/longhorn-share-manager
+    strip-prefix: v
+    tag-filter-prefix: v1.9
+    use-tag: true
+  ignore-regex-patterns:
+    - '.*-rc\d+$'
+    - ".*-dev-.*"
