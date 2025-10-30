@@ -1,0 +1,113 @@
+package:
+  name: aravis
+  epoch: 0
+  version: 0.8.35
+  description: Glib/gobject based library for video acquisition using Genicam cameras
+  copyright:
+    - license: LGPL-2.1-only
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - glib-dev
+      - glib-gir
+      - gobject-introspection-dev
+      - gst-plugins-base-dev
+      - gstreamer-dev
+      - gtk-3-dev
+      - libusb-dev
+      - libxml2-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '(\d+)\.(\d+).(\d+)'
+    replace: "$1.$2"
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/AravisProject/aravis.git
+      tag: ${{package.version}}
+      expected-commit: ea4f3c47cb387d81b63444887f3e0efda7918d50
+
+  - uses: meson/configure
+    with:
+      opts: |
+        -Dfast-heartbeat=true \
+        -Dgst-plugin=enabled \
+        -Dintrospection=enabled \
+        -Dpacket-socket=enabled \
+        -Dtests=true \
+        -Dusb=enabled \
+        -Dviewer=enabled
+
+  - uses: meson/compile
+
+  - uses: meson/install
+
+  - uses: strip
+
+update:
+  enabled: true
+  git: {}
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: Development libraries for ${{package.name}}
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          arv-camera-test-${{vars.major-version}}
+          arv-fake-gv-camera-${{vars.major-version}}
+          arv-test-${{vars.major-version}}
+          arv-tool-${{vars.major-version}}
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          arv-camera-test-${{vars.major-version}}
+          arv-test-${{vars.major-version}}
+          arv-tool-${{vars.major-version}}
+    - name: Check tooling without fake camera
+      runs: |
+        MAJOR="${{vars.major-version}}"
+        arv-test-${MAJOR} --debug=all:4 | grep -F -e "Found 0 device"
+        arv-camera-test-${MAJOR} --debug=all:4 | grep -F -e "No camera found"
+
+        arv-fake-gv-camera &
+        FAKE_CAMERA_PID=$!
+        kill -9 "${FAKE_CAMERA_PID}"
+    - uses: test/daemon-check-output
+      with:
+        start: arv-fake-gv-camera-${{vars.major-version}} --debug=all
+        expected_output: |
+          Listening to 2 sockets
+        post: |
+          ARV_TEST_OUT=$(mktemp)
+          arv-test-${{vars.major-version}} --duration=1 | tee "${ARV_TEST_OUT}"
+
+          grep -F -e "FAILURE" -v "${ARV_TEST_OUT}"
+          grep -E -e "Found 1 device" "${ARV_TEST_OUT}"
+          grep -E -e "Testing 'Aravis:Fake'" "${ARV_TEST_OUT}"
+          grep -E -e "Genicam:Load *SUCCESS" "${ARV_TEST_OUT}"
+          grep -E -e "Genicam:Schema *SUCCESS Schema validation disabled" "${ARV_TEST_OUT}"
+
+          ARV_CAMERA_TEST_OUT=$(mktemp)
+          arv-camera-test-${{vars.major-version}} --duration=1 | tee "${ARV_CAMERA_TEST_OUT}"
+          grep -E -e "vendor name.*Aravis" "${ARV_CAMERA_TEST_OUT}"
+          grep -E -e "model name.*Fake" "${ARV_CAMERA_TEST_OUT}"
+          grep -E -e "device serial number.*GV01" "${ARV_CAMERA_TEST_OUT}"
+
+          arv-tool-${{vars.major-version}} values | grep -E -e "DeviceModelName.*Fake"
