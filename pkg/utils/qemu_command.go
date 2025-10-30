@@ -133,6 +133,7 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 		"-drive", "if=pflash,format=raw,unit=0,file=" + ovmf + ",readonly=on",
 		"-drive", "if=pflash,format=raw,unit=1,file=" + varsPath,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
+		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()),
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
 		"-netdev", "user,id=id1," + getHostFwd(),
