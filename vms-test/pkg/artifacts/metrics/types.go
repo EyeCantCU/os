@@ -11,4 +11,5 @@ const (
 	SSHDStartTime
 	MultiUserTarget
 	SystemdState
+	LinkStatistics
 )
