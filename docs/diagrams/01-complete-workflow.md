@@ -28,17 +28,15 @@ digraph workflow {
     C2 [label="stereo image-dependencies\n< tfplan.json", fillcolor="#fff3e0"];
     C3 [label="stereo vm-dependencies", fillcolor="#fff3e0"];
     C4 [label="stereo seed-dependencies\n(optional)", fillcolor="#fff3e0"];
-    C5 [label="stereo version-stream-dependencies\n(optional)", fillcolor="#fff3e0"];
 
     // Dependencies outputs
     C1A [label="resolved/build/{arch}/\nBuild deps per repo", shape=folder, fillcolor="#f0f0f0"];
     C2A [label="resolved/images/{arch}/\nImage deps public/private", shape=folder, fillcolor="#f0f0f0"];
     C3A [label="resolved/vms/{arch}/\nVM dependencies", shape=folder, fillcolor="#f0f0f0"];
     C4A [label="resolved/seeds/{arch}/\nManual seed deps", shape=folder, fillcolor="#f0f0f0"];
-    C5A [label="resolved/version-streams/{arch}/\nVersion stream deps", shape=folder, fillcolor="#f0f0f0"];
 
     // Archive process
-    D1 [label="Archive Analysis:\n• Age > 365 days\n• No reverse dependencies\n• Not in active builds\n• Not in images/VMs/seeds/version-streams", fillcolor="#fce4ec"];
+    D1 [label="Archive Analysis:\n• Age > 365 days\n• No reverse dependencies\n• Not in active builds\n• Not in images/VMs/seeds", fillcolor="#fce4ec"];
     D2 [label="archive/\nArchive candidates", shape=folder, fillcolor="#f0f0f0"];
     D3 [label="retain/\nRetained packages", shape=folder, fillcolor="#f0f0f0"];
     D4 [label="withdrawn-packages.txt\nPer repository", shape=note, fillcolor="#fff9c4"];
@@ -69,19 +67,16 @@ digraph workflow {
     C -> C2;
     C -> C3;
     C -> C4;
-    C -> C5;
 
     C1 -> C1A;
     C2 -> C2A;
     C3 -> C3A;
     C4 -> C4A;
-    C5 -> C5A;
 
     C1A -> D;
     C2A -> D;
     C3A -> D;
     C4A -> D;
-    C5A -> D;
 
     // Archive phase
     D -> D1 [label="stereo archive\n--generate-withdrawn\n--duration 365"];

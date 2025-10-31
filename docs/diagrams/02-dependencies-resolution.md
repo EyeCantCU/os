@@ -90,20 +90,6 @@ digraph dependencies {
         SD -> SD1 -> SD2 -> SD3 -> SD4;
     }
 
-    // Version Stream Dependencies cluster
-    subgraph cluster_version_streams {
-        label="Version Stream Dependencies (Optional)";
-        style=filled;
-        fillcolor="#e8f5e8";
-
-        VSD [label="stereo version-stream-dependencies\n(optional)", fillcolor="#e8f5e8"];
-        VSD1 [label="Read package-version-metadata/\nversion stream configs", fillcolor="#e8f5e8"];
-        VSD2 [label="Find packages matching\nstream patterns", fillcolor="#e8f5e8"];
-        VSD3 [label="Keep latest version per stream\nresolve dependencies", fillcolor="#e8f5e8"];
-        VSD4 [label="resolved/version-streams/{arch}/\nkept packages + dependencies", shape=folder, fillcolor="#f0f0f0"];
-
-        VSD -> VSD1 -> VSD2 -> VSD3 -> VSD4;
-    }
 
     // Processing cluster
     subgraph cluster_processing {
@@ -132,13 +118,11 @@ digraph dependencies {
         OS2 [label="images/{arch}/\nImage dependencies", shape=folder, fillcolor="#f0f0f0"];
         OS3 [label="vms/{arch}/\nVM dependencies", shape=folder, fillcolor="#f0f0f0"];
         OS4 [label="seeds/{arch}/\nSeed dependencies", shape=folder, fillcolor="#f0f0f0"];
-        OS5 [label="version-streams/{arch}/\nVersion stream dependencies", shape=folder, fillcolor="#f0f0f0"];
 
         OS -> OS1;
         OS -> OS2;
         OS -> OS3;
         OS -> OS4;
-        OS -> OS5;
     }
 
     subgraph cluster_unresolved {
@@ -175,7 +159,6 @@ digraph dependencies {
     ID5 -> OS2 [ltail=cluster_image, lhead=cluster_resolved];
     VD4 -> OS3 [ltail=cluster_vm, lhead=cluster_resolved];
     SD4 -> OS4 [ltail=cluster_seed, lhead=cluster_resolved];
-    VSD4 -> OS5 [ltail=cluster_version_streams, lhead=cluster_resolved];
 }
 ```
 
