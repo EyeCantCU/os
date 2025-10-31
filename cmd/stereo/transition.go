@@ -15,6 +15,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Reason string constants for package transition status
+const (
+	// ReasonVersionStreamProvider indicates a package provides older library versions
+	ReasonVersionStreamProvider = "version stream provider package (maintains older library versions)"
+
+	// ReasonAlreadyUpToDate indicates a package already uses current shared library versions
+	ReasonAlreadyUpToDate = "already uses current shared library versions"
+
+	// ReasonPinnedToVersionStream is a format string for packages pinned to older version streams
+	// Arguments: baseLib, depVersion, provider
+	ReasonPinnedToVersionStream = "pinned to %s version %s (provided by %s version stream)"
+
+	// ReasonTransitionNeeded is a format string for packages needing rebuild
+	// Arguments: baseLib, depVersion, newestTargetVersion
+	ReasonTransitionNeeded = "depends on %s version %s, but target provides newest version %s (transition needed)"
+
+	// ReasonVersionComparisonInconclusive is a format string when version comparison fails
+	// Arguments: patternStr
+	ReasonVersionComparisonInconclusive = "depends on shared library matching pattern: %s (version comparison inconclusive)"
+)
+
 func transitionCmd() *cobra.Command {
 	var (
 		arch       string
@@ -156,16 +177,17 @@ func transition(ctx context.Context, packageName, arch string, extraRepos []stri
 	}
 
 	// Identify packages that need rebuilding
-	packagesToRebuild, completedPackages, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch, extraRepos)
+	analysisResult, err := identifyPackagesToRebuild(ctx, candidateConfigs, sharedLibVersions, sharedLibPatterns, arch, extraRepos, packageName)
 	if err != nil {
 		return fmt.Errorf("identifying packages to rebuild: %w", err)
 	}
 
-	log.Printf("Identified %d packages that need rebuilding", len(packagesToRebuild))
-	log.Printf("Identified %d packages that are already complete", len(completedPackages))
+	log.Printf("Identified %d packages that need rebuilding", len(analysisResult.Rebuild))
+	log.Printf("Identified %d packages that are already complete", len(analysisResult.Completed))
+	log.Printf("Identified %d packages that are skipped (pinned to older version streams)", len(analysisResult.Skipped))
 
 	// Determine build order based on dependencies
-	buildOrder, err := determineBuildOrder(ctx, packagesToRebuild, arch, extraRepos)
+	buildOrder, err := determineBuildOrder(ctx, analysisResult.Rebuild, arch, extraRepos)
 	if err != nil {
 		return fmt.Errorf("determining build order: %w", err)
 	}
@@ -177,8 +199,9 @@ func transition(ctx context.Context, packageName, arch string, extraRepos []stri
 		Architecture:          arch,
 		SharedLibraryPatterns: sharedLibPatterns,
 		SharedLibraryVersions: sharedLibVersions,
-		PackagesToRebuild:     packagesToRebuild,
-		CompletedPackages:     completedPackages,
+		PackagesToRebuild:     analysisResult.Rebuild,
+		CompletedPackages:     analysisResult.Completed,
+		SkippedPackages:       analysisResult.Skipped,
 		BuildOrder:            buildOrder,
 	}
 
@@ -207,40 +230,69 @@ func transition(ctx context.Context, packageName, arch string, extraRepos []stri
 	return nil
 }
 
+// BuildOrderEntry represents a package in the build order sequence.
 type BuildOrderEntry struct {
-	Repository string `json:"repository"`
-	Package    string `json:"package"`
+	Repository string `json:"repository"` // Repository containing the package
+	Package    string `json:"package"`    // Package name to build
 }
 
+// TransitionPlan contains the complete analysis and plan for a shared library
+// version transition, including which packages need rebuilding and in what order.
 type TransitionPlan struct {
-	TargetPackage         string              `json:"target_package"`
-	Repository            string              `json:"repository"`
-	Architecture          string              `json:"architecture"`
-	SharedLibraryPatterns []string            `json:"shared_library_patterns"`
-	SharedLibraryVersions map[string][]string `json:"shared_library_versions"`
-	PackagesToRebuild     []RebuildCandidate  `json:"packages_to_rebuild"`
-	CompletedPackages     []CompletedPackage  `json:"completed_packages"`
-	BuildOrder            [][]BuildOrderEntry `json:"build_order"`
+	TargetPackage         string              `json:"target_package"`          // Package being transitioned
+	Repository            string              `json:"repository"`              // Repository of target package
+	Architecture          string              `json:"architecture"`            // Target architecture
+	SharedLibraryPatterns []string            `json:"shared_library_patterns"` // Regex patterns for shared libraries
+	SharedLibraryVersions map[string][]string `json:"shared_library_versions"` // Library versions provided by target
+	PackagesToRebuild     []RebuildCandidate  `json:"packages_to_rebuild"`     // Packages requiring rebuild
+	CompletedPackages     []CompletedPackage  `json:"completed_packages"`      // Packages already up to date
+	SkippedPackages       []SkippedPackage    `json:"skipped_packages"`        // Packages pinned to older versions
+	BuildOrder            [][]BuildOrderEntry `json:"build_order"`             // Topologically sorted build order
 }
 
+// AffectedPackage represents a binary package affected by a transition.
 type AffectedPackage struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+	Name    string `json:"name"`    // Binary package name
+	Version string `json:"version"` // Package version
 }
 
+// RebuildCandidate represents a package that needs to be rebuilt during
+// a shared library transition because it depends on an outdated version.
 type RebuildCandidate struct {
-	Name             string            `json:"name"`
-	Repository       string            `json:"repository"`
-	Reason           string            `json:"reason"`
-	MatchedPattern   string            `json:"matched_pattern"`
-	AffectedPackages []AffectedPackage `json:"affected_packages"`
+	Name             string            `json:"name"`              // Package origin name
+	Repository       string            `json:"repository"`        // Repository where package is found
+	Reason           string            `json:"reason"`            // Why rebuild is needed
+	MatchedPattern   string            `json:"matched_pattern"`   // Regex pattern that matched
+	AffectedPackages []AffectedPackage `json:"affected_packages"` // Binary packages that will be rebuilt
 }
 
+// CompletedPackage represents a package that has already been updated to use
+// the current shared library versions and does not need rebuilding.
 type CompletedPackage struct {
-	Name             string            `json:"name"`
-	Repository       string            `json:"repository"`
-	Reason           string            `json:"reason"`
-	AffectedPackages []AffectedPackage `json:"affected_packages"`
+	Name             string            `json:"name"`              // Package origin name
+	Repository       string            `json:"repository"`        // Repository where package is found
+	Reason           string            `json:"reason"`            // Why it's already complete
+	AffectedPackages []AffectedPackage `json:"affected_packages"` // Binary packages already up to date
+}
+
+// SkippedPackage represents a package that is intentionally skipped during a
+// shared library transition because it is pinned to an older version stream
+// or is itself a version stream provider package.
+type SkippedPackage struct {
+	Name             string            `json:"name"`              // Package origin name
+	Repository       string            `json:"repository"`        // Repository where the package is found
+	Reason           string            `json:"reason"`            // Human-readable reason for skipping
+	PinnedVersion    string            `json:"pinned_version"`    // Version the package is pinned to (if applicable)
+	ProvidedBy       string            `json:"provided_by"`       // Package providing the pinned version
+	AffectedPackages []AffectedPackage `json:"affected_packages"` // List of binary packages affected
+}
+
+// PackageAnalysisResult contains the categorized results of analyzing packages
+// during a shared library transition.
+type PackageAnalysisResult struct {
+	Rebuild   []RebuildCandidate // Packages that need to be rebuilt
+	Completed []CompletedPackage // Packages already up to date
+	Skipped   []SkippedPackage   // Packages pinned to older version streams
 }
 
 func extractSharedLibraryPatternsWithVersions(packages []*apk.Package) (map[string][]string, []string, error) {
@@ -347,26 +399,16 @@ func removeVersionSuffix(libName string) string {
 	return libName
 }
 
-func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string, extraRepos []string) ([]RebuildCandidate, []CompletedPackage, error) {
-	log.Printf("Analyzing APK repositories for packages with shared library dependencies")
+// scanRepositoriesForPackages scans all repositories (dirToRepo + extraRepos) in a single pass
+// to build the version providers map and collect origin packages for analysis.
+// Returns versionProviders (baseLib -> version -> provider package), originPackages (originKey -> packageName -> packages), and error.
+func scanRepositoriesForPackages(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, arch string, extraRepos []string) (map[string]map[string]string, map[string]map[string][]*apk.Package, error) {
+	versionProviders := make(map[string]map[string]string)
+	originPackages := make(map[string]map[string][]*apk.Package)
 
-	rebuilds := make(map[string]*RebuildCandidate)
-	completed := make(map[string]*CompletedPackage)
+	log.Printf("Scanning repositories to identify version stream providers and collect packages")
 
-	// Compile regex patterns
-	compiledPatterns := make([]*regexp.Regexp, len(patterns))
-	for i, pattern := range patterns {
-		regex, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, nil, fmt.Errorf("compiling pattern %s: %w", pattern, err)
-		}
-		compiledPatterns[i] = regex
-	}
-
-	// First, collect all packages by origin and package name to find the most recent version of each distinct package
-	originPackages := make(map[string]map[string][]*apk.Package) // originKey -> packageName -> list of package versions
-
-	// Check dirToRepo repositories for packages
+	// Process dirToRepo repositories
 	for repo, repoURL := range dirToRepo {
 		log.Printf("Checking APK index for repository: %s", repo)
 
@@ -376,8 +418,44 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 			continue
 		}
 
-		// Group packages by origin and package name
 		for _, pkg := range index.Packages {
+			// Check provides for shared libraries matching our patterns (for version stream detection)
+			for _, provide := range pkg.Provides {
+				if strings.HasPrefix(provide, "so:") {
+					libPart := provide[3:]
+					if idx := strings.Index(libPart, "="); idx != -1 {
+						libPart = libPart[:idx]
+					}
+
+					baseLib := removeVersionSuffix(libPart)
+					soversion := extractSoVersion(libPart)
+
+					// Check if this matches one of our target libraries
+					if _, isTarget := targetVersions[baseLib]; isTarget && soversion != "" {
+						if versionProviders[baseLib] == nil {
+							versionProviders[baseLib] = make(map[string]string)
+						}
+						// Record which package provides this version
+						// If multiple packages provide the same version, prefer the one with a version suffix in its name
+						// (e.g., prefer "protobuf-29.5" over "protobuf" for version 29.5.0)
+						if existingProvider, exists := versionProviders[baseLib][soversion]; !exists {
+							versionProviders[baseLib][soversion] = pkg.Origin
+							log.Printf("Version stream: %s version %s provided by %s", baseLib, soversion, pkg.Origin)
+						} else if existingProvider != pkg.Origin {
+							log.Printf("Note: %s version %s provided by both %s and %s", baseLib, soversion, existingProvider, pkg.Origin)
+							// Prefer versioned package names (e.g., protobuf-29.5 over protobuf)
+							// Check if the new origin has a version suffix like -29.5 or -3.11
+							versionSuffixPattern := regexp.MustCompile(`-\d+(\.\d+)*$`)
+							if versionSuffixPattern.MatchString(pkg.Origin) {
+								versionProviders[baseLib][soversion] = pkg.Origin
+								log.Printf("Preferring versioned provider %s for %s version %s", pkg.Origin, baseLib, soversion)
+							}
+						}
+					}
+				}
+			}
+
+			// Collect packages by origin and package name
 			originKey := repo + "/" + pkg.Origin
 
 			// Check if we have a melange config for this origin
@@ -425,6 +503,25 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 		}
 	}
 
+	return versionProviders, originPackages, nil
+}
+
+// categorizeOriginPackages analyzes origin packages and categorizes them into rebuild, completed, or skipped
+// based on their dependency versions and version stream pinning.
+// Returns maps of rebuilds, completed, and skipped packages.
+func categorizeOriginPackages(originPackages map[string]map[string][]*apk.Package, versionProviders map[string]map[string]string, compiledPatterns []*regexp.Regexp, patterns []string, targetVersions map[string][]string, targetPackage string) (map[string]*RebuildCandidate, map[string]*CompletedPackage, map[string]*SkippedPackage) {
+	rebuilds := make(map[string]*RebuildCandidate)
+	completed := make(map[string]*CompletedPackage)
+	skipped := make(map[string]*SkippedPackage)
+
+	// Build a set of version stream provider origins to exclude from rebuild checks
+	versionStreamOrigins := make(map[string]bool)
+	for _, providers := range versionProviders {
+		for _, provider := range providers {
+			versionStreamOrigins[provider] = true
+		}
+	}
+
 	// For each origin, check each distinct package it builds
 	for originKey, packageMap := range originPackages {
 		if len(packageMap) == 0 {
@@ -434,11 +531,43 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 		repo := strings.Split(originKey, "/")[0]
 		origin := strings.Split(originKey, "/")[1]
 
+		// Skip version stream packages themselves - they provide the older versions
+		if versionStreamOrigins[origin] {
+			log.Printf("Skipping %s - it is a version stream provider package", origin)
+
+			// Add it to skipped packages with a special reason
+			affectedPackages := make([]AffectedPackage, 0, len(packageMap))
+			for _, packageVersions := range packageMap {
+				mostRecentPkg := packageVersions[0]
+				for _, pkg := range packageVersions[1:] {
+					if isMoreRecent(pkg, mostRecentPkg) {
+						mostRecentPkg = pkg
+					}
+				}
+				affectedPackages = append(affectedPackages, AffectedPackage{
+					Name:    mostRecentPkg.Name,
+					Version: mostRecentPkg.Version,
+				})
+			}
+
+			skipped[originKey] = &SkippedPackage{
+				Name:             origin,
+				Repository:       repo,
+				Reason:           ReasonVersionStreamProvider,
+				PinnedVersion:    "",
+				ProvidedBy:       origin,
+				AffectedPackages: affectedPackages,
+			}
+			continue
+		}
+
 		// Track if any package from this origin needs rebuilding
 		originNeedsRebuild := false
-		var firstMatchedPattern, firstReason string
+		originIsPinned := false
+		var firstMatchedPattern, firstReason, pinnedVersion, providedBy string
 		affectedPackagesMap := make(map[string]*apk.Package)  // packageName -> most recent package
 		completedPackagesMap := make(map[string]*apk.Package) // packageName -> most recent package
+		pinnedPackagesMap := make(map[string]*apk.Package)    // packageName -> most recent package
 		hasMatchingDeps := false
 
 		// Check each distinct package name from this origin
@@ -454,16 +583,27 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 			log.Printf("Checking most recent version of %s from origin %s: %s v%s", packageName, origin, mostRecentPkg.Name, mostRecentPkg.Version)
 
 			// Check if this package has dependencies matching our patterns
-			needsRebuild, matchedPattern, reason := checkPackageDependenciesWithVersions(mostRecentPkg, compiledPatterns, patterns, targetVersions)
-			if needsRebuild {
-				log.Printf("Package %s from origin %s needs rebuild: %s", packageName, origin, reason)
+			status := checkPackageDependenciesWithVersions(mostRecentPkg, compiledPatterns, patterns, targetVersions, versionProviders, targetPackage)
+			if status.NeedsRebuild {
+				log.Printf("Package %s from origin %s needs rebuild: %s", packageName, origin, status.Reason)
 				originNeedsRebuild = true
 				hasMatchingDeps = true
 				if firstMatchedPattern == "" {
-					firstMatchedPattern = matchedPattern
-					firstReason = reason
+					firstMatchedPattern = status.MatchedPattern
+					firstReason = status.Reason
 				}
 				affectedPackagesMap[packageName] = mostRecentPkg
+			} else if status.IsPinned {
+				log.Printf("Package %s from origin %s is pinned: %s", packageName, origin, status.Reason)
+				originIsPinned = true
+				hasMatchingDeps = true
+				if firstMatchedPattern == "" {
+					firstMatchedPattern = status.MatchedPattern
+					firstReason = status.Reason
+					pinnedVersion = status.PinnedVersion
+					providedBy = status.ProvidedBy
+				}
+				pinnedPackagesMap[packageName] = mostRecentPkg
 			} else {
 				// Check if package has any dependencies matching our patterns (even if up to date)
 				hasMatch := false
@@ -484,7 +624,6 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 					completedPackagesMap[packageName] = mostRecentPkg
 				}
 			}
-
 		}
 
 		// If any package from this origin needs rebuilding, create a rebuild candidate
@@ -507,6 +646,28 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 				MatchedPattern:   firstMatchedPattern,
 				AffectedPackages: affectedPackages,
 			}
+		} else if originIsPinned {
+			log.Printf("Origin %s is pinned to older version stream", origin)
+
+			// Convert to AffectedPackage slice for pinned packages
+			pinnedAffectedPackages := make([]AffectedPackage, 0, len(pinnedPackagesMap))
+			for _, pkg := range pinnedPackagesMap {
+				pinnedAffectedPackages = append(pinnedAffectedPackages, AffectedPackage{
+					Name:    pkg.Name,
+					Version: pkg.Version,
+				})
+			}
+
+			if len(pinnedAffectedPackages) > 0 {
+				skipped[originKey] = &SkippedPackage{
+					Name:             origin, // Use origin name (main package)
+					Repository:       repo,
+					Reason:           firstReason,
+					PinnedVersion:    pinnedVersion,
+					ProvidedBy:       providedBy,
+					AffectedPackages: pinnedAffectedPackages,
+				}
+			}
 		} else if hasMatchingDeps {
 			log.Printf("Origin %s already uses current shared library versions", origin)
 
@@ -523,25 +684,63 @@ func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*confi
 				completed[originKey] = &CompletedPackage{
 					Name:             origin, // Use origin name (main package)
 					Repository:       repo,
-					Reason:           "already uses current shared library versions",
+					Reason:           ReasonAlreadyUpToDate,
 					AffectedPackages: completedAffectedPackages,
 				}
 			}
 		}
 	}
 
-	// Convert maps to slices
-	result := make([]RebuildCandidate, 0, len(rebuilds))
+	return rebuilds, completed, skipped
+}
+
+func identifyPackagesToRebuild(ctx context.Context, candidates map[string]*config.Configuration, targetVersions map[string][]string, patterns []string, arch string, extraRepos []string, targetPackage string) (*PackageAnalysisResult, error) {
+	// Validate required parameters
+	if targetPackage == "" {
+		return nil, fmt.Errorf("targetPackage cannot be empty")
+	}
+
+	log.Printf("Analyzing APK repositories for packages with shared library dependencies")
+
+	// Compile regex patterns
+	compiledPatterns := make([]*regexp.Regexp, len(patterns))
+	for i, pattern := range patterns {
+		regex, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compiling pattern %s: %w", pattern, err)
+		}
+		compiledPatterns[i] = regex
+	}
+
+	// Scan repositories to build version providers and collect origin packages
+	versionProviders, originPackages, err := scanRepositoriesForPackages(ctx, candidates, targetVersions, arch, extraRepos)
+	if err != nil {
+		return nil, fmt.Errorf("scanning repositories: %w", err)
+	}
+
+	// Categorize origin packages into rebuild/completed/skipped
+	rebuilds, completed, skipped := categorizeOriginPackages(originPackages, versionProviders, compiledPatterns, patterns, targetVersions, targetPackage)
+
+	// Convert maps to slices and return as structured result
+	result := &PackageAnalysisResult{
+		Rebuild:   make([]RebuildCandidate, 0, len(rebuilds)),
+		Completed: make([]CompletedPackage, 0, len(completed)),
+		Skipped:   make([]SkippedPackage, 0, len(skipped)),
+	}
+
 	for _, rebuild := range rebuilds {
-		result = append(result, *rebuild)
+		result.Rebuild = append(result.Rebuild, *rebuild)
 	}
 
-	completedResult := make([]CompletedPackage, 0, len(completed))
 	for _, comp := range completed {
-		completedResult = append(completedResult, *comp)
+		result.Completed = append(result.Completed, *comp)
 	}
 
-	return result, completedResult, nil
+	for _, skip := range skipped {
+		result.Skipped = append(result.Skipped, *skip)
+	}
+
+	return result, nil
 }
 
 func isMoreRecent(pkg1, pkg2 *apk.Package) bool {
@@ -557,9 +756,30 @@ func isMoreRecent(pkg1, pkg2 *apk.Package) bool {
 	return apk.CompareVersions(ver1, ver2) > 0
 }
 
-func checkPackageDependenciesWithVersions(pkg *apk.Package, patterns []*regexp.Regexp, patternStrs []string, targetVersions map[string][]string) (bool, string, string) {
-	// Check if any of the package's dependencies match our shared library patterns
-	// and if they are using an older version that needs to transition to the new version
+// PackageTransitionStatus represents the transition state of a package
+// during a shared library version migration. It indicates whether a package
+// needs to be rebuilt, is pinned to an older version stream, or is already
+// up to date.
+type PackageTransitionStatus struct {
+	NeedsRebuild   bool   // Package must be rebuilt for the new library version
+	IsPinned       bool   // Package is intentionally locked to an older version stream
+	MatchedPattern string // Regex pattern that matched the dependency
+	Reason         string // Human-readable explanation of the status
+	PinnedVersion  string // Version the package is pinned to (if IsPinned is true)
+	ProvidedBy     string // Package providing the pinned version (if IsPinned is true)
+}
+
+// checkPackageDependenciesWithVersions analyzes a package's dependencies to determine
+// its transition status during a shared library version migration.
+//
+// It checks if the package depends on shared libraries matching the target patterns and:
+// - Returns NeedsRebuild=true if the package uses an older library version that should be updated
+// - Returns IsPinned=true if the package is intentionally pinned to an older version stream
+// - Returns NeedsRebuild=false and IsPinned=false if the package is already up to date
+//
+// A package is considered pinned if it depends on an older library version that is actively
+// provided by a different version stream package (not the target package itself).
+func checkPackageDependenciesWithVersions(pkg *apk.Package, patterns []*regexp.Regexp, patternStrs []string, targetVersions map[string][]string, versionProviders map[string]map[string]string, targetPackage string) PackageTransitionStatus {
 	for _, dep := range pkg.Dependencies {
 		for i, pattern := range patterns {
 			if pattern.MatchString(dep) {
@@ -579,23 +799,55 @@ func checkPackageDependenciesWithVersions(pkg *apk.Package, patterns []*regexp.R
 					// Find the newest version provided by the target (this is what we're transitioning TO)
 					newestTargetVersion := findNewestVersion(targetVersionsList)
 
-					// If the package depends on anything other than the newest version, it needs rebuilding
+					// If the package depends on anything other than the newest version
 					if depVersion != newestTargetVersion {
-						reason := fmt.Sprintf("depends on %s version %s, but target provides newest version %s (transition needed)", baseLib, depVersion, newestTargetVersion)
-						return true, patternStrs[i], reason
+						// Check if this older version is still actively provided by a version stream package
+						// BUT: only consider it pinned if it's provided by a DIFFERENT package than the target
+						if providers, hasProviders := versionProviders[baseLib]; hasProviders {
+							if provider, isPinned := providers[depVersion]; isPinned && provider != targetPackage {
+								// This package is pinned to an older version stream (not the target package itself)
+								reason := fmt.Sprintf(ReasonPinnedToVersionStream, baseLib, depVersion, provider)
+								log.Printf("Package %s is pinned: %s", pkg.Name, reason)
+								return PackageTransitionStatus{
+									NeedsRebuild:   false,
+									IsPinned:       true,
+									MatchedPattern: patternStrs[i],
+									Reason:         reason,
+									PinnedVersion:  depVersion,
+									ProvidedBy:     provider,
+								}
+							}
+						}
+
+						// Not pinned, needs rebuild
+						reason := fmt.Sprintf(ReasonTransitionNeeded, baseLib, depVersion, newestTargetVersion)
+						return PackageTransitionStatus{
+							NeedsRebuild:   true,
+							IsPinned:       false,
+							MatchedPattern: patternStrs[i],
+							Reason:         reason,
+						}
 					} else {
 						log.Printf("Package %s already uses newest version %s of %s", pkg.Name, depVersion, baseLib)
 					}
 				} else if hasTarget {
 					// Pattern matches but we couldn't determine versions - assume needs rebuild
-					reason := fmt.Sprintf("depends on shared library matching pattern: %s (version comparison inconclusive)", patternStrs[i])
-					return true, patternStrs[i], reason
+					reason := fmt.Sprintf(ReasonVersionComparisonInconclusive, patternStrs[i])
+					return PackageTransitionStatus{
+						NeedsRebuild:   true,
+						IsPinned:       false,
+						MatchedPattern: patternStrs[i],
+						Reason:         reason,
+					}
 				}
 			}
 		}
 	}
 
-	return false, "", ""
+	return PackageTransitionStatus{
+		NeedsRebuild: false,
+		IsPinned:     false,
+	}
 }
 
 func findNewestVersion(versions []string) string {
@@ -608,21 +860,24 @@ func findNewestVersion(versions []string) string {
 
 	newest := versions[0]
 	for _, version := range versions[1:] {
-		// Try to parse as APK versions for proper comparison
+		// Parse as APK versions for proper comparison
 		currentVer, err1 := apk.ParseVersion(version)
 		newestVer, err2 := apk.ParseVersion(newest)
 
-		if err1 != nil || err2 != nil {
-			// If we can't parse as APK versions, do simple string comparison
-			// This handles cases like "3" vs "1" where "3" > "1"
-			if version > newest {
-				newest = version
-			}
-		} else {
-			// Use proper APK version comparison
-			if apk.CompareVersions(currentVer, newestVer) > 0 {
-				newest = version
-			}
+		if err1 != nil {
+			log.Printf("Warning: failed to parse version %q as APK version: %v", version, err1)
+			continue
+		}
+		if err2 != nil {
+			log.Printf("Warning: failed to parse version %q as APK version: %v", newest, err2)
+			// If current parses but newest doesn't, use current
+			newest = version
+			continue
+		}
+
+		// Use proper APK version comparison
+		if apk.CompareVersions(currentVer, newestVer) > 0 {
+			newest = version
 		}
 	}
 

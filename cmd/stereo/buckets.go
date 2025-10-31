@@ -257,7 +257,7 @@ func lock(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRep
 	configs, _, err := apko_build.LockImageConfiguration(ctx, c.Environment, opts...)
 	if err != nil {
 		if err := json.NewEncoder(os.Stderr).Encode(c.Environment); err != nil {
-			return nil, fmt.Errorf("encoding %s: %w", c.Name)
+			return nil, fmt.Errorf("encoding %s: %w", c.Name(), err)
 		}
 		return nil, fmt.Errorf("unable to lock image configuration: %w", err)
 	}
