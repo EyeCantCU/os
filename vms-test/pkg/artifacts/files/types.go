@@ -17,4 +17,6 @@ const (
 	ComplianceHTMLReport
 	ComplianceXMLResults
 	BootCtl
+	SystemdStatusStateFailed
+	SystemdListUnits
 )

@@ -128,6 +128,8 @@ func TestCollectLogs(t *testing.T) {
 		{cmd: []string{"bootctl", "--no-pager"}, id: files.BootCtl},
 		{cmd: []string{"systemd-analyze"}, id: files.SystemdAnalyze},
 		{cmd: []string{"systemd-analyze", "critical-chain"}, id: files.SystemdCriticalChain},
+		{cmd: []string{"systemctl", "status", "--no-pager", "--full", "--state=failed"}, id: files.SystemdStatusStateFailed},
+		{cmd: []string{"systemctl", "list-units", "--no-pager", "--full"}, id: files.SystemdListUnits},
 	}
 
 	errors := map[files.ID]error{}

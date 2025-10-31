@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-const _IDName = "UnidentifiedFileDmesgJournalCtlB0SystemdAnalyzeSystemdCriticalChainProc1MountinfoNestedQemuConsoleComplianceHTMLReportComplianceXMLResultsBootCtl"
+const _IDName = "UnidentifiedFileDmesgJournalCtlB0SystemdAnalyzeSystemdCriticalChainProc1MountinfoNestedQemuConsoleComplianceHTMLReportComplianceXMLResultsBootCtlSystemdStatusStateFailedSystemdListUnits"
 
-var _IDIndex = [...]uint8{0, 16, 21, 33, 47, 67, 81, 98, 118, 138, 145}
+var _IDIndex = [...]uint8{0, 16, 21, 33, 47, 67, 81, 98, 118, 138, 145, 169, 185}
 
-const _IDLowerName = "unidentifiedfiledmesgjournalctlb0systemdanalyzesystemdcriticalchainproc1mountinfonestedqemuconsolecompliancehtmlreportcompliancexmlresultsbootctl"
+const _IDLowerName = "unidentifiedfiledmesgjournalctlb0systemdanalyzesystemdcriticalchainproc1mountinfonestedqemuconsolecompliancehtmlreportcompliancexmlresultsbootctlsystemdstatusstatefailedsystemdlistunits"
 
 func (i ID) String() string {
 	if i < 0 || i >= ID(len(_IDIndex)-1) {
@@ -35,9 +35,11 @@ func _IDNoOp() {
 	_ = x[ComplianceHTMLReport-(7)]
 	_ = x[ComplianceXMLResults-(8)]
 	_ = x[BootCtl-(9)]
+	_ = x[SystemdStatusStateFailed-(10)]
+	_ = x[SystemdListUnits-(11)]
 }
 
-var _IDValues = []ID{UnidentifiedFile, Dmesg, JournalCtlB0, SystemdAnalyze, SystemdCriticalChain, Proc1Mountinfo, NestedQemuConsole, ComplianceHTMLReport, ComplianceXMLResults, BootCtl}
+var _IDValues = []ID{UnidentifiedFile, Dmesg, JournalCtlB0, SystemdAnalyze, SystemdCriticalChain, Proc1Mountinfo, NestedQemuConsole, ComplianceHTMLReport, ComplianceXMLResults, BootCtl, SystemdStatusStateFailed, SystemdListUnits}
 
 var _IDNameToValueMap = map[string]ID{
 	_IDName[0:16]:         UnidentifiedFile,
@@ -60,6 +62,10 @@ var _IDNameToValueMap = map[string]ID{
 	_IDLowerName[118:138]: ComplianceXMLResults,
 	_IDName[138:145]:      BootCtl,
 	_IDLowerName[138:145]: BootCtl,
+	_IDName[145:169]:      SystemdStatusStateFailed,
+	_IDLowerName[145:169]: SystemdStatusStateFailed,
+	_IDName[169:185]:      SystemdListUnits,
+	_IDLowerName[169:185]: SystemdListUnits,
 }
 
 var _IDNames = []string{
@@ -73,6 +79,8 @@ var _IDNames = []string{
 	_IDName[98:118],
 	_IDName[118:138],
 	_IDName[138:145],
+	_IDName[145:169],
+	_IDName[169:185],
 }
 
 // IDString retrieves an enum value from the enum constants string name.
