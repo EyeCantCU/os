@@ -92,6 +92,7 @@ func launchCmd() *cobra.Command {
 				Location: &region,
 				Tags:     resourceTags,
 				Properties: &armnetwork.InterfacePropertiesFormat{
+					EnableAcceleratedNetworking: utils.ToPtr(true),
 					IPConfigurations: []*armnetwork.InterfaceIPConfiguration{
 						{
 							Name: utils.ToPtr(fmt.Sprintf("ipconfig-%s", vmName)),
