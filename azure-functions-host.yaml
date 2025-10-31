@@ -1,6 +1,6 @@
 package:
   name: azure-functions-host
-  version: "4.1044.400"
+  version: "4.1045.100"
   epoch: 0
   description: Runtime host used by the Azure Functions service.
   target-architecture:
@@ -16,6 +16,16 @@ package:
     runtime:
       - aspnet-8-runtime
       - dotnet-8-runtime
+
+data:
+  - name: py-versions
+    items:
+      3.11:
+      3.12:
+
+  - name: py-versions-with-runtime
+    items:
+      3.13:
 
 environment:
   environment:
@@ -38,6 +48,8 @@ environment:
       - protobuf
       - protobuf-dev
       - protoc
+      - py3-supported-azure-functions-worker
+      - uv
       - wget
       - zlib
       - zlib-dev
@@ -47,7 +59,7 @@ pipeline:
     with:
       repository: https://github.com/Azure/azure-functions-host
       tag: v${{package.version}}
-      expected-commit: ac5f4d4d963db7316fa7516d0b349528452421b4
+      expected-commit: 79dcda6c0b0070ef6f327e8732c6687f75ab1c59
       destination: /home/build/src
 
   - name: Download nuget.exe CLI
@@ -67,12 +79,14 @@ pipeline:
         runs: |
           # Use the locally built workers
           dotnet nuget add source /home/build/packages/ --name LocalWorker
+
           # Build the package
           BUILD_NUMBER=$(echo "${{package.version}}" | cut -d'.' -f 3)
           HOST_COMMIT=$(git rev-list -1 HEAD)
-          mkdir -p "${{targets.destdir}}"/azure-functions-host
-          dotnet publish --verbosity detailed /p:BuildNumber=$BUILD_NUMBER /p:CommitHash=$HOST_COMMIT src/WebJobs.Script.WebHost/WebJobs.Script.WebHost.csproj -c Release --output "${{targets.destdir}}"/azure-functions-host --runtime linux-x64
-          mv "${{targets.destdir}}"/azure-functions-host/workers /home/build/temp_workers
+          mkdir -p "${{targets.contextdir}}"/azure-functions-host
+          dotnet publish --verbosity detailed /p:BuildNumber=$BUILD_NUMBER /p:CommitHash=$HOST_COMMIT src/WebJobs.Script.WebHost/WebJobs.Script.WebHost.csproj -c Release --output "${{targets.contextdir}}"/azure-functions-host --runtime linux-x64
+
+          mv "${{targets.contextdir}}"/azure-functions-host/workers /home/build/temp_workers
 
 subpackages:
   - name: azure-functions-host-nodejs-worker
@@ -90,6 +104,186 @@ subpackages:
         - name: Test worker directory exists
           runs: |
             test -d /azure-functions-host/workers/node
+
+  # Python worker subpackages for 3.11 and 3.12 (worker only)
+  - range: py-versions
+    name: azure-functions-host-python${{range.key}}-worker
+    description: "Python ${{range.key}} worker runtime integrated into the Azure Functions Host package."
+    pipeline:
+      - name: Install Azure Functions Python ${{range.key}} Worker into the Host package
+        runs: |
+          # Create directory structure for Python worker
+          mkdir -p ${{targets.contextdir}}/azure-functions-host/workers/python/${{range.key}}/LINUX/X64
+          mkdir -p ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages
+
+          cp -r /usr/share/azure-functions-python-worker/worker.config.json ${{targets.contextdir}}/azure-functions-host/workers/python/worker.config.json
+
+          # Install additional debug/development packages to match Microsoft's image
+          uv venv --python ${{range.key}}
+          uv pip install \
+            pip \
+            ptvsd
+
+          if [ "${{range.key}}" = "3.12" ]; then
+            uv pip install \
+              debugpy \
+              gunicorn \
+              objprint \
+              orjson \
+              packaging \
+              psutil \
+              vizplugins \
+              viztracer
+          fi
+
+          # Vendor dependencies to match Microsoft's image structure
+          for dep in azure azure_functions_worker azurefunctions dateutil google grpc markupsafe six.py werkzeug worker.py
+          do
+            cp -r /usr/lib/python${{range.key}}/site-packages/$dep ${{targets.contextdir}}/azure-functions-host/workers/python/${{range.key}}/LINUX/X64/$dep
+          done
+
+          # Install system Python dependencies
+          cp -r .venv/lib/python${{range.key}}/site-packages/* ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/
+    test:
+      environment:
+        contents:
+          packages:
+            - py${{range.key}}-azure-functions-worker
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+        - name: Test worker directory and files exist
+          runs: |
+            test -d /azure-functions-host/workers/python
+            test -f /azure-functions-host/workers/python/worker.config.json
+            test -f /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/worker.py
+            test -d /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/azure_functions_worker
+        - name: Test worker functionality
+          runs: |
+            set -euo pipefail
+            cd /azure-functions-host/workers/python/${{range.key}}/LINUX/X64
+
+            # Test worker help shows expected options
+            python${{range.key}} worker.py --help
+
+            # Test worker can import required modules
+            python${{range.key}} -c "
+            import azure_functions_worker
+            from azure_functions_worker import main, dispatcher
+            print('Worker modules imported successfully')
+            "
+
+            # Test worker configuration file is valid JSON
+            python${{range.key}} -c "
+            import json
+            with open('/azure-functions-host/workers/python/worker.config.json', 'r') as f:
+                config = json.load(f)
+                assert 'description' in config
+                assert 'defaultExecutablePath' in config['description']
+                assert 'language' in config['description']
+                assert config['description']['language'] == 'python'
+                print('Worker configuration is valid')
+            "
+
+  # Python worker subpackages for 3.13 (worker + runtime packages)
+  - range: py-versions-with-runtime
+    name: azure-functions-host-python${{range.key}}-worker
+    description: "Python ${{range.key}} worker runtime integrated into the Azure Functions Host package (includes v2 runtime)."
+    pipeline:
+      - name: Install Azure Functions Python ${{range.key}} Worker into the Host package
+        runs: |
+          # Create directory structure for Python worker
+          mkdir -p "${{targets.contextdir}}"/azure-functions-host/workers/python/${{range.key}}/LINUX/X64
+          mkdir -p ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages
+
+          cp -r /usr/share/azure-functions-python-worker/worker.config.json ${{targets.contextdir}}/azure-functions-host/workers/python/worker.config.json
+
+          # Install additional debug/development packages to match Microsoft's image
+          uv venv --python ${{range.key}}
+          uv pip install \
+            debugpy \
+            gunicorn \
+            objprint \
+            orjson \
+            packaging \
+            pip \
+            psutil \
+            ptvsd \
+            vizplugins \
+            viztracer
+
+          # Copy V1 and V2 runtime workers
+          cp -r /usr/lib/python${{range.key}}/site-packages/azure_functions_runtime_v1 \
+            ${{targets.contextdir}}/azure-functions-host/workers/python/${{range.key}}/LINUX/X64/azure_functions_runtime_v1
+          cp -r /usr/lib/python${{range.key}}/site-packages/azure_functions_runtime \
+            ${{targets.contextdir}}/azure-functions-host/workers/python/${{range.key}}/LINUX/X64/azure_functions_runtime
+
+          # Vendor dependencies to match Microsoft's image structure
+          for dep in azure azurefunctions google grpc markupsafe proxy_worker six.py uvloop werkzeug worker.py
+          do
+            cp -r /usr/lib/python${{range.key}}/site-packages/$dep ${{targets.contextdir}}/azure-functions-host/workers/python/${{range.key}}/LINUX/X64/$dep
+          done
+
+          # Install system Python dependencies
+          cp -r .venv/lib/python${{range.key}}/site-packages/* ${{targets.contextdir}}/usr/lib/python${{range.key}}/site-packages/
+    test:
+      environment:
+        contents:
+          packages:
+            - py${{range.key}}-azure-functions-worker
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+        - name: Test worker directory and files exist
+          runs: |
+            test -d /azure-functions-host/workers/python
+            test -f /azure-functions-host/workers/python/worker.config.json
+            test -f /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/worker.py
+            test -d /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/proxy_worker
+            test -d /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/azure_functions_runtime_v1
+            test -d /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/azure_functions_runtime
+            # Test vendored dependencies
+            test -d /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/werkzeug
+            test -f /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/six.py
+            test -d /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/markupsafe
+            test -d /azure-functions-host/workers/python/${{range.key}}/LINUX/X64/grpc
+        - name: Test worker functionality
+          runs: |
+            set -euo pipefail
+            cd /azure-functions-host/workers/python/${{range.key}}/LINUX/X64
+
+            # Test worker help shows expected options
+            python${{range.key}} worker.py --help
+
+            # Test worker can import required modules (proxy worker for 3.13+)
+            python${{range.key}} -c "
+            import proxy_worker
+            from proxy_worker import dispatcher
+            print('Proxy worker modules imported successfully')
+            "
+
+            # Test worker configuration file is valid JSON
+            python${{range.key}} -c "
+            import json
+            with open('/azure-functions-host/workers/python/worker.config.json', 'r') as f:
+                config = json.load(f)
+                assert 'description' in config
+                assert 'defaultExecutablePath' in config['description']
+                assert 'language' in config['description']
+                assert config['description']['language'] == 'python'
+                print('Worker configuration is valid')
+            "
+
+            # Test vendored dependencies are importable
+            python${{range.key}} -c "
+            import werkzeug
+            import six
+            import markupsafe
+            import grpc
+            print('Vendored dependencies imported successfully')
+            "
 
   - name: azure-functions-host-compat
     description: "Compatibility package for the Azure Functions image."
@@ -131,6 +325,7 @@ test:
       packages:
         - azure-functions-host-nodejs-worker
         - curl
+        - jq
     environment:
       ASPNETCORE_CONTENTROOT: /azure-functions-host
       FUNCTIONS_WORKER_RUNTIME: node
@@ -139,16 +334,14 @@ test:
       ASPNETCORE_URLS: http://127.0.0.1:8082
   pipeline:
     - uses: test/tw/ldd-check
-    - name: Test Azure Functions Host startup
-      runs: |
-        /azure-functions-host/Microsoft.Azure.WebJobs.Script.WebHost &
-        HOST_PID=$!
-
-        # Wait for the host to start
-        sleep 5
-        if (curl -s http://127.0.0.1:8082 | grep -iq 'your azure function app is up and running'); then
-            kill -9 "$HOST_PID"
-        else
-            kill -9 "$HOST_PID"
-            exit 1
-        fi
+    - uses: test/daemon-check-output
+      with:
+        start: "/azure-functions-host/Microsoft.Azure.WebJobs.Script.WebHost"
+        expected_output: |
+          Now listening on: http://127.0.0.1:8082
+          Application started
+        post: |
+          set -euo pipefail
+          # Test main homepage response
+          RESPONSE=$(curl -f -s http://127.0.0.1:8082)
+          echo "$RESPONSE" | grep -iq "Your Functions.*app is up and running"
