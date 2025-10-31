@@ -1,7 +1,7 @@
 package:
   name: DCGM-cuda-12.9
-  version: "4.2.3"
-  epoch: 1
+  version: "4.4.1"
+  epoch: 0
   description: "NVIDIA Data Center GPU Manager"
   copyright:
     - license: Apache-2.0
@@ -35,8 +35,11 @@ environment:
       - Catch2-2.13-dev
       - Catch2-2.13-static
       - bash
-      - boost-dev~1.88
-      - boost-static~1.88
+      # boost 1.86 we no longer have in melange, but we still have the APKs
+      # the alternative is to use a newer boost APKs and patch the upstream code to be able to work with it
+      # but that means manually rebasing the patches every upstream release. This seems easier.
+      - boost-dev~1.86
+      - boost-static~1.86
       - build-base
       - busybox
       - ca-certificates-bundle
@@ -50,6 +53,8 @@ environment:
       - libevent-dev
       - libevent-static
       - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-libcublas-${{vars.cuda-version}}
+      - nvidia-libcublas-${{vars.cuda-version}}-dev
       - plog-dev
       - plog-static
       - tclap
@@ -60,20 +65,29 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/NVIDIA/DCGM
-      expected-commit: 6e947dcac9b3160d61d98fea4741d51d4bec5c1f
+      expected-commit: ca755f1487915935447be84e70c45d2d7b050f3c
       tag: v${{package.version}}
 
   - uses: patch
     with:
-      patches: fix-build-update-boost-api.patch fix-build-boost-process-v1.patch fix-link-ordering.patch
+      patches: |
+        fix-link-ordering.patch
+        coinstallability-workaround.patch
 
   - runs: |
       # code has unused variables in C code
       sed -i 's|-Werror|-Wno-error|' CMakeLists.txt
-      # Cannot currently coinstall, hence both are the same build, and
-      # "11" one is removed
-      sed -i 's|11.8|12.9|' -i ./cmake/FindCuda.cmake
-      sed -i 's|12.8|12.9|' -i ./cmake/FindCuda.cmake
+      # Cannot currently coinstall, but can't easily disable a single cuda variant, so
+      # we trick the system into building all cuda versions as our versioin
+      sed -i 's|11.8|${{vars.cuda-version}}|' -i ./cmake/FindCuda.cmake
+      sed -i 's|12.8|${{vars.cuda-version}}|' -i ./cmake/FindCuda.cmake
+      sed -i 's|13.0|${{vars.cuda-version}}|' -i ./cmake/FindCuda.cmake
+
+      # FindCuda expects a `target/<arch>` part of the path which we don't have
+      sed -i '/unset(_Cuda_PATH)/ aset(_Cuda_TARGET_DIR "")' cmake/FindCuda.cmake
+
+      # FindCuda doesn't look in /usr/local, so add it to the set of paths considered
+      sed -i '/unset(_Cuda_PATH)/ alist(APPEND _Cuda_PATHS "/usr/local")' cmake/FindCuda.cmake
 
   - uses: cmake/configure
     with:
@@ -128,12 +142,24 @@ subpackages:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/share
           mv ${{targets.destdir}}/usr/share/dcgm_tests ${{targets.contextdir}}/usr/share
+    test:
+      pipeline:
+        - name: "basic verification some files are in the expected path"
+          runs: |
+            stat /usr/share/dcgm_tests/__init__.py
+            stat /usr/share/dcgm_tests/apps/__init__.py
 
   - name: ${{package.name}}-nvvs
     pipeline:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/libexec
           mv ${{targets.destdir}}/usr/libexec/datacenter-gpu-manager-4 ${{targets.contextdir}}/usr/libexec/datacenter-gpu-manager-4
+    test:
+      pipeline:
+        - name: "basic verification some files are in the expected path"
+          runs: |
+            stat /usr/libexec/datacenter-gpu-manager-4/nvvs
+            stat /usr/libexec/datacenter-gpu-manager-4/plugins/cuda12/nvbandwidth
 
 update:
   enabled: true
