@@ -442,6 +442,23 @@ $(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	  --output=$(patsubst %-build,%,$@) \
 	  configs/$*/build.yaml
 
+$(ARCH_OUT_D)/lxd-%/build.stamp: configs/lxd-%/build.yaml
+	@mkdir -p $(dir $@)
+	# Create metadata
+	cp -r lxd/ $(dir $@)/
+	sed -i 's|@ARCH@|$(ARCH)|;s|@TIMESTAMP@|$(shell busybox date -d $(BUILD_TIMESTAMP) -D %Y%m%d-%H%M +%s)|' $(dir $@)/lxd/metadata.yaml
+	tar -C $(dir $@)/lxd -c -J -f $(dir $@)/chainguard-$*-lxd.tar.xz .
+	rm -rf $(dir $@)/lxd
+	# Create squashfs
+	apko build-minirootfs --build-arch=$(ARCH) $< $(dir $@)/disk.tar
+	# TODO /var/log/journal has xattrs which lxd refuses to support
+	# Ubuntu uses xz, but upgrade to zstd should have wide support now
+	cat $(dir $@)/disk.tar | mksquashfs - $(dir $@)/chainguard-$*.squashfs -tar -no-progress -no-xattrs -comp zstd -Xcompression-level 19
+	rm -f $(dir $@)/disk.tar
+	# Create README
+	echo "Import with: lxc image import chainguard-$*-lxd.tar.xz chainguard-$*.squashfs --alias chainguard-$*" >> $(dir $@)/README.md
+	touch $@
+
 shellcheck: .shellcheck
 .shellcheck: $(shell_scripts)
 	@rc=0;for script in $(shell_scripts); do \
