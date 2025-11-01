@@ -1,5 +1,5 @@
 package:
-  name: nrdot-collector-k8s
+  name: nrdot-collector-k8s-fips
   version: "1.5.0"
   epoch: 0
   description: Custom distributions of the OpenTelemetry Collector for New Relic
@@ -7,13 +7,14 @@ package:
     - license: Apache-2.0
 
 vars:
-  build_folder: _build
+  build_folder: _build-fips
 
 environment:
   contents:
     packages:
       - busybox
-      - opentelemetry-collector-ocb
+      - opentelemetry-collector-ocb-fips
+      - yq-fips
 
 pipeline:
   - uses: git-checkout
@@ -29,26 +30,24 @@ pipeline:
       sed -i 's/0\.135\.0/0.138.0/g' ./distributions/nrdot-collector-k8s/manifest.yaml
       sed -i 's/1\.41\.0/1.44.0/g' ./distributions/nrdot-collector-k8s/manifest.yaml
 
-      CGO_ENABLED=0 ocb --skip-compilation=true --config ./distributions/nrdot-collector-k8s/manifest.yaml > ${{targets.contextdir}}/${{vars.build_folder}}/build.log 2>&1
+      # https://github.com/newrelic/nrdot-collector-releases/blob/main/scripts/build.sh#L50 modification for fips
+      yq eval '
+         .dist.name += "-fips" |
+         .dist.description += "-fips" |
+         .dist.output_path += "-fips"' ./distributions/nrdot-collector-k8s/manifest.yaml > ./distributions/nrdot-collector-k8s/manifest-fips.yaml
+
+      CGO_ENABLED=0 ocb --skip-compilation=true --config ./distributions/nrdot-collector-k8s/manifest-fips.yaml > ${{targets.contextdir}}/${{vars.build_folder}}/build.log 2>&1
       mv ${{vars.build_folder}}/* ${{targets.contextdir}}/${{vars.build_folder}}
+      mv ./fips/fips.go ${{targets.contextdir}}/${{vars.build_folder}}
 
   - uses: go/build
     with:
       output: nrdot-collector-k8s
       packages: .
       modroot: ${{targets.contextdir}}/${{vars.build_folder}}
+      go-package: go-fips
 
-subpackages:
-  - name: ${{package.name}}-compat
-    description: ${{package.name}} compatibility libraries
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"
-          ln -sf /usr/bin/nrdot-collector-k8s ${{targets.subpkgdir}}/nrdot-collector-k8s
-    test:
-      pipeline:
-        - runs: |
-            test "$(readlink /nrdot-collector-k8s)" = "/usr/bin/nrdot-collector-k8s"
+# we have a symlink compat package in non fips that we should use while building the fips image
 
 test:
   environment:
@@ -57,6 +56,7 @@ test:
         - curl
         - wait-for-it
   pipeline:
+    - uses: test/go-fips-check
     - uses: test/tw/ver-check
       with:
         bins: nrdot-collector-k8s
