@@ -35,6 +35,7 @@ var (
 	deleteJobs            int
 	dbHashes              []string
 	trustedLaunch         bool
+	apiCallAttempts       int
 )
 
 const (
@@ -91,6 +92,7 @@ Examples:
 	rootCmd.Flags().BoolVar(&deleteIfNecessary, "delete-if-necessary", false, "Delete and recreate image definition if conflicts occur")
 	rootCmd.Flags().IntVar(&deleteJobs, "delete-jobs", runtime.NumCPU()+1, "Parallel jobs for deletion")
 	rootCmd.Flags().StringSliceVar(&dbHashes, "db-hash", []string{}, "Secureboot db base64 encoded hashes to add")
+	rootCmd.Flags().IntVar(&apiCallAttempts, "api-attempts", 3, "Times to attempt Azure API calls")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -220,6 +222,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		regions:        regions,
 		tags:           azTags,
 		dbHashes:       dbHashes,
+		Attempts:       apiCallAttempts,
 	}
 	err = createImageVersion(ctx, clients, opts, verbose)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 )
@@ -44,4 +45,16 @@ func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClien
 	}
 
 	return clients, nil
+}
+
+func tryAPICall[T any](call func() (*runtime.Poller[T], error), tries int) (*runtime.Poller[T], error) {
+	var p *runtime.Poller[T]
+	var err error
+	for i := 0; i < tries; i++ {
+		p, err = call()
+		if err == nil {
+			return p, err
+		}
+	}
+	return p, err
 }
