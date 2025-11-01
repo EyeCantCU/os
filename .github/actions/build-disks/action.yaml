@@ -64,6 +64,40 @@ runs:
           kvm-ok
           groups || :
 
+      - name: set environment variables
+        shell: bash
+        run: |
+          # set VM_CONCURRENT_BUILD_MAX and friends
+          echo "$(nproc) processors"
+          echo "=== /proc/meminfo ==="
+          grep ^Mem /proc/meminfo
+
+          # /proc/meminfo lines look like 'MemFree:  1342648 kB'
+          memfree=$(awk '/MemFree/ { print $2 }' /proc/meminfo) &&
+            [ "$memfree" -gt 1 ] ||
+            { echo "FATAL: could not read MemFree"; exit 1; }
+          memtot=$(awk '/MemTotal/ { print $2 }' /proc/meminfo) &&
+            [ "$memtot" -gt 1 ] ||
+            { echo "FATAL: could not read MemTotal"; exit 1; }
+          numprocs=$(nproc) ||
+            { echo "FATAL: could not get number of processors"; exit 1; }
+
+          # num build vms is based on available memory
+          vmmem_kb=$((4*1024*1024)) # memory used per vm in kb
+          maxbuildvms=$((memfree/vmmem_kb)) && [ "$maxbuildvms" -ge 1 ] ||
+              { echo "FATAL: could not determine maxbuildvms"; exit 1; }
+
+          # num test vms min of memTotal/2 or procs/2
+          bymem=$((memtot/vmmem_kb))
+          byprocs=$((numprocs/2))
+          echo "bymem=$bymem byprocs=$byprocs"
+          [ $bymem -lt $byprocs ] && maxtestvms=$bymem || maxtestvms=$byprocs
+
+          tee -a "$GITHUB_ENV" <<EOF
+          VM_CONCURRENT_BUILD_MAX=$maxbuildvms
+          VM_CONCURRENT_TEST_MAX=$maxtestvms
+          EOF
+
       - name: make clean
         shell: bash
         run: |
@@ -85,12 +119,9 @@ runs:
           df -h || true
           printenv | grep -E TE?MP || true
 
-          num_vms=$(awk -v gb_per_vm=4 '/MemFree/ { print int($2 / 1024 / 1024 / gb_per_vm) }' /proc/meminfo)
-          if [[ -z ${num_vms} ]] || [[ ${num_vms} -lt 1 ]]; then
-              num_vms=1
-          fi
-          echo "Running with concurrency limited to ${num_vms} jobs"
-          make -j"${num_vms}" --output-sync=recurse ARCH="${VM_ARCH}" "disks-${VM_GROUP}"
+          [ -n "$VM_CONCURRENT_BUILD_MAX" ] || { echo "VM_CONCURRENT_BUILD_MAX not set"; exit 1; }
+          echo "Running with concurrency limited to ${VM_CONCURRENT_BUILD_MAX} jobs"
+          make -j"${VM_CONCURRENT_BUILD_MAX}" --output-sync=recurse ARCH="${VM_ARCH}" "disks-${VM_GROUP}"
         env:
           VM_ARCH: ${{ inputs.arch }}
           VM_GROUP: ${{ inputs.vm_group }}
