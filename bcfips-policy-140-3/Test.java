@@ -235,8 +235,7 @@ public class Test {
 
         String expectedAlgorithm = "ENTROPY";
         String expectedProvider = "BCRNG";
-        String environmentSetting = System.getenv("ENTROPY");
-        if (environmentSetting != null && environmentSetting.equals("KERNEL")) {
+        if ("file:/dev/random".equals(Security.getProperty("securerandom.source"))) {
                 expectedAlgorithm = "NativePRNGBlocking";
                 expectedProvider = "SUN";
         }
