@@ -3,7 +3,7 @@ module chainguard.dev/wolfi-vm
 go 1.25
 
 require (
-	chainguard.dev/apko v0.30.17
+	chainguard.dev/apko v0.30.18
 	cloud.google.com/go/compute v1.49.1
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.0
@@ -27,7 +27,7 @@ require (
 	github.com/safchain/ethtool v0.6.2
 	github.com/spf13/cobra v1.10.1
 	github.com/vishvananda/netlink v1.3.1
-	github.com/wolfi-dev/wolfictl v0.38.19
+	github.com/wolfi-dev/wolfictl v0.38.20
 	golang.org/x/crypto v0.43.0
 	golang.org/x/oauth2 v0.32.0
 	golang.org/x/sys v0.37.0
