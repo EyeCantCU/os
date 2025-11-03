@@ -8,7 +8,7 @@ BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
 
 # Space-separated list of image names to exclude from all groups
 # Example: SKIP_IMAGES="aws-ecs-foo generic-base" make disks-aws-ecs
-SKIP_IMAGES = aws-ecs-full-immutable aws-ecs-fips-full-immutable aws-eks-1.31-fips-dev aws-eks-1.32-dev-hardened aws-eks-1.32-fips-dev-hardened aws-eks-1.33-dev-hardened aws-eks-1.33-fips-dev-hardened
+SKIP_IMAGES = aws-ecs-full-immutable aws-ecs-fips-full-immutable aws-eks-1.32-dev-hardened aws-eks-1.32-fips-dev-hardened aws-eks-1.33-dev-hardened aws-eks-1.33-fips-dev-hardened
 
 # list_cloud_images(cloud)
 # Returns list of images for the given cloud prefix, excluding any in SKIP_IMAGES
