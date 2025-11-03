@@ -282,6 +282,28 @@ cluster_resources() {
     echo "$vpc_id $subnet_id $sg_id $profile_name $basic_task_arn"
 }
 
+instance_get_logs() {
+    [ -d "$outd" ] || {
+        log 'no output directory given, not fetching instance logs'
+        return 1
+    }
+
+    local rc=0 json
+
+    for instance_id; do
+        json=$(vr "${aws[@]}" ec2 get-console-output \
+                --latest --instance-id "$instance_id" \
+        ) || {
+            log "failed to fetch console output for instance '$instance_id'"
+            rc=1
+            continue
+        }
+        jq -r '.Output' <<<"$json" >"$outd/$instance_id.txt"
+    done
+
+    return "$rc"
+}
+
 Usage_instance_add() {
     cat <<EOF
 Usage: ${0##*/} instance-add cluster ami capacity instance-type
@@ -359,6 +381,7 @@ echo 'ECS_ENABLE_TASK_IAM_ROLE=true' >> /etc/ecs/ecs.config
     log "Waiting for instances ${instance_ids[*]} to be reported as running"
     vr "${aws[@]}" ec2 wait instance-running --instance-ids "${instance_ids[@]}" || {
         stderr "Instances ${instance_ids[*]} did not flip to running"
+        instance_get_logs "${instance_ids[@]}"
         instance_remove "${instance_ids[@]}"
         return 1
     }
@@ -389,6 +412,7 @@ echo 'ECS_ENABLE_TASK_IAM_ROLE=true' >> /etc/ecs/ecs.config
 
     if [ "$num_joined" -ne "$capacity" ]; then
         stderr 'Some instances failed to join the cluster'
+        instance_get_logs "${instance_ids[@]}"
         instance_remove "${instance_ids[@]}"
         return 1
     fi
@@ -498,7 +522,7 @@ test_basic_task() {
 
 Usage_run_test() {
     cat <<EOF
-Usage: ${0##*/} [ options ] out-dir
+Usage: ${0##*/} [ options ] [ out-dir ]
 
    Test an ECS AMI (including cluster setup if needed).
 
@@ -547,6 +571,16 @@ run_test() {
         esac
         shift
     done
+
+    local outd
+    if [ $# -eq 1 ]; then
+        outd=$1
+        shift
+        mkdir -p "$outd" || {
+            stderr "Failed to create output directory '$outd'"
+            return 1
+        }
+    fi
 
     if [ -z "$ami_id" ] && [ -z "$awspub_file" ]; then
         Usage_run_test >&2
@@ -645,6 +679,8 @@ run_test() {
     for test_fn in "${failed[@]}"; do
         log "FAIL $test_fn"
     done
+
+    instance_get_logs "${instance_ids[@]}"
 
     if [ "$teardown" = "true" ]; then
         instance_remove "${instance_ids[@]}" || {
