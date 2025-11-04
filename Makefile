@@ -2,6 +2,31 @@ TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 TOOLS_SUBD = tools
 TOOLS_D = $(TOP_D)/$(TOOLS_SUBD)
 HASH := \#
+ART ?= tools/art
+YAM ?= tools/yam
+YQ ?= tools/yq
+
+cue_files=$(shell find . -name '*.cue' ! -name '*_lock.cue')
+go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)
+# Hack to make things paths like github.com/mikefarah/yq/v4 work normally
+# Find the last component of the go package path. If the last component is
+# /v[0-9]+ and matches the module version, remove it. Then use whatever the
+# the last path component is after the removal.
+go_binary_name = $(shell \
+	MOD_PATH="$1"; \
+	MOD_VERSION=$$(go list -f '{{.Module.Version}}' $(1)); \
+	MAJOR_VERSION=$$(echo $$MOD_VERSION | grep -oE 'v[0-9]+'); \
+	echo $$MOD_PATH | sed "s|$$MAJOR_VERSION\$$||" | xargs basename;)
+go_tools_bin=$(foreach tool,$(go_tools),tools/$(call go_binary_name,$(tool)))
+# List each import listed in files tagged 'tools', find the module with the path we're looking for,
+# get the version we're supposed to be using, and install the binary into tools.
+$(go_tools_bin): go.mod pkg/tools/tools.go
+	@mkdir -p tools/
+	@TOOL_PKG=$$(go list -tags tools -f '{{join .Imports "\n"}}' -e ./pkg/tools | grep -E '.*/$(@F)(/.*|$$)'); \
+	TOOL_VER=$$(go list -f '{{.Module.Version}}' "$$TOOL_PKG"); \
+	export GOPRIVATE=github.com/chainguard-images/images-private; \
+	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_VER}"; \
+	GOBIN=$$(pwd)/tools/ go install "$${TOOL_PKG}@$${TOOL_VER}"
 
 # when converting from an existing image, we stuff these in.
 BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
@@ -9,11 +34,14 @@ BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
 # Space-separated list of image names to exclude from all groups
 # Example: SKIP_IMAGES="aws-ecs-foo generic-base" make disks-aws-ecs
 SKIP_IMAGES = aws-ecs-fips-full-immutable
+cfgs = $(wildcard configs/*-*)
+# names is a list of each basename cfg
+names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
 
 # list_cloud_images(cloud)
 # Returns list of images for the given cloud prefix, excluding any in SKIP_IMAGES
 define list_cloud_images
-	$(filter-out $(SKIP_IMAGES),$(notdir $(wildcard configs/$1-*)))
+	$(filter-out $(SKIP_IMAGES),$(filter $1-%,$(names)))
 endef
 
 shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
@@ -45,10 +73,6 @@ ARCH_OUT_D = output/$(ARCH)
 
 BUILDER_KERNEL := builder/kernel-$(BUILDER_ARCH)
 BUILDER_INITRD := builder/initrd-$(BUILDER)-$(BUILDER_ARCH)
-
-cfgs = $(wildcard configs/*)
-# names is a list of each basename cfg
-names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
 
 gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
@@ -164,19 +188,51 @@ $(debug_shell_targets): debug-shell-%:
 	@echo "[hit enter for shell prompt. ctrl-e to exit]"
 	@socat STDIO,cfmakeraw,isig=1,escape=0x05 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
 
-configs/%/build.yaml:
+art_render_targets = $(foreach name,$(names),art-render-$(name))
+art-render-all: $(art_render_targets)
+art-render-qemu: $(filter art-render-generic-%,$(art_render_targets))
+art-render-azure: $(filter art-render-azure-%,$(art_render_targets))
+art-render-aws: $(filter art-render-aws-%,$(art_render_targets))
+art-render-gcp: $(filter art-render-gcp-%,$(art_render_targets))
+art-render-vmware: $(filter art-render-vmware-%,$(art_render_targets))
+art-render-rpi: $(filter art-render-rpi-%,$(art_render_targets))
+.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-gcp art-render-vmware art-render-rpi $(art_render_targets)
+$(art_render_targets): art-render-%: configs/%/build.yaml
+
+configs/%/build.yaml: $(ART) $(YQ) $(YAM) $(cue_files)
 	@mkdir -p $(dir $@)
-	cosign verify-attestation \
-	--type=https://apko.dev/image-configuration \
-	--certificate-oidc-issuer=https://token.actions.githubusercontent.com \
-	--certificate-identity=https://github.com/chainguard-images/images-private/.github/workflows/release.yaml@refs/heads/main \
-	"cgr.dev/chainguard-private/$*" > $@.tmp.json
-	jq -r . $@.tmp.json | yq -P > $@.tmp && rm $@.tmp.json
-	yq -P -i '.payload | @base64d | fromjson | .predicate' $@.tmp
-	for i in $(BOOT_PKGS) ; do \
-		yq -i ".contents.packages += [\"$$i\"]" $@.tmp; \
-	done
-	mv $@.tmp $@
+	@test -f "configs/$*/build.cue" || exec $(YAM) --sort .packages configs/$*/build.yaml; \
+	set -xe; \
+	$(ART) resolve ./configs/$*; \
+	$(ART) lock --tf=false ./configs/$*; \
+	render_json="$$($(ART) render ./configs/$*)"; \
+	echo "$$render_json" | $(YQ) -p=json > ./configs/$*/build.yaml; \
+	$(YAM) --sort .packages ./configs/$*/build.yaml
+
+art_diff_targets = $(foreach name,$(names),art-diff-$(name))
+art-diff-all: $(art_diff_targets)
+art-diff-qemu: $(filter art-diff-generic-%,$(art_diff_targets))
+art-diff-azure: $(filter art-diff-azure-%,$(art_diff_targets))
+art-diff-aws: $(filter art-diff-aws-%,$(art_diff_targets))
+art-diff-gcp: $(filter art-diff-gcp-%,$(art_diff_targets))
+art-diff-vmware: $(filter art-diff-vmware-%,$(art_diff_targets))
+art-diff-rpi: $(filter art-diff-rpi-%,$(art_diff_targets))
+.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-gcp art-diff-vmware art-diff-rpi $(art_diff_targets)
+# The purpose of this is to catch build.yaml files committed in CI which differ from the rendered build.yaml
+# that goes with the associated cue file.
+# This is desirable to 1. make it easier to analyze what's happening in an image
+# by ensuring it's possible to just read build.yaml since it's up to date and
+# 2. Get us closer to the end-goal of being able to reproduce any build by
+# checking out the commit SHA it was built from. (note this requires better
+# handling of *_lock.cue files than we currently have).
+$(art_diff_targets): art-diff-%: $(ART) $(YQ) $(YAM)
+	@test -f "configs/$*/build.cue" || exit 0; \
+	set -xe; \
+	render_json="$$($(ART) render ./configs/$*)"; \
+	echo "$$render_json" | $(YQ) -p=json > ./configs/$*/build.yaml.tmp; \
+	$(YAM) --sort .packages ./configs/$*/build.yaml.tmp; \
+	diff ./configs/$*/build.yaml.tmp ./configs/$*/build.yaml
+	@rm -f ./configs/$*/build.yaml.tmp
 
 .PHONY: builder
 builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
