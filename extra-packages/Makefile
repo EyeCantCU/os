@@ -204,6 +204,9 @@ local-wolfi: $(KEY)
 	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	echo "https://apk.cgr.dev/extra-packages" >> $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
+	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+endif
 	mkdir -p ${PWD}/packages
 	docker run --pull=always --rm -it \
 		--mount type=bind,source="${PWD}/packages",destination="$(PACKAGES_CONTAINER_FOLDER)",readonly \
