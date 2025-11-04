@@ -169,6 +169,19 @@ set -euo pipefail
 
 This ensures tests fail fast and don't mask errors.
 
+**IMPORTANT:** Always add `set -o pipefail` at the start of `post:` blocks in `test/daemon-check-output` to catch pipeline failures:
+
+```yaml
+# Good
+post: |-
+  set -o pipefail
+  curl -sf http://localhost:8080/metrics | grep -F "uptime"
+
+# Bad - failures may be masked
+post: |-
+  curl -sf http://localhost:8080/metrics | grep -F "uptime"
+```
+
 ### 2. Use `jq` for JSON parsing instead of `grep`/`tail`/`head`
 **Bad pattern:**
 ```bash
@@ -304,3 +317,140 @@ test:
     - runs: |
         # Functional tests go here
 ```
+
+### 8. Use `grep -F` for literal string matching, avoid `-q` flag
+Use `grep -F` (fixed string) instead of plain `grep` for literal strings - it's safer and faster.
+
+**IMPORTANT:** Never use `grep -q` (quiet mode) in tests as it suppresses output and makes debugging failures harder:
+
+```bash
+# Good - shows what matched
+curl -sf http://localhost:8080/metrics | grep -F "otelcol_process_uptime"
+netstat -ln | grep -F ":8080"
+
+# Bad - regex can have unexpected matches
+curl -sf http://localhost:8080/metrics | grep "otelcol_process_uptime"
+
+# Bad - silences output, makes debugging difficult
+curl -sf http://localhost:8080/metrics | grep -qF "otelcol_process_uptime"
+```
+
+When tests fail, seeing the actual output helps diagnose issues quickly. The `-q` flag hides this valuable information.
+
+### 9. Use environment variables for test configuration
+Centralize port numbers and repeated values using environment variables:
+
+```yaml
+# Good
+test:
+  environment:
+    environment:
+      GRPC_PORT: "4317"
+      METRICS_PORT: "8888"
+  pipeline:
+    - uses: test/daemon-check-output
+      with:
+        post: |-
+          curl -sf "http://localhost:${METRICS_PORT}/metrics" | grep -F "uptime"
+          netstat -ln | grep -F ":${GRPC_PORT}"
+
+# Bad - hardcoded values repeated throughout
+post: |-
+  curl -sf http://localhost:8888/metrics | grep -F "uptime"
+  netstat -ln | grep -F ':4317'
+```
+
+### 10. Quote paths in shell scripts
+Always quote variable expansions in paths to handle spaces and special characters safely:
+
+```yaml
+# Good - quoted paths
+pipeline:
+  - runs: |
+      mkdir -p "${{targets.contextdir}}/${{vars.build_folder}}"
+      mv "${{vars.build_folder}}"/* "${{targets.contextdir}}/${{vars.build_folder}}"
+      mv ./fips/fips.go "${{targets.contextdir}}/${{vars.build_folder}}"
+
+# Bad - unquoted paths (can break with spaces)
+pipeline:
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/${{vars.build_folder}}
+      mv ${{vars.build_folder}}/* ${{targets.contextdir}}/${{vars.build_folder}}
+      mv ./fips/fips.go ${{targets.contextdir}}/${{vars.build_folder}}
+```
+
+### 11. Use reasonable timeouts for daemon tests
+Set appropriate timeout values based on service type:
+
+- **Go binaries**: 30-60 seconds
+- **Java applications**: 90-120 seconds
+- **Python/Ruby services**: 60-90 seconds
+- **Heavy services (databases, etc.)**: 120-180 seconds
+
+```yaml
+# Good
+- uses: test/daemon-check-output
+  with:
+    timeout: 60  # Sufficient for Go services
+
+# Bad
+- uses: test/daemon-check-output
+  with:
+    timeout: 150  # Excessive for a lightweight Go binary
+```
+
+### 12. Use `setup` parameter for test configuration
+Move config file creation to `setup` parameter in `test/daemon-check-output`:
+
+```yaml
+# Good - setup separate from execution
+- uses: test/daemon-check-output
+  with:
+    setup: |-
+      cat << 'EOF' > /tmp/config.yaml
+      receivers:
+        otlp:
+      EOF
+    start: service-name --config=/tmp/config.yaml
+    post: |-
+      service-name validate --config=/tmp/config.yaml
+
+# Bad - config creation as separate test step
+- name: Config validation
+  runs: |
+    cat << 'EOF' > /tmp/config.yaml
+    receivers:
+      otlp:
+    EOF
+    service-name --config=/tmp/config.yaml validate
+```
+
+### 13. Use `tee` instead of `cat` for creating config files
+When creating config files in tests, use `tee` instead of `cat` to write the file. This shows the config content in the output, making debugging failures much easier:
+
+```bash
+# Good - shows config content in output
+tee /tmp/config.yaml << 'EOF'
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+EOF
+
+# Bad - silent, no output shown
+cat << 'EOF' > /tmp/config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+EOF
+```
+
+Benefits of using `tee`:
+- Config content appears in test logs, helping diagnose configuration issues
+- No need to add separate `cat /tmp/config.yaml` commands for debugging
+- Maintains the same functionality as `cat >` while improving observability
+
+**Note:** `tee` writes to both the file and stdout by default. This is desired behavior for test visibility.
