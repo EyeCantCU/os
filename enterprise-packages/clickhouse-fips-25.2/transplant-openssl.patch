@@ -1,0 +1,736 @@
+Description: Transplant ClickHouse 25.5 OpenSSL class.
+ .
+ This patch back-ports 25.5's OpenSSL support so we can modify it for FIPS
+ compliance. This *must* be applied before openssl.patch.
+Author: Chris Herborth <chris.herborth@chainguard.dev>
+Forwarded: not-needed
+
+diff --git a/base/poco/Crypto/CMakeLists.txt b/base/poco/Crypto/CMakeLists.txt
+index 67171afa..e350c279 100644
+--- a/base/poco/Crypto/CMakeLists.txt
++++ b/base/poco/Crypto/CMakeLists.txt
+@@ -23,8 +23,8 @@ if (ENABLE_SSL)
+             -Wno-zero-as-null-pointer-constant
+             -Wno-used-but-marked-unused
+     )
+-    target_include_directories (_poco_crypto SYSTEM PUBLIC "include")
+-    target_link_libraries (_poco_crypto PUBLIC Poco::Foundation OpenSSL::SSL OpenSSL::Crypto)
++    target_include_directories (_poco_crypto SYSTEM PUBLIC "include" "../../../contrib/fmtlib/include" "../../../contrib/magic_enum/include/magic_enum" "../../../base" "../../../src")
++    target_link_libraries (_poco_crypto PUBLIC Poco::Foundation OpenSSL::SSL OpenSSL::Crypto boost::headers_only boost::system)
+ 
+     message (STATUS "Using Poco::Crypto")
+ else ()
+diff --git a/base/poco/Crypto/include/Poco/Crypto/CipherImpl.h b/base/poco/Crypto/include/Poco/Crypto/CipherImpl.h
+index 057e77a4..1fda1667 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/CipherImpl.h
++++ b/base/poco/Crypto/include/Poco/Crypto/CipherImpl.h
+@@ -52,7 +52,7 @@ namespace Crypto
+ 
+     private:
+         CipherKey _key;
+-        OpenSSLInitializer _openSSLInitializer;
++        OpenSSLInitializer & _openSSLInitializer;
+     };
+ 
+ 
+diff --git a/base/poco/Crypto/include/Poco/Crypto/CipherKeyImpl.h b/base/poco/Crypto/include/Poco/Crypto/CipherKeyImpl.h
+index 700ae95c..b45f9d0b 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/CipherKeyImpl.h
++++ b/base/poco/Crypto/include/Poco/Crypto/CipherKeyImpl.h
+@@ -123,7 +123,7 @@ namespace Crypto
+         std::string _name;
+         ByteVec _key;
+         ByteVec _iv;
+-        OpenSSLInitializer _openSSLInitializer;
++        OpenSSLInitializer & _openSSLInitializer;
+     };
+ 
+ 
+diff --git a/base/poco/Crypto/include/Poco/Crypto/DigestEngine.h b/base/poco/Crypto/include/Poco/Crypto/DigestEngine.h
+index 77a1349f..1623b01c 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/DigestEngine.h
++++ b/base/poco/Crypto/include/Poco/Crypto/DigestEngine.h
+@@ -63,7 +63,7 @@ namespace Crypto
+         std::string _name;
+         EVP_MD_CTX * _pContext;
+         Poco::DigestEngine::Digest _digest;
+-        OpenSSLInitializer _openSSLInitializer;
++        OpenSSLInitializer & _openSSLInitializer;
+     };
+ 
+ 
+diff --git a/base/poco/Crypto/include/Poco/Crypto/KeyPairImpl.h b/base/poco/Crypto/include/Poco/Crypto/KeyPairImpl.h
+index ecafbef0..b772e32e 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/KeyPairImpl.h
++++ b/base/poco/Crypto/include/Poco/Crypto/KeyPairImpl.h
+@@ -66,7 +66,7 @@ namespace Crypto
+ 
+         std::string _name;
+         Type _type;
+-        OpenSSLInitializer _openSSLInitializer;
++        OpenSSLInitializer & _openSSLInitializer;
+     };
+ 
+ 
+diff --git a/base/poco/Crypto/include/Poco/Crypto/OpenSSLInitializer.h b/base/poco/Crypto/include/Poco/Crypto/OpenSSLInitializer.h
+index 147cfaee..df096b5e 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/OpenSSLInitializer.h
++++ b/base/poco/Crypto/include/Poco/Crypto/OpenSSLInitializer.h
+@@ -18,22 +18,14 @@
+ #define Crypto_OpenSSLInitializer_INCLUDED
+ 
+ 
+-#include <openssl/crypto.h>
+-#include "Poco/AtomicCounter.h"
+-#include "Poco/Crypto/Crypto.h"
+-#include "Poco/Mutex.h"
+-
+-#if defined(OPENSSL_FIPS) && OPENSSL_VERSION_NUMBER < 0x010001000L
+-#    include <openssl/fips.h>
+-#endif
++#include "config.h"
+ 
++#include <boost/noncopyable.hpp>
++#include <atomic>
+ 
+-extern "C" {
+-struct CRYPTO_dynlock_value
+-{
+-    Poco::FastMutex _mutex;
+-};
+-}
++#if USE_SSL
++#    include <openssl/provider.h>
++#endif
+ 
+ 
+ namespace Poco
+@@ -42,24 +34,18 @@ namespace Crypto
+ {
+ 
+ 
+-    class Crypto_API OpenSSLInitializer
+-    /// Initializes the OpenSSL library.
+-    ///
+-    /// The class ensures the earliest initialization and the
+-    /// latest shutdown of the OpenSSL library.
+-    {
++struct OpenSSLInitializer : private boost::noncopyable
++{
+     public:
+-        OpenSSLInitializer();
+-        /// Automatically initialize OpenSSL on startup.
+-
+-        ~OpenSSLInitializer();
+-        /// Automatically shut down OpenSSL on exit.
++        static OpenSSLInitializer & instance()
++        {
++            static OpenSSLInitializer instance;
++            return instance;
++        }
+ 
+         static void initialize();
+-        /// Initializes the OpenSSL machinery.
+-
+         static void uninitialize();
+-        /// Shuts down the OpenSSL machinery.
++        static void cleanup();
+ 
+         static bool isFIPSEnabled();
+         // Returns true if FIPS mode is enabled, false otherwise.
+@@ -67,28 +53,26 @@ namespace Crypto
+         static void enableFIPSMode(bool enabled);
+         // Enable or disable FIPS mode. If FIPS is not available, this method doesn't do anything.
+ 
+-    protected:
+-        enum
+-        {
+-            SEEDSIZE = 256
+-        };
+-
+-        // OpenSSL multithreading support
+-        static void lock(int mode, int n, const char * file, int line);
+-        static unsigned long id();
+-        static struct CRYPTO_dynlock_value * dynlockCreate(const char * file, int line);
+-        static void dynlock(int mode, struct CRYPTO_dynlock_value * lock, const char * file, int line);
+-        static void dynlockDestroy(struct CRYPTO_dynlock_value * lock, const char * file, int line);
+-
+     private:
+-        static Poco::FastMutex * _mutexes;
+-        static Poco::AtomicCounter _rc;
+-    };
++        OpenSSLInitializer();
++        ~OpenSSLInitializer();
++
++#if USE_SSL
++        static std::atomic<bool> initialize_done;
++        static std::atomic<bool> cleanup_done;
+ 
++        static OSSL_PROVIDER * legacy_provider;
++        static OSSL_PROVIDER * default_provider;
++#endif
++};
+ 
+     //
+     // inlines
+     //
++    inline void OpenSSLInitializer::uninitialize()
++    {
++    }
++
+     inline bool OpenSSLInitializer::isFIPSEnabled()
+     {
+ #ifdef OPENSSL_FIPS
+@@ -109,7 +93,6 @@ namespace Crypto
+     }
+ #endif
+ 
+-
+ }
+ } // namespace Poco::Crypto
+ 
+diff --git a/base/poco/Crypto/include/Poco/Crypto/PKCS12Container.h b/base/poco/Crypto/include/Poco/Crypto/PKCS12Container.h
+index 40baa496..6490446c 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/PKCS12Container.h
++++ b/base/poco/Crypto/include/Poco/Crypto/PKCS12Container.h
+@@ -98,7 +98,7 @@ namespace Crypto
+         typedef std::auto_ptr<X509Certificate> CertPtr;
+ #endif // #ifdef POCO_ENABLE_CPP11
+ 
+-        OpenSSLInitializer _openSSLInitializer;
++        OpenSSLInitializer & _openSSLInitializer;
+         EVP_PKEY * _pKey;
+         CertPtr _pX509Cert;
+         CAList _caCertList;
+diff --git a/base/poco/Crypto/include/Poco/Crypto/RSACipherImpl.h b/base/poco/Crypto/include/Poco/Crypto/RSACipherImpl.h
+index c0920b40..6982426c 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/RSACipherImpl.h
++++ b/base/poco/Crypto/include/Poco/Crypto/RSACipherImpl.h
+@@ -60,7 +60,7 @@ namespace Crypto
+     private:
+         RSAKey _key;
+         RSAPaddingMode _paddingMode;
+-        OpenSSLInitializer _openSSLInitializer;
++        OpenSSLInitializer & _openSSLInitializer;
+     };
+ 
+ 
+diff --git a/base/poco/Crypto/include/Poco/Crypto/X509Certificate.h b/base/poco/Crypto/include/Poco/Crypto/X509Certificate.h
+index 30147623..8b82c595 100644
+--- a/base/poco/Crypto/include/Poco/Crypto/X509Certificate.h
++++ b/base/poco/Crypto/include/Poco/Crypto/X509Certificate.h
+@@ -193,7 +193,7 @@ namespace Crypto
+         std::string _subjectName;
+         std::string _serialNumber;
+         X509 * _pCert;
+-        OpenSSLInitializer _openSSLInitializer;
++        OpenSSLInitializer & _openSSLInitializer;
+     };
+ 
+ 
+diff --git a/base/poco/Crypto/src/CipherImpl.cpp b/base/poco/Crypto/src/CipherImpl.cpp
+index ae574775..a45890c3 100644
+--- a/base/poco/Crypto/src/CipherImpl.cpp
++++ b/base/poco/Crypto/src/CipherImpl.cpp
+@@ -245,6 +245,7 @@ namespace
+ 
+ 
+ CipherImpl::CipherImpl(const CipherKey& key):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_key(key)
+ {
+ }
+diff --git a/base/poco/Crypto/src/CipherKeyImpl.cpp b/base/poco/Crypto/src/CipherKeyImpl.cpp
+index d5ebc5e3..3465c9a2 100644
+--- a/base/poco/Crypto/src/CipherKeyImpl.cpp
++++ b/base/poco/Crypto/src/CipherKeyImpl.cpp
+@@ -30,6 +30,7 @@ CipherKeyImpl::CipherKeyImpl(const std::string& name,
+ 	const std::string& salt,
+ 	int iterationCount,
+ 	const std::string& digest):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pCipher(0),
+ 	_pDigest(0),
+ 	_name(name),
+@@ -57,6 +58,7 @@ CipherKeyImpl::CipherKeyImpl(const std::string& name,
+ CipherKeyImpl::CipherKeyImpl(const std::string& name,
+ 	const ByteVec& key,
+ 	const ByteVec& iv):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pCipher(0),
+ 	_pDigest(0),
+ 	_name(name),
+@@ -73,6 +75,7 @@ CipherKeyImpl::CipherKeyImpl(const std::string& name,
+ 
+ 
+ CipherKeyImpl::CipherKeyImpl(const std::string& name):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pCipher(0),
+ 	_pDigest(0),
+ 	_name(name),
+diff --git a/base/poco/Crypto/src/DigestEngine.cpp b/base/poco/Crypto/src/DigestEngine.cpp
+index a09879fe..15163716 100644
+--- a/base/poco/Crypto/src/DigestEngine.cpp
++++ b/base/poco/Crypto/src/DigestEngine.cpp
+@@ -21,6 +21,7 @@ namespace Crypto {
+ 
+ 
+ DigestEngine::DigestEngine(const std::string& name):
++	_openSSLInitializer(OpenSSLInitializer::instance()),
+ 	_name(name),
+ 	_pContext(EVP_MD_CTX_create())
+ {
+diff --git a/base/poco/Crypto/src/KeyPairImpl.cpp b/base/poco/Crypto/src/KeyPairImpl.cpp
+index c782f042..1c41a785 100644
+--- a/base/poco/Crypto/src/KeyPairImpl.cpp
++++ b/base/poco/Crypto/src/KeyPairImpl.cpp
+@@ -21,6 +21,7 @@ namespace Crypto {
+ 
+ 
+ KeyPairImpl::KeyPairImpl(const std::string& name, Type type):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_name(name),
+ 	_type(type)
+ {
+diff --git a/base/poco/Crypto/src/OpenSSLInitializer.cpp b/base/poco/Crypto/src/OpenSSLInitializer.cpp
+index 31798e8d..3622d3f1 100644
+--- a/base/poco/Crypto/src/OpenSSLInitializer.cpp
++++ b/base/poco/Crypto/src/OpenSSLInitializer.cpp
+@@ -13,149 +13,111 @@
+ 
+ 
+ #include "Poco/Crypto/OpenSSLInitializer.h"
+-#include "Poco/RandomStream.h"
+-#include "Poco/Thread.h"
+-#include <openssl/ssl.h>
+-#include <openssl/rand.h>
+-#include <openssl/crypto.h>
+-#include <openssl/err.h>
+-#if OPENSSL_VERSION_NUMBER >= 0x0907000L
+-#include <openssl/conf.h>
+-#endif
+-
+-
+-using Poco::RandomInputStream;
+-using Poco::Thread;
++#include "config.h"
+ 
++#include <Common/Exception.h>
++#include <Common/OpenSSLHelpers.h>
+ 
++#if USE_SSL
++#    include <openssl/crypto.h>
++#    include <openssl/provider.h>
++#    include <openssl/ssl.h>
++#endif
+ 
+ 
+ namespace Poco {
+ namespace Crypto {
+ 
+-
+-Poco::FastMutex* OpenSSLInitializer::_mutexes(0);
+-Poco::AtomicCounter OpenSSLInitializer::_rc;
+-
++#if USE_SSL
++std::atomic<bool> Poco::Crypto::OpenSSLInitializer::initialize_done{false};
++std::atomic<bool> Poco::Crypto::OpenSSLInitializer::cleanup_done{false};
++OSSL_PROVIDER * Poco::Crypto::OpenSSLInitializer::default_provider = nullptr;
++OSSL_PROVIDER * Poco::Crypto::OpenSSLInitializer::legacy_provider = nullptr;
++#endif
+ 
+ OpenSSLInitializer::OpenSSLInitializer()
+ {
+-	initialize();
+-}
+-
+-
+-OpenSSLInitializer::~OpenSSLInitializer()
+-{
+-	try
+-	{
+-		uninitialize();
+-	}
+-	catch (...)
+-	{
+-		poco_unexpected();
+-	}
++    initialize();
+ }
+ 
+-
+ void OpenSSLInitializer::initialize()
+ {
+-	if (++_rc == 1)
+-	{
+-#if OPENSSL_VERSION_NUMBER >= 0x0907000L
+-		OPENSSL_config(NULL);
+-#endif
+-		SSL_library_init();
+-		SSL_load_error_strings();
+-		OpenSSL_add_all_algorithms();
+-		
+-		char seed[SEEDSIZE];
+-		RandomInputStream rnd;
+-		rnd.read(seed, sizeof(seed));
+-		RAND_seed(seed, SEEDSIZE);
+-		
+-		int nMutexes = CRYPTO_num_locks();
+-		_mutexes = new Poco::FastMutex[nMutexes];
+-		CRYPTO_set_locking_callback(&OpenSSLInitializer::lock);
+-// Not needed on Windows (see SF #110: random unhandled exceptions when linking with ssl).
+-// https://sourceforge.net/p/poco/bugs/110/
+-//
+-// From http://www.openssl.org/docs/crypto/threads.html :
+-// "If the application does not register such a callback using CRYPTO_THREADID_set_callback(), 
+-//  then a default implementation is used - on Windows and BeOS this uses the system's 
+-//  default thread identifying APIs"
+-		CRYPTO_set_id_callback(&OpenSSLInitializer::id);
+-		CRYPTO_set_dynlock_create_callback(&OpenSSLInitializer::dynlockCreate);
+-		CRYPTO_set_dynlock_lock_callback(&OpenSSLInitializer::dynlock);
+-		CRYPTO_set_dynlock_destroy_callback(&OpenSSLInitializer::dynlockDestroy);
+-	}
+-}
+-
+-
+-void OpenSSLInitializer::uninitialize()
+-{
+-	if (--_rc == 0)
+-	{
+-		EVP_cleanup();
+-		ERR_free_strings();
+-		CRYPTO_set_locking_callback(0);
+-		CRYPTO_set_id_callback(0);
+-		delete [] _mutexes;
+-		
+-		CONF_modules_free();
+-	}
+-}
+-
+-
+-void OpenSSLInitializer::lock(int mode, int n, const char* file, int line)
+-{
+-	if (mode & CRYPTO_LOCK)
+-		_mutexes[n].lock();
+-	else
+-		_mutexes[n].unlock();
+-}
+-
+-
+-unsigned long OpenSSLInitializer::id()
+-{
+-	// Note: we use an old-style C cast here because
+-	// neither static_cast<> nor reinterpret_cast<>
+-	// work uniformly across all platforms.
+-	return (unsigned long) Poco::Thread::currentTid();
+-}
++#if USE_SSL
+ 
++#ifndef NDEBUG
++    assert(!initialize_done);
++    assert(!cleanup_done);
++#endif
+ 
+-struct CRYPTO_dynlock_value* OpenSSLInitializer::dynlockCreate(const char* file, int line)
+-{
+-	return new CRYPTO_dynlock_value;
++    if (!initialize_done)
++    {
++        initialize_done = true;
++
++        // Disable OpenSSL atexit hook.
++        // It may cause issues on shutdown, when some OpenSSL objects are still in use.
++        auto openssl_flags = OPENSSL_INIT_NO_ATEXIT;
++
++        /// Loading OpenSSL config only if it is set explicitly.
++        ///
++        /// 'legacy' provider may be disabled in system config,
++        /// but we're compiling it statically in the binary, so it must be loadable in any case.
++        const char * env_openssl_conf = getenv("OPENSSL_CONF"); // NOLINT(concurrency-mt-unsafe)
++        if (env_openssl_conf)
++        {
++            openssl_flags |= OPENSSL_INIT_LOAD_CONFIG;
++        }
++        else
++        {
++            openssl_flags |= OPENSSL_INIT_NO_LOAD_CONFIG;
++        }
++
++        if (OPENSSL_init_ssl(openssl_flags, nullptr) == 0)
++            throw std::runtime_error(fmt::format("Failed to load OpenSSL config. {}", DB::getOpenSSLErrors()));
++
++        default_provider = OSSL_PROVIDER_load(nullptr, "default");
++        if (!default_provider)
++            throw std::runtime_error(fmt::format("Failed to load OpenSSL 'default' provider. {}", DB::getOpenSSLErrors()));
++
++        legacy_provider = OSSL_PROVIDER_load(nullptr, "legacy");
++        if (!legacy_provider)
++            throw std::runtime_error(fmt::format("Failed to load OpenSSL 'legacy' provider. {}", DB::getOpenSSLErrors()));
++    }
++#endif
+ }
+ 
+-
+-void OpenSSLInitializer::dynlock(int mode, struct CRYPTO_dynlock_value* lock, const char* file, int line)
++void OpenSSLInitializer::cleanup()
+ {
+-	poco_check_ptr (lock);
++#if USE_SSL
+ 
+-	if (mode & CRYPTO_LOCK)
+-		lock->_mutex.lock();
+-	else
+-		lock->_mutex.unlock();
+-}
++#ifndef NDEBUG
++    assert(initialize_done);
++    assert(!cleanup_done);
++#endif
+ 
++    if (!cleanup_done)
++    {
++        cleanup_done = true;
+ 
+-void OpenSSLInitializer::dynlockDestroy(struct CRYPTO_dynlock_value* lock, const char* file, int line)
+-{
+-	delete lock;
+-}
++        if (legacy_provider)
++        {
++            chassert(OSSL_PROVIDER_unload(legacy_provider));
++            legacy_provider = nullptr;
++        }
+ 
++        if (default_provider)
++        {
++            chassert(OSSL_PROVIDER_unload(default_provider));
++            default_provider = nullptr;
++        }
+ 
+-void initializeCrypto()
+-{
+-	OpenSSLInitializer::initialize();
++        OPENSSL_cleanup();
++    }
++#endif
+ }
+ 
+-
+-void uninitializeCrypto()
++OpenSSLInitializer::~OpenSSLInitializer()
+ {
+-	OpenSSLInitializer::uninitialize();
++    cleanup();
+ }
+ 
+ 
+diff --git a/base/poco/Crypto/src/PKCS12Container.cpp b/base/poco/Crypto/src/PKCS12Container.cpp
+index def89bf0..786d6a91 100644
+--- a/base/poco/Crypto/src/PKCS12Container.cpp
++++ b/base/poco/Crypto/src/PKCS12Container.cpp
+@@ -24,7 +24,9 @@ namespace Poco {
+ namespace Crypto {
+ 
+ 
+-PKCS12Container::PKCS12Container(std::istream& istr, const std::string& password): _pKey(0)
++PKCS12Container::PKCS12Container(std::istream& istr, const std::string& password):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
++	_pKey(0)
+ {
+ 	std::ostringstream ostr;
+ 	Poco::StreamCopier::copyStream(istr, ostr);
+@@ -46,7 +48,9 @@ PKCS12Container::PKCS12Container(std::istream& istr, const std::string& password
+ }
+ 
+ 
+-PKCS12Container::PKCS12Container(const std::string& path, const std::string& password): _pKey(0)
++PKCS12Container::PKCS12Container(const std::string& path, const std::string& password):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
++	_pKey(0)
+ {
+ 	FILE* pFile = fopen(path.c_str(), "rb");
+ 	if (pFile)
+@@ -64,6 +68,7 @@ PKCS12Container::PKCS12Container(const std::string& path, const std::string& pas
+ 
+ 
+ PKCS12Container::PKCS12Container(const PKCS12Container& other):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pKey(EVPPKey::duplicate(other._pKey, &_pKey)),
+ 	_pX509Cert(new X509Certificate(*other._pX509Cert)),
+ 	_caCertList(other._caCertList),
+@@ -92,6 +97,7 @@ PKCS12Container& PKCS12Container::operator = (const PKCS12Container& other)
+ 
+ 
+ PKCS12Container::PKCS12Container(PKCS12Container&& other):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pKey(other._pKey),
+ 	_pX509Cert(std::move(other._pX509Cert)),
+ 	_caCertList(std::move(other._caCertList)),
+diff --git a/base/poco/Crypto/src/RSACipherImpl.cpp b/base/poco/Crypto/src/RSACipherImpl.cpp
+index 4f9ddcf3..398ae36b 100644
+--- a/base/poco/Crypto/src/RSACipherImpl.cpp
++++ b/base/poco/Crypto/src/RSACipherImpl.cpp
+@@ -316,6 +316,7 @@ namespace
+ 
+ 
+ RSACipherImpl::RSACipherImpl(const RSAKey& key, RSAPaddingMode paddingMode):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_key(key),
+ 	_paddingMode(paddingMode)
+ {
+diff --git a/base/poco/Crypto/src/X509Certificate.cpp b/base/poco/Crypto/src/X509Certificate.cpp
+index 16458d04..f2b3e2ea 100644
+--- a/base/poco/Crypto/src/X509Certificate.cpp
++++ b/base/poco/Crypto/src/X509Certificate.cpp
+@@ -30,6 +30,7 @@ namespace Crypto {
+ 
+ 
+ X509Certificate::X509Certificate(std::istream& istr):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pCert(0)
+ {
+ 	load(istr);
+@@ -37,6 +38,7 @@ X509Certificate::X509Certificate(std::istream& istr):
+ 
+ 
+ X509Certificate::X509Certificate(const std::string& path):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pCert(0)
+ {
+ 	load(path);
+@@ -44,6 +46,7 @@ X509Certificate::X509Certificate(const std::string& path):
+ 
+ 
+ X509Certificate::X509Certificate(X509* pCert):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pCert(pCert)
+ {
+ 	poco_check_ptr(_pCert);
+@@ -53,10 +56,11 @@ X509Certificate::X509Certificate(X509* pCert):
+ 
+ 
+ X509Certificate::X509Certificate(X509* pCert, bool shared):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_pCert(pCert)
+ {
+ 	poco_check_ptr(_pCert);
+-	
++
+ 	if (shared)
+ 	{
+ #if OPENSSL_VERSION_NUMBER >= 0x10100000L
+@@ -71,6 +75,7 @@ X509Certificate::X509Certificate(X509* pCert, bool shared):
+ 
+ 
+ X509Certificate::X509Certificate(const X509Certificate& cert):
++	_openSSLInitializer(Poco::Crypto::OpenSSLInitializer::instance()),
+ 	_issuerName(cert._issuerName),
+ 	_subjectName(cert._subjectName),
+ 	_serialNumber(cert._serialNumber),
+@@ -150,7 +155,7 @@ void X509Certificate::save(std::ostream& stream) const
+ 	if (!pBIO) throw Poco::IOException("Cannot create BIO for writing certificate");
+ 	try
+ 	{
+-		if (!PEM_write_bio_X509(pBIO, _pCert)) 
++		if (!PEM_write_bio_X509(pBIO, _pCert))
+ 			throw Poco::IOException("Failed to write certificate to stream");
+ 
+ 		char *pData;
+@@ -178,7 +183,7 @@ void X509Certificate::save(const std::string& path) const
+ 	}
+ 	try
+ 	{
+-		if (!PEM_write_bio_X509(pBIO, _pCert)) 
++		if (!PEM_write_bio_X509(pBIO, _pCert))
+ 			throw Poco::WriteFileException("Failed to write certificate to file", path);
+ 	}
+ 	catch (...)
+@@ -243,7 +248,7 @@ std::string X509Certificate::subjectName(NID nid) const
+ 
+ void X509Certificate::extractNames(std::string& cmnName, std::set<std::string>& domainNames) const
+ {
+-	domainNames.clear(); 
++	domainNames.clear();
+ 	if (STACK_OF(GENERAL_NAME)* names = static_cast<STACK_OF(GENERAL_NAME)*>(X509_get_ext_d2i(_pCert, NID_subject_alt_name, 0, 0)))
+ 	{
+ 		for (int i = 0; i < sk_GENERAL_NAME_num(names); ++i)
+@@ -258,7 +263,7 @@ void X509Certificate::extractNames(std::string& cmnName, std::set<std::string>&
+ 		}
+ 		GENERAL_NAMES_free(names);
+ 	}
+- 
++
+ 	cmnName = commonName();
+ 	if (!cmnName.empty() && domainNames.empty())
+ 	{
+@@ -275,7 +280,7 @@ Poco::DateTime X509Certificate::validFrom() const
+ 	return DateTimeParser::parse("%y%m%d%H%M%S", dateTime, tzd);
+ }
+ 
+-	
++
+ Poco::DateTime X509Certificate::expiresOn() const
+ {
+ 	ASN1_TIME* certTime = X509_get_notAfter(_pCert);
+diff --git a/base/poco/NetSSL_OpenSSL/src/SSLManager.cpp b/base/poco/NetSSL_OpenSSL/src/SSLManager.cpp
+index ae04a994..9a99f023 100644
+--- a/base/poco/NetSSL_OpenSSL/src/SSLManager.cpp
++++ b/base/poco/NetSSL_OpenSSL/src/SSLManager.cpp
+@@ -239,7 +239,7 @@ void SSLManager::initDefaultContext(bool server)
+ 	if (server && _ptrDefaultServerContext) return;
+ 	if (!server && _ptrDefaultClientContext) return;
+ 
+-	Poco::Crypto::OpenSSLInitializer openSSLInitializer;
++	Poco::Crypto::OpenSSLInitializer::initialize();
+ 	initEvents(server);
+ 	Poco::Util::AbstractConfiguration& config = appConfig();
+ 
+@@ -463,14 +463,14 @@ Poco::Util::AbstractConfiguration& SSLManager::appConfig()
+ 
+ void initializeSSL()
+ {
+-	Poco::Crypto::initializeCrypto();
++	// Poco::Crypto::initializeCrypto();
+ }
+ 
+ 
+ void uninitializeSSL()
+ {
+ 	SSLManager::instance().shutdown();
+-	Poco::Crypto::uninitializeCrypto();
++	// Poco::Crypto::uninitializeCrypto();
+ }
+ 
+ 
+diff --git a/base/poco/NetSSL_OpenSSL/src/X509Certificate.cpp b/base/poco/NetSSL_OpenSSL/src/X509Certificate.cpp
+index 54651c3a..85a6aa43 100644
+--- a/base/poco/NetSSL_OpenSSL/src/X509Certificate.cpp
++++ b/base/poco/NetSSL_OpenSSL/src/X509Certificate.cpp
+@@ -33,7 +33,7 @@ namespace Net {
+ 
+ X509Certificate::X509Certificate(std::istream& istr):
+ 	Poco::Crypto::X509Certificate(istr)
+-{	
++{
+ }
+ 
+ 
+@@ -81,7 +81,7 @@ bool X509Certificate::verify(const std::string& hostName) const
+ 
+ 
+ bool X509Certificate::verify(const Poco::Crypto::X509Certificate& certificate, const std::string& hostName)
+-{		
++{
+ #if OPENSSL_VERSION_NUMBER < 0x10002000L
+ 	std::string commonName;
+ 	std::set<std::string> dnsNames;
+diff --git a/src/Access/Common/CMakeLists.txt b/src/Access/Common/CMakeLists.txt
+index 6a7682ec..63f7481b 100644
+--- a/src/Access/Common/CMakeLists.txt
++++ b/src/Access/Common/CMakeLists.txt
+@@ -2,4 +2,4 @@ include("${ClickHouse_SOURCE_DIR}/cmake/dbms_glob_sources.cmake")
+ 
+ add_headers_and_sources(clickhouse_common_access .)
+ add_library(clickhouse_common_access ${clickhouse_common_access_headers} ${clickhouse_common_access_sources})
+-target_link_libraries(clickhouse_common_access PUBLIC clickhouse_common_io)
++target_link_libraries(clickhouse_common_access PUBLIC clickhouse_common_io boost::headers_only boost::system)

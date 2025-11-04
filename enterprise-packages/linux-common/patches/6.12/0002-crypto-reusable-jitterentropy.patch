@@ -1,4 +1,4 @@
-From a48d7249469a040ccc839593fb2c66648c9dd2c7 Mon Sep 17 00:00:00 2001
+From c597aabe3eaa1eb303d76dc4a8fc7762a8020ae3 Mon Sep 17 00:00:00 2001
 From: Amelia Crate <amelia.crate@chainguard.dev>
 Date: Mon, 28 Jul 2025 16:56:42 -0700
 Subject: [PATCH 2/3] crypto: reusable jitterentropy
@@ -14,20 +14,22 @@ requires the same sha3_generic-module.c and sha3_generic-shim.c technique.
 
 Co-Authored-By: Markus Boehme <markus.boehme@chainguard.dev>
 ---
- crypto/jitterentropy-kcapi.c        |  77 +++----
- crypto/jitterentropy-shim.c         | 306 ++++++++++++++++++++++++++++
- crypto/jitterentropy-shim.h         | 101 +++++++++
- crypto/jitterentropy.c              |  13 +-
- crypto/sha3_jitterentropy.c         | 245 ++++++++++++++++++++++
+ crypto/jitterentropy-kcapi.c        | 130 +----------
+ crypto/jitterentropy-optimized.c    | 133 ++++++++++++
+ crypto/jitterentropy-shim.c         | 321 ++++++++++++++++++++++++++++
+ crypto/jitterentropy-shim.h         | 104 +++++++++
+ crypto/jitterentropy.c              |  17 +-
+ crypto/sha3_jitterentropy.c         | 245 +++++++++++++++++++++
  include/crypto/sha3_jitterentropy.h |  54 +++++
- 6 files changed, 740 insertions(+), 56 deletions(-)
+ 7 files changed, 877 insertions(+), 127 deletions(-)
+ create mode 100644 crypto/jitterentropy-optimized.c
  create mode 100644 crypto/jitterentropy-shim.c
  create mode 100644 crypto/jitterentropy-shim.h
  create mode 100644 crypto/sha3_jitterentropy.c
  create mode 100644 include/crypto/sha3_jitterentropy.h
 
 diff --git a/crypto/jitterentropy-kcapi.c b/crypto/jitterentropy-kcapi.c
-index 1266eb790708..aa7b68c3b0af 100644
+index 1266eb790708b..fae81a7c912e3 100644
 --- a/crypto/jitterentropy-kcapi.c
 +++ b/crypto/jitterentropy-kcapi.c
 @@ -36,9 +36,6 @@
@@ -48,87 +50,100 @@ index 1266eb790708..aa7b68c3b0af 100644
  #include "jitterentropy.h"
  
  #define JENT_CONDITIONING_HASH	"sha3-256-generic"
-@@ -105,17 +103,16 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
- 		   unsigned int addtl_len, __u64 hash_loop_cnt,
- 		   unsigned int stuck)
- {
+@@ -101,92 +99,6 @@ void jent_get_nstime(__u64 *out)
+ 	jent_raw_hires_entropy_store(tmp);
+ }
+ 
+-int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
+-		   unsigned int addtl_len, __u64 hash_loop_cnt,
+-		   unsigned int stuck)
+-{
 -	struct shash_desc *hash_state_desc = (struct shash_desc *)hash_state;
 -	SHASH_DESC_ON_STACK(desc, hash_state_desc->tfm);
-+	struct sha3_state *hash_state_desc = (struct sha3_state *)hash_state;
-+	struct sha3_state desc;
- 	u8 intermediary[SHA3_256_DIGEST_SIZE];
- 	__u64 j = 0;
- 	int ret;
- 
+-	u8 intermediary[SHA3_256_DIGEST_SIZE];
+-	__u64 j = 0;
+-	int ret;
+-
 -	desc->tfm = hash_state_desc->tfm;
 -
 -	if (sizeof(intermediary) != crypto_shash_digestsize(desc->tfm)) {
-+	if (sizeof(intermediary) != SHA3_256_DIGEST_SIZE) {
- 		pr_warn_ratelimited("Unexpected digest size\n");
+-		pr_warn_ratelimited("Unexpected digest size\n");
 -		return -EINVAL;
-+		ret = -EINVAL;
-+		goto err;
- 	}
- 
- 	/*
-@@ -129,13 +126,13 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
- 	 *
- 	 * Note, it does not matter which or how much data you inject, we are
- 	 * interested in one Keccack1600 compression operation performed with
+-	}
+-
+-	/*
+-	 * This loop fills a buffer which is injected into the entropy pool.
+-	 * The main reason for this loop is to execute something over which we
+-	 * can perform a timing measurement. The injection of the resulting
+-	 * data into the pool is performed to ensure the result is used and
+-	 * the compiler cannot optimize the loop away in case the result is not
+-	 * used at all. Yet that data is considered "additional information"
+-	 * considering the terminology from SP800-90A without any entropy.
+-	 *
+-	 * Note, it does not matter which or how much data you inject, we are
+-	 * interested in one Keccack1600 compression operation performed with
 -	 * the crypto_shash_final.
-+	 * the jitter_sha3_final.
- 	 */
- 	for (j = 0; j < hash_loop_cnt; j++) {
+-	 */
+-	for (j = 0; j < hash_loop_cnt; j++) {
 -		ret = crypto_shash_init(desc) ?:
 -		      crypto_shash_update(desc, intermediary,
-+		ret = jitter_sha3_init(&desc, SHA3_256_DIGEST_SIZE) ?:
-+		      jitter_sha3_update(&desc, intermediary,
- 					  sizeof(intermediary)) ?:
+-					  sizeof(intermediary)) ?:
 -		      crypto_shash_finup(desc, addtl, addtl_len, intermediary);
-+		      jitter_sha3_finup(&desc, addtl, addtl_len, SHA3_256_DIGEST_SIZE, intermediary);
- 		if (ret)
- 			goto err;
- 	}
-@@ -144,7 +141,7 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
- 	 * Inject the data from the previous loop into the pool. This data is
- 	 * not considered to contain any entropy, but it stirs the pool a bit.
- 	 */
+-		if (ret)
+-			goto err;
+-	}
+-
+-	/*
+-	 * Inject the data from the previous loop into the pool. This data is
+-	 * not considered to contain any entropy, but it stirs the pool a bit.
+-	 */
 -	ret = crypto_shash_update(hash_state_desc, intermediary, sizeof(intermediary));
-+	ret = jitter_sha3_update(hash_state_desc, intermediary, sizeof(intermediary));
- 	if (ret)
- 		goto err;
- 
-@@ -161,10 +158,10 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
- 		time = 0;
- 	}
- 
+-	if (ret)
+-		goto err;
+-
+-	/*
+-	 * Insert the time stamp into the hash context representing the pool.
+-	 *
+-	 * If the time stamp is stuck, do not finally insert the value into the
+-	 * entropy pool. Although this operation should not do any harm even
+-	 * when the time stamp has no entropy, SP800-90B requires that any
+-	 * conditioning operation to have an identical amount of input data
+-	 * according to section 3.1.5.
+-	 */
+-	if (stuck) {
+-		time = 0;
+-	}
+-
 -	ret = crypto_shash_update(hash_state_desc, (u8 *)&time, sizeof(__u64));
-+	ret = jitter_sha3_update(hash_state_desc, (u8 *)&time, sizeof(__u64));
- 
- err:
+-
+-err:
 -	shash_desc_zero(desc);
-+	jitter_sha3_zero(&desc);
- 	memzero_explicit(intermediary, sizeof(intermediary));
- 
- 	return ret;
-@@ -172,12 +169,12 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
- 
- int jent_read_random_block(void *hash_state, char *dst, unsigned int dst_len)
- {
+-	memzero_explicit(intermediary, sizeof(intermediary));
+-
+-	return ret;
+-}
+-
+-int jent_read_random_block(void *hash_state, char *dst, unsigned int dst_len)
+-{
 -	struct shash_desc *hash_state_desc = (struct shash_desc *)hash_state;
-+	struct sha3_state *hash_state_desc = (struct sha3_state *)hash_state;
- 	u8 jent_block[SHA3_256_DIGEST_SIZE];
- 	/* Obtain data from entropy pool and re-initialize it */
+-	u8 jent_block[SHA3_256_DIGEST_SIZE];
+-	/* Obtain data from entropy pool and re-initialize it */
 -	int ret = crypto_shash_final(hash_state_desc, jent_block) ?:
 -		  crypto_shash_init(hash_state_desc) ?:
 -		  crypto_shash_update(hash_state_desc, jent_block,
-+	int ret = jitter_sha3_final(hash_state_desc, SHA3_256_DIGEST_SIZE, jent_block) ?:
-+		  jitter_sha3_init(hash_state_desc, SHA3_256_DIGEST_SIZE) ?:
-+		  jitter_sha3_update(hash_state_desc, jent_block,
- 				      sizeof(jent_block));
- 
- 	if (!ret && dst_len)
-@@ -194,8 +191,7 @@ int jent_read_random_block(void *hash_state, char *dst, unsigned int dst_len)
+-				      sizeof(jent_block));
+-
+-	if (!ret && dst_len)
+-		memcpy(dst, jent_block, dst_len);
+-
+-	memzero_explicit(jent_block, sizeof(jent_block));
+-	return ret;
+-}
+-
+ /***************************************************************************
+  * Kernel crypto API interface
+  ***************************************************************************/
+@@ -194,8 +106,7 @@ int jent_read_random_block(void *hash_state, char *dst, unsigned int dst_len)
  struct jitterentropy {
  	spinlock_t jent_lock;
  	struct rand_data *entropy_collector;
@@ -138,7 +153,7 @@ index 1266eb790708..aa7b68c3b0af 100644
  };
  
  static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
-@@ -205,15 +201,11 @@ static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
+@@ -205,15 +116,11 @@ static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
  	spin_lock(&rng->jent_lock);
  
  	if (rng->sdesc) {
@@ -155,7 +170,7 @@ index 1266eb790708..aa7b68c3b0af 100644
  	if (rng->entropy_collector)
  		jent_entropy_collector_free(rng->entropy_collector);
  	rng->entropy_collector = NULL;
-@@ -223,8 +215,7 @@ static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
+@@ -223,8 +130,7 @@ static void jent_kcapi_cleanup(struct crypto_tfm *tfm)
  static int jent_kcapi_init(struct crypto_tfm *tfm)
  {
  	struct jitterentropy *rng = crypto_tfm_ctx(tfm);
@@ -165,7 +180,7 @@ index 1266eb790708..aa7b68c3b0af 100644
  	int size, ret = 0;
  
  	spin_lock_init(&rng->jent_lock);
-@@ -238,22 +229,15 @@ static int jent_kcapi_init(struct crypto_tfm *tfm)
+@@ -238,22 +144,15 @@ static int jent_kcapi_init(struct crypto_tfm *tfm)
  	 * using a fast implementation, we would need to call it more often
  	 * as its variations are lower.
  	 */
@@ -190,7 +205,7 @@ index 1266eb790708..aa7b68c3b0af 100644
  	rng->sdesc = sdesc;
  
  	rng->entropy_collector =
-@@ -333,23 +317,14 @@ static struct rng_alg jent_alg = {
+@@ -333,23 +232,14 @@ static struct rng_alg jent_alg = {
  
  static int __init jent_mod_init(void)
  {
@@ -218,12 +233,151 @@ index 1266eb790708..aa7b68c3b0af 100644
  	if (ret) {
  		/* Handle permanent health test error */
  		if (fips_enabled)
+diff --git a/crypto/jitterentropy-optimized.c b/crypto/jitterentropy-optimized.c
+new file mode 100644
+index 0000000000000..ee8a6ee427130
+--- /dev/null
++++ b/crypto/jitterentropy-optimized.c
+@@ -0,0 +1,133 @@
++/*
++ * Non-physical true random number generator based on timing jitter --
++ * Linux Kernel Crypto API specific code
++ *
++ * Copyright Stephan Mueller <smueller@chronox.de>, 2015 - 2023
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, and the entire permission notice in its entirety,
++ *    including the disclaimer of warranties.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote
++ *    products derived from this software without specific prior
++ *    written permission.
++ *
++ * ALTERNATIVELY, this product may be distributed under the terms of
++ * the GNU General Public License, in which case the provisions of the GPL2 are
++ * required INSTEAD OF the above restrictions.  (This clause is
++ * necessary due to a potential bad interaction between the GPL and
++ * the restrictions contained in a BSD-style copyright.)
++ *
++ * THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ALL OF
++ * WHICH ARE HEREBY DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
++ * OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
++ * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
++ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
++ * USE OF THIS SOFTWARE, EVEN IF NOT ADVISED OF THE POSSIBILITY OF SUCH
++ * DAMAGE.
++ */
++
++/*
++ * This file contains functions which are part of jitterentropy implementation,
++ * not part of the kernel crypto api interface (as in jitterentropy-kcapi.c)
++ * but do not need to be compiled with -O0 (as in jitterentropy.c).
++ */
++#include "jitterentropy-shim.h"
++#include "jitterentropy.h"
++#include <crypto/sha3_jitterentropy.h>
++
++int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
++		   unsigned int addtl_len, __u64 hash_loop_cnt,
++		   unsigned int stuck)
++{
++	struct sha3_state *hash_state_desc = (struct sha3_state *)hash_state;
++	struct sha3_state desc;
++	u8 intermediary[SHA3_256_DIGEST_SIZE];
++	__u64 j = 0;
++	int ret;
++
++	if (sizeof(intermediary) != SHA3_256_DIGEST_SIZE) {
++		jent_shim_pr_warn_ratelimited("Unexpected digest size\n");
++		ret = -EINVAL;
++		goto err;
++	}
++
++	/*
++	 * This loop fills a buffer which is injected into the entropy pool.
++	 * The main reason for this loop is to execute something over which we
++	 * can perform a timing measurement. The injection of the resulting
++	 * data into the pool is performed to ensure the result is used and
++	 * the compiler cannot optimize the loop away in case the result is not
++	 * used at all. Yet that data is considered "additional information"
++	 * considering the terminology from SP800-90A without any entropy.
++	 *
++	 * Note, it does not matter which or how much data you inject, we are
++	 * interested in one Keccack1600 compression operation performed with
++	 * the jitter_sha3_final.
++	 */
++	for (j = 0; j < hash_loop_cnt; j++) {
++		ret = jitter_sha3_init(&desc, SHA3_256_DIGEST_SIZE) ?:
++		      jitter_sha3_update(&desc, intermediary,
++					  sizeof(intermediary)) ?:
++		      jitter_sha3_finup(&desc, addtl, addtl_len, SHA3_256_DIGEST_SIZE, intermediary);
++		if (ret)
++			goto err;
++	}
++
++	/*
++	 * Inject the data from the previous loop into the pool. This data is
++	 * not considered to contain any entropy, but it stirs the pool a bit.
++	 */
++	ret = jitter_sha3_update(hash_state_desc, intermediary, sizeof(intermediary));
++	if (ret)
++		goto err;
++
++	/*
++	 * Insert the time stamp into the hash context representing the pool.
++	 *
++	 * If the time stamp is stuck, do not finally insert the value into the
++	 * entropy pool. Although this operation should not do any harm even
++	 * when the time stamp has no entropy, SP800-90B requires that any
++	 * conditioning operation to have an identical amount of input data
++	 * according to section 3.1.5.
++	 */
++	if (stuck) {
++		time = 0;
++	}
++
++	ret = jitter_sha3_update(hash_state_desc, (u8 *)&time, sizeof(__u64));
++
++err:
++	jitter_sha3_zero(&desc);
++	jent_shim_memzero_explicit(intermediary, sizeof(intermediary));
++
++	return ret;
++}
++
++int jent_read_random_block(void *hash_state, char *dst, unsigned int dst_len)
++{
++	struct sha3_state *hash_state_desc = (struct sha3_state *)hash_state;
++	u8 jent_block[SHA3_256_DIGEST_SIZE];
++	/* Obtain data from entropy pool and re-initialize it */
++	int ret = jitter_sha3_final(hash_state_desc, SHA3_256_DIGEST_SIZE, jent_block) ?:
++		  jitter_sha3_init(hash_state_desc, SHA3_256_DIGEST_SIZE) ?:
++		  jitter_sha3_update(hash_state_desc, jent_block,
++				      sizeof(jent_block));
++
++	if (!ret && dst_len)
++		jent_shim_memcpy(dst, jent_block, dst_len);
++
++	jent_shim_memzero_explicit(jent_block, sizeof(jent_block));
++	return ret;
++}
++
 diff --git a/crypto/jitterentropy-shim.c b/crypto/jitterentropy-shim.c
 new file mode 100644
-index 000000000000..ac074593c4f2
+index 0000000000000..810528a6a39a3
 --- /dev/null
 +++ b/crypto/jitterentropy-shim.c
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,321 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * Jitter RNG shim layer implementation
@@ -244,7 +398,7 @@ index 000000000000..ac074593c4f2
 +#include <linux/sched.h>
 +#include <linux/slab.h>
 +#include <linux/spinlock.h>
-+#include <linux/string.h>  
++#include <linux/string.h>
 +#include <linux/time.h>
 +#include <linux/types.h>
 +#include <linux/uaccess.h>
@@ -283,6 +437,21 @@ index 000000000000..ac074593c4f2
 +void jent_shim_kfree(void *ptr)
 +{
 +	kfree(ptr);
++}
++
++void jent_shim_kvzfree(void *ptr, unsigned int len)
++{
++	kvfree_sensitive(ptr, len);
++}
++
++void *jent_shim_zalloc(unsigned int len)
++{
++	return kzalloc(len, GFP_KERNEL);
++}
++
++void jent_shim_zfree(void *ptr)
++{
++	kfree_sensitive(ptr);
 +}
 +
 +/* Time functions */
@@ -532,10 +701,10 @@ index 000000000000..ac074593c4f2
 +
 diff --git a/crypto/jitterentropy-shim.h b/crypto/jitterentropy-shim.h
 new file mode 100644
-index 000000000000..a6d330c43726
+index 0000000000000..2a0b04abcf0e0
 --- /dev/null
 +++ b/crypto/jitterentropy-shim.h
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,104 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +/*
 + * Jitter RNG shim layer
@@ -558,6 +727,9 @@ index 000000000000..a6d330c43726
 +void jent_shim_kfree_sensitive(void *ptr);
 +void *jent_shim_kmalloc(unsigned int size, gfp_t flags);
 +void jent_shim_kfree(void *ptr);
++void jent_shim_kvzfree(void *ptr, unsigned int len);
++void *jent_shim_zalloc(unsigned int len);
++void jent_shim_zfree(void *ptr);
 +
 +/* Time functions */
 +unsigned long jent_shim_random_get_entropy(void);
@@ -638,7 +810,7 @@ index 000000000000..a6d330c43726
 +
 +#endif /* _JITTERENTROPY_SHIM_H */
 diff --git a/crypto/jitterentropy.c b/crypto/jitterentropy.c
-index 0bdbaeb40bbb..e6afb40408fd 100644
+index 0bdbaeb40bbbd..7a4b91b4192ad 100644
 --- a/crypto/jitterentropy.c
 +++ b/crypto/jitterentropy.c
 @@ -150,6 +150,7 @@ struct rand_data {
@@ -687,7 +859,17 @@ index 0bdbaeb40bbb..e6afb40408fd 100644
  		if (jent_read_random_block(ec->hash_state, p, tocopy))
  			return -1;
  
-@@ -709,7 +712,7 @@ void jent_entropy_collector_free(struct rand_data *entropy_collector)
+@@ -701,15 +704,15 @@ struct rand_data *jent_entropy_collector_alloc(unsigned int osr,
+ 
+ void jent_entropy_collector_free(struct rand_data *entropy_collector)
+ {
+-	jent_kvzfree(entropy_collector->mem, JENT_MEMORY_SIZE);
++	jent_shim_kvzfree(entropy_collector->mem, JENT_MEMORY_SIZE);
+ 	entropy_collector->mem = NULL;
+-	jent_zfree(entropy_collector);
++	jent_shim_zfree(entropy_collector);
+ }
+ 
  int jent_entropy_init(unsigned int osr, unsigned int flags, void *hash_state,
  		      struct rand_data *p_ec)
  {
@@ -698,7 +880,7 @@ index 0bdbaeb40bbb..e6afb40408fd 100644
  	 * health test entropy data is used to further still the available
 diff --git a/crypto/sha3_jitterentropy.c b/crypto/sha3_jitterentropy.c
 new file mode 100644
-index 000000000000..a5ab6b44b965
+index 0000000000000..a5ab6b44b9659
 --- /dev/null
 +++ b/crypto/sha3_jitterentropy.c
 @@ -0,0 +1,245 @@
@@ -949,7 +1131,7 @@ index 000000000000..a5ab6b44b965
 +}
 diff --git a/include/crypto/sha3_jitterentropy.h b/include/crypto/sha3_jitterentropy.h
 new file mode 100644
-index 000000000000..cdb51594f32a
+index 0000000000000..cdb51594f32a6
 --- /dev/null
 +++ b/include/crypto/sha3_jitterentropy.h
 @@ -0,0 +1,54 @@
@@ -1008,5 +1190,5 @@ index 000000000000..cdb51594f32a
 +}
 +#endif
 -- 
-2.51.0
+2.50.1
 
