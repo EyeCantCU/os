@@ -1,0 +1,152 @@
+package:
+  name: airbyte-webapp
+  version: "2.0.0"
+  epoch: 0
+  description: User-facing webapp for Airbyte - ELT platform for data integration
+  copyright:
+    - license: Elastic-2.0
+  dependencies:
+    runtime:
+      - ${{package.name}}-nginx-config
+      - bash-binsh
+      - findutils
+      - gettext # for envsubst command in docker-entrypoint.sh
+      - nginx-stable
+      - tzdata
+
+vars:
+  # Pinned to match Airbyte's build requirements from .nvmrc and package.json
+  # Check upstream repository for updates: https://github.com/airbytehq/airbyte-platform
+  # Update when bumping package version or if build fails due to version mismatch
+  node-version: 20
+  # Airbyte Gradle plugins (version 0.73.0) require at least Java 21
+  java-version: 21
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - git
+      - gradle
+      - jq
+      - libudev
+      - nginx-stable-config
+      - nginx-stable-package-config
+      - nodejs-${{vars.node-version}}
+      - openjdk-${{vars.java-version}}
+      - openssl
+      - pnpm
+      - python-3
+      - udev
+      - wolfi-baselayout
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/airbytehq/airbyte-platform
+      tag: v${{package.version}}
+      expected-commit: c46502e96e66083687b15861e05fe8777a9afb59
+
+  - name: Build webapp with Gradle
+    runs: |
+      export JAVA_HOME=/usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      export NODE_VERSION=${{vars.node-version}}
+
+      # Build only the webapp module
+      ./gradlew :oss:airbyte-webapp:assemble --no-daemon --stacktrace
+
+  - name: Install webapp files
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/nginx/html
+      cp -r airbyte-webapp/build/app/* ${{targets.destdir}}/usr/share/nginx/html/
+
+  - name: Copy docker-entrypoint
+    working-directory: airbyte-base-nginx-image/src
+    runs: |
+      mkdir -p ${{targets.destdir}}/docker-entrypoint.d
+      install -Dm755 docker-entrypoint.sh ${{targets.destdir}}/docker-entrypoint.sh
+      install -Dm755 *.sh ${{targets.destdir}}/docker-entrypoint.d/
+      install -Dm755 15-local-resolvers.envsh ${{targets.destdir}}/docker-entrypoint.d/15-local-resolvers.envsh
+      rm ${{targets.destdir}}/docker-entrypoint.d/docker-entrypoint.sh # Remove duplicate
+
+subpackages:
+  - name: ${{package.name}}-nginx-config
+    description: nginx config for airbyte-webapp
+    dependencies:
+      provides:
+        - nginx-config=0.${{package.full-version}}
+    pipeline:
+      - name: Copy files
+        runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc/nginx
+          mkdir -p ${{targets.subpkgdir}}/etc/nginx/templates
+          mkdir -p ${{targets.subpkgdir}}/var/log/nginx
+          cp -rf /etc/nginx/* ${{targets.subpkgdir}}/etc/nginx/
+          cp -f /etc/nginx/conf.d/nginx.default.conf ${{targets.subpkgdir}}/etc/nginx/conf.d/default.conf
+          cp ${{targets.subpkgdir}}/etc/nginx/conf.d/default.conf ${{targets.subpkgdir}}/etc/nginx/templates/default.conf.template
+      - name: Modify configs with sed
+        runs: |
+          # https://github.com/airbytehq/airbyte-platform/blob/e97c8e6eef9c2613d6bc832fffdbc949a30cde4b/airbyte-base-nginx-image/src/Dockerfile#L116-L120
+          sed -i 's,listen[[:space:]]*80;,listen 8080;,' ${{targets.subpkgdir}}/etc/nginx/conf.d/default.conf
+          sed -i '/user  nginx;/d' ${{targets.subpkgdir}}/etc/nginx/nginx.conf
+          sed -i 's,/var/run/nginx.pid,/tmp/nginx.pid,' ${{targets.subpkgdir}}/etc/nginx/nginx.conf
+          sed -i "/^http {/a \    proxy_temp_path /tmp/proxy_temp;\n    client_body_temp_path /tmp/client_temp;\n    fastcgi_temp_path /tmp/fastcgi_temp;\n    uwsgi_temp_path /tmp/uwsgi_temp;\n    scgi_temp_path /tmp/scgi_temp;\n" ${{targets.subpkgdir}}/etc/nginx/nginx.conf
+      - name: Create log symlinks
+        runs: |
+          # https://github.com/airbytehq/airbyte-platform/blob/e97c8e6eef9c2613d6bc832fffdbc949a30cde4b/airbyte-base-nginx-image/src/Dockerfile#L110-L112
+          ln -sf /dev/stdout ${{targets.subpkgdir}}/var/log/nginx/access.log
+          ln -sf /dev/stderr ${{targets.subpkgdir}}/var/log/nginx/error.log
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: nginx-config
+            real-pkg-name: ${{subpkg.name}}
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: nginx
+          gid: 65532
+      users:
+        - username: nginx
+          gid: 65532
+          uid: 65532
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+    environment:
+      AIRBYTE_SERVER_HOST: localhost
+      CONNECTOR_BUILDER_API_HOST: localhost
+      KEYCLOAK_INTERNAL_HOST: localhost
+  pipeline:
+    - name: Verify static files exist
+      runs: |
+        [ -f /usr/share/nginx/html/index.html ] || exit 1
+    - name: "Start server and test endpoint with error checking"
+      uses: test/daemon-check-output
+      with:
+        start: bash -x /docker-entrypoint.sh nginx -g 'daemon off;'
+        timeout: 60
+        expected_output: |
+          Configuration complete; ready for start up
+          start worker processes
+        post: |
+          wait-for-it -t 10 localhost:8080
+          curl -sfL http://localhost:8080/index.html | grep -qi "<title>Airbyte</title>"
+
+update:
+  enabled: true
+  github:
+    identifier: airbytehq/airbyte-platform
+    strip-prefix: v
+    tag-filter: v
