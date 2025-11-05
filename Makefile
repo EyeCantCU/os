@@ -33,7 +33,7 @@ BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
 
 # Space-separated list of image names to exclude from all groups
 # Example: SKIP_IMAGES="aws-ecs-foo generic-base" make disks-aws-ecs
-SKIP_IMAGES = aws-ecs-fips-full-immutable
+SKIP_IMAGES =
 cfgs = $(wildcard configs/*-*)
 # names is a list of each basename cfg
 names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
