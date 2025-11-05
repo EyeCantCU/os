@@ -52,25 +52,19 @@ func CreateCpio(ctx context.Context, dest string, opts ...build.Option) error {
 // CreateTar is modeled after the apko build-minirootfs command.
 // It creates a tar layer and generates SPDX SBOMs in the specified output directory.
 // Returns the layer path, SBOM paths, and any error encountered.
-func CreateTar(ctx context.Context, config string, targetArch string, sbomOutputDir string) (layerPath string, sbomPaths []string, err error) {
+func CreateTar(ctx context.Context, config string, targetArch string, sbomOutputDir string, opts ...build.Option) (layerPath string, sbomPaths []string, err error) {
 	buildconf, err := os.Open(config)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to open apko yaml: %w", err)
 	}
 	defer buildconf.Close()
 
-	opts := []build.Option{
+	opts = append(opts,
 		build.WithConfig(config, []string{}),
 		build.WithArch(types.ParseArchitecture(targetArch)),
 		build.WithSBOM(sbomOutputDir),
 		build.WithSBOMFormats([]string{"spdx"}),
-	}
-
-	wd, err := os.MkdirTemp("", "apko-*")
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create working directory: %w", err)
-	}
-	defer os.RemoveAll(wd)
+	)
 
 	// use tarfs instead of apkofs.DirFS as it preserves reproducibility.
 	bc, err := build.New(ctx, tarfs.New(), opts...)
