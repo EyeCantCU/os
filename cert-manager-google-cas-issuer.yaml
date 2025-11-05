@@ -1,0 +1,70 @@
+package:
+  name: cert-manager-google-cas-issuer
+  version: "0.10.1"
+  epoch: 0
+  description: cert-manager issuer for Google CA Service
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: cddbde7dc24e0c4b5d81bb6044ae052553e1c484
+      repository: https://github.com/cert-manager/google-cas-issuer
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-viper/mapstructure/v2@v2.4.0
+
+  - uses: go/build
+    with:
+      packages: main.go
+      output: google-cas-issuer
+      ldflags: |
+        -X github.com/cert-manager/google-cas-issuer/pkg/internal/version.AppVersion=${{package.version}}
+        -X github.com/cert-manager/google-cas-issuer/pkg/internal/version.GitCommit=$(git rev-parse HEAD)
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '.*-alpha.*'
+    - '.*-beta.*'
+    - '.*-rc.*'
+  git:
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      METRICS_PORT: "8080"
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: google-cas-issuer
+    - uses: test/kwok/cluster
+    - name: Install CRDs
+      runs: |
+        set -euo pipefail
+        # google-cas-issuer requires cert-manager CRDs to be present
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.crds.yaml
+        kubectl apply -f https://raw.githubusercontent.com/cert-manager/google-cas-issuer/v${{package.version}}/deploy/crds/cas-issuer.jetstack.io_googlecasissuers.yaml
+        kubectl apply -f https://raw.githubusercontent.com/cert-manager/google-cas-issuer/v${{package.version}}/deploy/crds/cas-issuer.jetstack.io_googlecasclusterissuers.yaml
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl config view --minify --raw > /tmp/kubeconfig.yaml
+        start: |
+          google-cas-issuer
+        timeout: 120
+        expected_output: |
+          starting manager
+          Starting metrics server
+          Starting Controller
+        post: |-
+          set -euo pipefail
+          curl -sf "http://localhost:${METRICS_PORT}/metrics" | grep -F "controller_runtime_active_workers"
