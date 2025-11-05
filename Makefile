@@ -324,6 +324,7 @@ AZSTORAGEACCOUNT = chainguardvms$(PUBLISH_TARGET)
 AZ_IMAGEUPLOAD_FLAGS ?=
 QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
 VMWARE_AZSTORAGECONTAINER = chainguard-vms-vmware
+LXD_AZSTORAGECONTAINER = chainguard-vms-lxd
 
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
@@ -477,6 +478,20 @@ $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-ge
 		--gcs-bucket $(RPI_GCSBUCKET) \
 		--rpi-upload \
 		--raw-path $(dir $@)disk.raw)
+
+$(ARCH_OUT_D)/lxd-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/lxd-%/build.stamp
+	@mkdir -p $(dir $@)
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name lxd-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(LXD_AZSTORAGECONTAINER) \
+		--lxd-metadata-path $(dir $@)chainguard-$*-lxd.tar.xz \
+		--squashfs-path $(dir $@)chainguard-$*.squashfs \
+		--readme $(dir $@)README.md \
+		--sbom-path $(dir $@)sbom-$(ARCH).spdx.json \
+		--sign-az-urls)
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
