@@ -318,17 +318,24 @@ test:
         # Functional tests go here
 ```
 
-### 8. Use `grep -F` for literal string matching
-Use `grep -F` (fixed string) instead of plain `grep` for literal strings - it's safer and faster:
+### 8. Use `grep -F` for literal string matching, avoid `-q` flag
+Use `grep -F` (fixed string) instead of plain `grep` for literal strings - it's safer and faster.
+
+**IMPORTANT:** Never use `grep -q` (quiet mode) in tests as it suppresses output and makes debugging failures harder:
 
 ```bash
-# Good
+# Good - shows what matched
 curl -sf http://localhost:8080/metrics | grep -F "otelcol_process_uptime"
 netstat -ln | grep -F ":8080"
 
 # Bad - regex can have unexpected matches
 curl -sf http://localhost:8080/metrics | grep "otelcol_process_uptime"
+
+# Bad - silences output, makes debugging difficult
+curl -sf http://localhost:8080/metrics | grep -qF "otelcol_process_uptime"
 ```
+
+When tests fail, seeing the actual output helps diagnose issues quickly. The `-q` flag hides this valuable information.
 
 ### 9. Use environment variables for test configuration
 Centralize port numbers and repeated values using environment variables:
@@ -417,3 +424,33 @@ Move config file creation to `setup` parameter in `test/daemon-check-output`:
     EOF
     service-name --config=/tmp/config.yaml validate
 ```
+
+### 13. Use `tee` instead of `cat` for creating config files
+When creating config files in tests, use `tee` instead of `cat` to write the file. This shows the config content in the output, making debugging failures much easier:
+
+```bash
+# Good - shows config content in output
+tee /tmp/config.yaml << 'EOF'
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+EOF
+
+# Bad - silent, no output shown
+cat << 'EOF' > /tmp/config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+EOF
+```
+
+Benefits of using `tee`:
+- Config content appears in test logs, helping diagnose configuration issues
+- No need to add separate `cat /tmp/config.yaml` commands for debugging
+- Maintains the same functionality as `cat >` while improving observability
+
+**Note:** `tee` writes to both the file and stdout by default. This is desired behavior for test visibility.

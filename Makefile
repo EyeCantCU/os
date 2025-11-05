@@ -205,6 +205,9 @@ local-wolfi: ${KEY} apk-token
 	echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOSITORIES_FILE)
 	echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
+	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+endif
 	mkdir -p ${PWD}/packages
 	docker run --pull=always --rm -it \
 		-e HTTP_AUTH="basic:apk.cgr.dev:user:$(shell chainctl auth token --audience apk.cgr.dev)" \
@@ -255,6 +258,9 @@ OS_DIR ?= ${PWD}
 dev-container-wolfi:
 	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
+ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
+	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+endif
 	docker run --pull=always --rm -it \
 		--mount type=bind,source="${OUT_DIR}",destination="$(OUT_LOCAL_DIR)" \
 		--mount type=bind,source="${OS_DIR}",destination="$(OS_LOCAL_DIR)",readonly \

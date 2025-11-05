@@ -1,0 +1,104 @@
+package:
+  name: nrdot-collector-k8s-fips
+  version: "1.5.0"
+  epoch: 0
+  description: Custom distributions of the OpenTelemetry Collector for New Relic
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  build_folder: _build-fips
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - opentelemetry-collector-ocb-fips
+      - yq-fips
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 0a58b96fb6406240c3c760d30924b3d9b1ba39f6
+      repository: https://github.com/newrelic/nrdot-collector-releases
+      tag: ${{package.version}}
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/${{vars.build_folder}}
+
+      # Update the manifest to as we are using ocb 0.138.0 and upstream hasnt updated this yet, they are still using 0.135.0, this causes build failures due to dependency mismatches
+      # track: https://github.com/newrelic/nrdot-collector-releases/pull/424
+      sed -i 's/0\.135\.0/0.138.0/g' ./distributions/nrdot-collector-k8s/manifest.yaml
+      sed -i 's/1\.41\.0/1.44.0/g' ./distributions/nrdot-collector-k8s/manifest.yaml
+
+      # https://github.com/newrelic/nrdot-collector-releases/blob/main/scripts/build.sh#L50 modification for fips
+      yq eval '
+         .dist.name += "-fips" |
+         .dist.description += "-fips" |
+         .dist.output_path += "-fips"' ./distributions/nrdot-collector-k8s/manifest.yaml > ./distributions/nrdot-collector-k8s/manifest-fips.yaml
+
+      ocb --skip-compilation=true --config ./distributions/nrdot-collector-k8s/manifest-fips.yaml > ${{targets.contextdir}}/${{vars.build_folder}}/build.log 2>&1
+      mv "${{vars.build_folder}}"/* "${{targets.contextdir}}/${{vars.build_folder}}"
+      mv ./fips/fips.go "${{targets.contextdir}}/${{vars.build_folder}}"
+
+  - uses: go/build
+    with:
+      output: nrdot-collector-k8s
+      packages: .
+      modroot: ${{targets.contextdir}}/${{vars.build_folder}}
+      go-package: go-fips
+
+# this package intentionally does not include a compat subpackage, we have one in non-fips package that we can reuse while building images
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+    environment:
+      GRPC_PORT: "4317"
+      METRICS_PORT: "8888"
+  pipeline:
+    - uses: test/tw/ver-check
+      with:
+        bins: nrdot-collector-k8s
+    - uses: test/tw/help-check
+      with:
+        bins: nrdot-collector-k8s
+    - name: "Test nrdot-collector-k8s runs as a daemon"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          tee /tmp/config.yaml <<EOF
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+          exporters:
+            debug:
+          service:
+            pipelines:
+              traces:
+                receivers: [otlp]
+                exporters: [debug]
+          EOF
+          nrdot-collector-k8s --config=/tmp/config.yaml validate
+        start: nrdot-collector-k8s --config=/tmp/config.yaml
+        expected_output: |
+          Starting GRPC server
+          Starting nrdot-collector-k8s
+          Everything is ready
+        timeout: 60
+        post: |-
+          set -euo pipefail
+          wait-for-it -t 10 --strict localhost:"${GRPC_PORT}"
+          FIRST_METRICS_CALL=$(curl -sf http://localhost:"${METRICS_PORT}"/metrics | grep -Fe "otelcol_process_uptime")
+          netstat -ln | grep -F :"${GRPC_PORT}"
+          sleep 10
+          [ "${FIRST_METRICS_CALL}" != "$(curl -sf http://localhost:"${METRICS_PORT}"/metrics | grep -Fe "otelcol_process_uptime")" ]
+
+update:
+  enabled: true
+  github:
+    identifier: newrelic/nrdot-collector-releases
+    use-tag: true
