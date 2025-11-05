@@ -3,7 +3,7 @@ module chainguard.dev/wolfi-vm
 go 1.25
 
 require (
-	chainguard.dev/apko v0.30.18
+	chainguard.dev/apko v0.30.20
 	cloud.google.com/go/compute v1.49.1
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.0
@@ -335,7 +335,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
-	go.step.sm/crypto v0.72.0 // indirect
+	go.step.sm/crypto v0.73.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
