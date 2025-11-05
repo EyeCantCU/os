@@ -27,6 +27,8 @@ func CreateCpio(ctx context.Context, dest string, opts ...build.Option) error {
 	}
 	defer os.RemoveAll(wd)
 
+	opts = append(opts, build.WithTempDir(wd))
+
 	bc, err := build.New(ctx, tarfs.New(), opts...)
 	if err != nil {
 		return err
