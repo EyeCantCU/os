@@ -491,6 +491,7 @@ $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-ge
 
 .PHONY: publish-lxd
 publish-lxd: $(foreach name,$(disks_lxd),publish-lxd-$(subst lxd-,,$(name)))
+$(foreach name,$(disks_lxd),publish-lxd-$(subst lxd-,,$(name))): publish-lxd-%: $(ARCH_OUT_D)/lxd-%/publish.$(PUBLISH_TARGET).json
 $(ARCH_OUT_D)/lxd-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/lxd-%/build.stamp
 	@mkdir -p $(dir $@)
 	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
