@@ -567,7 +567,7 @@ install-deps:
 	     --option=Dpkg::options::=--force-unsafe-io \
 	     install --no-install-recommends \
 	       cpu-checker curl gzip parallel python3-lxml python3-venv python3-yaml \
-		   qemu-system-x86 qemu-utils xfsprogs zlib1g-dev'
+		   qemu-system-x86 qemu-utils xfsprogs zlib1g-dev squashfs-tools'
 	sudo sh -c 'for p in kvm vhost-net vhost-vsock; do \
 		d=/dev/$$p; [ -e "$$d" ] || { echo "no $$d"; continue; } ; \
 		chmod ugo+rw $$d && ls -l $$d || exit; done'
