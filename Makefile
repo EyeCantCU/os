@@ -540,9 +540,8 @@ $(ARCH_OUT_D)/lxd-%/build.stamp: configs/lxd-%/build.yaml
 	rm -rf $(dir $@)/lxd
 	# Create squashfs
 	apko build-minirootfs --build-arch=$(ARCH) $< $(dir $@)/disk.tar
-	# TODO /var/log/journal has xattrs which lxd refuses to support
 	# Ubuntu uses xz, but upgrade to zstd should have wide support now
-	cat $(dir $@)/disk.tar | mksquashfs - $(dir $@)/chainguard-$*.squashfs -tar -no-progress -no-xattrs -comp zstd -Xcompression-level 19
+	cat $(dir $@)/disk.tar | mksquashfs - $(dir $@)/chainguard-$*.squashfs -tar -no-progress -xattrs -comp zstd -Xcompression-level 19
 	rm -f $(dir $@)/disk.tar
 	# Create README
 	echo "Import with: lxc image import chainguard-$*-lxd.tar.xz chainguard-$*.squashfs --alias chainguard-$*" >> $(dir $@)/README.md
