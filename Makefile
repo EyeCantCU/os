@@ -503,7 +503,6 @@ $(ARCH_OUT_D)/lxd-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/lxd-%/build.st
 		--lxd-metadata-path $(dir $@)chainguard-$*-lxd.tar.xz \
 		--squashfs-path $(dir $@)chainguard-$*.squashfs \
 		--readme $(dir $@)README.md \
-		--sbom-path $(dir $@)sbom-$(ARCH).spdx.json \
 		--sign-az-urls)
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
