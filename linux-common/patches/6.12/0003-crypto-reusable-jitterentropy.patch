@@ -1,64 +1,228 @@
-From 19b5228a2fe54e3ff392fcf782e60dc05434f008 Mon Sep 17 00:00:00 2001
+From 2cc30227fc24bf84b8d97ff51c6f7954bcd8aeae Mon Sep 17 00:00:00 2001
 From: Amelia Crate <amelia.crate@chainguard.dev>
-Date: Tue, 29 Jul 2025 12:06:47 -0700
-Subject: [PATCH 3/3] crypto: reusable jitterentropy
+Date: Fri, 14 Nov 2025 16:32:37 -0600
+Subject: [PATCH 3/4] crypto: reusable jitterentropy
 
-modify crypto/Makefile for highly reusable jitterentropy
-
-* include vendored sha3_jitterentropy in jitterentropy_rng module
-* include module and shim objects in jitterentropy_rng_module
-* use prebuilt jitterentropy and sha3 objects unless REBUILD_JITTERENTROPY is set
-* disable UBSAN, KASAN, KCOV_INSTRUMENT for objects which should be prebuilt
-
-Guarding the CFLAGS stuff not necessary, but is nice because jitterentropy emits #error if
-compiled with optimizations, so this is a small guardrail against unintentional
-rebuilding of jitterentropy.
+Use 6.18 jitterentropy source code. This is mostly minor improvements.
+We're doing this because it allows us to say that our 6.12 and
+6.18 jitterentropy object builds are actually the same thing but
+built for two different platforms, which means we can submit them at the same
+time.
 ---
- crypto/Makefile | 21 ++++++++++++++++++++-
- 1 file changed, 20 insertions(+), 1 deletion(-)
+ crypto/jitterentropy-kcapi.c     |  1 +
+ crypto/jitterentropy-optimized.c |  1 +
+ crypto/jitterentropy-shim.c      |  9 +++++++++
+ crypto/jitterentropy-shim.h      |  3 +++
+ crypto/jitterentropy-testing.c   | 32 +++++++++++++++++---------------
+ crypto/jitterentropy.c           |  5 ++---
+ crypto/jitterentropy.h           |  5 +++--
+ 7 files changed, 36 insertions(+), 20 deletions(-)
 
-diff --git a/crypto/Makefile b/crypto/Makefile
-index 4c99e5d376f68..250cff47cc6d2 100644
---- a/crypto/Makefile
-+++ b/crypto/Makefile
-@@ -3,6 +3,15 @@
- # Cryptographic API
- #
- 
-+jent_sources = jitterentropy jitterentropy-optimized sha3_jitterentropy
-+# Use 'make REBUILD_JITTERENTROPY=1' to ignore prebuilt objects
-+ifdef REBUILD_JITTERENTROPY
-+$(foreach jent_src,$(jent_sources),$(eval $(obj)/$(jent_src).o: $(src)/$(jent_src).c))
-+else
-+$(foreach jent_src,$(jent_sources),$(obj)/$(jent_src).o): $(subst $(obj),$(src),$(@))
-+	$(call if-changed,copy)
-+endif
+diff --git a/crypto/jitterentropy-kcapi.c b/crypto/jitterentropy-kcapi.c
+index fae81a7c912e3..d1dfb60cf3dd3 100644
+--- a/crypto/jitterentropy-kcapi.c
++++ b/crypto/jitterentropy-kcapi.c
+@@ -265,3 +265,4 @@ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_AUTHOR("Stephan Mueller <smueller@chronox.de>");
+ MODULE_DESCRIPTION("Non-physical True Random Number Generator based on CPU Jitter");
+ MODULE_ALIAS_CRYPTO("jitterentropy_rng");
 +
- obj-$(CONFIG_CRYPTO) += crypto.o
- crypto-y := api.o cipher.o compress.o
+diff --git a/crypto/jitterentropy-optimized.c b/crypto/jitterentropy-optimized.c
+index ee8a6ee427130..fe89c531662d2 100644
+--- a/crypto/jitterentropy-optimized.c
++++ b/crypto/jitterentropy-optimized.c
+@@ -83,6 +83,7 @@ int jent_hash_time(void *hash_state, __u64 time, u8 *addtl,
+ 		if (ret)
+ 			goto err;
+ 	}
++	jent_shim_kmsan_unpoison_memory(intermediary, sizeof(intermediary));
  
-@@ -164,10 +173,20 @@ obj-$(CONFIG_CRYPTO_RNG2) += rng.o
- obj-$(CONFIG_CRYPTO_ANSI_CPRNG) += ansi_cprng.o
- obj-$(CONFIG_CRYPTO_DRBG) += drbg.o
- obj-$(CONFIG_CRYPTO_JITTERENTROPY) += jitterentropy_rng.o
-+ifdef REBUILD_JITTERENTROPY
- CFLAGS_jitterentropy.o = -O0
-+# Disable for certified objects
- KASAN_SANITIZE_jitterentropy.o = n
- UBSAN_SANITIZE_jitterentropy.o = n
--jitterentropy_rng-y := jitterentropy.o jitterentropy-kcapi.o
-+KCOV_INSTRUMENT_jitterentropy.o = n
-+KASAN_SANITIZE_jitterentropy_optimized.o = n
-+UBSAN_SANITIZE_jitterentropy_optimized.o = n
-+KCOV_INSTRUMENT_jitterentropy_optimized.o = n
-+KASAN_SANITIZE_sha3_jitterentropy.o = n
-+UBSAN_SANITIZE_sha3_jitterentropy.o = n
-+KCOV_INSTRUMENT_sha3_jitterentropy.o = n
-+endif
-+jitterentropy_rng-y := jitterentropy.o jitterentropy-optimized.o jitterentropy-kcapi.o jitterentropy-shim.o sha3_jitterentropy.o
- obj-$(CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE) += jitterentropy-testing.o
- obj-$(CONFIG_CRYPTO_TEST) += tcrypt.o
- obj-$(CONFIG_CRYPTO_GHASH) += ghash-generic.o
+ 	/*
+ 	 * Inject the data from the previous loop into the pool. This data is
+diff --git a/crypto/jitterentropy-shim.c b/crypto/jitterentropy-shim.c
+index 810528a6a39a3..98091838740b9 100644
+--- a/crypto/jitterentropy-shim.c
++++ b/crypto/jitterentropy-shim.c
+@@ -236,6 +236,11 @@ void jent_shim_put_unaligned_le32(u32 val, void *p)
+ 	put_unaligned_le32(val, p);
+ }
+ 
++u64 jent_shim_le64_to_cpu(__le64 p)
++{
++	return le64_to_cpu(p);
++}
++
+ /* Crypto registration */
+ int jent_shim_crypto_register_rng(void *alg)
+ {
+@@ -319,3 +324,7 @@ void *jent_shim_crypto_rng_ctx(void *tfm)
+ 	return crypto_rng_ctx((struct crypto_rng *)tfm);
+ }
+ 
++void jent_shim_kmsan_unpoison_memory(const void *address, size_t size)
++{
++	kmsan_unpoison_memory(address, size);
++}
+diff --git a/crypto/jitterentropy-shim.h b/crypto/jitterentropy-shim.h
+index 2a0b04abcf0e0..409c281953cd7 100644
+--- a/crypto/jitterentropy-shim.h
++++ b/crypto/jitterentropy-shim.h
+@@ -70,6 +70,7 @@ u64 jent_shim_get_unaligned_le64(const void *p);
+ void jent_shim_put_unaligned_le64(u64 val, void *p);
+ u32 jent_shim_get_unaligned_le32(const void *p);
+ void jent_shim_put_unaligned_le32(u32 val, void *p);
++u64 jent_shim_le64_to_cpu(__le64 p);
+ 
+ /* Crypto registration */
+ int jent_shim_crypto_register_rng(void *alg);
+@@ -101,4 +102,6 @@ int jent_shim_module_param(void);
+ void *jent_shim_crypto_tfm_ctx(void *tfm);
+ void *jent_shim_crypto_rng_ctx(void *tfm);
+ 
++void jent_shim_kmsan_unpoison_memory(const void *address, size_t size);
++
+ #endif /* _JITTERENTROPY_SHIM_H */
+diff --git a/crypto/jitterentropy-testing.c b/crypto/jitterentropy-testing.c
+index 5cb6a77b8e3b2..fd79cef170d9f 100644
+--- a/crypto/jitterentropy-testing.c
++++ b/crypto/jitterentropy-testing.c
+@@ -15,7 +15,7 @@
+ #define JENT_TEST_RINGBUFFER_MASK	(JENT_TEST_RINGBUFFER_SIZE - 1)
+ 
+ struct jent_testing {
+-	u32 jent_testing_rb[JENT_TEST_RINGBUFFER_SIZE];
++	u64 jent_testing_rb[JENT_TEST_RINGBUFFER_SIZE];
+ 	u32 rb_reader;
+ 	atomic_t rb_writer;
+ 	atomic_t jent_testing_enabled;
+@@ -72,7 +72,7 @@ static void jent_testing_fini(struct jent_testing *data, u32 boot)
+ 	pr_warn("Disabling data collection\n");
+ }
+ 
+-static bool jent_testing_store(struct jent_testing *data, u32 value,
++static bool jent_testing_store(struct jent_testing *data, u64 value,
+ 			       u32 *boot)
+ {
+ 	unsigned long flags;
+@@ -156,20 +156,20 @@ static int jent_testing_reader(struct jent_testing *data, u32 *boot,
+ 		}
+ 
+ 		/* We copy out word-wise */
+-		if (outbuflen < sizeof(u32)) {
++		if (outbuflen < sizeof(u64)) {
+ 			spin_unlock_irqrestore(&data->lock, flags);
+ 			goto out;
+ 		}
+ 
+ 		memcpy(outbuf, &data->jent_testing_rb[data->rb_reader],
+-		       sizeof(u32));
++		       sizeof(u64));
+ 		data->rb_reader++;
+ 
+ 		spin_unlock_irqrestore(&data->lock, flags);
+ 
+-		outbuf += sizeof(u32);
+-		outbuflen -= sizeof(u32);
+-		collected_data += sizeof(u32);
++		outbuf += sizeof(u64);
++		outbuflen -= sizeof(u64);
++		collected_data += sizeof(u64);
+ 	}
+ 
+ out:
+@@ -189,16 +189,17 @@ static int jent_testing_extract_user(struct file *file, char __user *buf,
+ 
+ 	/*
+ 	 * The intention of this interface is for collecting at least
+-	 * 1000 samples due to the SP800-90B requirements. So, we make no
+-	 * effort in avoiding allocating more memory that actually needed
+-	 * by the user. Hence, we allocate sufficient memory to always hold
+-	 * that amount of data.
++	 * 1000 samples due to the SP800-90B requirements. However, due to
++	 * memory and performance constraints, it is not desirable to allocate
++	 * 8000 bytes of memory. Instead, we allocate space for only 125
++	 * samples, which will allow the user to collect all 1000 samples using
++	 * 8 calls to this interface.
+ 	 */
+-	tmp = kmalloc(JENT_TEST_RINGBUFFER_SIZE + sizeof(u32), GFP_KERNEL);
++	tmp = kmalloc(125 * sizeof(u64) + sizeof(u64), GFP_KERNEL);
+ 	if (!tmp)
+ 		return -ENOMEM;
+ 
+-	tmp_aligned = PTR_ALIGN(tmp, sizeof(u32));
++	tmp_aligned = PTR_ALIGN(tmp, sizeof(u64));
+ 
+ 	while (nbytes) {
+ 		int i;
+@@ -212,7 +213,7 @@ static int jent_testing_extract_user(struct file *file, char __user *buf,
+ 			schedule();
+ 		}
+ 
+-		i = min_t(int, nbytes, JENT_TEST_RINGBUFFER_SIZE);
++		i = min_t(int, nbytes, 125 * sizeof(u64));
+ 		i = reader(tmp_aligned, i);
+ 		if (i <= 0) {
+ 			if (i < 0)
+@@ -251,7 +252,7 @@ static struct jent_testing jent_raw_hires = {
+ 	.read_wait = __WAIT_QUEUE_HEAD_INITIALIZER(jent_raw_hires.read_wait)
+ };
+ 
+-int jent_raw_hires_entropy_store(__u32 value)
++int jent_raw_hires_entropy_store(__u64 value)
+ {
+ 	return jent_testing_store(&jent_raw_hires, value, &boot_raw_hires_test);
+ }
+@@ -292,3 +293,4 @@ void jent_testing_exit(void)
+ 	debugfs_remove_recursive(jent_raw_debugfs_root);
+ }
+ EXPORT_SYMBOL(jent_testing_exit);
++
+diff --git a/crypto/jitterentropy.c b/crypto/jitterentropy.c
+index 7a4b91b4192ad..144933be8f8c6 100644
+--- a/crypto/jitterentropy.c
++++ b/crypto/jitterentropy.c
+@@ -145,6 +145,7 @@ struct rand_data {
+  */
+ #define JENT_ENTROPY_SAFETY_FACTOR	64
+ 
++#include <linux/array_size.h>
+ #include <linux/fips.h>
+ #include <linux/minmax.h>
+ #include <linux/printk.h>
+@@ -181,9 +182,6 @@ static const unsigned int jent_apt_cutoff_lookup[15] = {
+ static const unsigned int jent_apt_cutoff_permanent_lookup[15] = {
+ 	355, 447, 479, 494, 502, 507, 510, 512,
+ 	512, 512, 512, 512, 512, 512, 512 };
+-/* #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+- * redefined by includes from jitterentropy-shim.h
+- */
+ 
+ static void jent_apt_init(struct rand_data *ec, unsigned int osr)
+ {
+@@ -830,3 +828,4 @@ int jent_entropy_init(unsigned int osr, unsigned int flags, void *hash_state,
+ 
+ 	return ret;
+ }
++
+diff --git a/crypto/jitterentropy.h b/crypto/jitterentropy.h
+index aa4728675ae24..8dd2bf2163bfb 100644
+--- a/crypto/jitterentropy.h
++++ b/crypto/jitterentropy.h
+@@ -22,11 +22,12 @@ extern struct rand_data *jent_entropy_collector_alloc(unsigned int osr,
+ extern void jent_entropy_collector_free(struct rand_data *entropy_collector);
+ 
+ #ifdef CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE
+-int jent_raw_hires_entropy_store(__u32 value);
++int jent_raw_hires_entropy_store(__u64 value);
+ void jent_testing_init(void);
+ void jent_testing_exit(void);
+ #else /* CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE */
+-static inline int jent_raw_hires_entropy_store(__u32 value) { return 0; }
++static inline int jent_raw_hires_entropy_store(__u64 value) { return 0; }
+ static inline void jent_testing_init(void) { }
+ static inline void jent_testing_exit(void) { }
+ #endif /* CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE */
++
 -- 
 2.50.1
 
