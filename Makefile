@@ -213,13 +213,13 @@ $(art_render_targets): art-render-%: configs/%/build.yaml
 
 configs/%/build.yaml: $(ART) $(YQ) $(YAM) $(cue_files)
 	@mkdir -p $(dir $@)
-	@test -f "configs/$*/build.cue" || exec $(YAM) --sort .packages configs/$*/build.yaml; \
+	@test -f "configs/$*/build.cue" || exec $(YAM) --sort .contents.packages configs/$*/build.yaml; \
 	set -xe; \
 	$(ART) resolve ./configs/$*; \
 	$(ART) lock --tf=false ./configs/$*; \
 	render_json="$$($(ART) render ./configs/$*)"; \
 	echo "$$render_json" | $(YQ) -p=json > ./configs/$*/build.yaml; \
-	$(YAM) --sort .packages ./configs/$*/build.yaml
+	$(YAM) --sort .contents.packages ./configs/$*/build.yaml
 
 art_diff_targets = $(foreach name,$(names),art-diff-$(name))
 art-diff-all: $(art_diff_targets)
@@ -245,10 +245,10 @@ $(art_diff_targets): art-diff-%: $(ART) $(YQ) $(YAM)
 	@test -f "configs/$*/build.cue" || exit 0; \
 	set -xe; \
 	render_json="$$($(ART) render ./configs/$*)"; \
-	echo "$$render_json" | $(YQ) -p=json > ./configs/$*/build.yaml.tmp; \
-	$(YAM) --sort .packages ./configs/$*/build.yaml.tmp; \
-	diff ./configs/$*/build.yaml.tmp ./configs/$*/build.yaml
-	@rm -f ./configs/$*/build.yaml.tmp
+	echo "$$render_json" | $(YQ) -p=json > ./configs/$*/build.tmp.yaml; \
+	$(YAM) --sort .contents.packages ./configs/$*/build.tmp.yaml; \
+	diff ./configs/$*/build.tmp.yaml ./configs/$*/build.yaml
+	@rm -f ./configs/$*/build.tmp.yaml
 
 .PHONY: builder
 builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
