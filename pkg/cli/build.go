@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 
+	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/wolfi-vm/pkg/converter"
 	"chainguard.dev/wolfi-vm/pkg/converter/tar2efi"
@@ -150,8 +151,14 @@ func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPa
 }
 
 func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, kcmdAppend, buildArch, arch, output string) error {
+	wd, err := os.MkdirTemp("", "apko-*")
+	if err != nil {
+		return fmt.Errorf("failed to create working directory: %w", err)
+	}
+	defer os.RemoveAll(wd)
+
 	// Generate tar and SBOM using apko
-	apkoTar, apkoSBOMPaths, err := utils.CreateTar(ctx, buildFilePath, arch, filepath.Dir(output))
+	apkoTar, apkoSBOMPaths, err := utils.CreateTar(ctx, buildFilePath, arch, filepath.Dir(output), build.WithTempDir(wd))
 	if err != nil {
 		return fmt.Errorf("error creating image.tar: %w", err)
 	}
