@@ -1,0 +1,108 @@
+From 132b083fb44bc615f025e226a8e5d5d79af548ab Mon Sep 17 00:00:00 2001
+From: Dimitri John Ledkov <dimitri.ledkov@surgut.co.uk>
+Date: Mon, 27 Oct 2025 23:49:46 +0000
+Subject: [PATCH 2/2] Port from x/crypto/hkdf to crypto/hkdf
+
+---
+ internal/handshake/hkdf.go            |  8 +++-----
+ internal/handshake/initial_aead.go    |  8 +++++---
+ internal/handshake/token_protector.go | 16 ++++++----------
+ 3 files changed, 14 insertions(+), 18 deletions(-)
+
+diff --git a/internal/handshake/hkdf.go b/internal/handshake/hkdf.go
+index 3da97cd8..16921f75 100644
+--- a/internal/handshake/hkdf.go
++++ b/internal/handshake/hkdf.go
+@@ -2,9 +2,8 @@ package handshake
+ 
+ import (
+ 	"crypto"
++	"crypto/hkdf"
+ 	"encoding/binary"
+-
+-	"golang.org/x/crypto/hkdf"
+ )
+ 
+ // hkdfExpandLabel HKDF expands a label as defined in RFC 8446, section 7.1.
+@@ -18,9 +17,8 @@ func hkdfExpandLabel(hash crypto.Hash, secret, context []byte, label string, len
+ 	b[3+6+len(label)] = uint8(len(context))
+ 	b = append(b, context...)
+ 
+-	out := make([]byte, length)
+-	n, err := hkdf.Expand(hash.New, secret, b).Read(out)
+-	if err != nil || n != length {
++	out, err := hkdf.Expand(hash.New, secret, string(b), length)
++	if err != nil {
+ 		panic("quic: HKDF-Expand-Label invocation failed unexpectedly")
+ 	}
+ 	return out
+diff --git a/internal/handshake/initial_aead.go b/internal/handshake/initial_aead.go
+index b8aa7e3e..fe00579e 100644
+--- a/internal/handshake/initial_aead.go
++++ b/internal/handshake/initial_aead.go
+@@ -2,10 +2,9 @@ package handshake
+ 
+ import (
+ 	"crypto"
++	"crypto/hkdf"
+ 	"crypto/tls"
+ 
+-	"golang.org/x/crypto/hkdf"
+-
+ 	"github.com/quic-go/quic-go/internal/protocol"
+ )
+ 
+@@ -52,7 +51,10 @@ func NewInitialAEAD(connID protocol.ConnectionID, pers protocol.Perspective, v p
+ }
+ 
+ func computeSecrets(connID protocol.ConnectionID, v protocol.Version) (clientSecret, serverSecret []byte) {
+-	initialSecret := hkdf.Extract(crypto.SHA256.New, connID.Bytes(), getSalt(v))
++	initialSecret, err := hkdf.Extract(crypto.SHA256.New, connID.Bytes(), getSalt(v))
++	if err != nil {
++		panic("quic: HKDF-Extract invocation failed unexpectedly")
++	}
+ 	clientSecret = hkdfExpandLabel(crypto.SHA256, initialSecret, []byte{}, "client in", crypto.SHA256.Size())
+ 	serverSecret = hkdfExpandLabel(crypto.SHA256, initialSecret, []byte{}, "server in", crypto.SHA256.Size())
+ 	return
+diff --git a/internal/handshake/token_protector.go b/internal/handshake/token_protector.go
+index 15779189..d06a601d 100644
+--- a/internal/handshake/token_protector.go
++++ b/internal/handshake/token_protector.go
+@@ -3,12 +3,10 @@ package handshake
+ import (
+ 	"crypto/aes"
+ 	"crypto/cipher"
++	"crypto/hkdf"
+ 	"crypto/rand"
+ 	"crypto/sha256"
+ 	"fmt"
+-	"io"
+-
+-	"golang.org/x/crypto/hkdf"
+ )
+ 
+ // TokenProtectorKey is the key used to encrypt both Retry and session resumption tokens.
+@@ -53,15 +51,13 @@ func (s *tokenProtector) DecodeToken(p []byte) ([]byte, error) {
+ }
+ 
+ func (s *tokenProtector) createAEAD(nonce []byte) (cipher.AEAD, []byte, error) {
+-	h := hkdf.New(sha256.New, s.key[:], nonce, []byte("quic-go token source"))
+-	key := make([]byte, 32) // use a 32 byte key, in order to select AES-256
+-	if _, err := io.ReadFull(h, key); err != nil {
+-		return nil, nil, err
+-	}
+-	aeadNonce := make([]byte, 12)
+-	if _, err := io.ReadFull(h, aeadNonce); err != nil {
++	// 32 key + 12 aeadNone = 44
++	keyAndNonce, err := hkdf.Key(sha256.New, s.key[:], nonce, "quic-go token source", 44)
++	if err != nil {
+ 		return nil, nil, err
+ 	}
++	key := keyAndNonce[0:32]
++	aeadNonce := keyAndNonce[32:]
+ 	c, err := aes.NewCipher(key)
+ 	if err != nil {
+ 		return nil, nil, err
+-- 
+2.51.0
+
