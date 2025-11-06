@@ -37,6 +37,7 @@ artConfig: artv1.#Config & {
 			"https://apk.cgr.dev/chainguard-private",
 		]])
 		packages: list.Concat([cfg.packages, [
+			"ca-certificates",
 			"chainguard-baselayout",
 			"coreutils",
 			"busybox",
