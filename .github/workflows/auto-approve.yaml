@@ -26,9 +26,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Check the API rate limit
           QUOTA=$(gh api rate_limit --jq '.resources.search.remaining')
           if [ "$QUOTA" -lt 5 ]; then
               echo "Rate limit too low ($QUOTA). Exiting."
+              exit 1
+          fi
+
+          # Check for secondary rate limits by making a test API call
+          HEADERS=$(gh api /user --include 2>&1 | grep -iE '^(x-ratelimit-remaining|retry-after):' || true)
+
+          # Check if we're hitting secondary rate limits
+          if echo "$HEADERS" | grep -iq 'retry-after:'; then
+              RETRY_AFTER=$(echo "$HEADERS" | grep -i 'retry-after:' | cut -d: -f2 | tr -d ' ')
+              echo "Secondary rate limit detected. Retry after: $RETRY_AFTER seconds"
+              exit 1
+          fi
+
+          # Check remaining requests from secondary rate limit headers
+          REMAINING=$(echo "$HEADERS" | grep -i 'x-ratelimit-remaining:' | cut -d: -f2 | tr -d ' ' || echo "unknown")
+          if [ "$REMAINING" != "unknown" ] && [ "$REMAINING" -lt 100 ]; then
+              echo "Secondary rate limit threshold reached ($REMAINING remaining). Exiting."
               exit 1
           fi
       - name: Slack notification (quota)
