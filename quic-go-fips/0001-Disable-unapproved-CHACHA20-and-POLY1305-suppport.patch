@@ -1,0 +1,719 @@
+From 92dd5086eb282b18df8a1ce45adcfe11c287ba1a Mon Sep 17 00:00:00 2001
+From: Dimitri John Ledkov <dimitri.ledkov@surgut.co.uk>
+Date: Mon, 27 Oct 2025 17:16:42 +0000
+Subject: [PATCH 1/2] Disable unapproved CHACHA20 and POLY1305 suppport
+
+---
+ fuzzing/handshake/fuzz.go                     |   2 -
+ integrationtests/self/handshake_test.go       |   1 -
+ internal/handshake/cipher_suite.go            |  18 -
+ internal/handshake/handshake_helpers_test.go  |   1 -
+ internal/handshake/header_protector.go        |  59 ---
+ internal/handshake/hkdf_test.go               |   2 +-
+ internal/handshake/updatable_aead.go          |   2 -
+ internal/handshake/updatable_aead.go.orig     | 340 ++++++++++++++++++
+ internal/handshake/updatable_aead_test.go     |  39 --
+ internal/handshake/updatable_aead_test.go.rej |  48 +++
+ internal/protocol/protocol.go                 |   3 -
+ interop/client/main.go                        |   4 -
+ interop/server/main.go                        |   5 -
+ 13 files changed, 389 insertions(+), 135 deletions(-)
+ create mode 100644 internal/handshake/updatable_aead.go.orig
+ create mode 100644 internal/handshake/updatable_aead_test.go.rej
+
+diff --git a/fuzzing/handshake/fuzz.go b/fuzzing/handshake/fuzz.go
+index 659eb58d..621982d8 100644
+--- a/fuzzing/handshake/fuzz.go
++++ b/fuzzing/handshake/fuzz.go
+@@ -189,8 +189,6 @@ func runHandshake(runConfig [confLen]byte, messageConfig uint8, clientConf *tls.
+ 		resetCipherSuite = qtls.SetCipherSuite(tls.TLS_AES_128_GCM_SHA256)
+ 	case 1:
+ 		resetCipherSuite = qtls.SetCipherSuite(tls.TLS_AES_256_GCM_SHA384)
+-	case 3:
+-		resetCipherSuite = qtls.SetCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256)
+ 	default:
+ 	}
+ 	defer resetCipherSuite()
+diff --git a/integrationtests/self/handshake_test.go b/integrationtests/self/handshake_test.go
+index 3e2ddf91..2fd6b875 100644
+--- a/integrationtests/self/handshake_test.go
++++ b/integrationtests/self/handshake_test.go
+@@ -118,7 +118,6 @@ func TestHandshakeCipherSuites(t *testing.T) {
+ 	for _, suiteID := range []uint16{
+ 		tls.TLS_AES_128_GCM_SHA256,
+ 		tls.TLS_AES_256_GCM_SHA384,
+-		tls.TLS_CHACHA20_POLY1305_SHA256,
+ 	} {
+ 		t.Run(tls.CipherSuiteName(suiteID), func(t *testing.T) {
+ 			reset := qtls.SetCipherSuite(suiteID)
+diff --git a/internal/handshake/cipher_suite.go b/internal/handshake/cipher_suite.go
+index d8a381da..46a69fbb 100644
+--- a/internal/handshake/cipher_suite.go
++++ b/internal/handshake/cipher_suite.go
+@@ -6,8 +6,6 @@ import (
+ 	"crypto/cipher"
+ 	"crypto/tls"
+ 	"fmt"
+-
+-	"golang.org/x/crypto/chacha20poly1305"
+ )
+ 
+ // These cipher suite implementations are copied from the standard library crypto/tls package.
+@@ -27,8 +25,6 @@ func getCipherSuite(id uint16) *cipherSuite {
+ 	switch id {
+ 	case tls.TLS_AES_128_GCM_SHA256:
+ 		return &cipherSuite{ID: tls.TLS_AES_128_GCM_SHA256, Hash: crypto.SHA256, KeyLen: 16, AEAD: aeadAESGCMTLS13}
+-	case tls.TLS_CHACHA20_POLY1305_SHA256:
+-		return &cipherSuite{ID: tls.TLS_CHACHA20_POLY1305_SHA256, Hash: crypto.SHA256, KeyLen: 32, AEAD: aeadChaCha20Poly1305}
+ 	case tls.TLS_AES_256_GCM_SHA384:
+ 		return &cipherSuite{ID: tls.TLS_AES_256_GCM_SHA384, Hash: crypto.SHA384, KeyLen: 32, AEAD: aeadAESGCMTLS13}
+ 	default:
+@@ -54,20 +50,6 @@ func aeadAESGCMTLS13(key, nonceMask []byte) *xorNonceAEAD {
+ 	return ret
+ }
+ 
+-func aeadChaCha20Poly1305(key, nonceMask []byte) *xorNonceAEAD {
+-	if len(nonceMask) != aeadNonceLength {
+-		panic("tls: internal error: wrong nonce length")
+-	}
+-	aead, err := chacha20poly1305.New(key)
+-	if err != nil {
+-		panic(err)
+-	}
+-
+-	ret := &xorNonceAEAD{aead: aead}
+-	copy(ret.nonceMask[:], nonceMask)
+-	return ret
+-}
+-
+ // xorNonceAEAD wraps an AEAD by XORing in a fixed pattern to the nonce
+ // before each call.
+ type xorNonceAEAD struct {
+diff --git a/internal/handshake/handshake_helpers_test.go b/internal/handshake/handshake_helpers_test.go
+index a684c2cc..bf295e6c 100644
+--- a/internal/handshake/handshake_helpers_test.go
++++ b/internal/handshake/handshake_helpers_test.go
+@@ -31,5 +31,4 @@ func TestSplitHexString(t *testing.T) {
+ var cipherSuites = []*cipherSuite{
+ 	getCipherSuite(tls.TLS_AES_128_GCM_SHA256),
+ 	getCipherSuite(tls.TLS_AES_256_GCM_SHA384),
+-	getCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256),
+ }
+diff --git a/internal/handshake/header_protector.go b/internal/handshake/header_protector.go
+index 2c5ee42f..d25711fd 100644
+--- a/internal/handshake/header_protector.go
++++ b/internal/handshake/header_protector.go
+@@ -4,11 +4,8 @@ import (
+ 	"crypto/aes"
+ 	"crypto/cipher"
+ 	"crypto/tls"
+-	"encoding/binary"
+ 	"fmt"
+ 
+-	"golang.org/x/crypto/chacha20"
+-
+ 	"github.com/quic-go/quic-go/internal/protocol"
+ )
+ 
+@@ -29,8 +26,6 @@ func newHeaderProtector(suite *cipherSuite, trafficSecret []byte, isLongHeader b
+ 	switch suite.ID {
+ 	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384:
+ 		return newAESHeaderProtector(suite, trafficSecret, isLongHeader, hkdfLabel)
+-	case tls.TLS_CHACHA20_POLY1305_SHA256:
+-		return newChaChaHeaderProtector(suite, trafficSecret, isLongHeader, hkdfLabel)
+ 	default:
+ 		panic(fmt.Sprintf("Invalid cipher suite id: %d", suite.ID))
+ 	}
+@@ -78,57 +73,3 @@ func (p *aesHeaderProtector) apply(sample []byte, firstByte *byte, hdrBytes []by
+ 		hdrBytes[i] ^= p.mask[i+1]
+ 	}
+ }
+-
+-type chachaHeaderProtector struct {
+-	mask [5]byte
+-
+-	key          [32]byte
+-	isLongHeader bool
+-}
+-
+-var _ headerProtector = &chachaHeaderProtector{}
+-
+-func newChaChaHeaderProtector(suite *cipherSuite, trafficSecret []byte, isLongHeader bool, hkdfLabel string) headerProtector {
+-	hpKey := hkdfExpandLabel(suite.Hash, trafficSecret, []byte{}, hkdfLabel, suite.KeyLen)
+-
+-	p := &chachaHeaderProtector{
+-		isLongHeader: isLongHeader,
+-	}
+-	copy(p.key[:], hpKey)
+-	return p
+-}
+-
+-func (p *chachaHeaderProtector) DecryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
+-	p.apply(sample, firstByte, hdrBytes)
+-}
+-
+-func (p *chachaHeaderProtector) EncryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
+-	p.apply(sample, firstByte, hdrBytes)
+-}
+-
+-func (p *chachaHeaderProtector) apply(sample []byte, firstByte *byte, hdrBytes []byte) {
+-	if len(sample) != 16 {
+-		panic("invalid sample size")
+-	}
+-	for i := 0; i < 5; i++ {
+-		p.mask[i] = 0
+-	}
+-	cipher, err := chacha20.NewUnauthenticatedCipher(p.key[:], sample[4:])
+-	if err != nil {
+-		panic(err)
+-	}
+-	cipher.SetCounter(binary.LittleEndian.Uint32(sample[:4]))
+-	cipher.XORKeyStream(p.mask[:], p.mask[:])
+-	p.applyMask(firstByte, hdrBytes)
+-}
+-
+-func (p *chachaHeaderProtector) applyMask(firstByte *byte, hdrBytes []byte) {
+-	if p.isLongHeader {
+-		*firstByte ^= p.mask[0] & 0xf
+-	} else {
+-		*firstByte ^= p.mask[0] & 0x1f
+-	}
+-	for i := range hdrBytes {
+-		hdrBytes[i] ^= p.mask[i+1]
+-	}
+-}
+diff --git a/internal/handshake/hkdf_test.go b/internal/handshake/hkdf_test.go
+index e43084f3..53ea769d 100644
+--- a/internal/handshake/hkdf_test.go
++++ b/internal/handshake/hkdf_test.go
+@@ -11,7 +11,7 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-var tls13CipherSuites = []uint16{tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384, tls.TLS_CHACHA20_POLY1305_SHA256}
++var tls13CipherSuites = []uint16{tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384}
+ 
+ type cipherSuiteTLS13 struct {
+ 	ID     uint16
+diff --git a/internal/handshake/updatable_aead.go b/internal/handshake/updatable_aead.go
+index ef92ab1c..edb46b2e 100644
+--- a/internal/handshake/updatable_aead.go
++++ b/internal/handshake/updatable_aead.go
+@@ -160,8 +160,6 @@ func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite *cipherSuite)
+ 	switch suite.ID {
+ 	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384:
+ 		a.invalidPacketLimit = protocol.InvalidPacketLimitAES
+-	case tls.TLS_CHACHA20_POLY1305_SHA256:
+-		a.invalidPacketLimit = protocol.InvalidPacketLimitChaCha
+ 	default:
+ 		panic(fmt.Sprintf("unknown cipher suite %d", suite.ID))
+ 	}
+diff --git a/internal/handshake/updatable_aead.go.orig b/internal/handshake/updatable_aead.go.orig
+new file mode 100644
+index 00000000..ef92ab1c
+--- /dev/null
++++ b/internal/handshake/updatable_aead.go.orig
+@@ -0,0 +1,340 @@
++package handshake
++
++import (
++	"crypto"
++	"crypto/cipher"
++	"crypto/tls"
++	"encoding/binary"
++	"fmt"
++	"sync/atomic"
++
++	"github.com/quic-go/quic-go/internal/monotime"
++	"github.com/quic-go/quic-go/internal/protocol"
++	"github.com/quic-go/quic-go/internal/qerr"
++	"github.com/quic-go/quic-go/internal/utils"
++	"github.com/quic-go/quic-go/logging"
++)
++
++var keyUpdateInterval atomic.Uint64
++
++func init() {
++	keyUpdateInterval.Store(protocol.KeyUpdateInterval)
++}
++
++func SetKeyUpdateInterval(v uint64) (reset func()) {
++	old := keyUpdateInterval.Swap(v)
++	return func() { keyUpdateInterval.Store(old) }
++}
++
++// FirstKeyUpdateInterval is the maximum number of packets we send or receive before initiating the first key update.
++// It's a package-level variable to allow modifying it for testing purposes.
++var FirstKeyUpdateInterval uint64 = 100
++
++type updatableAEAD struct {
++	suite *cipherSuite
++
++	keyPhase           protocol.KeyPhase
++	largestAcked       protocol.PacketNumber
++	firstPacketNumber  protocol.PacketNumber
++	handshakeConfirmed bool
++
++	invalidPacketLimit uint64
++	invalidPacketCount uint64
++
++	// Time when the keys should be dropped. Keys are dropped on the next call to Open().
++	prevRcvAEADExpiry monotime.Time
++	prevRcvAEAD       cipher.AEAD
++
++	firstRcvdWithCurrentKey protocol.PacketNumber
++	firstSentWithCurrentKey protocol.PacketNumber
++	highestRcvdPN           protocol.PacketNumber // highest packet number received (which could be successfully unprotected)
++	numRcvdWithCurrentKey   uint64
++	numSentWithCurrentKey   uint64
++	rcvAEAD                 cipher.AEAD
++	sendAEAD                cipher.AEAD
++	// caches cipher.AEAD.Overhead(). This speeds up calls to Overhead().
++	aeadOverhead int
++
++	nextRcvAEAD           cipher.AEAD
++	nextSendAEAD          cipher.AEAD
++	nextRcvTrafficSecret  []byte
++	nextSendTrafficSecret []byte
++
++	headerDecrypter headerProtector
++	headerEncrypter headerProtector
++
++	rttStats *utils.RTTStats
++
++	tracer  *logging.ConnectionTracer
++	logger  utils.Logger
++	version protocol.Version
++
++	// use a single slice to avoid allocations
++	nonceBuf []byte
++}
++
++var (
++	_ ShortHeaderOpener = &updatableAEAD{}
++	_ ShortHeaderSealer = &updatableAEAD{}
++)
++
++func newUpdatableAEAD(rttStats *utils.RTTStats, tracer *logging.ConnectionTracer, logger utils.Logger, version protocol.Version) *updatableAEAD {
++	return &updatableAEAD{
++		firstPacketNumber:       protocol.InvalidPacketNumber,
++		largestAcked:            protocol.InvalidPacketNumber,
++		firstRcvdWithCurrentKey: protocol.InvalidPacketNumber,
++		firstSentWithCurrentKey: protocol.InvalidPacketNumber,
++		rttStats:                rttStats,
++		tracer:                  tracer,
++		logger:                  logger,
++		version:                 version,
++	}
++}
++
++func (a *updatableAEAD) rollKeys() {
++	if a.prevRcvAEAD != nil {
++		a.logger.Debugf("Dropping key phase %d ahead of scheduled time. Drop time was: %s", a.keyPhase-1, a.prevRcvAEADExpiry)
++		if a.tracer != nil && a.tracer.DroppedKey != nil {
++			a.tracer.DroppedKey(a.keyPhase - 1)
++		}
++		a.prevRcvAEADExpiry = 0
++	}
++
++	a.keyPhase++
++	a.firstRcvdWithCurrentKey = protocol.InvalidPacketNumber
++	a.firstSentWithCurrentKey = protocol.InvalidPacketNumber
++	a.numRcvdWithCurrentKey = 0
++	a.numSentWithCurrentKey = 0
++	a.prevRcvAEAD = a.rcvAEAD
++	a.rcvAEAD = a.nextRcvAEAD
++	a.sendAEAD = a.nextSendAEAD
++
++	a.nextRcvTrafficSecret = a.getNextTrafficSecret(a.suite.Hash, a.nextRcvTrafficSecret)
++	a.nextSendTrafficSecret = a.getNextTrafficSecret(a.suite.Hash, a.nextSendTrafficSecret)
++	a.nextRcvAEAD = createAEAD(a.suite, a.nextRcvTrafficSecret, a.version)
++	a.nextSendAEAD = createAEAD(a.suite, a.nextSendTrafficSecret, a.version)
++}
++
++func (a *updatableAEAD) startKeyDropTimer(now monotime.Time) {
++	d := 3 * a.rttStats.PTO(true)
++	a.logger.Debugf("Starting key drop timer to drop key phase %d (in %s)", a.keyPhase-1, d)
++	a.prevRcvAEADExpiry = now.Add(d)
++}
++
++func (a *updatableAEAD) getNextTrafficSecret(hash crypto.Hash, ts []byte) []byte {
++	return hkdfExpandLabel(hash, ts, []byte{}, "quic ku", hash.Size())
++}
++
++// SetReadKey sets the read key.
++// For the client, this function is called before SetWriteKey.
++// For the server, this function is called after SetWriteKey.
++func (a *updatableAEAD) SetReadKey(suite *cipherSuite, trafficSecret []byte) {
++	a.rcvAEAD = createAEAD(suite, trafficSecret, a.version)
++	a.headerDecrypter = newHeaderProtector(suite, trafficSecret, false, a.version)
++	if a.suite == nil {
++		a.setAEADParameters(a.rcvAEAD, suite)
++	}
++
++	a.nextRcvTrafficSecret = a.getNextTrafficSecret(suite.Hash, trafficSecret)
++	a.nextRcvAEAD = createAEAD(suite, a.nextRcvTrafficSecret, a.version)
++}
++
++// SetWriteKey sets the write key.
++// For the client, this function is called after SetReadKey.
++// For the server, this function is called before SetReadKey.
++func (a *updatableAEAD) SetWriteKey(suite *cipherSuite, trafficSecret []byte) {
++	a.sendAEAD = createAEAD(suite, trafficSecret, a.version)
++	a.headerEncrypter = newHeaderProtector(suite, trafficSecret, false, a.version)
++	if a.suite == nil {
++		a.setAEADParameters(a.sendAEAD, suite)
++	}
++
++	a.nextSendTrafficSecret = a.getNextTrafficSecret(suite.Hash, trafficSecret)
++	a.nextSendAEAD = createAEAD(suite, a.nextSendTrafficSecret, a.version)
++}
++
++func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite *cipherSuite) {
++	a.nonceBuf = make([]byte, aead.NonceSize())
++	a.aeadOverhead = aead.Overhead()
++	a.suite = suite
++	switch suite.ID {
++	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384:
++		a.invalidPacketLimit = protocol.InvalidPacketLimitAES
++	case tls.TLS_CHACHA20_POLY1305_SHA256:
++		a.invalidPacketLimit = protocol.InvalidPacketLimitChaCha
++	default:
++		panic(fmt.Sprintf("unknown cipher suite %d", suite.ID))
++	}
++}
++
++func (a *updatableAEAD) DecodePacketNumber(wirePN protocol.PacketNumber, wirePNLen protocol.PacketNumberLen) protocol.PacketNumber {
++	return protocol.DecodePacketNumber(wirePNLen, a.highestRcvdPN, wirePN)
++}
++
++func (a *updatableAEAD) Open(dst, src []byte, rcvTime monotime.Time, pn protocol.PacketNumber, kp protocol.KeyPhaseBit, ad []byte) ([]byte, error) {
++	dec, err := a.open(dst, src, rcvTime, pn, kp, ad)
++	if err == ErrDecryptionFailed {
++		a.invalidPacketCount++
++		if a.invalidPacketCount >= a.invalidPacketLimit {
++			return nil, &qerr.TransportError{ErrorCode: qerr.AEADLimitReached}
++		}
++	}
++	if err == nil {
++		a.highestRcvdPN = max(a.highestRcvdPN, pn)
++	}
++	return dec, err
++}
++
++func (a *updatableAEAD) open(dst, src []byte, rcvTime monotime.Time, pn protocol.PacketNumber, kp protocol.KeyPhaseBit, ad []byte) ([]byte, error) {
++	if a.prevRcvAEAD != nil && !a.prevRcvAEADExpiry.IsZero() && rcvTime.After(a.prevRcvAEADExpiry) {
++		a.prevRcvAEAD = nil
++		a.logger.Debugf("Dropping key phase %d", a.keyPhase-1)
++		a.prevRcvAEADExpiry = 0
++		if a.tracer != nil && a.tracer.DroppedKey != nil {
++			a.tracer.DroppedKey(a.keyPhase - 1)
++		}
++	}
++	binary.BigEndian.PutUint64(a.nonceBuf[len(a.nonceBuf)-8:], uint64(pn))
++	if kp != a.keyPhase.Bit() {
++		if a.keyPhase > 0 && a.firstRcvdWithCurrentKey == protocol.InvalidPacketNumber || pn < a.firstRcvdWithCurrentKey {
++			if a.prevRcvAEAD == nil {
++				return nil, ErrKeysDropped
++			}
++			// we updated the key, but the peer hasn't updated yet
++			dec, err := a.prevRcvAEAD.Open(dst, a.nonceBuf, src, ad)
++			if err != nil {
++				err = ErrDecryptionFailed
++			}
++			return dec, err
++		}
++		// try opening the packet with the next key phase
++		dec, err := a.nextRcvAEAD.Open(dst, a.nonceBuf, src, ad)
++		if err != nil {
++			return nil, ErrDecryptionFailed
++		}
++		// Opening succeeded. Check if the peer was allowed to update.
++		if a.keyPhase > 0 && a.firstSentWithCurrentKey == protocol.InvalidPacketNumber {
++			return nil, &qerr.TransportError{
++				ErrorCode:    qerr.KeyUpdateError,
++				ErrorMessage: "keys updated too quickly",
++			}
++		}
++		a.rollKeys()
++		a.logger.Debugf("Peer updated keys to %d", a.keyPhase)
++		// The peer initiated this key update. It's safe to drop the keys for the previous generation now.
++		// Start a timer to drop the previous key generation.
++		a.startKeyDropTimer(rcvTime)
++		if a.tracer != nil && a.tracer.UpdatedKey != nil {
++			a.tracer.UpdatedKey(a.keyPhase, true)
++		}
++		a.firstRcvdWithCurrentKey = pn
++		return dec, err
++	}
++	// The AEAD we're using here will be the qtls.aeadAESGCM13.
++	// It uses the nonce provided here and XOR it with the IV.
++	dec, err := a.rcvAEAD.Open(dst, a.nonceBuf, src, ad)
++	if err != nil {
++		return dec, ErrDecryptionFailed
++	}
++	a.numRcvdWithCurrentKey++
++	if a.firstRcvdWithCurrentKey == protocol.InvalidPacketNumber {
++		// We initiated the key updated, and now we received the first packet protected with the new key phase.
++		// Therefore, we are certain that the peer rolled its keys as well. Start a timer to drop the old keys.
++		if a.keyPhase > 0 {
++			a.logger.Debugf("Peer confirmed key update to phase %d", a.keyPhase)
++			a.startKeyDropTimer(rcvTime)
++		}
++		a.firstRcvdWithCurrentKey = pn
++	}
++	return dec, err
++}
++
++func (a *updatableAEAD) Seal(dst, src []byte, pn protocol.PacketNumber, ad []byte) []byte {
++	if a.firstSentWithCurrentKey == protocol.InvalidPacketNumber {
++		a.firstSentWithCurrentKey = pn
++	}
++	if a.firstPacketNumber == protocol.InvalidPacketNumber {
++		a.firstPacketNumber = pn
++	}
++	a.numSentWithCurrentKey++
++	binary.BigEndian.PutUint64(a.nonceBuf[len(a.nonceBuf)-8:], uint64(pn))
++	// The AEAD we're using here will be the qtls.aeadAESGCM13.
++	// It uses the nonce provided here and XOR it with the IV.
++	return a.sendAEAD.Seal(dst, a.nonceBuf, src, ad)
++}
++
++func (a *updatableAEAD) SetLargestAcked(pn protocol.PacketNumber) error {
++	if a.firstSentWithCurrentKey != protocol.InvalidPacketNumber &&
++		pn >= a.firstSentWithCurrentKey && a.numRcvdWithCurrentKey == 0 {
++		return &qerr.TransportError{
++			ErrorCode:    qerr.KeyUpdateError,
++			ErrorMessage: fmt.Sprintf("received ACK for key phase %d, but peer didn't update keys", a.keyPhase),
++		}
++	}
++	a.largestAcked = pn
++	return nil
++}
++
++func (a *updatableAEAD) SetHandshakeConfirmed() {
++	a.handshakeConfirmed = true
++}
++
++func (a *updatableAEAD) updateAllowed() bool {
++	if !a.handshakeConfirmed {
++		return false
++	}
++	// the first key update is allowed as soon as the handshake is confirmed
++	return a.keyPhase == 0 ||
++		// subsequent key updates as soon as a packet sent with that key phase has been acknowledged
++		(a.firstSentWithCurrentKey != protocol.InvalidPacketNumber &&
++			a.largestAcked != protocol.InvalidPacketNumber &&
++			a.largestAcked >= a.firstSentWithCurrentKey)
++}
++
++func (a *updatableAEAD) shouldInitiateKeyUpdate() bool {
++	if !a.updateAllowed() {
++		return false
++	}
++	// Initiate the first key update shortly after the handshake, in order to exercise the key update mechanism.
++	if a.keyPhase == 0 {
++		if a.numRcvdWithCurrentKey >= FirstKeyUpdateInterval || a.numSentWithCurrentKey >= FirstKeyUpdateInterval {
++			return true
++		}
++	}
++	if a.numRcvdWithCurrentKey >= keyUpdateInterval.Load() {
++		a.logger.Debugf("Received %d packets with current key phase. Initiating key update to the next key phase: %d", a.numRcvdWithCurrentKey, a.keyPhase+1)
++		return true
++	}
++	if a.numSentWithCurrentKey >= keyUpdateInterval.Load() {
++		a.logger.Debugf("Sent %d packets with current key phase. Initiating key update to the next key phase: %d", a.numSentWithCurrentKey, a.keyPhase+1)
++		return true
++	}
++	return false
++}
++
++func (a *updatableAEAD) KeyPhase() protocol.KeyPhaseBit {
++	if a.shouldInitiateKeyUpdate() {
++		a.rollKeys()
++		a.logger.Debugf("Initiating key update to key phase %d", a.keyPhase)
++		if a.tracer != nil && a.tracer.UpdatedKey != nil {
++			a.tracer.UpdatedKey(a.keyPhase, false)
++		}
++	}
++	return a.keyPhase.Bit()
++}
++
++func (a *updatableAEAD) Overhead() int {
++	return a.aeadOverhead
++}
++
++func (a *updatableAEAD) EncryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
++	a.headerEncrypter.EncryptHeader(sample, firstByte, hdrBytes)
++}
++
++func (a *updatableAEAD) DecryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
++	a.headerDecrypter.DecryptHeader(sample, firstByte, hdrBytes)
++}
++
++func (a *updatableAEAD) FirstPacketNumber() protocol.PacketNumber {
++	return a.firstPacketNumber
++}
+diff --git a/internal/handshake/updatable_aead_test.go b/internal/handshake/updatable_aead_test.go
+index 8140294e..945ed15f 100644
+--- a/internal/handshake/updatable_aead_test.go
++++ b/internal/handshake/updatable_aead_test.go
+@@ -44,45 +44,6 @@ func setupEndpoints(t *testing.T, serverRTTStats *utils.RTTStats) (client, serve
+ 	return client, server, serverTracer
+ }
+ 
+-func TestChaChaTestVector(t *testing.T) {
+-	testCases := []struct {
+-		name            string
+-		version         protocol.Version
+-		expectedPayload []byte
+-		expectedPacket  []byte
+-	}{
+-		{
+-			version:         protocol.Version1,
+-			expectedPayload: splitHexString(t, "655e5cd55c41f69080575d7999c25a5bfb"),
+-			expectedPacket:  splitHexString(t, "4cfe4189655e5cd55c41f69080575d7999c25a5bfb"),
+-		},
+-		{
+-			version:         protocol.Version2,
+-			expectedPayload: splitHexString(t, "0ae7b6b932bc27d786f4bc2bb20f2162ba"),
+-			expectedPacket:  splitHexString(t, "5558b1c60ae7b6b932bc27d786f4bc2bb20f2162ba"),
+-		},
+-	}
+-
+-	for _, tc := range testCases {
+-		t.Run(fmt.Sprintf("QUIC %s", tc.version), func(t *testing.T) {
+-			secret := splitHexString(t, "9ac312a7f877468ebe69422748ad00a1 5443f18203a07d6060f688f30f21632b")
+-			aead := newUpdatableAEAD(&utils.RTTStats{}, nil, nil, tc.version)
+-			chacha := cipherSuites[2]
+-			require.Equal(t, tls.TLS_CHACHA20_POLY1305_SHA256, chacha.ID)
+-			aead.SetWriteKey(chacha, secret)
+-			const pnOffset = 1
+-			header := splitHexString(t, "4200bff4")
+-			payloadOffset := len(header)
+-			plaintext := splitHexString(t, "01")
+-			payload := aead.Seal(nil, plaintext, 654360564, header)
+-			require.Equal(t, tc.expectedPayload, payload)
+-			packet := append(header, payload...)
+-			aead.EncryptHeader(packet[pnOffset+4:pnOffset+4+16], &packet[0], packet[pnOffset:payloadOffset])
+-			require.Equal(t, tc.expectedPacket, packet)
+-		})
+-	}
+-}
+-
+ func TestUpdatableAEADHeaderProtection(t *testing.T) {
+ 	for _, v := range []protocol.Version{protocol.Version1, protocol.Version2} {
+ 		for _, cs := range cipherSuites {
+diff --git a/internal/handshake/updatable_aead_test.go.rej b/internal/handshake/updatable_aead_test.go.rej
+new file mode 100644
+index 00000000..de220dc9
+--- /dev/null
++++ b/internal/handshake/updatable_aead_test.go.rej
+@@ -0,0 +1,48 @@
++--- internal/handshake/updatable_aead_test.go
+++++ internal/handshake/updatable_aead_test.go
++@@ -75,45 +75,6 @@ func bothSides(ev qlogwriter.Event) []qlogwriter.Event {
++ 	}
++ }
++ 
++-func TestChaChaTestVector(t *testing.T) {
++-	testCases := []struct {
++-		name            string
++-		version         protocol.Version
++-		expectedPayload []byte
++-		expectedPacket  []byte
++-	}{
++-		{
++-			version:         protocol.Version1,
++-			expectedPayload: splitHexString(t, "655e5cd55c41f69080575d7999c25a5bfb"),
++-			expectedPacket:  splitHexString(t, "4cfe4189655e5cd55c41f69080575d7999c25a5bfb"),
++-		},
++-		{
++-			version:         protocol.Version2,
++-			expectedPayload: splitHexString(t, "0ae7b6b932bc27d786f4bc2bb20f2162ba"),
++-			expectedPacket:  splitHexString(t, "5558b1c60ae7b6b932bc27d786f4bc2bb20f2162ba"),
++-		},
++-	}
++-
++-	for _, tc := range testCases {
++-		t.Run(fmt.Sprintf("QUIC %s", tc.version), func(t *testing.T) {
++-			secret := splitHexString(t, "9ac312a7f877468ebe69422748ad00a1 5443f18203a07d6060f688f30f21632b")
++-			aead := newUpdatableAEAD(utils.NewRTTStats(), nil, nil, tc.version)
++-			chacha := cipherSuites[2]
++-			require.Equal(t, tls.TLS_CHACHA20_POLY1305_SHA256, chacha.ID)
++-			aead.SetWriteKey(chacha, secret)
++-			const pnOffset = 1
++-			header := splitHexString(t, "4200bff4")
++-			payloadOffset := len(header)
++-			plaintext := splitHexString(t, "01")
++-			payload := aead.Seal(nil, plaintext, 654360564, header)
++-			require.Equal(t, tc.expectedPayload, payload)
++-			packet := append(header, payload...)
++-			aead.EncryptHeader(packet[pnOffset+4:pnOffset+4+16], &packet[0], packet[pnOffset:payloadOffset])
++-			require.Equal(t, tc.expectedPacket, packet)
++-		})
++-	}
++-}
++-
++ func TestUpdatableAEADHeaderProtection(t *testing.T) {
++ 	for _, v := range []protocol.Version{protocol.Version1, protocol.Version2} {
++ 		for _, cs := range cipherSuites {
+diff --git a/internal/protocol/protocol.go b/internal/protocol/protocol.go
+index a8813a66..d99f5ed1 100644
+--- a/internal/protocol/protocol.go
++++ b/internal/protocol/protocol.go
+@@ -154,6 +154,3 @@ const MaxConnIDLen = 20
+ // InvalidPacketLimitAES is the maximum number of packets that we can fail to decrypt when using
+ // AEAD_AES_128_GCM or AEAD_AES_265_GCM.
+ const InvalidPacketLimitAES = 1 << 52
+-
+-// InvalidPacketLimitChaCha is the maximum number of packets that we can fail to decrypt when using AEAD_CHACHA20_POLY1305.
+-const InvalidPacketLimitChaCha = 1 << 36
+diff --git a/interop/client/main.go b/interop/client/main.go
+index fcde0bf7..88e75c2d 100644
+--- a/interop/client/main.go
++++ b/interop/client/main.go
+@@ -18,7 +18,6 @@ import (
+ 	"github.com/quic-go/quic-go/http3"
+ 	"github.com/quic-go/quic-go/internal/handshake"
+ 	"github.com/quic-go/quic-go/internal/protocol"
+-	"github.com/quic-go/quic-go/internal/qtls"
+ 	"github.com/quic-go/quic-go/interop/http09"
+ 	"github.com/quic-go/quic-go/interop/utils"
+ )
+@@ -85,9 +84,6 @@ func runTestcase(testcase string) error {
+ 	case "handshake", "transfer", "retry":
+ 	case "keyupdate":
+ 		handshake.FirstKeyUpdateInterval = 100
+-	case "chacha20":
+-		reset := qtls.SetCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256)
+-		defer reset()
+ 	case "multiconnect":
+ 		return runMultiConnectTest(r, urls)
+ 	case "versionnegotiation":
+diff --git a/interop/server/main.go b/interop/server/main.go
+index a809186d..0ff46dfd 100644
+--- a/interop/server/main.go
++++ b/interop/server/main.go
+@@ -10,7 +10,6 @@ import (
+ 
+ 	"github.com/quic-go/quic-go"
+ 	"github.com/quic-go/quic-go/http3"
+-	"github.com/quic-go/quic-go/internal/qtls"
+ 	"github.com/quic-go/quic-go/interop/http09"
+ 	"github.com/quic-go/quic-go/interop/utils"
+ )
+@@ -53,10 +52,6 @@ func main() {
+ 	switch testcase {
+ 	case "versionnegotiation", "handshake", "retry", "transfer", "resumption", "multiconnect", "zerortt":
+ 		err = runHTTP09Server(tlsConf, quicConf, testcase == "retry")
+-	case "chacha20":
+-		reset := qtls.SetCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256)
+-		defer reset()
+-		err = runHTTP09Server(tlsConf, quicConf, false)
+ 	case "http3":
+ 		tlsConf.NextProtos = []string{http3.NextProtoH3}
+ 		err = runHTTP3Server(tlsConf, quicConf)
+-- 
+2.51.0
+
