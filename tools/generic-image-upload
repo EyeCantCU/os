@@ -22,6 +22,7 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH
 
   Optional arguments:
     --raw-path RAW_PATH  Path to the raw disk image
+    --readme PATH  Path to the README document
     --qcow2-path PATH    Path to qcow2 image (generates qcow2 fields in JSON)
     --vmdk-path PATH     Path to vmdk image (generates vmdk fields in JSON)
     --vmdk-flat-path PATH Path to vmdk-flat image (generates vmdk_flat fields in JSON)
@@ -29,6 +30,8 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH
     --edk2vars-path PATH Path to OVMF/AAVMF UEFI variables (generates uefi_edk2 fields in JSON)
     --awsvars-path PATH  Path to AWS UEFI variables (generated uefi_aws fields in JSON)
     --sbom-path PATH     Path to SBOM file (generates sbom fields in JSON)
+    --lxd-metadata-path PATH Path to LXD tar.xz file (generates lxd_metadata fields in JSON)
+    --squashfs-path PATH Path to LXD squashfs file (generates squashfs fields in JSON)
     --artifact-prefix PREFIX  Artifact filename prefix (default: name-arch-timestamp)
     --sign-gcs-urls      Generate signed URLs for GCS uploaded artifacts
     --sign-az-urls       Generate signed URLs for Azure uploaded artifacts
@@ -371,7 +374,7 @@ upload_rpi_file() {
 
 main() {
     local short_opts="hv"
-    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,s3-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,ova-path:,edk2vars-path:,awsvars-path:,sbom-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,sign-s3-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,signed-s3-url-expiry:,azure-storage-tier:,rpi-upload,rpi-upload-secret:"
+    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,s3-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,ova-path:,edk2vars-path:,awsvars-path:,sbom-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,sign-s3-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,signed-s3-url-expiry:,azure-storage-tier:,rpi-upload,rpi-upload-secret:,lxd-metadata-path:,squashfs-path:,readme:"
     local getopt_out=""
     if ! getopt_out=$(getopt --name "${0##*/}" \
         --options "${short_opts}" --long "${long_opts}" -- "$@"); then
@@ -380,16 +383,18 @@ main() {
     fi
     eval set -- "${getopt_out}"
 
-    local name="" timestamp="" arch="" gcs_bucket="" azure_account="" azure_container="" azure_storage_tier="cool" raw_path="" qcow2_path="" vmdk_path="" vmdk_flat_path="" edk2vars_path="" awsvars_path="" sbom_path=""
+    local readme="" name="" timestamp="" arch="" gcs_bucket="" azure_account="" azure_container="" azure_storage_tier="cool" raw_path="" qcow2_path="" vmdk_path="" vmdk_flat_path="" edk2vars_path="" awsvars_path="" sbom_path=""
     local artifact_prefix="" sign_gcs_urls=false sign_az_urls=false signed_gcs_url_expiry="12h" signed_az_url_expiry="12 hours"
     local s3_bucket="" sign_s3_urls=false signed_s3_url_expiry="43200"
     local rpi_upload=false rpi_upload_secret="${RPI_UPLOAD_SECRET:-}"
+    local lxd_metadata_path="" squashfs_path=""
 
     while [ $# -ne 0 ]; do
         case "$1" in
             -h|--help) Usage; exit 0;;
             -v|--verbose) VERBOSITY=$((VERBOSITY+1));;
             --name) name="$2"; shift;;
+            --readme) readme="$2"; shift;;
             --timestamp) timestamp="$2"; shift;;
             --arch) arch="$2"; shift;;
             --gcs-bucket) gcs_bucket="$2"; shift;;
@@ -414,6 +419,8 @@ main() {
             --azure-storage-tier) azure_storage_tier="$2"; shift;;
             --rpi-upload) rpi_upload=true;;
             --rpi-upload-secret) rpi_upload_secret="$2"; shift;;
+            --lxd-metadata-path) lxd_metadata_path="$2"; shift;;
+            --squashfs-path) squashfs_path="$2"; shift;;
             --) shift; break;;
             *) stderr "ERROR: Unknown option: $1"; Usage 1>&2; return 1;;
         esac
@@ -481,6 +488,21 @@ main() {
 
     if [ -n "$sbom_path" ] && [ ! -f "$sbom_path" ]; then
         stderr "ERROR: SBOM file not found: $sbom_path"
+        return 1
+    fi
+
+    if [ -n "$readme" ] && [ ! -f "$readme" ]; then
+        stderr "ERROR: README file not found: $readme"
+        return 1
+    fi
+
+    if [ -n "$lxd_metadata_path" ] && [ ! -f "$lxd_metadata_path" ]; then
+        stderr "ERROR: LXD metadata file not found: $lxd_metadata_path"
+        return 1
+    fi
+
+    if [ -n "$squashfs_path" ] && [ ! -f "$squashfs_path" ]; then
+        stderr "ERROR: Squashfs file not found: $squashfs_path"
         return 1
     fi
 
@@ -561,6 +583,19 @@ main() {
             fi
         fi
 
+        if [ -n "$readme_path" ]; then
+            local readme_filename="README.md"
+            local readme_gcs_path="${base_gcs_path}/${readme_filename}"
+            readme_gcs_path=$(upload_gcs_file "$readme_path" "$readme_gcs_path" "$readme_filename") || return 1
+            gcs_json_parts+=("\"readme\": \"$readme_gcs_path\"")
+
+            if [ "$sign_gcs_urls" = true ]; then
+                local readme_signed_url
+                readme_signed_url=$(generate_gcs_signed_url "$readme_gcs_path" "$signed_gcs_url_expiry") || return 1
+                gcs_json_parts+=("\"readme_signed_url\": \"$readme_signed_url\"")
+            fi
+        fi
+
         if [ -n "$qcow2_path" ]; then
             local qcow2_filename="${artifact_prefix}.qcow2"
             local qcow2_gcs_path="${base_gcs_path}/${qcow2_filename}"
@@ -622,6 +657,32 @@ main() {
             gcs_json_parts+=("\"sbom\": \"$sbom_gcs_path\"")
         fi
 
+        if [ -n "$lxd_metadata_path" ]; then
+            local lxd_metadata_filename="${artifact_prefix}.tar.xz"
+            local lxd_metadata_gcs_path="${base_gcs_path}/${lxd_metadata_filename}"
+            lxd_metadata_gcs_path=$(upload_gcs_file "$lxd_metadata_path" "$lxd_metadata_gcs_path" "$lxd_metadata_filename") || return 1
+            gcs_json_parts+=("\"lxd_metadata\": \"$lxd_metadata_gcs_path\"")
+
+            if [ "$sign_gcs_urls" = true ]; then
+                local lxd_metadata_signed_url
+                lxd_metadata_signed_url=$(generate_gcs_signed_url "$lxd_metadata_gcs_path" "$signed_gcs_url_expiry") || return 1
+                gcs_json_parts+=("\"lxd_metadata_signed_url\": \"$lxd_metadata_signed_url\"")
+            fi
+        fi
+
+        if [ -n "$squashfs_path" ]; then
+            local squashfs_filename="${artifact_prefix}.squashfs"
+            local squashfs_gcs_path="${base_gcs_path}/${squashfs_filename}"
+            squashfs_gcs_path=$(upload_gcs_file "$squashfs_path" "$squashfs_gcs_path" "$squashfs_filename") || return 1
+            gcs_json_parts+=("\"squashfs\": \"$squashfs_gcs_path\"")
+
+            if [ "$sign_gcs_urls" = true ]; then
+                local squashfs_signed_url
+                squashfs_signed_url=$(generate_gcs_signed_url "$squashfs_gcs_path" "$signed_gcs_url_expiry") || return 1
+                gcs_json_parts+=("\"squashfs_signed_url\": \"$squashfs_signed_url\"")
+            fi
+        fi
+
         local gcs_json=""
         local first=true
         for part in "${gcs_json_parts[@]}"; do
@@ -651,6 +712,20 @@ main() {
                 local raw_signed_url
                 raw_signed_url=$(generate_azure_signed_url "$azure_account" "$azure_container" "$raw_blob_name" "$signed_az_url_expiry") || return 1
                 azure_json_parts+=("\"raw_signed_url\": \"$raw_signed_url\"")
+            fi
+        fi
+
+        if [ -n "$readme_path" ]; then
+            local readme_filename="${artifact_prefix}.md"
+            local readme_blob_name="${azure_path_prefix}/${readme_filename}"
+            local readme_azure_url
+            readme_azure_url=$(upload_azure_file "$readme_path" "$azure_account" "$azure_container" "$readme_blob_name" "$readme_filename" "$azure_storage_tier") || return 1
+            azure_json_parts+=("\"readme\": \"$readme_azure_url\"")
+
+            if [ "$sign_az_urls" = true ]; then
+                local readme_signed_url
+                readme_signed_url=$(generate_azure_signed_url "$azure_account" "$azure_container" "$readme_blob_name" "$signed_az_url_expiry") || return 1
+                azure_json_parts+=("\"readme_signed_url\": \"$readme_signed_url\"")
             fi
         fi
 
@@ -722,6 +797,34 @@ main() {
             azure_json_parts+=("\"sbom\": \"$sbom_azure_url\"")
         fi
 
+        if [ -n "$lxd_metadata_path" ]; then
+            local lxd_metadata_filename="${artifact_prefix}.tar.xz"
+            local lxd_metadata_blob_name="${azure_path_prefix}/${lxd_metadata_filename}"
+            local lxd_metadata_azure_url
+            lxd_metadata_azure_url=$(upload_azure_file "$lxd_metadata_path" "$azure_account" "$azure_container" "$lxd_metadata_blob_name" "$lxd_metadata_filename" "$azure_storage_tier") || return 1
+            azure_json_parts+=("\"lxd_metadata\": \"$lxd_metadata_azure_url\"")
+
+            if [ "$sign_az_urls" = true ]; then
+                local lxd_metadata_signed_url
+                lxd_metadata_signed_url=$(generate_azure_signed_url "$azure_account" "$azure_container" "$lxd_metadata_blob_name" "$signed_az_url_expiry") || return 1
+                azure_json_parts+=("\"lxd_metadata_signed_url\": \"$lxd_metadata_signed_url\"")
+            fi
+        fi
+
+        if [ -n "$squashfs_path" ]; then
+            local squashfs_filename="${artifact_prefix}.squashfs"
+            local squashfs_blob_name="${azure_path_prefix}/${squashfs_filename}"
+            local squashfs_azure_url
+            squashfs_azure_url=$(upload_azure_file "$squashfs_path" "$azure_account" "$azure_container" "$squashfs_blob_name" "$squashfs_filename" "$azure_storage_tier") || return 1
+            azure_json_parts+=("\"squashfs\": \"$squashfs_azure_url\"")
+
+            if [ "$sign_az_urls" = true ]; then
+                local squashfs_signed_url
+                squashfs_signed_url=$(generate_azure_signed_url "$azure_account" "$azure_container" "$squashfs_blob_name" "$signed_az_url_expiry") || return 1
+                azure_json_parts+=("\"squashfs_signed_url\": \"$squashfs_signed_url\"")
+            fi
+        fi
+
         local azure_json=""
         local first=true
         for part in "${azure_json_parts[@]}"; do
@@ -751,6 +854,19 @@ main() {
                 local raw_signed_url
                 raw_signed_url=$(generate_s3_signed_url "$raw_s3_path" "$signed_s3_url_expiry") || return 1
                 s3_json_parts+=("\"raw_signed_url\": \"$raw_signed_url\"")
+            fi
+        fi
+
+        if [ -n "$readme_path" ]; then
+            local readme_filename="${artifact_prefix}.md"
+            local readme_s3_path="${base_s3_path}/${readme_filename}"
+            readme_s3_path=$(upload_s3_file "$readme_path" "$readme_s3_path" "$readme_filename") || return 1
+            s3_json_parts+=("\"readme\": \"$readme_s3_path\"")
+
+            if [ "$sign_s3_urls" = true ]; then
+                local readme_signed_url
+                readme_signed_url=$(generate_s3_signed_url "$readme_s3_path" "$signed_s3_url_expiry") || return 1
+                s3_json_parts+=("\"readme_signed_url\": \"$readme_signed_url\"")
             fi
         fi
 
@@ -814,6 +930,33 @@ main() {
             sbom_s3_path=$(upload_s3_file "$sbom_path" "$sbom_s3_path" "$sbom_filename") || return 1
             s3_json_parts+=("\"sbom\": \"$sbom_s3_path\"")
         fi
+
+        if [ -n "$lxd_metadata_path" ]; then
+            local lxd_metadata_filename="${artifact_prefix}.tar.xz"
+            local lxd_metadata_s3_path="${base_s3_path}/${lxd_metadata_filename}"
+            lxd_metadata_s3_path=$(upload_s3_file "$lxd_metadata_path" "$lxd_metadata_s3_path" "$lxd_metadata_filename") || return 1
+            s3_json_parts+=("\"lxd_metadata\": \"$lxd_metadata_s3_path\"")
+
+            if [ "$sign_s3_urls" = true ]; then
+                local lxd_metadata_signed_url
+                lxd_metadata_signed_url=$(generate_s3_signed_url "$lxd_metadata_s3_path" "$signed_s3_url_expiry") || return 1
+                s3_json_parts+=("\"lxd_metadata_signed_url\": \"$lxd_metadata_signed_url\"")
+            fi
+        fi
+
+        if [ -n "$squashfs_path" ]; then
+            local squashfs_filename="${artifact_prefix}.squashfs"
+            local squashfs_s3_path="${base_s3_path}/${squashfs_filename}"
+            squashfs_s3_path=$(upload_s3_file "$squashfs_path" "$squashfs_s3_path" "$squashfs_filename") || return 1
+            s3_json_parts+=("\"squashfs\": \"$squashfs_s3_path\"")
+
+            if [ "$sign_s3_urls" = true ]; then
+                local squashfs_signed_url
+                squashfs_signed_url=$(generate_s3_signed_url "$squashfs_s3_path" "$signed_s3_url_expiry") || return 1
+                s3_json_parts+=("\"squashfs_signed_url\": \"$squashfs_signed_url\"")
+            fi
+        fi
+
 
         local aws_json=""
         local first=true

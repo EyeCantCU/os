@@ -52,6 +52,7 @@ disks_qemu := $(call list_cloud_images,generic)
 disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
 disks_rpi := $(call list_cloud_images,rpi)
+disks_lxd := $(call list_cloud_images,lxd)
 
 # Exclude images with release candidate kernel
 group_qemu_nonrc := $(filter-out %-rc,$(disks_qemu))
@@ -106,8 +107,9 @@ disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
 disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
 disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
 ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
+disks-lxd: $(foreach name,$(disks_lxd),stamp-$(name))
 
-.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-rpi
+.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-rpi list-lxd
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -124,6 +126,8 @@ list-vmware:
 	@for n in $(disks_vmware); do echo $$n; done
 list-rpi:
 	@for n in $(disks_rpi); do echo $$n; done
+list-lxd:
+	@for n in $(disks_lxd); do echo $$n; done
 list-%:
 	@groups="$(group_$(subst -,_,$(*)))"; \
 	[ -n "$$groups" ] || { echo "no group $*"; exit 1; }; \
@@ -152,6 +156,10 @@ $(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
 ova_targets = $(foreach name,$(disks_vmware),ova-$(name))
 .PHONY: $(ova_targets)
 $(ova_targets): ova-%: $(ARCH_OUT_D)/%/disk.ova
+
+stamp_targets = $(foreach name,$(disks_lxd),stamp-$(name))
+.PHONY: $(stamp_targets)
+$(stamp_targets): stamp-%: $(ARCH_OUT_D)/%/build.stamp
 
 %.qcow2: %.raw
 	./$(TOOLS_SUBD)/convert-image $< $@
@@ -199,7 +207,8 @@ art-render-aws-main: $(foreach name,$(group_aws_main),art-render-$(name))
 art-render-gcp: $(filter art-render-gcp-%,$(art_render_targets))
 art-render-vmware: $(filter art-render-vmware-%,$(art_render_targets))
 art-render-rpi: $(filter art-render-rpi-%,$(art_render_targets))
-.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-aws-ecs art-render-aws-eks art-render-aws-main art-render-gcp art-render-vmware art-render-rpi $(art_render_targets)
+art-render-lxd: $(filter art-render-lxd-%,$(art_render_targets))
+.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-aws-ecs art-render-aws-eks art-render-aws-main art-render-gcp art-render-vmware art-render-rpi art-render-lxd $(art_render_targets)
 $(art_render_targets): art-render-%: configs/%/build.yaml
 
 configs/%/build.yaml: $(ART) $(YQ) $(YAM) $(cue_files)
@@ -223,7 +232,8 @@ art-diff-aws-main: $(foreach name,$(group_aws_main),art-diff-$(name))
 art-diff-gcp: $(filter art-diff-gcp-%,$(art_diff_targets))
 art-diff-vmware: $(filter art-diff-vmware-%,$(art_diff_targets))
 art-diff-rpi: $(filter art-diff-rpi-%,$(art_diff_targets))
-.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-aws-ecs art-diff-aws-eks art-diff-aws-main art-diff-gcp art-diff-vmware art-diff-rpi $(art_diff_targets)
+art-diff-lxd: $(filter art-diff-lxd-%,$(art_diff_targets))
+.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-aws-ecs art-diff-aws-eks art-diff-aws-main art-diff-gcp art-diff-vmware art-diff-rpi art-diff-lxd $(art_diff_targets)
 # The purpose of this is to catch build.yaml files committed in CI which differ from the rendered build.yaml
 # that goes with the associated cue file.
 # This is desirable to 1. make it easier to analyze what's happening in an image
@@ -324,6 +334,7 @@ AZSTORAGEACCOUNT = chainguardvms$(PUBLISH_TARGET)
 AZ_IMAGEUPLOAD_FLAGS ?=
 QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
 VMWARE_AZSTORAGECONTAINER = chainguard-vms-vmware
+LXD_AZSTORAGECONTAINER = chainguard-vms-lxd
 
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
@@ -477,6 +488,22 @@ $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-ge
 		--gcs-bucket $(RPI_GCSBUCKET) \
 		--rpi-upload \
 		--raw-path $(dir $@)disk.raw)
+
+.PHONY: publish-lxd
+publish-lxd: $(foreach name,$(disks_lxd),publish-lxd-$(subst lxd-,,$(name)))
+$(ARCH_OUT_D)/lxd-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/lxd-%/build.stamp
+	@mkdir -p $(dir $@)
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name lxd-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(LXD_AZSTORAGECONTAINER) \
+		--lxd-metadata-path $(dir $@)chainguard-$*-lxd.tar.xz \
+		--squashfs-path $(dir $@)chainguard-$*.squashfs \
+		--readme $(dir $@)README.md \
+		--sbom-path $(dir $@)sbom-$(ARCH).spdx.json \
+		--sign-az-urls)
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
