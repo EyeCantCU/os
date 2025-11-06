@@ -206,7 +206,7 @@ local-wolfi: ${KEY} apk-token
 	echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
-	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOSITORIES_FILE)
 endif
 	mkdir -p ${PWD}/packages
 	docker run --pull=always --rm -it \
@@ -259,7 +259,7 @@ dev-container-wolfi:
 	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
-	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOSITORIES_FILE)
 endif
 	docker run --pull=always --rm -it \
 		--mount type=bind,source="${OUT_DIR}",destination="$(OUT_LOCAL_DIR)" \
