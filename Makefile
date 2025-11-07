@@ -30,11 +30,8 @@ $(go_tools_bin): go.mod pkg/tools/tools.go
 	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_VER}"; \
 	GOBIN=$$(pwd)/tools/ go install "$${TOOL_PKG}@$${TOOL_VER}"
 
-# when converting from an existing image, we stuff these in.
-BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
-
 # Space-separated list of image names to exclude from all groups
-# Example: SKIP_IMAGES="aws-ecs-foo generic-base" make disks-aws-ecs
+# Example: SKIP_IMAGES="aws-ecs-foo qemu-base" make disks-aws-ecs
 SKIP_IMAGES =
 cfgs = $(wildcard configs/*-*)
 # names is a list of each basename cfg
@@ -50,7 +47,7 @@ shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
 disks_aws := $(call list_cloud_images,aws)
 disks_gcp := $(call list_cloud_images,gcp)
-disks_qemu := $(call list_cloud_images,generic)
+disks_qemu := $(call list_cloud_images,qemu)
 disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
 disks_rpi := $(call list_cloud_images,rpi)
@@ -84,13 +81,13 @@ apkoaas: $(gosrc)
 $(TOOLS_SUBD)/%: $(TOOLS_SUBD)/go/%/*.go
 	go build -o $(TOOLS_SUBD)/$* ./$(TOOLS_SUBD)/go/$*
 
-.PHONY: test-gotest test-generic
 include cgr-install.mk
 
+.PHONY: test-gotest
 test-gotest: $(CGR_INSTALL_APK)
 	go test -v -tags withauth ./...
 
-# disk-generic depends on ARCH_OUT_D/generic/disk.raw
+# disk-qemu depends on ARCH_OUT_D/qemu/disk.raw
 test_targets_qemu = $(foreach name,$(disks_qemu),test-$(name))
 .PHONY: $(test_targets_qemu)
 $(test_targets_qemu): test-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
@@ -138,7 +135,7 @@ list-%:
 .PHONY: disks
 disks: $(foreach name,$(names),disk-$(name))
 
-# disk-generic depends on ARCH_OUT_D/generic/disk.raw
+# disk-<img> depends on ARCH_OUT_D/image/disk.raw
 disk_targets = $(foreach name,$(names),disk-$(name))
 .PHONY: $(disk_targets)
 $(disk_targets): disk-%: $(ARCH_OUT_D)/%/disk.raw
@@ -200,7 +197,7 @@ $(debug_shell_targets): debug-shell-%:
 
 art_render_targets = $(foreach name,$(names),art-render-$(name))
 art-render-all: $(art_render_targets)
-art-render-qemu: $(filter art-render-generic-%,$(art_render_targets))
+art-render-qemu: $(filter art-render-qemu-%,$(art_render_targets))
 art-render-azure: $(filter art-render-azure-%,$(art_render_targets))
 art-render-aws: $(filter art-render-aws-%,$(art_render_targets))
 art-render-aws-ecs: $(foreach name,$(group_aws_ecs),art-render-$(name))
@@ -225,7 +222,7 @@ configs/%/build.yaml: $(ART) $(YQ) $(YAM) $(cue_files)
 
 art_diff_targets = $(foreach name,$(names),art-diff-$(name))
 art-diff-all: $(art_diff_targets)
-art-diff-qemu: $(filter art-diff-generic-%,$(art_diff_targets))
+art-diff-qemu: $(filter art-diff-qemu-%,$(art_diff_targets))
 art-diff-azure: $(filter art-diff-azure-%,$(art_diff_targets))
 art-diff-aws: $(filter art-diff-aws-%,$(art_diff_targets))
 art-diff-aws-ecs: $(foreach name,$(group_aws_ecs),art-diff-$(name))
@@ -445,13 +442,13 @@ $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
 	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
 
 .PHONY: publish-qemu
-publish-qemu: $(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name)))
-$(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name))): publish-qemu-%: $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json
+publish-qemu: $(foreach name,$(disks_qemu),publish-$(name))
+$(foreach name,$(disks_qemu),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/disk.raw $(ARCH_OUT_D)/generic-%/disk.qcow2
+$(ARCH_OUT_D)/qemu-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/qemu-%/disk.raw $(ARCH_OUT_D)/qemu-%/disk.qcow2
 	@mkdir -p $(dir $@)
 	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
-		--name generic-$* \
+		--name=qemu-$* \
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
 		--gcs-bucket $(QEMU_GCSBUCKET) \
@@ -480,13 +477,13 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 		--ova-path $(dir $@)disk.ova)
 
 .PHONY: publish-rpi
-publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
-$(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name))): publish-rpi-%: $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json
+publish-rpi: $(foreach name,$(disks_rpi),publish-$(name))
+$(foreach name,$(disks_rpi),publish-$(name))): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-generic-%/disk.raw
+$(ARCH_OUT_D)/rpi-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-%/disk.raw
 	@mkdir -p $(dir $@)
 	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
-		--name rpi-generic-$* \
+		--name=rpi-$* \
 		--timestamp $(BUILD_TIMESTAMP) \
 		--arch $(ARCH) \
 		--gcs-bucket $(RPI_GCSBUCKET) \
