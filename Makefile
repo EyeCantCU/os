@@ -6,6 +6,8 @@ ART ?= tools/art
 YAM ?= tools/yam
 YQ ?= tools/yq
 
+NOOP := @true
+
 cue_files=$(shell find . -name '*.cue' ! -name '*_lock.cue')
 go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)
 # Hack to make things paths like github.com/mikefarah/yq/v4 work normally
@@ -398,8 +400,10 @@ $(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspu
 	@$(call capture_stdout,$@,\
 	awspub publish --config-mapping=output/awspub.mapping $(ARCH_OUT_D)/awspub/share/$*.yaml)
 
-.PHONY: bespoke-publish-s3-aws-ecs-full-request-6943
-bespoke-publish-s3-aws-ecs-full-request-6943: $(ARCH_OUT_D)/aws-ecs-full-request-6943/publish.s3.json
+# General pattern rule for publishing any AWS image to S3
+.PHONY: bespoke-publish-s3-aws-%
+bespoke-publish-s3-aws-%: $(ARCH_OUT_D)/aws-%/publish.s3.json
+	$(NOOP)
 
 # Targets to publish AWS images to an S3 bucket
 $(ARCH_OUT_D)/aws-%/publish.s3.json: AWSNAME=$(PREFIX)-$*-$(AWSARCH)
