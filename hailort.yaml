@@ -1,0 +1,203 @@
+package:
+  name: hailort
+  version: "4.23.0"
+  epoch: 0
+  description: An open source light-weight and high performance inference framework for Hailo devices
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - cmake-3
+      - eigen-dev
+      - flatbuffers
+      - git
+      - ninja
+      - patch
+      - protobuf
+      - protobuf-dev
+      - python3
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/hailo-ai/hailort.git
+      tag: v${{package.version}}
+      expected-commit: 08f088d3b443c7846af067269ce998c6d5d91449
+      recurse-submodules: true
+
+  - name: "Prefer system Protobuf if provided"
+    runs: |
+      sed -i 's|set(PROTOBUF_INSTALL_DIR ${HAILO_EXTERNAL_DIR}/protobuf-install)|if(NOT PROTOBUF_INSTALL_DIR)\n  set(PROTOBUF_INSTALL_DIR ${HAILO_EXTERNAL_DIR}/protobuf-install)\nendif()|' hailort/cmake/external/protobuf.cmake
+      sed -i 's|set(PROTOBUF_CONFIG_DIR \${PROTOBUF_INSTALL_DIR}/lib/cmake/protobuf)|if(NOT PROTOBUF_CONFIG_DIR)\n  set(PROTOBUF_CONFIG_DIR ${PROTOBUF_INSTALL_DIR}/lib/cmake/protobuf)\nendif()|' hailort/cmake/external/protobuf.cmake
+
+  - name: "Use system Eigen if provided"
+    runs: |
+      cat > /tmp/_eigen_prefix.cmake <<'EOF'
+      if(DEFINED EIGEN3_INCLUDE_DIR)
+        add_library(eigen INTERFACE)
+        target_include_directories(eigen INTERFACE "${EIGEN3_INCLUDE_DIR}")
+        set(Eigen3_FOUND ON)
+        set(Eigen3_INCLUDE_DIRS "${EIGEN3_INCLUDE_DIR}")
+        set(USE_SYSTEM_EIGEN ON)
+        return()
+      endif()
+      EOF
+      printf '%s\n%s\n' "$(cat /tmp/_eigen_prefix.cmake)" "$(cat hailort/cmake/external/eigen.cmake)" > hailort/cmake/external/eigen.cmake
+
+  - uses: cmake/configure
+    with:
+      output-dir: build
+      opts: |
+        -Wno-dev \
+        -S . \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DBUILD_TESTING=OFF \
+        -DCMAKE_CXX_STANDARD=17 \
+        -DPROTOBUF_INSTALL_DIR=/usr \
+        -DPROTOBUF_CONFIG_DIR=/usr/lib/cmake/protobuf \
+        -DProtobuf_DIR=/usr/lib/cmake/protobuf \
+        -DProtobuf_PROTOC_EXECUTABLE=/usr/bin/protoc \
+        -Deigen_SOURCE_PATH=/usr/include/eigen3 \
+        -DHAILO_BUILD_SERVICE=OFF
+
+  - uses: cmake/build
+    with:
+      output-dir: build
+
+  - uses: cmake/install
+    with:
+      output-dir: build
+
+  - name: "Install pkg-config file"
+    runs: |
+      set -e
+      pkgdir="${{targets.destdir}}/usr"
+      mkdir -p "${pkgdir}/lib/pkgconfig"
+      cat > "${pkgdir}/lib/pkgconfig/hailort.pc" <<EOF
+      prefix=/usr
+      exec_prefix=\${prefix}
+      libdir=\${exec_prefix}/lib
+      includedir=\${prefix}/include
+
+      Name: hailort
+      Description: HailoRT runtime library
+      Version: ${{package.version}}
+      Libs: -L\${libdir} -lhailort
+      Cflags: -I\${includedir}
+      EOF
+
+  - name: "Install CMake package config for HailoRT (lib & lib64)"
+    runs: |
+      set -e
+      pkgdir="${{targets.destdir}}/usr"
+      ver="${{package.version}}"
+      for libdir in lib lib64; do
+        cmakedir="${pkgdir}/${libdir}/cmake/HailoRT"
+        mkdir -p "${cmakedir}"
+        # Copy the main config. It computes _pkgdir relative to this file.
+        cp "HailoRTConfig.cmake" "${cmakedir}/HailoRTConfig.cmake"
+      cat <<'EOF' > "${cmakedir}/HailoRTConfigVersion.cmake"
+      set(PACKAGE_VERSION "${{package.version}}")
+      if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+        set(PACKAGE_VERSION_EXACT TRUE)
+      endif()
+      set(PACKAGE_VERSION_COMPATIBLE TRUE)
+      EOF
+        done
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+      - name: "Move pkg-config file into -dev"
+        runs: |
+          set -e
+          src="${{targets.destdir}}/hailort/usr/lib/pkgconfig/hailort.pc"
+          dest="${{targets.destdir}}/hailort-dev/usr/lib/pkgconfig"
+          if [ -f "$src" ]; then
+            mkdir -p "$dest"
+            mv "$src" "$dest/"
+            rmdir "${{targets.destdir}}/hailort/usr/lib/pkgconfig" 2>/dev/null || true
+          fi
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+  - name: ${{package.name}}-compat
+    description: ${{package.name}} compatibility
+    pipeline:
+      - name: "Add log directory for HailoRT"
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}/var/log/hailort"
+    test:
+      pipeline:
+        - name: "Check log directory exists"
+          runs: |
+            test -d /var/log/hailort
+
+update:
+  enabled: true
+  github:
+    identifier: hailo-ai/hailort
+    strip-prefix: v
+    tag-filter-prefix: v4.23.
+
+test:
+  environment:
+    contents:
+      packages:
+        - hailort-dev
+        - build-base
+        - cmake-3
+        - ninja
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: "Basic Hailortcli test"
+      runs: |
+        export HAILORT_LOGGER_PATH=/var/log/hailort
+        hailortcli --help | grep -F "HailoRT CLI"
+        hailortcli --version | grep -F "${{package.version}}"
+    - name: "CMake smoke test: compile & link against HailoRT"
+      runs: |
+        set -ex
+        mkdir -p /tmp/hailort_test && cd /tmp/hailort_test
+        cat > CMakeLists.txt <<'EOF'
+        cmake_minimum_required(VERSION 3.15)
+        project(hailort_smoke CXX)
+        set(CMAKE_CXX_STANDARD 17)
+        find_package(HailoRT REQUIRED)
+        add_executable(hailort_test main.cpp)
+        target_link_libraries(hailort_test PRIVATE HailoRT::libhailort)
+        EOF
+        cat > main.cpp <<'EOF'
+        #include "hailo/hailort.hpp"
+        #include <iostream>
+        int main() {
+          auto scan_res = hailort::Device::scan();
+          if (scan_res) {
+            std::cout << "Found " << scan_res.value().size() << " Hailo device(s)\n";
+          } else {
+            std::cout << "Device scan not available (no driver/device present)\n";
+          }
+          return 0;
+        }
+        EOF
+        cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release
+        ldd build/hailort_test | grep -F "libhailort"
+        ./build/hailort_test | grep -Fq "Device scan not available" && {
+          echo "❌ Device scan not available — failing."
+          exit 1
+        }
