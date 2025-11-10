@@ -478,7 +478,7 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 
 .PHONY: publish-rpi
 publish-rpi: $(foreach name,$(disks_rpi),publish-$(name))
-$(foreach name,$(disks_rpi),publish-$(name))): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
+$(foreach name,$(disks_rpi),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/rpi-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-%/disk.raw
 	@mkdir -p $(dir $@)
