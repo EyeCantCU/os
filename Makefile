@@ -545,7 +545,8 @@ $(ARCH_OUT_D)/lxd-%/build.stamp: configs/lxd-%/build.yaml
 	cat $(dir $@)/disk.tar | mksquashfs - $(dir $@)/chainguard-$*.squashfs -tar -no-progress -xattrs -comp zstd -Xcompression-level 19
 	rm -f $(dir $@)/disk.tar
 	# Create README
-	echo "Import with: lxc image import chainguard-$*-lxd.tar.xz chainguard-$*.squashfs --alias chainguard-$*" >> $(dir $@)/README.md
+	# Name in a way that matches blob storage artifacts, not local output names
+	echo "Import with: lxc image import lxd-$*-$(BUILD_TIMESTAMP).tar.xz lxd-$*-$(BUILD_TIMESTAMP).squashfs --alias chainguard-$*" >> $(dir $@)/README.md
 	touch $@
 
 shellcheck: .shellcheck
