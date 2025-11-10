@@ -158,17 +158,48 @@ cluster_create() {
     }
 
     log "Creating CloudFormation stack: $stack_name"
-    vr "${aws[@]}" cloudformation deploy \
-        --stack-name "$stack_name" \
-        --template-file "$template_path" \
-        --parameter-overrides "ClusterName=$name" \
-        --capabilities CAPABILITY_IAM \
-        --no-fail-on-empty-changeset || {
-            stderr 'Failed to create CloudFormation stack'
-            return 1
-        }
+    local output attempt max_attempts=3
 
-    log 'Stack created successfully'
+    for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+        if output=$(vr "${aws[@]}" cloudformation deploy \
+            --stack-name "$stack_name" \
+            --template-file "$template_path" \
+            --parameter-overrides "ClusterName=$name" \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset \
+            2>&1
+        ); then
+            echo "$output"
+            log 'Stack created successfully'
+            return 0
+        fi
+
+        case "$output" in
+            # On "aws cloudformation deploy", the resulting change set is named
+            # based on the current timestamp in seconds granularity, but has a
+            # description based on the timestamp in microsecond granularity. If
+            # two deployments happen at the same time, they will conflict. This
+            # could be avoided if the change set could be named explicitly, but
+            # that feature request has gone unfulfilled for > 5 years by now:
+            # https://github.com/aws/aws-cli/issues/5435
+            *AlreadyExistsException*)
+                log "Lost concurrent creation of the CloudFormation stack in attempt $attempt/$max_attempts."
+                # Actually retry and don't just return with a passing result as
+                # the other process this was racing against may actually change
+                # or create the stack, and we need to wait for those changes to
+                # become effective.
+                continue
+                ;;
+            *)
+                echo "$output"
+                log "Failed to create CloudFormation stack"
+                return 1
+                ;;
+        esac
+    done
+
+    log 'Repeatedly failed to create the CloudFormation stack'
+    return 1
 }
 
 Usage_cluster_destroy() {
