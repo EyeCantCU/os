@@ -14,6 +14,7 @@ import (
 	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/metrics"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/systemd"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/test/selinux/selinux"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 )
 
