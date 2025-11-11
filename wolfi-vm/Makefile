@@ -1,24 +1,63 @@
 TOP_D := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-TOOLS_D = $(TOP_D)/tools
+TOOLS_SUBD = tools
+TOOLS_D = $(TOP_D)/$(TOOLS_SUBD)
 HASH := \#
+ART ?= tools/art
+YAM ?= tools/yam
+YQ ?= tools/yq
 
-# when converting from an existing image, we stuff these in.
-BOOT_PKGS = linux-qemu-generic-boot-installed mattmoor-chainit-init
+NOOP := @true
+
+cue_files=$(shell find . -name '*.cue' ! -name '*_lock.cue')
+go_tools=$(shell go list -tags tools -f '{{join .Imports " "}}' -e ./pkg/tools/)
+# Hack to make things paths like github.com/mikefarah/yq/v4 work normally
+# Find the last component of the go package path. If the last component is
+# /v[0-9]+ and matches the module version, remove it. Then use whatever the
+# the last path component is after the removal.
+go_binary_name = $(shell \
+	MOD_PATH="$1"; \
+	MOD_VERSION=$$(go list -f '{{.Module.Version}}' $(1)); \
+	MAJOR_VERSION=$$(echo $$MOD_VERSION | grep -oE 'v[0-9]+'); \
+	echo $$MOD_PATH | sed "s|$$MAJOR_VERSION\$$||" | xargs basename;)
+go_tools_bin=$(foreach tool,$(go_tools),tools/$(call go_binary_name,$(tool)))
+# List each import listed in files tagged 'tools', find the module with the path we're looking for,
+# get the version we're supposed to be using, and install the binary into tools.
+$(go_tools_bin): go.mod pkg/tools/tools.go
+	@mkdir -p tools/
+	@TOOL_PKG=$$(go list -tags tools -f '{{join .Imports "\n"}}' -e ./pkg/tools | grep -E '.*/$(@F)(/.*|$$)'); \
+	TOOL_VER=$$(go list -f '{{.Module.Version}}' "$$TOOL_PKG"); \
+	export GOPRIVATE=github.com/chainguard-images/images-private; \
+	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_VER}"; \
+	GOBIN=$$(pwd)/tools/ go install "$${TOOL_PKG}@$${TOOL_VER}"
+
+# Space-separated list of image names to exclude from all groups
+# Example: SKIP_IMAGES="aws-ecs-foo qemu-base" make disks-aws-ecs
+SKIP_IMAGES =
+cfgs = $(wildcard configs/*-*)
+# names is a list of each basename cfg
+names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
 
 # list_cloud_images(cloud)
+# Returns list of images for the given cloud prefix, excluding any in SKIP_IMAGES
 define list_cloud_images
-	$(notdir $(wildcard configs/$1-*))
+	$(filter-out $(SKIP_IMAGES),$(filter $1-%,$(names)))
 endef
+
+shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
 disks_aws := $(call list_cloud_images,aws)
 disks_gcp := $(call list_cloud_images,gcp)
-disks_qemu := $(call list_cloud_images,generic)
+disks_qemu := $(call list_cloud_images,qemu)
 disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
 disks_rpi := $(call list_cloud_images,rpi)
+disks_lxd := $(call list_cloud_images,lxd)
 
-group_aws_noneks := $(filter-out aws-eks-%,$(call list_cloud_images,aws))
-group_aws_eks := $(filter aws-eks-%,$(call list_cloud_images,aws))
+# Exclude images with release candidate kernel
+group_qemu_nonrc := $(filter-out %-rc,$(disks_qemu))
+group_aws_ecs := $(filter aws-ecs-%,$(disks_aws))
+group_aws_eks := $(filter aws-eks-%,$(disks_aws))
+group_aws_main := $(filter-out aws-ecs-%,$(filter-out aws-eks-%,$(disks_aws)))
 
 # Darwin reports arm64 for 'uname -m'
 UNAME_M := $(shell uname -m)
@@ -33,38 +72,43 @@ ARCH ?= $(BUILDER_ARCH)
 ARCH_OUT_D = output/$(ARCH)
 
 BUILDER_KERNEL := builder/kernel-$(BUILDER_ARCH)
-BUILDER_INITRD := builder/initrd-$(BUILDER_ARCH)
-BUILDER_DEBUG_INITRD := builder/initrd-debug-$(BUILDER_ARCH)
-
-cfgs = $(wildcard configs/*)
-# names is a list of each basename cfg
-names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
+BUILDER_INITRD := builder/initrd-$(BUILDER)-$(BUILDER_ARCH)
 
 gosrc := $(shell find main.go pkg/ -name "*.go")
 apkoaas: $(gosrc)
 	go build -o apkoaas
 
-.PHONY: test test-generic
+$(TOOLS_SUBD)/%: $(TOOLS_SUBD)/go/%/*.go
+	go build -o $(TOOLS_SUBD)/$* ./$(TOOLS_SUBD)/go/$*
 
-test:
+include cgr-install.mk
+
+.PHONY: test-gotest
+test-gotest: $(CGR_INSTALL_APK)
 	go test -v -tags withauth ./...
 
-test-generic: $(ARCH_OUT_D)/generic/disk.raw builder/ovmf-$(ARCH).fd
+# disk-qemu depends on ARCH_OUT_D/qemu/disk.raw
+test_targets_qemu = $(foreach name,$(disks_qemu),test-$(name))
+.PHONY: $(test_targets_qemu)
+$(test_targets_qemu): test-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
 	$(MAKE) -C vms-test TEST_ARCHES="$(ARCH)" runner/qemu tests
-	QEMU_VMS=generic ./vms-test/helpers/test-wolfi-vm \
-  --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results/$(ARCH)"
+		QEMU_VMS=$* ./vms-test/helpers/test-wolfi-vm \
+	    --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results"
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi ovas-vmware
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
+disks-aws-ecs: $(foreach name,$(group_aws_ecs),disk-$(name))
 disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
-disks-aws-noneks: $(foreach name,$(group_aws_noneks),disk-$(name))
+disks-aws-main: $(foreach name,$(group_aws_main),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
 disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
 disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
+ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
+disks-lxd: $(foreach name,$(disks_lxd),stamp-$(name))
 
-.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-vmware list-rpi
+.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-rpi list-lxd
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -75,10 +119,14 @@ list-gcp:
 	@for n in $(disks_gcp); do echo $$n; done
 list-qemu:
 	@for n in $(disks_qemu); do echo $$n; done
+list-qemu-nonrc:
+	@for n in $(group_qemu_nonrc); do echo $$n; done
 list-vmware:
 	@for n in $(disks_vmware); do echo $$n; done
 list-rpi:
 	@for n in $(disks_rpi); do echo $$n; done
+list-lxd:
+	@for n in $(disks_lxd); do echo $$n; done
 list-%:
 	@groups="$(group_$(subst -,_,$(*)))"; \
 	[ -n "$$groups" ] || { echo "no group $*"; exit 1; }; \
@@ -87,7 +135,7 @@ list-%:
 .PHONY: disks
 disks: $(foreach name,$(names),disk-$(name))
 
-# disk-generic depends on ARCH_OUT_D/generic/disk.raw
+# disk-<img> depends on ARCH_OUT_D/image/disk.raw
 disk_targets = $(foreach name,$(names),disk-$(name))
 .PHONY: $(disk_targets)
 $(disk_targets): disk-%: $(ARCH_OUT_D)/%/disk.raw
@@ -104,18 +152,26 @@ vhd_targets = $(foreach name,$(names),vhd-$(name))
 .PHONY: $(vhd_targets)
 $(vhd_targets): vhd-%: $(ARCH_OUT_D)/%/disk.vhd
 
-%.qcow2: %.raw
-	./tools/convert-image $< $@
+ova_targets = $(foreach name,$(disks_vmware),ova-$(name))
+.PHONY: $(ova_targets)
+$(ova_targets): ova-%: $(ARCH_OUT_D)/%/disk.ova
 
-# VMware-specific VMDK conversion (monolithicFlat for ESXi compatibility)
-$(ARCH_OUT_D)/vmware-%/disk.vmdk: $(ARCH_OUT_D)/vmware-%/disk.raw
-	./tools/convert-image --vmdk-format monolithicFlat $< $@
+stamp_targets = $(foreach name,$(disks_lxd),stamp-$(name))
+.PHONY: $(stamp_targets)
+$(stamp_targets): stamp-%: $(ARCH_OUT_D)/%/build.stamp
+
+%.qcow2: %.raw
+	./$(TOOLS_SUBD)/convert-image $< $@
+
+# VMWare OVA's
+$(ARCH_OUT_D)/vmware-%/disk.ova: $(ARCH_OUT_D)/vmware-%/disk.raw TEMPLATE/ova/$(ARCH)/vmware-esxi.yaml
+	./$(TOOLS_SUBD)/convert-image --ova-template TEMPLATE/ova/$(ARCH)/vmware-esxi.yaml $< $@
 
 %.vmdk: %.raw
-	./tools/convert-image $< $@
+	./$(TOOLS_SUBD)/convert-image $< $@
 
 %.vhd: %.raw
-	./tools/convert-image $< $@
+	./$(TOOLS_SUBD)/convert-image $< $@
 
 disk_debug_targets = $(foreach name,$(names),disk-debug-$(name))
 .PHONY: $(disk_debug_targets)
@@ -124,12 +180,12 @@ $(disk_debug_targets): disk-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw
 run_targets = $(foreach name,$(names),run-$(name))
 .PHONY: $(run_targets)
 $(run_targets): run-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
-	$(TOP_D)/apkoaas debug --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk.raw
+	$(TOP_D)/apkoaas debug --snapshot --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk.raw
 
 run_debug_targets = $(foreach name,$(names),run-debug-$(name))
 .PHONY: $(run_debug_targets)
 $(run_debug_targets): run-debug-%: $(ARCH_OUT_D)/%/disk-debug.raw builder/ovmf-$(ARCH).fd
-	$(TOP_D)/apkoaas debug --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk-debug.raw
+	$(TOP_D)/apkoaas debug --snapshot --arch=$(ARCH) --ovmf=builder/ovmf-$(ARCH).fd $(ARCH_OUT_D)/$*/disk-debug.raw
 
 debug_shell_targets = $(foreach name,$(names),debug-shell-$(name))
 .PHONY: $(debug_shell_targets)
@@ -139,29 +195,66 @@ $(debug_shell_targets): debug-shell-%:
 	@echo "[hit enter for shell prompt. ctrl-e to exit]"
 	@socat STDIO,cfmakeraw,isig=1,escape=0x05 UNIX:$(ARCH_OUT_D)/$(subst .yaml,,$*)/disk-debug.raw.socket
 
-configs/%/build.yaml:
+art_render_targets = $(foreach name,$(names),art-render-$(name))
+art-render-all: $(art_render_targets)
+art-render-qemu: $(filter art-render-qemu-%,$(art_render_targets))
+art-render-azure: $(filter art-render-azure-%,$(art_render_targets))
+art-render-aws: $(filter art-render-aws-%,$(art_render_targets))
+art-render-aws-ecs: $(foreach name,$(group_aws_ecs),art-render-$(name))
+art-render-aws-eks: $(foreach name,$(group_aws_eks),art-render-$(name))
+art-render-aws-main: $(foreach name,$(group_aws_main),art-render-$(name))
+art-render-gcp: $(filter art-render-gcp-%,$(art_render_targets))
+art-render-vmware: $(filter art-render-vmware-%,$(art_render_targets))
+art-render-rpi: $(filter art-render-rpi-%,$(art_render_targets))
+art-render-lxd: $(filter art-render-lxd-%,$(art_render_targets))
+.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-aws-ecs art-render-aws-eks art-render-aws-main art-render-gcp art-render-vmware art-render-rpi art-render-lxd $(art_render_targets)
+$(art_render_targets): art-render-%: configs/%/build.yaml
+
+configs/%/build.yaml: $(ART) $(YQ) $(YAM) $(cue_files)
 	@mkdir -p $(dir $@)
-	cosign verify-attestation \
-	--type=https://apko.dev/image-configuration \
-	--certificate-oidc-issuer=https://token.actions.githubusercontent.com \
-	--certificate-identity=https://github.com/chainguard-images/images-private/.github/workflows/release.yaml@refs/heads/main \
-	"cgr.dev/chainguard-private/$*" > $@.tmp.json
-	jq -r . $@.tmp.json | yq -P > $@.tmp && rm $@.tmp.json
-	yq -P -i '.payload | @base64d | fromjson | .predicate' $@.tmp
-	for i in $(BOOT_PKGS) ; do \
-		yq -i ".contents.packages += [\"$$i\"]" $@.tmp; \
-	done
-	mv $@.tmp $@
+	@test -f "configs/$*/build.cue" || exec $(YAM) --sort .contents.packages configs/$*/build.yaml; \
+	set -xe; \
+	$(ART) resolve ./configs/$*; \
+	$(ART) lock --tf=false ./configs/$*; \
+	render_json="$$($(ART) render ./configs/$*)"; \
+	echo "$$render_json" | $(YQ) -p=json > ./configs/$*/build.yaml; \
+	$(YAM) --sort .contents.packages ./configs/$*/build.yaml
+
+art_diff_targets = $(foreach name,$(names),art-diff-$(name))
+art-diff-all: $(art_diff_targets)
+art-diff-qemu: $(filter art-diff-qemu-%,$(art_diff_targets))
+art-diff-azure: $(filter art-diff-azure-%,$(art_diff_targets))
+art-diff-aws: $(filter art-diff-aws-%,$(art_diff_targets))
+art-diff-aws-ecs: $(foreach name,$(group_aws_ecs),art-diff-$(name))
+art-diff-aws-eks: $(foreach name,$(group_aws_eks),art-diff-$(name))
+art-diff-aws-main: $(foreach name,$(group_aws_main),art-diff-$(name))
+art-diff-gcp: $(filter art-diff-gcp-%,$(art_diff_targets))
+art-diff-vmware: $(filter art-diff-vmware-%,$(art_diff_targets))
+art-diff-rpi: $(filter art-diff-rpi-%,$(art_diff_targets))
+art-diff-lxd: $(filter art-diff-lxd-%,$(art_diff_targets))
+.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-aws-ecs art-diff-aws-eks art-diff-aws-main art-diff-gcp art-diff-vmware art-diff-rpi art-diff-lxd $(art_diff_targets)
+# The purpose of this is to catch build.yaml files committed in CI which differ from the rendered build.yaml
+# that goes with the associated cue file.
+# This is desirable to 1. make it easier to analyze what's happening in an image
+# by ensuring it's possible to just read build.yaml since it's up to date and
+# 2. Get us closer to the end-goal of being able to reproduce any build by
+# checking out the commit SHA it was built from. (note this requires better
+# handling of *_lock.cue files than we currently have).
+$(art_diff_targets): art-diff-%: $(ART) $(YQ) $(YAM)
+	@test -f "configs/$*/build.cue" || exit 0; \
+	set -xe; \
+	render_json="$$($(ART) render ./configs/$*)"; \
+	echo "$$render_json" | $(YQ) -p=json > ./configs/$*/build.tmp.yaml; \
+	$(YAM) --sort .contents.packages ./configs/$*/build.tmp.yaml; \
+	diff ./configs/$*/build.tmp.yaml ./configs/$*/build.yaml
+	@rm -f ./configs/$*/build.tmp.yaml
 
 .PHONY: builder
 builder: $(BUILDER_KERNEL) $(BUILDER_INITRD)
 
-builder/initrd-debug-%: apkoaas iac/builder-debug.yaml
-	$(TOP_D)/apkoaas --log-level=debug make-builder --arch=$* iac/builder-debug.yaml $@
-
-builder/initrd-%: apkoaas iac/$(BUILDER).yaml
+builder/initrd-%: apkoaas iac/$(BUILDER).yaml $(CGR_INSTALL_REPO)/%/$(CGR_INSTALL)-$(CGR_INSTALL_VERSION).apk
 	@mkdir -p $(dir $@)
-	$(TOP_D)/apkoaas make-builder --arch=$* iac/$(BUILDER).yaml $@
+	$(TOP_D)/apkoaas make-builder --arch=$(BUILDER_ARCH) iac/$(BUILDER).yaml $@
 
 builder/ovmf-%.fd: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* ovmf $@
@@ -174,7 +267,7 @@ COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
 PREFIX ?= $(shell id -un)
 BUILD_TIMESTAMP ?= $(shell date -u "+%Y%m%d-%H%M")
 AZVERSION ?= $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
-AZTAGS += env=$(PUBLISH_TARGET) commit=$(COMMIT)
+AZTAGS += env=$(PUBLISH_TARGET),commit=$(COMMIT)
 GCPLABELS = env=$(PUBLISH_TARGET),commit=$(COMMIT)
 
 ifeq ($(COMMIT),$(filter $(COMMIT), "", no-git))
@@ -199,26 +292,26 @@ ifeq ($(PUBLISH_TARGET),dev)
   AZRESOURCEGROUP = chainguard-vms
   GCPPROJECT = $(shell gcloud config get project)
   GCPBUCKET = $(GCPPROJECT)
-  QEMUBUCKET = gs://$(GCPPROJECT)
-  VMWAREBUCKET = gs://$(GCPPROJECT)
-  RPIBUCKET = gs://$(GCPPROJECT)
+  QEMU_GCSBUCKET = gs://$(GCPPROJECT)
+  VMWARE_GCSBUCKET = gs://$(GCPPROJECT)
+  RPI_GCSBUCKET = gs://$(GCPPROJECT)
 else ifeq ($(PUBLISH_TARGET),staging)
   AZGALLERY = chainguard_vms_staging
   AZRESOURCEGROUP = chainguard-vms-staging
   GCPPROJECT = staging-vms-h8zx
   GCPBUCKET = wolfi-vm-images-workloads
-  QEMUBUCKET = gs://wolfi-vm-images-workloads
-  VMWAREBUCKET = gs://wolfi-vm-images-workloads
-  RPIBUCKET = gs://wolfi-vm-images-workloads
+  QEMU_GCSBUCKET = gs://wolfi-vm-images-workloads
+  VMWARE_GCSBUCKET = gs://wolfi-vm-images-workloads
+  RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),eap)
 # EAP is also considered "production" in that it hits any EAP end user right now.
   AZGALLERY = eap_chainguard_vms
   AZRESOURCEGROUP = chainguard-vms-prod
   GCPPROJECT = chainguard-vms-eap
   GCPBUCKET = wolfi-vm-images-workloads
-  QEMUBUCKET = gs://chainguard-vms-eap
-  VMWAREBUCKET = gs://chainguard-vms-eap
-  RPIBUCKET = gs://wolfi-vm-images-workloads
+  QEMU_GCSBUCKET = gs://chainguard-vms-eap
+  VMWARE_GCSBUCKET = gs://chainguard-vms-eap
+  RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
 else ifeq ($(PUBLISH_TARGET),production)
   AZGALLERY = chainguard_vms
   AZRESOURCEGROUP = chainguard-vms-prod
@@ -226,35 +319,60 @@ else ifeq ($(PUBLISH_TARGET),production)
 # TODO: Move production workstation images to the chainguard-workstations project.
   GCPPROJECT = wolfi-vm
   GCPBUCKET = wolfi-vm-images-workloads
-  QEMUBUCKET = gs://wolfi-vm-images-workloads
-  VMWAREBUCKET = gs://wolfi-vm-images-workloads
-  RPIBUCKET = gs://wolfi-vm-images-workloads
+  QEMU_GCSBUCKET = gs://wolfi-vm-images-workloads
+  VMWARE_GCSBUCKET = gs://wolfi-vm-images-workloads
+  RPI_GCSBUCKET = gs://wolfi-vm-images-workloads
+else ifeq ($(PUBLISH_TARGET),ona)
+  # TODO: some IaC mechanism to define where an image goes when it publishes to S3.
+  AWS_S3_BUCKET=s3://chainguard-ona-amis
 else
   $(error "Bad value for PUBLISH_TARGET: '$(PUBLISH_TARGET)')
 endif
+AZSTORAGEACCOUNT = chainguardvms$(PUBLISH_TARGET)
+# Extra user-provided flags
+AZ_IMAGEUPLOAD_FLAGS ?=
+QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
+VMWARE_AZSTORAGECONTAINER = chainguard-vms-vmware
+LXD_AZSTORAGECONTAINER = chainguard-vms-lxd
 
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
 awspub-%: AWSSSM=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)
 awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
-	./tools/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
+	./$(TOOLS_SUBD)/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
 
-.PHONY: aws-create aws-create-% aws-publish aws-publish-%
+.PHONY: aws-create aws-create-% aws-publish aws-publish-% aws-share aws-share-%
 # these are just so human can type 'make aws-create-aws-base' to do the create/publish
 $(foreach name,$(disks_aws),aws-image-create-$(name)): aws-image-create-%: $(ARCH_OUT_D)/awspub/create/%.json
+$(foreach name,$(disks_aws),aws-image-share-$(name)): aws-image-share-%: $(ARCH_OUT_D)/awspub/share/%.json
 $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
 
 aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
 aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
+aws-share: $(foreach name,$(disks_aws),aws-share-$(name))
+aws-publish-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-publish-$(name))
 aws-publish-aws-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
-aws-publish-aws-noneks: $(foreach name,$(group_aws_noneks),aws-image-publish-$(name))
+aws-publish-aws-main: $(foreach name,$(group_aws_main),aws-image-publish-$(name))
+aws-create-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-create-$(name))
 aws-create-aws-eks: $(foreach name,$(group_aws_eks),aws-image-create-$(name))
-aws-create-aws-noneks: $(foreach name,$(group_aws_noneks),aws-image-create-$(name))
+aws-create-aws-main: $(foreach name,$(group_aws_main),aws-image-create-$(name))
+aws-share-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-share-$(name))
+aws-share-aws-eks: $(foreach name,$(group_aws_eks),aws-image-share-$(name))
+aws-share-aws-main: $(foreach name,$(group_aws_main),aws-image-share-$(name))
 
 output/awspub.mapping:
 	mkdir -p output
 	echo "---" > $@
 	echo "BUILD_TIMESTAMP: $(BUILD_TIMESTAMP)" >> $@
+	echo "WOLFI_VM: $(TOP_D)" >> $@
+
+# The SECONDEXPANSION and wildcard make the -share.yaml prerequisite optional.
+# In which case, we end up with just a copy of the regular yaml.
+.SECONDEXPANSION:
+$(ARCH_OUT_D)/awspub/share/%.yaml: awspub/$(ARCH)/%.yaml $$(wildcard awspub/$(ARCH)/%-share.yaml)
+	@mkdir -p $(ARCH_OUT_D)/awspub/share
+	@$(call capture_stdout,$@,\
+	    yq eval-all '. as $$item ireduce ({}; . *+ $$item)' $^)
 
 # capture_stdout(output,command)
 # safely write the output of command to output
@@ -268,17 +386,48 @@ $(ARCH_OUT_D)/awspub/create/%.json: output/awspub.mapping $(ARCH_OUT_D)/%/disk.v
 	@$(call capture_stdout,$@,\
 	awspub create --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
 
+# awspub checks checksums and metadata to see if an image was published already
+# so if this is run with a copy of the create yaml, it should be a noop.
+$(ARCH_OUT_D)/awspub/share/%.json: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json $(ARCH_OUT_D)/awspub/share/%.yaml
+	@$(call capture_stdout,$@,\
+	awspub create --config-mapping=output/awspub.mapping $(ARCH_OUT_D)/awspub/share/$*.yaml)
+
+# we use the stdout of awspub publish to indicate the thing was published.
+$(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/share/%.json $(ARCH_OUT_D)/awspub/share/%.yaml
+	@$(call capture_stdout,$@,\
+	awspub publish --config-mapping=output/awspub.mapping $(ARCH_OUT_D)/awspub/share/$*.yaml)
+
+# General pattern rule for publishing any AWS image to S3
+.PHONY: bespoke-publish-s3-aws-%
+bespoke-publish-s3-aws-%: $(ARCH_OUT_D)/aws-%/publish.s3.json
+	$(NOOP)
+
+# Targets to publish AWS images to an S3 bucket
+$(ARCH_OUT_D)/aws-%/publish.s3.json: AWSNAME=$(PREFIX)-$*-$(AWSARCH)
+$(ARCH_OUT_D)/aws-%/publish.s3.json: $(ARCH_OUT_D)/aws-%/disk.raw $(ARCH_OUT_D)/aws-%/disk.vmdk
+	@mkdir -p $(dir $@)
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name $(AWSNAME) \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--s3-bucket $(AWS_S3_BUCKET) \
+		--sbom-path $(dir $@)syft.sbom.json \
+		--vmdk-path $(dir $@)disk.vmdk \
+		--awsvars-path $(dir $@)uefi-data.aws \
+		--edk2vars-path $(dir $@)uefi-data.fd)
+
 .PHONY: publish-azure
 publish-azure: $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name)))
 $(foreach name,$(disks_azure),publish-azure-$(subst azure-,,$(name))): publish-azure-%: $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json
 
 $(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-$*-$(AZARCH)
-$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: AZTAGS+= local-name=azure-$*
-$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/azure-%/disk.raw
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: _AZTAGS=$(AZTAGS),local-name=azure-$*
+$(ARCH_OUT_D)/azure-%/publish.$(PUBLISH_TARGET).json: $(TOOLS_SUBD)/azure-image-upload $(ARCH_OUT_D)/azure-%/disk.raw
 	@$(call capture_stdout,$@,\
-		$(TOOLS_D)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+		./$(TOOLS_SUBD)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
 		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
-		--tags="$(AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(dir $@)disk.raw)
+		$(addprefix --db-hash=,$(shell cat $(dir $@)db-b64-hashes.txt)) \
+		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(AZ_IMAGEUPLOAD_FLAGS) $(dir $@)disk.raw)
 
 .PHONY: publish-gcp
 publish-gcp: $(foreach name,$(disks_gcp),publish-gcp-$(subst gcp-,,$(name)))
@@ -293,106 +442,136 @@ $(ARCH_OUT_D)/gcp-%/publish.$(PUBLISH_TARGET).yaml: $(ARCH_OUT_D)/gcp-%/disk.raw
 	@$(call capture_stdout,$@, gcloud compute images describe --project "$(GCP_PROJECT)" "$(GCPNAME)")
 
 .PHONY: publish-qemu
-publish-qemu: $(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name)))
-$(foreach name,$(disks_qemu),publish-qemu-$(subst generic-,,$(name))): publish-qemu-%: $(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json
+publish-qemu: $(foreach name,$(disks_qemu),publish-$(name))
+$(foreach name,$(disks_qemu),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: QEMUNAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/generic-%/disk.raw $(ARCH_OUT_D)/generic-%/disk.qcow2
+$(ARCH_OUT_D)/qemu-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/qemu-%/disk.raw $(ARCH_OUT_D)/qemu-%/disk.qcow2
 	@mkdir -p $(dir $@)
-	@echo "Publishing QEMU images for $* ($(ARCH))"
-	@artifact_name="$(QEMUNAME).raw"; \
-	gcs_raw_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
-	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
-	@artifact_name="$(QEMUNAME).qcow2"; \
-	gcs_qcow2_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.qcow2 to $$gcs_qcow2_path"; \
-	gcloud storage cp "$(dir $@)disk.qcow2" "$$gcs_qcow2_path"
-	@echo "Generating signed URLs for uploaded artifacts"; \
-	gcs_raw_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).raw"; \
-	gcs_qcow2_path="$(QEMUBUCKET)/$(GCPARCH)/generic-$*/$(BUILD_TIMESTAMP)/$(QEMUNAME).qcow2"; \
-	raw_signed_url=$$(gcloud storage sign-url "$$gcs_raw_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
-	qcow2_signed_url=$$(gcloud storage sign-url "$$gcs_qcow2_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"qcow2\": \"$$gcs_qcow2_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"qcow2_signed_url\": \"$$qcow2_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name=qemu-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--gcs-bucket $(QEMU_GCSBUCKET) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(QEMU_AZSTORAGECONTAINER) \
+		--raw-path $(dir $@)disk.raw \
+		--qcow2-path $(dir $@)disk.qcow2 \
+		--edk2vars-path $(dir $@)uefi-data.fd \
+		--sbom-path $(dir $@)syft.sbom.json \
+		--sign-gcs-urls --sign-az-urls)
 
 .PHONY: publish-vmware
-publish-vmware: $(foreach name,$(disks_vmware),publish-$(name))
-$(foreach name,$(disks_vmware),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
+publish-vmware: $(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name)))
+$(foreach name,$(disks_vmware),publish-vmware-$(subst vmware-,,$(name))): publish-vmware-%: $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: VMWARENAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/%/disk.raw $(ARCH_OUT_D)/%/disk.vmdk $(ARCH_OUT_D)/%/disk-flat.vmdk
+$(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/disk.raw $(ARCH_OUT_D)/vmware-%/disk.ova
 	@mkdir -p $(dir $@)
-	@echo "Publishing VMWARE images for $* ($(ARCH))"
-	@artifact_name="$(VMWARENAME).raw"; \
-	gcs_raw_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
-	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
-	@artifact_name="$(VMWARENAME).vmdk"; \
-	gcs_vmdk_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	sed -i "s/disk-flat.vmdk/$(VMWARENAME)-flat.vmdk/" $(dir $@)disk.vmdk; \
-	echo "Uploading $(dir $@)disk.vmdk to $$gcs_vmdk_path"; \
-	gcloud storage cp "$(dir $@)disk.vmdk" "$$gcs_vmdk_path"
-	@artifact_name="$(VMWARENAME)-flat.vmdk"; \
-	gcs_vmdk_flat_path="$(VMWAREBUCKET)/$(GCPARCH)/$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk-flat.vmdk to $$gcs_vmdk_flat_path"; \
-	gcloud storage cp "$(dir $@)disk-flat.vmdk" "$$gcs_vmdk_flat_path"
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"vmdk\": \"$$gcs_vmdk_path\", \"vmdk\": \"$$gcs_vmdk_flat_path\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name vmware-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(VMWARE_AZSTORAGECONTAINER) \
+		--raw-path $(dir $@)disk.raw \
+		--sbom-path $(dir $@)syft.sbom.json \
+		--ova-path $(dir $@)disk.ova)
 
 .PHONY: publish-rpi
-publish-rpi: $(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name)))
-$(foreach name,$(disks_rpi),publish-rpi-$(subst rpi-generic-,,$(name))): publish-rpi-%: $(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json
+publish-rpi: $(foreach name,$(disks_rpi),publish-$(name))
+$(foreach name,$(disks_rpi),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
 
-$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: RPINAME=$*-$(GCPARCH)-$(BUILD_TIMESTAMP)
-$(ARCH_OUT_D)/rpi-generic-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-generic-%/disk.raw
+$(ARCH_OUT_D)/rpi-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/rpi-%/disk.raw
 	@mkdir -p $(dir $@)
-	@echo "Publishing RPI images for $* ($(ARCH))"
-	@artifact_name="$(RPINAME).raw"; \
-	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$$artifact_name"; \
-	echo "Uploading $(dir $@)disk.raw to $$gcs_raw_path"; \
-	gcloud storage cp "$(dir $@)disk.raw" "$$gcs_raw_path"
-	@echo "Generating signed URLs for uploaded artifacts"; \
-	gcs_raw_path="$(RPIBUCKET)/$(GCPARCH)/rpi-generic-$*/$(BUILD_TIMESTAMP)/$(RPINAME).raw"; \
-	raw_signed_url=$$(gcloud storage sign-url "$$gcs_raw_path" --impersonate-service-account=signed-gcs-url@chainguard-vms-eap.iam.gserviceaccount.com --duration=12h --quiet); \
-	$(call capture_stdout,$@, echo "{ \"raw\": \"$$gcs_raw_path\", \"raw_signed_url\": \"$$raw_signed_url\", \"timestamp\": \"$(BUILD_TIMESTAMP)\" }")
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name=rpi-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--gcs-bucket $(RPI_GCSBUCKET) \
+		--rpi-upload \
+		--raw-path $(dir $@)disk.raw)
 
-# we use the stdout of awspub publish to indicate the thing was published.
-$(ARCH_OUT_D)/awspub/publish/%.output: output/awspub.mapping $(ARCH_OUT_D)/awspub/create/%.json
-	@$(call capture_stdout,$@,\
-	awspub publish --config-mapping=output/awspub.mapping awspub/$(ARCH)/$*.yaml)
+.PHONY: publish-lxd
+publish-lxd: $(foreach name,$(disks_lxd),publish-lxd-$(subst lxd-,,$(name)))
+$(foreach name,$(disks_lxd),publish-lxd-$(subst lxd-,,$(name))): publish-lxd-%: $(ARCH_OUT_D)/lxd-%/publish.$(PUBLISH_TARGET).json
+$(ARCH_OUT_D)/lxd-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/lxd-%/build.stamp
+	@mkdir -p $(dir $@)
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name lxd-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(LXD_AZSTORAGECONTAINER) \
+		--lxd-metadata-path $(dir $@)chainguard-$*-lxd.tar.xz \
+		--squashfs-path $(dir $@)chainguard-$*.squashfs \
+		--readme $(dir $@)README.md \
+		--sign-az-urls)
 
 $(ARCH_OUT_D)/%/disk.raw: configs/%/build.yaml apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
+	kopts=$$($(TOOLS_D)/get-install-opts "$@" configs/$*/build.yaml $(ARCH) ) && \
 	$(TOP_D)/apkoaas build \
-	--log-level=debug \
-	--arch=$(ARCH) \
-	--build-arch=$(BUILDER_ARCH) \
-	--builder-cpio=$(BUILDER_INITRD) \
-	--kernel=$(BUILDER_KERNEL) \
-	--output=$@ \
-	configs/$*/build.yaml
+	  --log-level=debug \
+	  --arch=$(ARCH) \
+	  --build-arch=$(BUILDER_ARCH) \
+	  --builder-cpio=$(BUILDER_INITRD) \
+	  --kernel=$(BUILDER_KERNEL) \
+	  --kernel-cmdline-append=cgri.opts="$$kopts" \
+	  --output=$(patsubst %-build,%,$@) \
+	  configs/$*/build.yaml
 
-$(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_DEBUG_INITRD)
+$(ARCH_OUT_D)/%/disk-debug.raw: apkoaas $(BUILDER_KERNEL) $(BUILDER_INITRD)
 	@mkdir -p $(dir $@)
+	kopts=$$($(TOOLS_D)/get-install-opts "$@" configs/$*/build.yaml $(ARCH) ) && \
 	$(TOP_D)/apkoaas build \
-	--log-level=debug \
-	--arch=$(ARCH) \
-	--build-arch=$(BUILDER_ARCH) \
-	--builder-cpio=$(BUILDER_DEBUG_INITRD) \
-	--kernel=$(BUILDER_KERNEL) \
-	--output=$@ \
-	configs/$*/build.yaml "$@"
+	  --log-level=debug \
+	  --arch=$(ARCH) \
+	  --build-arch=$(BUILDER_ARCH) \
+	  --builder-cpio=$(BUILDER_INITRD) \
+	  --kernel=$(BUILDER_KERNEL) \
+	  --kernel-cmdline-append=cgri.opts="$$kopts" \
+	  --output=$(patsubst %-build,%,$@) \
+	  configs/$*/build.yaml
+
+$(ARCH_OUT_D)/lxd-%/build.stamp: configs/lxd-%/build.yaml
+	@mkdir -p $(dir $@)
+	# Create metadata
+	cp -r lxd/ $(dir $@)/
+	sed -i 's|@ARCH@|$(ARCH)|;s|@TIMESTAMP@|$(shell busybox date -d $(BUILD_TIMESTAMP) -D %Y%m%d-%H%M +%s)|' $(dir $@)/lxd/metadata.yaml
+	tar -C $(dir $@)/lxd -c -J -f $(dir $@)/chainguard-$*-lxd.tar.xz .
+	rm -rf $(dir $@)/lxd
+	# Create squashfs
+	apko build-minirootfs --build-arch=$(ARCH) $< $(dir $@)/disk.tar
+	# Ubuntu uses xz, but upgrade to zstd should have wide support now
+	cat $(dir $@)/disk.tar | mksquashfs - $(dir $@)/chainguard-$*.squashfs -tar -no-progress -xattrs -comp zstd -Xcompression-level 19
+	rm -f $(dir $@)/disk.tar
+	# Create README
+	# Name in a way that matches blob storage artifacts, not local output names
+	echo "Import with: lxc image import lxd-$*-$(BUILD_TIMESTAMP).tar.xz lxd-$*-$(BUILD_TIMESTAMP).squashfs --alias chainguard-$*" >> $(dir $@)/README.md
+	touch $@
+
+shellcheck: .shellcheck
+.shellcheck: $(shell_scripts)
+	@rc=0;for script in $(shell_scripts); do \
+	    echo "shellcheck $$script"; \
+	    shellcheck "$$script" || rc=$$?; \
+	done; exit $$rc
+	@touch $@
 
 .PHONY: clean
 clean:
-	rm -Rf output builder apkoaas *.raw
+	rm -Rf output builder apkoaas *.raw $(CGR_INSTALL_REPO)
 
 install-deps:
 	sudo sh -c 'apt-get --quiet update && \
-	apt-get --quiet --assume-yes \
-	--option=Dpkg::Options::=--force-confold \
-	--option=Dpkg::options::=--force-unsafe-io \
-	install --no-install-recommends \
-	cpu-checker parallel python3-venv qemu-system-x86 qemu-utils'
+	   apt-get --quiet --assume-yes \
+	     --option=Dpkg::Options::=--force-confold \
+	     --option=Dpkg::options::=--force-unsafe-io \
+	     install --no-install-recommends \
+	       cpu-checker curl gzip parallel python3-lxml python3-venv python3-yaml \
+		   qemu-system-x86 qemu-utils xfsprogs zlib1g-dev squashfs-tools'
+	sudo sh -c 'for p in kvm vhost-net vhost-vsock; do \
+		d=/dev/$$p; [ -e "$$d" ] || { echo "no $$d"; continue; } ; \
+		chmod ugo+rw $$d && ls -l $$d || exit; done'
 	kvm-ok
 
 show-vars:
@@ -415,10 +594,6 @@ endif
 ifneq ($(filter-out $(arches),$(ARCH)),)
   $(error ARCH '$(ARCH)' not supported. Must be one of $(arches))
 endif
-
-.PHONY: convert
-convert:
-	./hack/convert.sh
 
 .PHONY: azure-marketplace-install-extension
 azure-marketplace-install-extension:

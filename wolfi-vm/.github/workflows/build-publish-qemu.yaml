@@ -69,11 +69,11 @@ jobs:
       WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'false' }}
 
     steps:
-      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
         with:
           egress-policy: audit
 
-      - uses: chainguard-dev/actions/apt-faster@8e97c1fc72515d627456cb0b92e9c9f299356375 # v1.5.2
+      - uses: chainguard-dev/actions/apt-faster@abcc11e1cf9073eff6c69e91c49756c1430b094c # v1.5.8
 
       - name: Checkout source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -91,7 +91,7 @@ jobs:
       - name: Scan disks
         uses: './.github/actions/scan-disks'
         with:
-          cloud_provider: "qemu"
+          vm_group: "qemu"
           arch: '${{ matrix.arch }}'
 
       - name: add HOME/bin to PATH
@@ -120,6 +120,20 @@ jobs:
             make "qcow-$name"
           done
 
+      - name: "Skip -rc images in testing"
+        run: |
+          names=$(make list-qemu-nonrc | tr "\n" " ")
+          [ -n "$names" ] || { echo "make list-qemu-nonrc produced empty output"; exit 1; }
+          echo "QEMU_VMS=$names" >> "$GITHUB_ENV"
+
+      - name: "Test QEMU images"
+        uses: './.github/actions/vms-test'
+        with:
+          cloud_provider: "qemu"
+          vm_group: "qemu"
+          arch: '${{ matrix.arch }}'
+          with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
+
       - name: "Setup GCP Creds for GCS Publishing"
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -133,28 +147,35 @@ jobs:
         with:
           project_id: wolfi-vm
 
-      - name: "Test QEMU images"
-        uses: './.github/actions/vms-test'
-        with:
-          cloud_provider: "qemu"
-          vm_group: "qemu"
-          arch: '${{ matrix.arch }}'
-          with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
-
       - name: "Configure gcloud"
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           gcloud config set storage/parallel_composite_upload_enabled True
 
-      - name: "Publish QEMU agents docker dev Image to GCS"
+      - name: "Install Azure Deps"
+        run: |
+          # Install the azure cli
+          # The script sets up the key, repos and then installs the package
+          # https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-linux?pivots=apt
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: Login to Azure prod
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # generated in mono https://github.com/chainguard-dev/mono/tree/main/env/azure/chainguard-vms-prod/iac/200-infra
+          client-id: "c5a91a71-f2b4-48b8-8604-dedfc7a258b2"
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: "ad60e736-b0ce-432e-b77c-4b8218f452ae"
+
+      - name: "Publish QEMU agents docker dev Image to Cloud Storage"
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           arch="${{ env.VM_ARCH }}"
-          names="generic-agents-docker-dev"
-          make -j$(nproc) --output-sync=recurse publish-qemu PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
+          names="publish-qemu-agents-docker-dev publish-qemu-agents-docker-dev-request-7235"
+          make -j$(nproc) --output-sync=recurse $names PREFIX=chainguard PUBLISH_TARGET=eap ARCH=$arch
 
       - uses: './.github/actions/notify-slack'
-        if: ${{ (inputs.notify-slack-success || failure()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
+        if: ${{ (inputs.notify-slack-success || !success()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
           title: ${{ github.workflow }} (${{ matrix.arch }}) ${{ job.status }}

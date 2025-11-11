@@ -4,6 +4,9 @@ HASH := \#
 
 TEST_ARCHES := x86_64 aarch64
 runners=$(subst pkg/runner/,,$(wildcard pkg/runner/*))
+# grab 'artifacts' from vms-test/pkg/artifacts/cmd/root.go
+cmds=$(subst /cmd,,$(subst pkg/,,$(wildcard pkg/*/cmd)))
+
 test_groups=$(subst pkg/test/,,$(wildcard pkg/test/*))
 tests=$(foreach group,$(test_groups),$(subst pkg/test/,,$(wildcard pkg/test/$(group)/*)))
 
@@ -15,27 +18,15 @@ go_tools_bin=$(foreach tool,$(notdir $(go_tools)),tools/$(tool))
 
 shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
-all: runners tests
+all: runners tests cmds
 
-$(go_tools_bin): go.mod pkg/tools/tools.go
+$(go_tools_bin): ../go.mod pkg/tools/tools.go
 	@mkdir -p tools/
-	@TOOL_PKG=$(filter %/$(@F),${go_tools}); \
-	TOOL=$$TOOL_PKG; \
-	TOOL_MODULE=""; \
-	while true; do \
-		# Check if the current package has a valid module version, if so we're done \
-		TOOL_MODULE=$$(go list -f "{{if eq .Path \"$$TOOL\"}}{{.Path}}@{{.Version}}{{end}}" -m all); \
-		[ -n "$$TOOL_MODULE" ] && break; \
-		# Chop off the last bit of the URL, if we're down to the last part give up \
-		# Otherwise continue with the trimmed URL \
-		NEW=$${TOOL%/*}; \
-		[ "$$TOOL" = "$$NEW" ] && break; \
-		TOOL=$$NEW; \
-	done; \
-	echo "Resolved tool package $$TOOL_PKG to module $$TOOL_MODULE"; \
-	# Print the command manually since we silenced this long one-liner \
-	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_MODULE##*@}"; \
-	GOBIN=$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_MODULE##*@}
+	@TOOL_PKG=$$(go list -tags tools -f '{{join .Imports "\n"}}' -e ./pkg/tools | grep -E '.*/$(@F)(/.*|$$)'); \
+	TOOL_VER=$$(go list -f '{{.Module.Version}}' "$$TOOL_PKG"); \
+	export GOPRIVATE=github.com/chainguard-images/images-private; \
+	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_VER}"; \
+	GOBIN=$$(pwd)/tools/ go install "$${TOOL_PKG}@$${TOOL_VER}"
 
 .go-generated: $(go_gen_sources) $(go_tools_bin)
 	PATH=$$PWD/tools/:$$PATH go generate ./...
@@ -46,6 +37,12 @@ runners: $(runner_targets)
 $(runner_targets): runner/%: $(go_files) .go-generated
 	@mkdir -p runner
 	go build -C ./pkg/runner/$* -o ../../../runner/$*
+
+cmd_targets=$(foreach cmd,$(cmds),tools/$(cmd))
+cmds: $(cmd_targets)
+$(cmd_targets): tools/%: $(go_files) .go-generated
+	@mkdir -p tools
+	go build -C ./pkg/$*/cmd -o ../../../tools/$*
 
 test_targets=$(foreach arch,$(TEST_ARCHES),$(foreach test,$(tests),test/$(arch)/$(test)))
 tests: $(test_targets)

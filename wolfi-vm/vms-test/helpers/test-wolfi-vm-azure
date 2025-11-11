@@ -113,7 +113,7 @@ test_azure() {
             fails="${fails+$fails }$vfails"
             continue
         }
-        az_arch=$(jq -rse '.[0].architecture' < "$publish_file") || {
+        az_arch=$(jq -rse '.[0].properties.architecture' < "$publish_file") || {
             vfails="$publish_file/read-architecture"
             log "finished $publish_file FAIL - $vfails"
             fails="${fails+$fails }$vfails"
@@ -135,26 +135,26 @@ test_azure() {
         }
         testconfig="$wolfivmd/configs/$localname/test.yaml"
         [ -f "$testconfig" ] || {
-            vfails="$arch-$imagename/missing-test-config"
+            vfails="$arch/$imagename/missing-test-config"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
         }
         yqassert "1" -re 'explode(.) | .version' "$testconfig" || {
-            vfails="$arch-$imagename/version-mismatch"
+            vfails="$arch/$imagename/version-mismatch"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
         }
         yqassert "azure" -re 'explode(.) | .cloud' "$testconfig" || {
-            vfails="$arch-$imagename/cloud-mismatch"
+            vfails="$arch/$imagename/cloud-mismatch"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
         }
         # convert to json because bash mangles yaml
         vmconfigs=$(yq -o json -re "explode(.) | .vmconfigs.$arch" "$testconfig") || {
-            vfails="$arch-$imagename/read-vmconfigs"
+            vfails="$arch/$imagename/read-vmconfigs"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
@@ -166,14 +166,14 @@ test_azure() {
         region="$region_flag"
         if [ -z "$region" ]; then
             region=$(yq -re "explode(.) | .data.region" "$testconfig") || {
-                vfails="$arch-$imagename/empty-region"
+                vfails="$arch/$imagename/empty-region"
                 log "finished $arch-$imagename FAIL - $vfails"
                 fails="${fails+$fails }$vfails"
                 continue
             }
         fi
         num_vmconfigs=$(echo "$vmconfigs" | jq 'length') || {
-            vfails="$arch-$imagename/malformed-vmconfigs"
+            vfails="$arch/$imagename/malformed-vmconfigs"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
@@ -181,7 +181,7 @@ test_azure() {
 
         local testconfig_dir=""
         testconfig_dir=$(dirname "$testconfig") || {
-            vfails="$arch-$imagename/dirname-failed"
+            vfails="$arch/$imagename/dirname-failed"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             return 1
@@ -189,7 +189,7 @@ test_azure() {
 
         log "setting up $imagename in $region, detected arch $arch"
         setup_azure "$setupd" "$subscription" "$resource_group" "$resource_basename" "$region" || {
-            vfails="$arch-$imagename/setup"
+            vfails="$arch/$imagename/setup"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
@@ -199,11 +199,11 @@ test_azure() {
         for i in $(seq 0 $((num_vmconfigs-1))); do
             vmtag="$resource_basename-vm-$RANDOM"
             vm_size=$(echo "$vmconfigs" | jq -re ".[$i].vm_size") || {
-                vfails="$vfails $arch-$imagename/missing-vm-size"
+                vfails="$vfails $arch/$imagename/missing-vm-size"
                 continue
             }
             disk_type=$(echo "$vmconfigs" | jq -re ".[$i].disk_type") || {
-                vfails="$vfails $arch-$imagename/missing-disk-type"
+                vfails="$vfails $arch/$imagename/missing-disk-type"
                 continue
             }
             vmconfig_name=$(echo "$vmconfigs" | jq -re ".[$i].name" 2>/dev/null) || vmconfig_name="$vm_size-$disk_type"
@@ -216,7 +216,7 @@ test_azure() {
                 done
             done
             if [ -z "$named_tests" ]; then
-                vfails="$vfails $arch-$imagename/$vmconfig_name/no-tests-defined"
+                vfails="$vfails $arch/$imagename/$vmconfig_name/no-tests-defined"
                 continue
             fi
             launchuser=$(echo "$vmconfigs" | jq -re ".[$i].launchuser" 2>/dev/null) || launchuser=$(yq -re "explode(.) | .data.launchuser" "$testconfig" 2>/dev/null) || launchuser="$user"
@@ -253,7 +253,13 @@ test_azure() {
             if [ $launch_code -eq 0 ]; then
                 vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
                     --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
-                    >> "$known_hosts"
+                    >> "$known_hosts" || {
+                        launch_code=$?
+                        stderr "failed wait-for-ssh $arch/$imagename/$vmconfig_name"
+                        vfails="$vfails $arch/$imagename/$vmconfig_name/wait-for-ssh"
+                    }
+            fi
+            if [ $launch_code -eq 0 ]; then
                 log "started testing $arch/$imagename/$vmconfig_name"
                 # Run tests, collect metrics
                 for tid in $named_tests; do
@@ -295,8 +301,8 @@ test_azure() {
                     fi
                     vrl "$voutd/test$tname_pretty" "$runner" run-remote --sudo --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
                         --private-key "$key" --user "$test_user" --file="$tfile" --known-hosts="$known_hosts" -- \
-                        -test.v "${metric_args[@]}" ||
-                        vfails="$vfails $arch-$imagename/$vmconfig_name/test-$tname_pretty"
+                        -test.v -test.timeout "$WAIT_TEST_TIMEOUT" "${metric_args[@]}" ||
+                        vfails="$vfails $arch/$imagename/$vmconfig_name/test-$tname_pretty"
 
                     if [ $emits_metrics -eq 0 ]; then
                         "$runner" ssh --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
@@ -308,13 +314,13 @@ test_azure() {
                 done
                 "$runner" console-log --resource-group "$resource_group" --subscription-id "$subscription" --tag "$vmtag" \
                     --timeout="${WAIT_CONSOLE_TIMEOUT}" --wait > "$voutd/console.log" ||
-                    vfails="$vfails $arch-$imagename/$vmconfig_name/console-log"
+                    vfails="$vfails $arch/$imagename/$vmconfig_name/console-log"
 
                 log "finished testing $arch/$imagename/$vmconfig_name"
             else
                 # azure reserves resources for 180s after failed VM creation...
                 log "waiting 180s for azure to release resources from failed vm launch"
-                vfails="$vfails $arch-$imagename/$vmconfig_name/launch"
+                vfails="$vfails $arch/$imagename/$vmconfig_name/launch"
                 sleep 180
             fi
             # Terminate VM

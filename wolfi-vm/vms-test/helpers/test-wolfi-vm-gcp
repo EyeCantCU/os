@@ -106,7 +106,7 @@ test_gcp() {
             continue
         }
         [ "$gcp_arch" == "X86_64" ] && arch="x86_64" || arch="aarch64"
-        imagename=$(yq -re '.name' "$publish_file") || {
+        imagename=$(yq -re '.family' "$publish_file") || {
             vfails="$publish_file/read-image-name"
             log "finished $publish_file FAIL - $vfails"
             fails="${fails+$fails }$vfails"
@@ -120,32 +120,32 @@ test_gcp() {
         }
         testconfig="$wolfivmd/configs/$localname/test.yaml"
         [ -f "$testconfig" ] || {
-            vfails="$arch-$imagename/missing-test-config"
+            vfails="$arch/$imagename/missing-test-config"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
         }
         yqassert "1" -re 'explode(.) | .version' "$testconfig" || {
-            vfails="$arch-$imagename/version-mismatch"
+            vfails="$arch/$imagename/version-mismatch"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
         }
         yqassert "gcp" -re 'explode(.) | .cloud' "$testconfig" || {
-            vfails="$arch-$imagename/cloud-mismatch"
+            vfails="$arch/$imagename/cloud-mismatch"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
         }
         # convert to json because bash mangles yaml
         vmconfigs=$(yq -o json -re "explode(.) | .vmconfigs.$arch" "$testconfig") || {
-            vfails="$arch-$imagename/read-vmconfigs"
+            vfails="$arch/$imagename/read-vmconfigs"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
         }
         user=$(yq -re "explode(.) | .data.vmuser" "$testconfig") || {
-            vfails="$arch-$imagename/empty-vmuser"
+            vfails="$arch/$imagename/empty-vmuser"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
@@ -153,14 +153,14 @@ test_gcp() {
         zone="$zonein"
         if [ -z "$zone" ]; then
             zone=$(yq -re "explode(.) | .data.zone" "$testconfig") || {
-                vfails="$arch-$imagename/empty-zone"
+                vfails="$arch/$imagename/empty-zone"
                 log "finished $arch-$imagename FAIL - $vfails"
                 fails="${fails+$fails }$vfails"
                 continue
             }
         fi
         num_vmconfigs=$(echo "$vmconfigs" | jq 'length') || {
-            vfails="$arch-$imagename/malformed-vmconfigs"
+            vfails="$arch/$imagename/malformed-vmconfigs"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             continue
@@ -168,7 +168,7 @@ test_gcp() {
 
         local testconfig_dir=""
         testconfig_dir=$(dirname "$testconfig") || {
-            vfails="$arch-$imagename/dirname-failed"
+            vfails="$arch/$imagename/dirname-failed"
             log "finished $arch-$imagename FAIL - $vfails"
             fails="${fails+$fails }$vfails"
             return 1
@@ -179,8 +179,8 @@ test_gcp() {
         local i="" label="" machine_type="" disk_type="" vmconfig_name="" named_tests="" test_groups="" group="" vm_testd="" voutd="" launcher="" launch_code="" tid="" tgroup="" tname="" tname_pretty="" tfile="" location="" nested_virt="" min_cpu_platform="" metadata="" secondary_disk_name="" secondary_disk_size="" secondary_disk_type="" user_data=""
         for i in $(seq 0 $((num_vmconfigs-1))); do
             label="test-wolfi-vm-$RANDOM"
-            machine_type=$(echo "$vmconfigs" | jq -re ".[$i].machine_type") || { vfails="$vfails $arch-$imagename/missing-vm-size"; continue; }
-            disk_type=$(echo "$vmconfigs" | jq -re ".[$i].disk_type") || { vfails="$vfails $arch-$imagename/missing-disk-type"; continue; }
+            machine_type=$(echo "$vmconfigs" | jq -re ".[$i].machine_type") || { vfails="$vfails $arch/$imagename/missing-vm-size"; continue; }
+            disk_type=$(echo "$vmconfigs" | jq -re ".[$i].disk_type") || { vfails="$vfails $arch/$imagename/missing-disk-type"; continue; }
             disk_size=$(echo "$vmconfigs" | jq -re ".[$i].disk_size") || disk_size="10"
             metadata=$(echo "$vmconfigs" | jq -re ".[$i].metadata") || metadata=""
             nested_virt=$(echo "$vmconfigs" | jq -re ".[$i].nested_virt" 2>/dev/null) || nested_virt="false"
@@ -199,7 +199,7 @@ test_gcp() {
                 done
             done
             if [ -z "$named_tests" ]; then
-                vfails="$vfails $arch-$imagename/$vmconfig_name/no-tests-defined"
+                vfails="$vfails $arch/$imagename/$vmconfig_name/no-tests-defined"
                 continue
             fi
 
@@ -230,7 +230,14 @@ test_gcp() {
                 "${user_data_args[@]}"
             launch_code=$?
             if [ $launch_code -eq 0 ]; then
-                vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh --name="$label" --project "$project" --zone="$zone" >> "$known_hosts"
+                vr "$runner" --timeout="${WAIT_SSH_TIMEOUT}" wait-for-ssh \
+                    --name="$label" --project "$project" --zone="$zone" >> "$known_hosts" || {
+                        launch_code=$?
+                        stderr "failed wait-for-ssh $arch/$imagename/$vmconfig_name"
+                        vfails="$vfails $arch/$imagename/$vmconfig_name/wait-for-ssh"
+                    }
+            fi
+            if [ $launch_code -eq 0 ]; then
                 log "started testing $arch/$imagename/$vmconfig_name"
                 # Run tests, collect metrics
                 for tid in $named_tests; do
@@ -258,8 +265,8 @@ test_gcp() {
                         metric_args=("-metric-tags" "arch:$arch,$METRIC_TAGS" )
                     fi
                     vrl "$voutd/test-$tname_pretty" "$runner" run-remote --sudo --name="$label" --file="$tfile" --private-key="$key" \
-                        --project="$project" --user="$test_user" --zone="$zone" -- -test.v "${metric_args[@]}" ||
-                            vfails="$vfails $arch-$imagename/$vmconfig_name/test-$tname_pretty"
+                        --project="$project" --user="$test_user" --zone="$zone" -- -test.v -test.timeout "$WAIT_TEST_TIMEOUT" "${metric_args[@]}" ||
+                            vfails="$vfails $arch/$imagename/$vmconfig_name/test-$tname_pretty"
 
                     if [ $emits_metrics -eq 0 ]; then
                         "$runner" ssh --name="$label" --private-key="$key"  --project="$project" --user="$test_user" --zone="$zone" \
@@ -269,11 +276,11 @@ test_gcp() {
 
                 done
                 vr "$runner" console-log --name="$label" --project="$project" --zone="$zone" > "$voutd/console.log" ||
-                    vfails="$vfails $arch-$imagename/$vmconfig_name/console-log"
+                    vfails="$vfails $arch/$imagename/$vmconfig_name/console-log"
 
                 log "finished testing $arch/$imagename/$vmconfig_name"
             else
-                vfails="$vfails $arch-$imagename/$vmconfig_name/launch"
+                vfails="$vfails $arch/$imagename/$vmconfig_name/launch"
             fi
             # Terminate VM
             vr "$runner" terminate --name="$label" --project="$project" --zone="$zone"

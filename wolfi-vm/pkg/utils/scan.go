@@ -29,18 +29,18 @@ import (
 	"github.com/wolfi-dev/wolfictl/pkg/sbom/catalogers"
 )
 
-func CreateAttestationFromLayer(ctx context.Context, layer v1.Layer) (io.Reader, error) {
+func CreateSyftSBOMFromLayer(ctx context.Context, layer v1.Layer) (io.Reader, error) {
 	r, err := layer.Uncompressed()
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
 
-	return CreateAttestation(ctx, r)
+	return CreateSyftSBOM(ctx, r)
 }
 
-func CreateAttestation(ctx context.Context, layer io.Reader) (io.Reader, error) {
-	clog.Info("creating syft attestation")
+func CreateSyftSBOM(ctx context.Context, layer io.Reader) (io.Reader, error) {
+	clog.Info("creating syft SBOM")
 
 	tempDir, err := os.MkdirTemp("", "wolfictl-sbom-*")
 	if err != nil {

@@ -70,8 +70,9 @@ jobs:
           - x86_64
           - aarch64
         group:
+          - aws-ecs
           - aws-eks
-          - aws-noneks
+          - aws-main
 
     env:
       BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
@@ -82,11 +83,11 @@ jobs:
       WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'true' }}
 
     steps:
-      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
         with:
           egress-policy: audit
 
-      - uses: chainguard-dev/actions/apt-faster@8e97c1fc72515d627456cb0b92e9c9f299356375 # v1.5.2
+      - uses: chainguard-dev/actions/apt-faster@abcc11e1cf9073eff6c69e91c49756c1430b094c # v1.5.8
 
       - name: Checkout source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -119,7 +120,7 @@ jobs:
           echo "PATH=$p" >> "$GITHUB_ENV"
 
       - name: "Setup AWS Creds"
-        uses: aws-actions/configure-aws-credentials@a03048d87541d1d9fcf2ecf528a4a65ba9bd7838 # v5.0.0
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
           # the secret used is the marketplace AWS account id
           # AWS account aws-marketplace
@@ -152,10 +153,10 @@ jobs:
       - name: "Create AWS Images"
         run: |
           # The request limit for VM imports on the AWS account in us-east-1
-          # is currently 50. With the job matrix there will be 4 jobs running
-          # concurrently at most, hence each job may import up to 12 images at
-          # a time.
-          make -j12 --output-sync=recurse aws-create-${VM_GROUP} BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
+          # is currently 50. Adjust the concurrent upload tasks accordingly.
+          num_jobs=$(( 50 / ${{ strategy.job-total }} ))
+          [[ -n "$num_jobs" ]] || num_jobs=8
+          make -j "$num_jobs" --output-sync=recurse aws-create-${VM_GROUP} BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
 
       - name: "Show publish output"
         run: |
@@ -165,26 +166,18 @@ jobs:
             echo
           done
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: awspub-create-${{ matrix.group}}-${{ matrix.arch }}
           path: ./output/${{ matrix.arch }}/awspub/create
 
-      - name: "[BASE] Setup Test AWS Creds"
-        if: ${{ matrix.group != 'aws-eks' }}
-        uses: aws-actions/configure-aws-credentials@a03048d87541d1d9fcf2ecf528a4a65ba9bd7838 # v5.0.0
+      - name: "Setup Test AWS Creds"
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
-          # AWS account chainguard-vms
-          role-to-assume: arn:aws:iam::235494789672:role/wolfi-vms-github-postsubmit-role
-          aws-region: us-east-1
-
-      - name: "[EKS] Setup Test AWS Creds"
-        if: ${{ matrix.group == 'aws-eks' }}
-        uses: aws-actions/configure-aws-credentials@a03048d87541d1d9fcf2ecf528a4a65ba9bd7838 # v5.0.0
-        with:
-          # AWS account chainguard-vms
+          # AWS account chainguard-test-vms
           role-to-assume: arn:aws:iam::677043465004:role/cg-test-vms-postsubmit-role
           aws-region: us-east-1
+          role-duration-seconds: 7200
 
       - name: "Test AWS Images"
         uses: './.github/actions/vms-test'
@@ -199,6 +192,23 @@ jobs:
             --region=us-east-1
           with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
 
+      - name: "[ECS+EKS] Refresh Test AWS Creds"
+        if: ${{ matrix.group != 'aws-main' }}
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          # AWS account chainguard-test-vms
+          role-to-assume: arn:aws:iam::677043465004:role/cg-test-vms-postsubmit-role
+          aws-region: us-east-1
+          role-duration-seconds: 7200
+
+      - name: "[ECS] AWS ECS Container Instances"
+        if: matrix.group == 'aws-ecs'
+        uses: './.github/actions/test-ecs-container-instance'
+        with:
+          aws-region: us-east-1
+          artifact-suffix: "-${{ matrix.arch }}-${{ matrix.group }}"
+          awspub-inputs-dir: ./output/${{ matrix.arch }}/awspub/create
+
       - name: "[EKS] AWS EKS Nodes"
         if: matrix.group == 'aws-eks'
         uses: './.github/actions/test-eks-node'
@@ -208,14 +218,21 @@ jobs:
           awspub-inputs-dir: ./output/${{ matrix.arch }}/awspub/create
 
       - name: "Setup AWS Creds"
-        uses: aws-actions/configure-aws-credentials@a03048d87541d1d9fcf2ecf528a4a65ba9bd7838 # v5.0.0
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
           # the secret used is the marketplace AWS account id
           # AWS account aws-marketplace
           role-to-assume: arn:aws:iam::607334848609:role/wolfi-vms-github-postsubmit-role
           aws-region: us-east-1
 
+      - name: "Share AWS Images"
+        run: |
+          num_jobs=$(( 50 / ${{ strategy.job-total }} ))
+          [[ -n "$num_jobs" ]] || num_jobs=8
+          make -j "$num_jobs" --output-sync=recurse aws-share-${VM_GROUP} BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
+
       - name: "Publish AWS Images to marketplace"
+        shell: bash
         run: |
           if [ "$PUBLISH_TO_MP" = 'on-schedule' ]; then
             # If this is a scheduled run, limit how often the images get published to the AWS Marketplace
@@ -231,13 +248,23 @@ jobs:
             # to be persistent and need manual intervention. Republishing the entire group when only one
             # of the products needs publishing will quickly exhaust the version limit.
 
-            # sort only to slurp all output and avoid a broken pipe
-            variant=$(make list-$VM_GROUP | sort | head -n1)
-            product_id=$(yq .awspub.images[].marketplace.entity_id awspub/$VM_ARCH/$variant.yaml | head -n1)
-            echo "Evaluating $variant ($product_id) for whether the group needs to be published..."
-            if ! should_publish=$(./tools/aws-should-ci-publish "$product_id"); then
-              echo 'Failed to decide whether to publish.'
-            fi
+            should_publish=no
+
+            mapfile -t variants < <(make "list-$VM_GROUP")
+            for variant in "${variants[@]}"; do
+              product_id=$(yq .awspub.images[].marketplace.entity_id awspub/"$VM_ARCH"/"$variant".yaml | head -1)
+              if [ "$product_id" = 'null' ]; then
+                echo "Variant $variant is not yet being published on the AWS Marketplace. Checking another."
+                continue
+              fi
+
+              echo "Evaluating $variant ($product_id) for whether the group needs to be published..."
+              if should_publish=$(./tools/aws-should-ci-publish "$product_id"); then
+                break
+              else
+                echo "Failed to decide whether to publish variant $variant ($product_id)."
+              fi
+            done
 
             case "$should_publish" in
               yes)
@@ -266,8 +293,21 @@ jobs:
 
           make -j4 --output-sync=recurse "aws-publish-${VM_GROUP}" BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }}
 
+      - name: "Setup ONA S3 Creds"
+        if: matrix.group == 'aws-ecs'
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          role-to-assume: arn:aws:iam::607334848609:role/chainguard-ona-publication
+          aws-region: us-east-1
+
+      - name: "Publish ONA Images to S3"
+        if: matrix.group == 'aws-ecs'
+        run: |
+          make bespoke-publish-s3-aws-ecs-full-request-6943 PREFIX=chainguard BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }} PUBLISH_TARGET=ona
+          make bespoke-publish-s3-aws-ecs-full-immutable PREFIX=chainguard BUILD_TIMESTAMP=${BUILD_TIMESTAMP} ARCH=${{ env.VM_ARCH }} PUBLISH_TARGET=ona
+
       - uses: './.github/actions/notify-slack'
-        if: ${{ (inputs.notify-slack-success || failure()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
+        if: ${{ (inputs.notify-slack-success || !success()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
           title: ${{ github.workflow }} (${{ matrix.arch }}, ${{ matrix.group }}) ${{ job.status }}

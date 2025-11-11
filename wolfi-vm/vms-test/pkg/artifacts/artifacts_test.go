@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/metrics"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )

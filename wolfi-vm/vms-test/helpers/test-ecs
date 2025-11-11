@@ -1,0 +1,775 @@
+#!/usr/bin/env bash
+
+# shellcheck disable=SC2329  # heavy use of dynamic dispatch leads to unused function warnings
+# shellcheck disable=SC2317  # dito for dead code analysis (fixed in recent shellcheck)
+
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+
+DEF_AWS_REGION=us-west-1
+DEF_CLUSTER_NAME=vmtest
+DEF_INSTANCE_TYPE_ARM=t4g.medium
+DEF_INSTANCE_TYPE_X86=t3.medium
+AWS_REGION=${AWS_REGION:-$DEF_AWS_REGION}
+
+aws=(
+    aws
+    --region "$AWS_REGION"
+    --no-cli-pager
+)
+
+Usage_dump_awspub() {
+    cat <<EOF
+Usage: ${0##*/} dump-awspub awspubfile
+
+   Parse an awspub JSON file and output AMI information.
+
+   arguments:
+      awspubfile               awspub JSON file to parse
+
+   output format: region ami-id architecture family localname
+
+   where:
+      - region: AWS region (e.g. us-east-1)
+      - ami-id: AMI ID (e.g. ami-01234678abcdef)
+      - architecture: aarch64 or x86_64
+      - family: image family (e.g. chainguard-docker-dev)
+      - localname: (e.g. aws-docker-dev)
+
+EOF
+}
+
+dump_awspub() {
+    dump_awspubin "$@"
+}
+
+Usage_cluster_list() {
+    cat <<EOF
+Usage: ${0##*/} cluster-list
+
+   List all ECS clusters managed by this script.
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output: space-separated list of cluster names
+
+EOF
+}
+
+cluster_list() {
+    local out="" clusters=""
+
+    # List stacks that match our naming pattern: ecs-test-*-stack
+    out=$(
+        "${aws[@]}" cloudformation list-stacks \
+            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+            --output=json
+    ) || {
+        stderr 'aws cloudformation list-stacks failed'
+        return 1
+    }
+
+    # Extract cluster names from stack names (ecs-test-NAME-stack -> NAME)
+    clusters=$(
+        echo "$out" \
+            | jq -r '.StackSummaries[] | select(.StackName | test("^ecs-test-.*-stack$")) | .StackName' \
+            | sed 's/^ecs-test-//; s/-stack$//'
+    )
+
+    # shellcheck disable=SC2086
+    set -- $clusters
+    echo "$@"
+}
+
+Usage_cluster_status() {
+    cat <<EOF
+Usage: ${0##*/} cluster-status cluster-name
+
+   Get the status of an ECS cluster.
+
+   arguments:
+      cluster-name             name of the ECS cluster
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output: CloudFormation stack status
+      - CREATE_COMPLETE: stack created successfully
+      - UPDATE_COMPLETE: stack updated successfully
+      - CREATE_IN_PROGRESS: stack creation in progress
+      - DELETE_IN_PROGRESS: stack deletion in progress
+      - *_FAILED: various failure states
+      - *_ROLLBACK*: rollback states
+      - NONE: stack does not exist
+
+EOF
+}
+
+cluster_status() {
+    local name="$1" out=""
+    [ -n "$name" ] || { stderr 'cluster_status got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    out=$(
+        "${aws[@]}" cloudformation describe-stacks \
+            --stack-name "$stack_name" \
+            --output json 2>/dev/null
+    ) || {
+        stderr 'aws cloudformation describe-stacks failed'
+        return 1
+    }
+
+    local stack_status
+    stack_status=$(echo "$out" | jq -r '.Stacks[0].StackStatus') || {
+        echo "NONE"
+        return
+    }
+
+    echo "$stack_status"
+}
+
+Usage_cluster_create() {
+    cat <<EOF
+Usage: ${0##*/} cluster-create cluster-name
+
+   Create an ECS cluster.
+
+   arguments:
+      cluster-name             name of the ECS cluster (e.g. vmtest-ecs)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
+cluster_create() {
+    local name="$1"
+    [ -n "$name" ] || { stderr 'cluster_create got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    local template_path
+    template_path="$(dirname -- "${BASH_SOURCE[0]}")/ecs-test-infrastructure.json"
+    [ -f "$template_path" ] || {
+        stderr "CloudFormation template not found at $template_path"
+        return 1
+    }
+
+    log "Creating CloudFormation stack: $stack_name"
+    local output attempt max_attempts=3
+
+    for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+        if output=$(vr "${aws[@]}" cloudformation deploy \
+            --stack-name "$stack_name" \
+            --template-file "$template_path" \
+            --parameter-overrides "ClusterName=$name" \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset \
+            2>&1
+        ); then
+            echo "$output"
+            log 'Stack created successfully'
+            return 0
+        fi
+
+        case "$output" in
+            # On "aws cloudformation deploy", the resulting change set is named
+            # based on the current timestamp in seconds granularity, but has a
+            # description based on the timestamp in microsecond granularity. If
+            # two deployments happen at the same time, they will conflict. This
+            # could be avoided if the change set could be named explicitly, but
+            # that feature request has gone unfulfilled for > 5 years by now:
+            # https://github.com/aws/aws-cli/issues/5435
+            *AlreadyExistsException*)
+                log "Lost concurrent creation of the CloudFormation stack in attempt $attempt/$max_attempts."
+                # Actually retry and don't just return with a passing result as
+                # the other process this was racing against may actually change
+                # or create the stack, and we need to wait for those changes to
+                # become effective.
+                continue
+                ;;
+            *)
+                echo "$output"
+                log "Failed to create CloudFormation stack"
+                return 1
+                ;;
+        esac
+    done
+
+    log 'Repeatedly failed to create the CloudFormation stack'
+    return 1
+}
+
+Usage_cluster_destroy() {
+    cat <<EOF
+Usage: ${0##*/} cluster-destroy cluster-name
+
+   Destroy an ECS cluster and all associated resources.
+
+   arguments:
+      cluster-name             name of the ECS cluster to destroy (e.g. vmtest-ecs)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
+cluster_destroy() {
+    local name="$1"
+    [ -n "$name" ] || { stderr 'cluster_destroy got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    log "Deleting CloudFormation stack: $stack_name"
+    vr "${aws[@]}" cloudformation delete-stack --stack-name "$stack_name" || {
+        stderr 'Failed to delete CloudFormation stack'
+        return 1
+    }
+
+    log 'Waiting for stack deletion to complete...'
+    vr "${aws[@]}" cloudformation wait stack-delete-complete --stack-name "$stack_name" || {
+        stderr 'Stack deletion failed or timed out'
+        return 1
+    }
+
+    log 'Stack deleted successfully'
+}
+
+Usage_cluster_resources() {
+    cat <<EOF
+Usage: ${0##*/} cluster-resources cluster
+
+   Get resource IDs belonging to an ECS cluster.
+
+   arguments:
+      cluster                  name of the ECS cluster (e.g. vmtest-ecs)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+
+   output: vpc-id subnet-id sg-id profile-name basic-task-arn
+
+   where:
+     - vpc-id: VPC ID created for the cluster
+     - subnet-id: VPC Subnet ID for instances in the cluster
+     - sg-id: Security Group ID for instances in the cluster
+     - profile-name: name of the Instance Profile instances need assigned when joining the cluster
+     - basic-task-arn: ARN of a basic ECS Task
+EOF
+}
+
+cluster_resources() {
+    local name="$1"
+    [ -n "$name" ] || { stderr 'cluster_status got empty name'; return 1; }
+
+    local stack_name="ecs-test-${name}-stack"
+
+    local outputs="$describe_stack_cache"
+    if [ -z "$describe_stack_cache" ]; then
+        outputs=$(
+            "${aws[@]}" cloudformation describe-stacks \
+                --stack-name "$stack_name" \
+                --output json 2>/dev/null
+        ) || {
+            stderr "Stack $stack_name not found"
+            return 1
+        }
+    fi
+
+    local vpc_id subnet_id sg_id profile_name basic_task_arn
+    read -r -d $"\n" vpc_id subnet_id sg_id profile_name basic_task_arn < <(
+        cloudformation_output() {
+            local key="$1"
+            echo "$outputs" | jq -r ".Stacks[0].Outputs[] | select(.OutputKey == \"${key}\") | .OutputValue"
+        }
+
+        cloudformation_output VPCId
+        cloudformation_output PublicSubnet
+        cloudformation_output SecurityGroupId
+        cloudformation_output InstanceProfileName
+        cloudformation_output TestBasicTaskArn
+    )
+
+    local errors=()
+    [ -n "$vpc_id" ]         || errors+=( 'VPC ID is missing' )
+    [ -n "$subnet_id" ]      || errors+=( 'Subnet ID is missing' )
+    [ -n "$sg_id" ]          || errors+=( 'Security Group ID is missing' )
+    [ -n "$profile_name" ]   || errors+=( 'Instance Profile Name is missing' )
+    [ -n "$basic_task_arn" ] || errors+=( 'Basic Task ARN is missing' )
+
+    if [ "${#errors[@]}" -ne 0 ]; then
+        stderr "Failed to get required stack outputs:"
+        stderr "$(printf "  %s\n" "${errors[@]}")"
+        return 1
+    fi
+
+    # Speed up future calls; intentionally non-local variable
+    [ -n "$describe_stack_cache" ] || describe_stack_cache="$outputs"
+
+    echo "$vpc_id $subnet_id $sg_id $profile_name $basic_task_arn"
+}
+
+instance_get_logs() {
+    [ -d "$outd" ] || {
+        log 'no output directory given, not fetching instance logs'
+        return 1
+    }
+
+    local rc=0 json
+
+    for instance_id; do
+        json=$(vr "${aws[@]}" ec2 get-console-output \
+                --latest --instance-id "$instance_id" \
+        ) || {
+            log "failed to fetch console output for instance '$instance_id'"
+            rc=1
+            continue
+        }
+        jq -r '.Output' <<<"$json" >"$outd/$instance_id.txt"
+    done
+
+    return "$rc"
+}
+
+Usage_instance_add() {
+    cat <<EOF
+Usage: ${0##*/} instance-add cluster ami capacity instance-type
+
+   Launch EC2 instances and join them to an ECS cluster.
+
+   arguments:
+      cluster                  name of the ECS cluster (e.g. vmtest-ecs)
+      ami                      AMI ID to use for instances (e.g. ami-012346789abcdef)
+      capacity                 number of instances to create
+      instance-type            EC2 instance type (e.g. t4g.large)
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+   output: space-separated list of instance IDs
+
+EOF
+}
+
+instance_add() {
+    local cluster="$1" ami="$2" capacity="$3" instance_type="$4"
+
+    [ $# -eq 4 ] || {
+        stderr 'error: instance_add requires exactly 4 arguments'
+        Usage_instance_add
+        return 1
+    } >&2
+
+    local out
+
+    log 'Retrieving required parameters for instance launch'
+    local vpc_id subnet_id sg_id profile_name
+    out=$(cluster_resources "$cluster") || {
+        stderr 'Failed to determine required parameters to launch new instances'
+        return 1
+    }
+    read -r vpc_id subnet_id sg_id profile_name _ <<<"${out}"
+
+    local userdata="#!/bin/sh
+echo 'ECS_CLUSTER=$cluster' >> /etc/ecs/ecs.config
+echo 'ECS_ENABLE_CONTAINER_METADATA=true' >> /etc/ecs/ecs.config
+echo 'ECS_ENABLE_TASK_IAM_ROLE=true' >> /etc/ecs/ecs.config
+"
+
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+
+    local instance_tags
+    instance_tags="ResourceType=instance,Tags=["
+    instance_tags+="{Key=Name,Value=ecs-${cluster}-${timestamp}},"
+    instance_tags+="{Key=Environment,Value=wolfi-vm-test},"
+    instance_tags+="{Key=ECSCluster,Value=${cluster}},"
+    instance_tags+="{Key=AMI,Value=${ami}}"
+    instance_tags+="]"
+
+    log 'Launching instances'
+    out=$(vr "${aws[@]}" ec2 run-instances \
+        --image-id "$ami" \
+        --count "$capacity" \
+        --instance-type "$instance_type" \
+        --subnet-id "$subnet_id" \
+        --security-group-ids "$sg_id" \
+        --iam-instance-profile "Name=${profile_name}" \
+        --user-data "$userdata" \
+        --tag-specifications "$instance_tags" \
+        --output json
+    ) || {
+        stderr 'Failed to launch new instances'
+        return 1
+    }
+    local instance_ids
+    mapfile -t instance_ids < <(jq -r '.Instances[].InstanceId' <<<"$out")
+
+    log "Waiting for instances ${instance_ids[*]} to be reported as running"
+    vr "${aws[@]}" ec2 wait instance-running --instance-ids "${instance_ids[@]}" || {
+        stderr "Instances ${instance_ids[*]} did not flip to running"
+        instance_get_logs "${instance_ids[@]}"
+        instance_remove "${instance_ids[@]}"
+        return 1
+    }
+
+    log 'Waiting for instances to join the cluster'
+
+    local instance_ids_list
+    instance_ids_list=$(printf "'%s'," "${instance_ids[@]}")
+    instance_ids_list=${instance_ids_list%,}
+
+    local num_joined=0 attempt
+    for (( attempt = 0; attempt < 30; attempt++ )); do
+        num_joined=$(
+            "${aws[@]}" ecs list-container-instances \
+                --cluster "$cluster" \
+                --filter "ec2InstanceId in [${instance_ids_list}]" \
+                --status ACTIVE \
+                --output json \
+            | jq '.containerInstanceArns | length'
+        )
+        if [ "$num_joined" -eq "$capacity" ]; then
+            log 'All instances joined the cluster'
+            break
+        fi
+        log "Still waiting on $(( capacity - num_joined ))/$capacity instances"
+        sleep 10
+    done
+
+    if [ "$num_joined" -ne "$capacity" ]; then
+        stderr 'Some instances failed to join the cluster'
+        instance_get_logs "${instance_ids[@]}"
+        instance_remove "${instance_ids[@]}"
+        return 1
+    fi
+
+    echo "${instance_ids[*]}"
+}
+
+Usage_instance_remove() {
+    cat <<EOF
+Usage: ${0##*/} instance-remove instance-ids...
+
+   Deregister instances from the cluster and terminate them.
+
+   arguments:
+      instance-ids             one or more EC2 instance IDs to terminate
+
+   environment:
+      AWS_REGION               AWS region (default: $DEF_AWS_REGION)
+
+EOF
+}
+
+instance_remove() {
+    [ $# -gt 0 ] || {
+        stderr 'error: instance_remove requires at least 1 instance ID'
+        Usage_instance_remove
+        return 1
+    }
+
+    # Just terminate; deregister happens automatically
+    vr "${aws[@]}" ec2 terminate-instances --instance-ids "$@"
+}
+
+test_basic_task() {
+    local cluster="$1" ami_id="$2"
+
+    [ "$#" -eq 2 ] || {
+        stderr "test_basic_task requires exactly 2 arguments: cluster ami_id"
+        return 1
+    }
+
+    local out
+    out=$(cluster_resources "$cluster") || {
+        stderr "Failed to determine ECS task family for cluster $cluster"
+        return 1
+    }
+
+    local task_arn
+    read -r _ _ _ _ task_arn <<<"$out"
+
+    log "Running task $task_arn on cluster $cluster (AMI: $ami_id)"
+    local out
+    out=$(vr "${aws[@]}" ecs run-task \
+        --cluster "$cluster" \
+        --task-definition "$task_arn" \
+        --placement-constraints "type=memberOf,expression=attribute:ecs.ami-id==$ami_id" \
+        --output json \
+    ) || {
+        stderr "Failed to run task"
+        return 1
+    }
+
+    local task_arn
+    task_arn=$(jq -r '.tasks[0].taskArn' <<<"$out")
+
+    if [ -z "$task_arn" ] || [ "$task_arn" == "null" ]; then
+        stderr 'Failed to get task ARN. Failures:'
+        stderr "$(jq -r '.failures[].reason' <<<"$out")"
+        return 1
+    fi
+
+    log "Started task ($task_arn), now waiting for it to run"
+    vr "${aws[@]}" ecs wait tasks-running \
+        --cluster "$cluster" \
+        --tasks "$task_arn" \
+    || {
+        stderr 'Task failed to start running:'
+        vr "${aws[@]}" ecs describe-tasks --cluster "$cluster" --tasks "$task_arn"
+        return 1
+    }
+    log 'Task is now running'
+
+    log 'Checking container is running'
+    out=$("${aws[@]}" ecs describe-tasks --cluster "$cluster" --tasks "$task_arn") || {
+        stderr 'Failed to describe task'
+        return 1
+    }
+
+    local container_status
+    container_status=$(jq -r '.tasks[0].containers[0].lastStatus' <<<"$out")
+    if [ "$container_status" != "RUNNING" ]; then
+        stderr "Container is not running. Status: $container_status"
+        return 1
+    fi
+    log 'Container is running'
+
+    log 'Stopping task'
+    # It's ok for this to fail; tasks are automatically stopped on instance
+    # termination. This is a best effort attempt to clean up.
+    rq "${aws[@]}" ecs stop-task \
+        --cluster "$cluster" \
+        --task "$task_arn" \
+        --reason 'Test passed'
+
+    return 0
+}
+
+Usage_run_test() {
+    cat <<EOF
+Usage: ${0##*/} [ options ] [ out-dir ]
+
+   Test an ECS AMI (including cluster setup if needed).
+
+   options:
+
+      -i, --ami           AMI-ID   AMI ID (conflicts with --awspub-inputs)
+      -I, --awspub-inputs DIR      read awspub info from DIR
+      -c, --cluster-name  NAME     name of the cluster to run tests in (will be created
+                                   if it does not exist, default: $DEF_CLUSTER_NAME)
+      -t, --instance-type TYPE     EC2 instance type to test on
+          --no-teardown            do not tear down the instance after testing
+
+   environment:
+      AWS_REGION                   AWS region (default: $DEF_AWS_REGION)
+
+   Either --ami or --awspub-inputs must be provided (but not both).
+
+EOF
+}
+
+run_test() {
+    local short_opts='c:hi:I:t:'
+    local long_opts="ami-id:,awspub-inputs:,cluster-name:,instance-type:,no-teardown"
+    local getopt_out=
+
+    if getopt_out=$(getopt --name "${0##*/}" --options "${short_opts}" --long "${long_opts}" -- "$@"); then
+        eval set -- "${getopt_out}"
+    else
+        Usage_run_test >&2
+        return 1
+    fi
+
+    local ami_id awspub_file cluster instance_type teardown=true
+
+    while [ $# -ne 0 ]; do
+        cur="$1"
+        next="$2"
+        case "$cur" in
+            -i|--ami-id)        ami_id=$next; shift ;;
+            -I|--awspub-inputs) awspub_file=$next; shift ;;
+            -c|--cluster-name)  cluster=$next; shift ;;
+            -h|--help)          Usage_run_test; exit 0 ;;
+            -t|--instance-type) instance_type=$next; shift ;;
+            --no-teardown)      teardown=false ;;
+            --)                 shift; break;
+        esac
+        shift
+    done
+
+    local outd
+    if [ $# -eq 1 ]; then
+        outd=$1
+        shift
+        mkdir -p "$outd" || {
+            stderr "Failed to create output directory '$outd'"
+            return 1
+        }
+    fi
+
+    if [ -z "$ami_id" ] && [ -z "$awspub_file" ]; then
+        Usage_run_test >&2
+        stderr "error: must give --ami-id or --awspub-inputs"
+        return 1
+    elif [ -n "$ami_id" ] && [ -n "$awspub_file" ]; then
+        Usage_run_test >&2
+        stderr "error: --ami-id and --awspub-inputs cannot be both given"
+        return 1
+    fi
+
+    if [ -n "$awspub_file" ]; then
+        out=$(
+            parse_awspubins "$awspub_file" \
+                | grep '-ecs-' \
+                | awk -v region="$AWS_REGION" '$1 == region { print $2 }'
+        ) || {
+            stderr "Failed to get AMI ID from awspub output $awspub_file"
+            return 1
+        }
+        case "$(grep -c ami- <<<"$out")" in
+            0)
+                stderr "Did not find an ECS AMI in $AWS_REGION in $awspub_file"
+                return 1
+                ;;
+            1)
+                ami_id="$out"
+                log "Using AMI $ami_id in $AWS_REGION found in $awspub_file"
+                ;;
+            *)
+                stderr "Found more than one ECS AMI in $AWS_REGION in $awspub_file:"
+                stderr "$out"
+                return 1
+                ;;
+        esac
+    fi
+
+    if [ -z "$instance_type" ]; then
+        local ami_arch=
+        ami_arch=$(
+            aws ec2 --region "$AWS_REGION" describe-images \
+                --image-ids "$ami_id" \
+                --query 'Images[0].Architecture' \
+                --output text
+        )
+        case "$ami_arch" in
+            arm64)
+               instance_type="$DEF_INSTANCE_TYPE_ARM" ;;
+            x86_64)
+               instance_type="$DEF_INSTANCE_TYPE_X86" ;;
+            *)
+               stderr "no instance type given and architecture '$ami_arch' of '$ami_id' is unknown"
+               return 1
+               ;;
+        esac
+    fi
+
+    log "Creating or updating cluster '$cluster'"
+    cluster_create "$cluster" || {
+        stderr "Failed to create/update cluster '$cluster'"
+        return 1
+    }
+
+    log "Adding 1 instance of type $instance_type to cluster '$cluster'"
+    local instance_ids=()
+    out=$(instance_add "$cluster" "$ami_id" 1 "$instance_type") || {
+        stderr "Failed to add capacity to cluster '$cluster'"
+        return 1
+    }
+    read -r -a instance_ids <<<"$out"
+
+    if [ "$teardown" = true ]; then
+        # shellcheck disable=SC2064  # expand now because variable is local
+        trap "instance_remove ${instance_ids[*]}" EXIT
+    fi
+
+    log 'Running tests'
+    local tests=(
+        test_basic_task
+    )
+    local passed=() failed=()
+    local test_fn
+
+    for test_fn in "${tests[@]}"; do
+        if vr "$test_fn" "$cluster" "$ami_id"; then
+            passed+=( "$test_fn" )
+        else
+            failed+=( "$test_fn" )
+        fi
+    done
+
+    log "SUMMARY:"
+    for test_fn in "${passed[@]}"; do
+        log "PASS $test_fn"
+    done
+    for test_fn in "${failed[@]}"; do
+        log "FAIL $test_fn"
+    done
+
+    instance_get_logs "${instance_ids[@]}"
+
+    if [ "$teardown" = "true" ]; then
+        instance_remove "${instance_ids[@]}" || {
+            stderr "Failed to remove and terminate ${instance_ids[*]} from cluster '$cluster'"
+            # Intentionally don't fail. At this point, the test passed already.
+        }
+        trap - EXIT
+    fi
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+SUBCMDS=(
+    dump-awspub
+    cluster-create
+    cluster-destroy
+    cluster-list
+    cluster-status
+    cluster-resources
+    instance-add
+    instance-remove
+    test-basic-task
+    run-test
+)
+
+if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$1" ]; then
+    cat <<EOF
+Usage: ${0##*/} subcommand [options]
+
+Available subcommands:
+EOF
+    for _s in "${SUBCMDS[@]}"; do
+        echo "  $_s"
+    done
+    echo ""
+    echo "Use '${0##*/} subcommand --help' for subcommand-specific help."
+    exit 0
+fi
+
+for _s in "${SUBCMDS[@]}"; do
+    [ "$_s" = "$1" ] || continue
+    name="$1"
+    fname=${name//-/_}
+    shift
+    if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+        "Usage_$fname" 2>/dev/null || stderr "No usage information for: $name"
+        exit 0
+    fi
+    "$fname" "$@"
+    exit
+done
+
+stderr "Bad subcmd '$1'. subcmds:"
+for _s in "${SUBCMDS[@]}"; do
+    stderr "  $_s"
+done
+exit 1

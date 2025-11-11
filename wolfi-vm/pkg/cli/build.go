@@ -23,10 +23,11 @@ import (
 	"runtime"
 	"strings"
 
+	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/converter"
-	"chainguard.dev/apkoaas/pkg/converter/tar2efi"
-	"chainguard.dev/apkoaas/pkg/utils"
+	"chainguard.dev/wolfi-vm/pkg/converter"
+	"chainguard.dev/wolfi-vm/pkg/converter/tar2efi"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -40,6 +41,7 @@ func buildCmd() *cobra.Command {
 	var builderConfFilePath string
 	var builderCpioPath string
 	var kernelPath string
+	var kernelCmdlineAppend string
 	var arch string
 	var buildArch string
 	var err error
@@ -100,7 +102,7 @@ func buildCmd() *cobra.Command {
 				}
 			}
 
-			return BuildCmd(ctx, buildFilePath, builderConfFilePath, builderCpioPath, kernelPath, buildArch, arch, output)
+			return BuildCmd(ctx, buildFilePath, builderConfFilePath, builderCpioPath, kernelPath, kernelCmdlineAppend, buildArch, arch, output)
 		},
 	}
 
@@ -110,6 +112,7 @@ func buildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&builderConfFilePath, "builder", "", "path to builder yaml definition")
 	cmd.Flags().StringVar(&builderCpioPath, "builder-cpio", "", "path to premade builder cpio")
 	cmd.Flags().StringVar(&kernelPath, "kernel", "", "path to kernel to use")
+	cmd.Flags().StringVar(&kernelCmdlineAppend, "kernel-cmdline-append", "", "append to kernel command line")
 
 	return cmd
 }
@@ -125,7 +128,7 @@ func createDisk(ctx context.Context, converter converter.Interface, buildTargetP
 	return converter.ConvertToFile(ctx, inputTar, output, types.ParseArchitecture(arch))
 }
 
-func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPath, arch string) (converter.Interface, error) {
+func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPath, kernelCmdlineAppend, arch string) (converter.Interface, error) {
 	if builderCpio == "" {
 		builderConfig, err := os.Open(builderConfigPath)
 		if err != nil {
@@ -140,21 +143,28 @@ func createBuilder(ctx context.Context, builderConfigPath, builderCpio, kernelPa
 			return nil, fmt.Errorf("failed to parse image configuration: %v", err)
 		}
 
-		return tar2efi.New(ctx, kernelPath, arch, ic)
+		return tar2efi.New(ctx, kernelPath, kernelCmdlineAppend, arch, ic)
 	}
 
 	// just convert using the provided cpio
-	return tar2efi.NewFromCpio(ctx, builderCpio, kernelPath, arch)
+	return tar2efi.NewFromCpio(ctx, builderCpio, kernelPath, kernelCmdlineAppend, arch)
 }
 
-func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, buildArch, arch, output string) error {
-	apkoTar, err := utils.CreateTar(ctx, buildFilePath, arch)
+func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kernelPath, kcmdAppend, buildArch, arch, output string) error {
+	wd, err := os.MkdirTemp("", "apko-*")
+	if err != nil {
+		return fmt.Errorf("failed to create working directory: %w", err)
+	}
+	defer os.RemoveAll(wd)
+
+	// Generate tar and SBOM using apko
+	apkoTar, apkoSBOMPaths, err := utils.CreateTar(ctx, buildFilePath, arch, filepath.Dir(output), build.WithTempDir(wd))
 	if err != nil {
 		return fmt.Errorf("error creating image.tar: %w", err)
 	}
 	defer os.RemoveAll(apkoTar)
 
-	converter, err := createBuilder(ctx, builderConf, builderCpio, kernelPath, buildArch)
+	converter, err := createBuilder(ctx, builderConf, builderCpio, kernelPath, kcmdAppend, buildArch)
 	if err != nil {
 		return fmt.Errorf("error creating tar converter: %w", err)
 	}
@@ -199,32 +209,39 @@ func BuildCmd(ctx context.Context, buildFilePath, builderConf, builderCpio, kern
 		return err
 	}
 
+	// Print apko-generated SBOM paths
+	for _, sbomPath := range apkoSBOMPaths {
+		fmt.Println(sbomPath)
+	}
+
+	// Generate syft SBOM
 	reopenedTar, err := os.Open(outputTar.Name())
 	if err != nil {
 		return err
 	}
 	defer reopenedTar.Close()
 
-	attestation, err := utils.CreateAttestation(ctx, reopenedTar)
+	syftSBOM, err := utils.CreateSyftSBOM(ctx, reopenedTar)
 	if err != nil {
 		return err
 	}
 
-	attestationFile, err := os.Create(filepath.Join(
+	syftSBOMFile, err := os.Create(filepath.Join(
 		filepath.Dir(outputTar.Name()),
 		"syft.sbom.json",
 	))
 	if err != nil {
 		return err
 	}
-	defer attestationFile.Close()
+	defer syftSBOMFile.Close()
 
-	_, err = io.Copy(attestationFile, attestation)
+	_, err = io.Copy(syftSBOMFile, syftSBOM)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println(attestationFile.Name())
+	fmt.Println(syftSBOMFile.Name())
+
 	fmt.Println(newName)
 	fmt.Println(output)
 	return nil

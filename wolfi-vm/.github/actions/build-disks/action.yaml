@@ -4,18 +4,21 @@
 name: "Build VM Disks"
 description: "Build VM disks for the specified cloud provider and architecture."
 
+permissions:
+  id-token: write # Needed for octo-sts
+
 inputs:
   cg_identity:
     required: false
-    description: "The identity to assume when interacting with chainguard."
+    description: "The identity to assume when interacting with Chainguard."
   vm_group:
     required: true
     default: ""
-    description: "Which cloud provider we will build the vm"
+    description: "The VM group to build (cloud provider + optional group, e.g. 'aws-ecs' or 'gcp')"
   arch:
     required: true
     default: ""
-    description: "Which acrchitecture we will build the vm"
+    description: "Which architecture we will build the VM for ('aarch64' or 'x86_64')"
 
 runs:
   using: composite
@@ -26,6 +29,18 @@ runs:
         with:
           identity: ${{ inputs.cg_identity }}
 
+      - name: Get octo-sts token
+        id: octo-sts
+        uses: octo-sts/action@d6c70ad3b9ac85df6da6b9749014d7283987cfec # v1.0.3
+        with:
+          scope: chainguard-images/images-private
+          identity: wolfi-vm
+
+      - name: Configure Git for private repository access
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ steps.octo-sts.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
       - name: Get apk.cgr.dev token
         shell: bash
         run: |
@@ -35,15 +50,87 @@ runs:
         env:
           CG_IDENTITY: ${{ inputs.cg_identity }}
 
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: stable
-          check-latest: true
+          go-version-file: './go.mod'
+
+      - uses: chainguard-dev/actions/setup-melange@abcc11e1cf9073eff6c69e91c49756c1430b094c # v1.5.8
+
+      # For LXD builds
+      - name: Install apko
+        shell: bash
+        run: |
+          mkdir -p $HOME/bin
+          GOBIN=$HOME/bin go install chainguard.dev/apko@latest
+
+      - name: add HOME/bin to PATH
+        shell: bash
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
 
       - name: Install deps
         shell: bash
         run: |
           make install-deps
+
+      # Enable KVM and Vhost
+      # ref: https://github.blog/changelog/2023-02-23-hardware-accelerated-android-virtualization-on-actions-windows-and-linux-larger-hosted-runners/
+      - name: Grant kvm/vhost perms
+        shell: bash
+        run: |
+          set -x
+          sudo tee /etc/udev/rules.d/99-kvm4all.rules <<"EOF"
+          KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"
+          EOF
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/vhost* /dev/kvm* || :
+          sudo sh -c 'for p in kvm vhost-net vhost-vsock; do \
+            d=/dev/$p; [ -e "$d" ] || { echo "no $d"; continue; } ; \
+            chmod ugo+rw $d && ls -l $d || exit; done'
+          kvm-ok
+          groups || :
+
+      - name: set environment variables
+        shell: bash
+        run: |
+          # set VM_CONCURRENT_BUILD_MAX and friends
+          echo "$(nproc) processors"
+          echo "=== /proc/meminfo ==="
+          grep ^Mem /proc/meminfo
+
+          # /proc/meminfo lines look like 'MemFree:  1342648 kB'
+          memfree=$(awk '/MemFree/ { print $2 }' /proc/meminfo) &&
+            [ "$memfree" -gt 1 ] ||
+            { echo "FATAL: could not read MemFree"; exit 1; }
+          memtot=$(awk '/MemTotal/ { print $2 }' /proc/meminfo) &&
+            [ "$memtot" -gt 1 ] ||
+            { echo "FATAL: could not read MemTotal"; exit 1; }
+          numprocs=$(nproc) ||
+            { echo "FATAL: could not get number of processors"; exit 1; }
+
+          # num build vms is based on available memory
+          vmmem_kb=$((5*1024*1024)) # memory used per vm in kb (4 GiB assigned to the guest plus overhead)
+          maxbuildvms=$((memfree/vmmem_kb)) && [ "$maxbuildvms" -ge 1 ] ||
+              { echo "FATAL: could not determine maxbuildvms"; exit 1; }
+
+          # num test vms min of memTotal/2 or procs/2
+          bymem=$((memtot/vmmem_kb))
+          byprocs=$((numprocs/2))
+          echo "bymem=$bymem byprocs=$byprocs"
+          [ $bymem -lt $byprocs ] && maxtestvms=$bymem || maxtestvms=$byprocs
+
+          tee -a "$GITHUB_ENV" <<EOF
+          VM_CONCURRENT_BUILD_MAX=$maxbuildvms
+          VM_CONCURRENT_TEST_MAX=$maxtestvms
+          EOF
 
       - name: make clean
         shell: bash
@@ -60,19 +147,35 @@ runs:
         run: |
           make builder
 
+      - name: diff rendered image configs
+        shell: bash
+        run: |
+          num_jobs=$(awk -v gb_per_job=4 '/MemFree/ { print int($2 / 1024 / 1024 / gb_per_job) }' /proc/meminfo)
+          if [[ -z ${num_jobs} ]] || [[ ${num_jobs} -lt 1 ]]; then
+              num_jobs=1
+          fi
+          make -j"${num_jobs}" --output-sync=recurse ARCH="${VM_ARCH}" "art-diff-${VM_GROUP}"
+        env:
+          VM_ARCH: ${{ inputs.arch }}
+          VM_GROUP: ${{ inputs.vm_group }}
+
       - name: make disks
         shell: bash
         run: |
           df -h || true
           printenv | grep -E TE?MP || true
 
-          num_vms=$(awk -v gb_per_vm=4 '/MemFree/ { print int($2 / 1024 / 1024 / gb_per_vm) }' /proc/meminfo)
-          if [[ -z ${num_vms} ]] || [[ ${num_vms} -lt 1 ]]; then
-              num_vms=1
-          fi
-          echo "Running with concurrency limited to ${num_vms} jobs"
-          make -j"${num_vms}" --output-sync=recurse ARCH="${VM_ARCH}" "disks-${VM_GROUP}"
+          [ -n "$VM_CONCURRENT_BUILD_MAX" ] || { echo "VM_CONCURRENT_BUILD_MAX not set"; exit 1; }
+          echo "Running with concurrency limited to ${VM_CONCURRENT_BUILD_MAX} jobs"
+          make -j"${VM_CONCURRENT_BUILD_MAX}" --output-sync=recurse ARCH="${VM_ARCH}" "disks-${VM_GROUP}"
         env:
           VM_ARCH: ${{ inputs.arch }}
           VM_GROUP: ${{ inputs.vm_group }}
           TMPDIR: ${{ runner.temp }}
+
+      - name: collect cue locks
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: cue-locks-${{ inputs.arch }}-${{ inputs.vm_group }}
+          path: ./configs/*/*_lock.cue
+        if: ${{ !cancelled() }}

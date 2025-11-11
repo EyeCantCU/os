@@ -6,14 +6,15 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/systemd"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/metrics"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/systemd"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 )
 
 // Wait for systemd to start, fail if it's not in "running" state.
@@ -83,16 +84,38 @@ func TestSystemdStatus(t *testing.T) {
 	artifacts.Log(t, metrics.SystemdState, state, data)
 }
 
+func TestNoOrderingCycles(t *testing.T) {
+	ctx := vmtest.Context(t)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "journalctl", "-b0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Error executing journalctl -b0: %v", err)
+	}
+
+	// Looking to match lines like
+	// systemd-tmpfiles-setup.service: Found ordering cycle: systemd-journal-flush.service/start after...
+	// systemd-tmpfiles-setup.service: Job systemd-journal-flush.service/start deleted to
+	//    break ordering cycle starting with systemd-tmpfiles-setup.service/start
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.Contains(line, "ordering cycle") {
+			t.Error("Ordering cycle detected: " + line)
+		}
+	}
+}
+
 func TestCollectLogs(t *testing.T) {
 	ctx := vmtest.Context(t)
 	timeout := 180 * time.Second
 	myCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// wait for graphical.target
-	st, err := systemd.GetServiceStartMonotonic(myCtx, "graphical.target")
+	// wait for default.target
+	st, err := systemd.GetServiceStartMonotonic(myCtx, "default.target")
 	if err != nil {
-		t.Errorf("fail waiting for graphical.target: %v\n", err)
+		t.Errorf("fail waiting for default.target: %v\n", err)
 	}
 
 	artifacts.Log(t, metrics.MultiUserTarget, fmt.Sprintf("%f", st.Seconds()), nil)
@@ -102,8 +125,11 @@ func TestCollectLogs(t *testing.T) {
 		id  files.ID
 	}{
 		{cmd: []string{"journalctl", "-b0"}, id: files.JournalCtlB0},
+		{cmd: []string{"bootctl", "--no-pager"}, id: files.BootCtl},
 		{cmd: []string{"systemd-analyze"}, id: files.SystemdAnalyze},
 		{cmd: []string{"systemd-analyze", "critical-chain"}, id: files.SystemdCriticalChain},
+		{cmd: []string{"systemctl", "status", "--no-pager", "--full", "--state=failed"}, id: files.SystemdStatusStateFailed},
+		{cmd: []string{"systemctl", "list-units", "--no-pager", "--full"}, id: files.SystemdListUnits},
 	}
 
 	errors := map[files.ID]error{}
