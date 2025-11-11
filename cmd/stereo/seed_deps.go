@@ -62,7 +62,7 @@ When no --arch is specified, dependencies are computed for both x86_64 and aarch
 		},
 	}
 
-	cmd.Flags().StringVar(&seedsFile, "seeds-file", "archive-seeds.json", "Path to archive-seeds.json file")
+	cmd.Flags().StringVar(&seedsFile, "seeds-file", "shrink/garbage-collection/archive-seeds.json", "Path to archive-seeds.json file")
 	cmd.Flags().StringVar(&arch, "arch", "", "Architecture to evaluate (default: both x86_64 and aarch64)")
 	cmd.Flags().BoolVar(&useWithdrawn, "use-withdrawn", false, "Use withdrawn APKINDEX files for testing")
 	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn indexes")

@@ -9,7 +9,8 @@ This document describes the Makefile targets for running the stereo archive proc
    - `private-images.tfplan.json` - Private images terraform plan (optional)
 
 2. **Optional Files**:
-   - `archive-seeds.json` - Manual seed packages configuration
+   - `shrink/garbage-collection/archive-seeds.json` - Manual seed packages configuration
+   - `shrink/garbage-collection/customer-apk-filter.txt` - Customer APK filter list (packages to retain)
    - `package-version-metadata/` - Directory containing version stream configurations for multi-version packages (e.g., postgresql-14, postgresql-15, postgresql-16)
 
 ## Quick Start
@@ -78,7 +79,10 @@ make validate-withdrawn
 stereo/
 ├── public-images.tfplan.json      # Public images terraform plan
 ├── private-images.tfplan.json     # Private images terraform plan (optional)
-├── archive-seeds.json             # Manual seed packages (optional)
+├── shrink/
+│   └── garbage-collection/
+│       ├── archive-seeds.json         # Manual seed packages (optional)
+│       └── customer-apk-filter.txt    # Customer APK filter (optional)
 ├── package-version-metadata/      # Version stream configurations (optional)
 ├── resolved/                      # Dependency resolution outputs
 │   ├── build/{arch}/              # Build dependencies
@@ -98,10 +102,30 @@ stereo/
     └── unresolved/
 ```
 
+## Customer APK Filter
+
+The customer APK filter file (`shrink/garbage-collection/customer-apk-filter.txt`) allows you to specify APK packages that should be retained during the archive process, regardless of age or other criteria. This is useful for customer-specific requirements.
+
+**Format:**
+- One APK filename per line in the format: `packagename-version.apk`
+- Empty lines are ignored
+- Lines starting with `#` are treated as comments
+- Example:
+  ```
+  # Customer-required packages
+  nginx-1.24.0-r0.apk
+  postgresql-15.3-r2.apk
+  ```
+
+When the archive command runs, any packages listed in this file will be:
+- Excluded from the withdrawn-packages.txt files
+- Moved to the `retain/` directory with reason "listed in customer APK filter"
+
 ## Error Handling
 
 - Missing tfplan.json files: Warnings logged, but workflow continues
-- Missing archive-seeds.json: Info logged, seed step skipped
+- Missing shrink/garbage-collection/archive-seeds.json: Info logged, seed step skipped
+- Missing shrink/garbage-collection/customer-apk-filter.txt: Info logged, customer filter skipped
 - Missing package-version-metadata/: Info logged, version-streams step skipped
 
 ## Cleanup

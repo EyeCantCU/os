@@ -54,10 +54,10 @@ deps-vm:
 
 deps-seed:
 	@echo "Resolving seed dependencies (optional)..."
-	@if [ -f archive-seeds.json ]; then \
+	@if [ -f shrink/garbage-collection/archive-seeds.json ]; then \
 		stereo seed-dependencies; \
 	else \
-		echo "Info: archive-seeds.json not found, skipping seed dependencies"; \
+		echo "Info: shrink/garbage-collection/archive-seeds.json not found, skipping seed dependencies"; \
 	fi
 
 # Step 2: Archive analysis
@@ -85,7 +85,7 @@ validate-withdrawn:
 		cat private-images.tfplan.json | stereo image-dependencies --private --use-withdrawn --withdrawn-dir withdrawn-indexes; \
 	fi
 	stereo vm-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes
-	@if [ -f archive-seeds.json ]; then \
+	@if [ -f shrink/garbage-collection/archive-seeds.json ]; then \
 		stereo seed-dependencies --use-withdrawn --withdrawn-dir withdrawn-indexes; \
 	fi
 
