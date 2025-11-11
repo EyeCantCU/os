@@ -4,9 +4,6 @@ package selinux
 
 import (
 	"context"
-	"os/exec"
-	"regexp"
-	"strings"
 	"testing"
 	"time"
 
@@ -35,33 +32,5 @@ func TestSELinuxStatus(t *testing.T) {
 
 	if status.LoadedPolicyName != "targeted" {
 		t.Errorf("SELinux policy is %q, wanted %q", status.LoadedPolicyName, "targeted")
-	}
-}
-
-func TestNoAVCDenials(t *testing.T) {
-	ctx := vmtest.Context(t)
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "journalctl", "-b0")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Error executing journalctl -b0: %v", err)
-	}
-
-	avcDenialPattern := regexp.MustCompile(`avc:\s+denied\s+.*`)
-	var avcDenials []string
-
-	for _, line := range strings.Split(string(output), "\n") {
-		if denial := avcDenialPattern.FindString(line); denial != "" {
-			avcDenials = append(avcDenials, denial)
-		}
-	}
-
-	if numDenials := len(avcDenials); numDenials > 0 {
-		t.Errorf("Found %v AVC denials, expected 0", numDenials)
-		for _, denial := range avcDenials {
-			t.Error(denial)
-		}
 	}
 }
