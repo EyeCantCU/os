@@ -1,0 +1,239 @@
+package:
+  name: hailo-ai-onnxruntime
+  version: "4.23.0"
+  epoch: 0
+  description: Cross-platform, high performance ML inferencing and training accelerator (C++ libraries)
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - hailort
+  resources:
+    cpu: 20
+    memory: 50Gi
+
+environment:
+  contents:
+    packages:
+      - abseil-cpp-dev
+      - bash
+      - cmake-3
+      - eigen-dev
+      - flatbuffers
+      - hailort-dev
+      - patch
+      - protobuf
+      - protobuf-dev
+      - py${{vars.python-version}}-build-base-dev
+      - py${{vars.python-version}}-numpy-2.2
+      - python-${{vars.python-version}}
+      - python3
+      - zlib-dev
+  environment:
+    # This seems to be required to compile `abseil`
+    # FIXME: remove this eventually
+    CXXFLAGS: "-fdelete-null-pointer-checks"
+
+vars:
+  python-version: 3.12
+  pypi-package: onnxruntime
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/hailo-ai/onnxruntime.git
+      tag: v${{package.version}}
+      expected-commit: 284fe0bdba1520d150078d560c6e03d31ebbf96c
+      recurse-submodules: true
+
+  - uses: patch
+    with:
+      patches: fix-include.patch
+
+  # NOTE: this sets some 'magic' apparently, otherwise we would use the 'cmake/build' pipeline.
+  # review in future upstream releases
+  - name: "build using upstream wrapper script"
+    runs: |
+      ./build.sh \
+        --use_hailo \
+        --build \
+        --update \
+        --config Release \
+        --build_shared_lib \
+        --parallel \
+        --compile_no_warning_as_error \
+        --skip_submodule_sync \
+        --skip_tests \
+        --cmake_extra_defines \
+          CMAKE_INSTALL_PREFIX=/usr\; \
+          HailoRT_DIR=/usr/lib/cmake/HailoRT\; \
+          CMAKE_PREFIX_PATH=/usr\;/usr/lib/cmake/HailoRT\;/usr/lib64/cmake/HailoRT
+
+  - uses: cmake/install
+    with:
+      output-dir: build/Linux/Release
+
+  - name: "Remove unnecessary binaries"
+    runs: |
+      rm -f "${{targets.destdir}}"/usr/bin/onnxruntime_test
+
+  # NOTE: I haven't found any way to tell cmake to change this,
+  # may be because the upstream build.sh script is too smart
+  - name: "change /lib64/ in the path to just /lib/"
+    runs: mv ${{targets.destdir}}/usr/lib64 ${{targets.destdir}}/usr/lib
+
+  - uses: strip
+
+subpackages:
+  - name: py${{vars.python-version}}-${{package.name}}
+    description: Python bindings for ${{package.name}}
+    dependencies:
+      runtime:
+        - hailort
+        - py${{vars.python-version}}-coloredlogs
+        - py${{vars.python-version}}-flatbuffers
+        - py${{vars.python-version}}-numpy-2.2
+        - py${{vars.python-version}}-packaging
+        - py${{vars.python-version}}-protobuf
+        - py${{vars.python-version}}-sympy
+        - ${{package.name}}
+    pipeline:
+      - name: "Patch protobuf requirement to accept system version"
+        runs: |
+          # The requirements.txt.in pins protobuf to an exact old version, which is too restrictive.
+          # Relax any strict protobuf pins to allow compatible versions so we can use system protobuf.
+          sed -i -E 's/^protobuf==([0-9.]+)/protobuf>=\1/' requirements.txt.in
+      - uses: cmake/configure
+        with:
+          output-dir: build-py
+          opts: |
+            -Wno-dev \
+            -S cmake \
+            -DCMAKE_BUILD_TYPE=None \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -Donnxruntime_BUILD_SHARED_LIB=ON \
+            -Donnxruntime_BUILD_UNIT_TESTS=OFF \
+            -DBUILD_TESTING=OFF \
+            -Donnxruntime_ENABLE_LAZY_TENSOR=OFF \
+            -Donnxruntime_ENABLE_TRAINING=OFF \
+            -Donnxruntime_ENABLE_TRAINING_APIS=OFF \
+            -Donnxruntime_ENABLE_TRAINING_OPS=OFF \
+            -Donnxruntime_USE_DNNL=OFF \
+            -Donnxruntime_USE_PREINSTALLED_EIGEN=ON \
+            -Deigen_SOURCE_PATH=/usr/include/eigen3 \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DHailoRT_DIR=/usr/lib/cmake/HailoRT \
+            -Donnxruntime_USE_HAILO=ON \
+            -DPython_EXECUTABLE=/usr/bin/python${{vars.python-version}}
+      - name: "build Python wheel using upstream wrapper script"
+        runs: |
+          ./build.sh \
+            --use_hailo \
+            --build \
+            --update \
+            --config Release \
+            --build_shared_lib \
+            --parallel \
+            --compile_no_warning_as_error \
+            --skip_submodule_sync \
+            --skip_tests \
+            --enable_pybind \
+            --build_wheel \
+            --cmake_extra_defines \
+              CMAKE_INSTALL_PREFIX=/usr\; \
+              HailoRT_DIR=/usr/lib/cmake/HailoRT\; \
+              CMAKE_PREFIX_PATH=/usr\;/usr/lib/cmake/HailoRT\;/usr/lib64/cmake/HailoRT\; \
+              Python_EXECUTABLE=/usr/bin/python${{vars.python-version}}
+      - name: "Install built wheel"
+        runs: |
+          set -e
+          wheel="$(ls build/Linux/Release/dist/*.whl)"
+          # Install wheel files into the package filesystem
+          python${{vars.python-version}} -m pip install --no-deps --no-cache-dir --disable-pip-version-check --no-compile \
+            --prefix=/usr --root "${{targets.contextdir}}" "$wheel"
+
+          # Precompile python files to .pyc for faster startup (best-effort)
+          sitepkgd=$(python${{vars.python-version}} -c 'import site; print(site.getsitepackages()[0])')
+          sitepkgd=${sitepkgd#/}
+          python${{vars.python-version}} -m compileall --invalidation-mode=unchecked-hash -r100 "${{targets.contextdir}}"/$sitepkgd || true
+
+          # Strip native extensions to keep size down
+          find "${{targets.contextdir}}"/usr/lib/python*/site-packages -name '*.so' \
+            -type f -exec strip --strip-unneeded {} + 2>/dev/null || true
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.python-version}}
+            - py${{vars.python-version}}-pip
+            - hailort=${{package.version}}
+            - py${{vars.python-version}}-coloredlogs
+            - py${{vars.python-version}}-flatbuffers
+            - py${{vars.python-version}}-numpy-2.2
+            - py${{vars.python-version}}-packaging
+            - py${{vars.python-version}}-protobuf
+            - py${{vars.python-version}}-sympy
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/pip-check
+          with:
+            python: python${{vars.python-version}}
+        - uses: python/import
+          with:
+            python: python${{vars.python-version}}
+            import: ${{vars.pypi-package}}
+        - name: "Python import smoke test"
+          runs: |
+            python${{vars.python-version}} - <<'PY'
+            import onnxruntime as ort
+            print("onnxruntime:", ort.__version__)
+            print("providers:", ort.get_available_providers())
+            PY
+
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+update:
+  enabled: true
+  github:
+    identifier: hailo-ai/onnxruntime
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - hailort
+        - ${{package.name}}-dev
+        - build-base
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: CPU C++ smoke
+      runs: |
+        # Tiny smoke test
+        cat > orttest.cpp <<'EOF'
+        #include <iostream>
+        #include "core/session/onnxruntime_cxx_api.h"  // <- note the subpath
+        int main() {
+          for (auto &p : Ort::GetAvailableProviders()) std::cout << p << "\n";
+          std::cout << OrtGetApiBase()->GetVersionString() << std::endl;
+          return 0;
+        }
+        EOF
+
+        # Build (pkgconf provides -I/usr/include/onnxruntime and -lonnxruntime)
+        c++ -std=c++17 orttest.cpp -o ort_version \
+          $(pkgconf --cflags libonnxruntime) \
+          $(pkgconf --libs   libonnxruntime)
+
+        # Prove the binary links to libonnxruntime and prints the right version or CPU provider
+        ldd ./ort_version | grep -F "libonnxruntime"
+        ./ort_version | grep -F -e "$(pkgconf --modversion libonnxruntime)" -e "CPU"
+        # Also prove Hailo EP was compiled in (no device required)
+        ./ort_version | grep -F "HailoExecutionProvider"
