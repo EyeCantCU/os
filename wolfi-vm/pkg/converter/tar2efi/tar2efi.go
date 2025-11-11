@@ -19,8 +19,8 @@ import (
 
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/converter"
-	"chainguard.dev/apkoaas/pkg/utils"
+	"chainguard.dev/wolfi-vm/pkg/converter"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 	"github.com/chainguard-dev/clog"
 )
 
@@ -28,7 +28,7 @@ var ErrDiskConversion = errors.New("disk conversion failed")
 
 // New creates a new converter.Interface for translating a tarball-based image
 // into an EFI disk image.
-func New(ctx context.Context, kernel string, buildArch string, ic types.ImageConfiguration) (converter.Interface, error) {
+func New(ctx context.Context, kernel string, kernelCmdlineAppend string, buildArch string, ic types.ImageConfiguration) (converter.Interface, error) {
 	// Create the builder initrd on startup.
 	f, err := os.CreateTemp("", "builder-*.cpio")
 	if err != nil {
@@ -43,13 +43,13 @@ func New(ctx context.Context, kernel string, buildArch string, ic types.ImageCon
 		return nil, fmt.Errorf("utils.CreateCpio() failed with %w", err)
 	}
 
-	return NewFromCpio(ctx, f.Name(), kernel, buildArch)
+	return NewFromCpio(ctx, f.Name(), kernel, kernelCmdlineAppend, buildArch)
 }
 
 // NewFromCpio creates a new converter.Interface for translating a tarball-based image
 // into an EFI disk image.
 // This one does not build a cpio, but needs one to be provided
-func NewFromCpio(ctx context.Context, cpio, kernel string, buildArch string) (converter.Interface, error) {
+func NewFromCpio(ctx context.Context, cpio, kernel string, kcmdlineAppend, buildArch string) (converter.Interface, error) {
 	// Force Cloud Run to pull in these files at startup to avoid them creating
 	// a big hit at request time.
 	if _, err := os.ReadFile(kernel); err != nil {
@@ -57,16 +57,18 @@ func NewFromCpio(ctx context.Context, cpio, kernel string, buildArch string) (co
 	}
 
 	return &t2e{
-		kernel:    kernel,
-		builder:   cpio,
-		buildArch: buildArch,
+		kernel:              kernel,
+		kernelCmdlineAppend: kcmdlineAppend,
+		builder:             cpio,
+		buildArch:           buildArch,
 	}, nil
 }
 
 type t2e struct {
-	kernel    string
-	builder   string
-	buildArch string
+	kernel              string
+	kernelCmdlineAppend string
+	builder             string
+	buildArch           string
 }
 
 // Check that we implement the interface
@@ -78,7 +80,7 @@ func (c *t2e) Cleanup() error {
 }
 
 // Convert implements converter.Interface
-func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer, arch types.Architecture) error {
+func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer, fwvars io.Writer, arch types.Architecture) error {
 	// Create a scratch space for ourselves.
 	tmp, err := os.MkdirTemp("", "")
 	if err != nil {
@@ -102,6 +104,19 @@ func (c *t2e) Convert(ctx context.Context, input io.Reader, output io.Writer, ar
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("f.Close() failed with %w", err)
 	}
+
+	fwPath := filepath.Join(tmp, "uefi-data.fd")
+	f, err = os.Open(fwPath)
+	if err != nil {
+		return fmt.Errorf("os.Open() on %s failed with %w", fwPath, err)
+	}
+	if _, err := io.Copy(fwvars, f); err != nil {
+		return fmt.Errorf("io.Copy() failed with %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("f.Close() failed with %w", err)
+	}
+
 	return nil
 }
 
@@ -187,6 +202,10 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 	q := QemuInfo[types.ParseArchitecture(c.buildArch)]
 	// Convert the image to a raw disk image.
 	buf := bytes.NewBuffer(nil)
+	kcmdline := "panic=-1 quiet console=" + q.Console
+	if c.kernelCmdlineAppend != "" {
+		kcmdline += " " + c.kernelCmdlineAppend
+	}
 	{
 		// nolint:gosec // We trust the kernel argument here.
 		cmd := exec.CommandContext(ctx, q.Command, append(slices.Clone(q.MachineArgs),
@@ -213,7 +232,8 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 
 			// The console=ttyS0 gets us useful debug output on x86_64
 			// (in the Cloud Run service), but hides test output on aarch64.
-			"-kernel", c.kernel, "-append", "panic=-1 quiet console="+q.Console,
+			"-kernel", c.kernel,
+			"-append", kcmdline,
 			"-initrd", c.builder,
 		)...)
 
@@ -228,10 +248,43 @@ func (c *t2e) ConvertToFile(ctx context.Context, input io.Reader, output string,
 		clog.Debug(buf.String())
 	}
 
+	outDir := filepath.Dir(output)
+	if err := os.Rename(filepath.Join(workDir, "install.log"), filepath.Join(outDir, "install.log")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to save install.log to %s: %w", outDir, err)
+	}
+
 	if b, err := os.ReadFile(filepath.Join(workDir, "result")); err != nil {
 		return fmt.Errorf("os.ReadFile() failed with %w", err)
-	} else if string(b) != "0" {
-		return fmt.Errorf("%w: %s", ErrDiskConversion, buf.String())
+	} else {
+		rc := strings.TrimSpace(string(b))
+		if rc != "0" {
+			return fmt.Errorf("%w: result was '%s'\n%s\n", ErrDiskConversion, rc, buf.String())
+		}
+	}
+
+	// Secureboot variables side-effect
+	if sbdir, err := os.Stat(filepath.Join(workDir, "secureboot")); err == nil && sbdir.IsDir() {
+		efifiles := []string{
+			// For new UEFI vars tools
+			"uefi-data.json",
+			// For AWS registration
+			"uefi-data.aws",
+			// For OVMF/AAMVF vars template
+			"uefi-data.fd",
+			"uefi-data.empty.fd",
+			// For enrollment in GCP / firmware / redfish / bmc
+			"PK.auth.bin", "KEK.auth.bin", "dbx.auth.bin", "db.auth.bin",
+			// List of DB hashes for Azure
+			"db-b64-hashes.txt",
+		}
+		for _, efi := range efifiles {
+			efiFilePath := filepath.Join(workDir, "secureboot", efi)
+			efiFileOutput := filepath.Join(filepath.Dir(output), efi)
+			if err := os.Rename(efiFilePath, efiFileOutput); err != nil {
+				return fmt.Errorf("failed to rename EFI vars into %s: %w", output, err)
+			}
+			clog.Infof("writting UEFI variables %s", efiFileOutput)
+		}
 	}
 
 	if err := os.Rename(diskFileName, output); err != nil {

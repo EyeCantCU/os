@@ -8,11 +8,11 @@ import (
 	"strings"
 )
 
-const _IDName = "UnidentifiedMetricSSHDStartTimeMultiUserTargetSystemdState"
+const _IDName = "UnidentifiedMetricSSHDStartTimeMultiUserTargetSystemdStateLinkStatistics"
 
-var _IDIndex = [...]uint8{0, 18, 31, 46, 58}
+var _IDIndex = [...]uint8{0, 18, 31, 46, 58, 72}
 
-const _IDLowerName = "unidentifiedmetricsshdstarttimemultiusertargetsystemdstate"
+const _IDLowerName = "unidentifiedmetricsshdstarttimemultiusertargetsystemdstatelinkstatistics"
 
 func (i ID) String() string {
 	if i < 0 || i >= ID(len(_IDIndex)-1) {
@@ -29,9 +29,10 @@ func _IDNoOp() {
 	_ = x[SSHDStartTime-(1)]
 	_ = x[MultiUserTarget-(2)]
 	_ = x[SystemdState-(3)]
+	_ = x[LinkStatistics-(4)]
 }
 
-var _IDValues = []ID{UnidentifiedMetric, SSHDStartTime, MultiUserTarget, SystemdState}
+var _IDValues = []ID{UnidentifiedMetric, SSHDStartTime, MultiUserTarget, SystemdState, LinkStatistics}
 
 var _IDNameToValueMap = map[string]ID{
 	_IDName[0:18]:       UnidentifiedMetric,
@@ -42,6 +43,8 @@ var _IDNameToValueMap = map[string]ID{
 	_IDLowerName[31:46]: MultiUserTarget,
 	_IDName[46:58]:      SystemdState,
 	_IDLowerName[46:58]: SystemdState,
+	_IDName[58:72]:      LinkStatistics,
+	_IDLowerName[58:72]: LinkStatistics,
 }
 
 var _IDNames = []string{
@@ -49,6 +52,7 @@ var _IDNames = []string{
 	_IDName[18:31],
 	_IDName[31:46],
 	_IDName[46:58],
+	_IDName[58:72],
 }
 
 // IDString retrieves an enum value from the enum constants string name.

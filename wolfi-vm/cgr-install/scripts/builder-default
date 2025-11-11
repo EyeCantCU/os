@@ -1,0 +1,131 @@
+#!/bin/bash
+set -o pipefail
+set -u
+
+DISK="${DISK:-ERROR_UNSET_DISK}"
+ROOT_DIR=${ROOT_DIR:-ERROR_UNSET_ROOT_DIR}
+OUT_DIR=${OUT_DIR:-ERROR_UNSET_OUT_DIR}
+
+if [ "$DEBUG" = "true" ]; then
+    write_debug_kernel_conf "$ROOT_DIR" ||
+        fail "failed writing debug kernel config"
+fi
+
+espdir="boot"
+rootfs_type="xfs"
+secureboot=true
+rpi=$(get_install_option rpi presence) || fail
+immutable=$(get_install_option immutable presence) || fail
+cis=$(get_install_option cis presence) ||
+    fail "failed reading installer option 'cis'"
+
+debug 1 "Install Options: rpi=$rpi immutable=$immutable cis=$cis"
+
+if [ "$rpi" = "true" ]; then
+    # bootloader on raspberry pi cannot read out xfs
+    rootfs_type="ext4"
+    # and contents of /boot/firmware go on the esp partition
+    espdir="boot/firmware"
+    secureboot=false
+fi
+
+# Create a GPT parition table on our disk where the
+# EFI System Partition (ESP) is 1020M to hold the kernel,
+# systemd-boot, and a handful of configuration files.
+# The root partition will be the remainder of the disk.
+gib=$((1024 * 1024 * 1024))
+start=$((1024 * 1024 * 4)) # Start 4Mib for maximum alignment
+sectsize=512
+sstart=$((start / sectsize))
+efisize=$(((gib - start) / sectsize)) # make efisize 1GiB - startsize, so second part starts at 1GiB
+
+veritysize=0
+if [ "$immutable" = "true" ]; then
+    # random decision - steal half (510MiB) of the esp size (1020M).
+    veritysize=$((efisize/2))
+    efisize=$((efisize-veritysize))
+fi
+
+vr partition "$DISK" "$sectsize" "$sstart" "$efisize" "$veritysize" || fail
+
+case "$DISK" in
+    /dev/loop*)
+        echo "would now do partprobe $DISK"
+        vr partx --update "$DISK" ||
+            fail "partx --update $DISK on loop device failed"
+esac
+
+if [ "$immutable" = "true" ]; then
+    pt_esp=$(ptdev "$DISK" 1) || fail "no partition 1 on $DISK"
+    pt_root=$(ptdev "$DISK" 3) || fail
+    pt_verity=$(ptdev "$DISK" 2) || fail
+else
+    pt_esp=$(ptdev "$DISK" 1) || fail "no partition 1 on $DISK"
+    pt_root=$(ptdev "$DISK" 2) || fail
+    pt_verity=""
+fi
+
+if [ "$rpi" = "true" ]; then
+    vr raspberry_pi_tweaks "$ROOT_DIR" || fail
+fi
+if [ "$immutable" = "true" ]; then
+    # To modify all our systemd units to already ship
+    # a symlink to their target
+    stampdalf "$ROOT_DIR/etc" /usr/bin/systemctl --root="$ROOT_DIR" preset-all || fail
+    # Plus we need to create sysusers in advance
+    stampdalf "$ROOT_DIR/etc" /usr/bin/systemd-sysusers --root="$ROOT_DIR" || fail
+    # We need ro flag at boot, this will remount root as rw, remove
+    stampdalf "$ROOT_DIR/etc" rm "$ROOT_DIR/etc/fstab" || fail
+fi
+
+if [ "$cis" = "true" ]; then
+    ln -sf /proc/self/fd /dev/fd ||
+        fail "failed symlinking /dev/fd -> /proc/self/fd"
+    # Run CIS lv1 Hardening
+    vr stampdalf "$ROOT_DIR" \
+        apply-hardening --profile=cis-level-1 --sysroot="${ROOT_DIR}" ||
+        fail "failed apply hardening"
+    # Run STIG Hardening
+    vr stampdalf "$ROOT_DIR" \
+        apply-hardening --profile=stig --sysroot="${ROOT_DIR}" ||
+        fail "failed apply hardening"
+fi
+
+esprootd=$(tmpd esproot) || fail "failed creating tmpdir for esp files"
+vr move_contents "$ROOT_DIR/$espdir" "$esprootd" ||
+    fail "failed separating boot mount point from root-dir $ROOT_DIR"
+
+adjust_var_run "$ROOT_DIR" ||
+    fail "failed to adjust /var/run"
+
+selinux_label "$ROOT_DIR" ||
+    stderr "selinux_label failed (ignoring)"
+
+case "$rootfs_type" in
+    xfs) xfs_populate "$ROOT_DIR" "$pt_root" "$FS_UUID_ROOT" || fail;;
+    ext4) ext4_populate "$ROOT_DIR" "$pt_root" "$FS_UUID_ROOT" || fail;;
+    *) fail "unexpected rootfs_type '$rootfs_type'"
+esac
+
+if [ "$immutable" = "true" ]; then
+    # setting up dmverity needs access to
+    # 1. the populated root block device
+    # 2. the boot/ directory to edit boot files before landing in esp
+    # 3. verity partition
+    # This will not work for raspberry pi, where boot/loader files
+    # remain in the rootfs, and boot/firmware files are on the esp.
+    vr setup_dmverity "$pt_root" "$pt_verity" "$esprootd" ||
+        fail "setting up dmverity failed"
+    # setting up UKI in order to seal the root hash
+    # protecting cmdline using secureboot
+    vr uki_setup "$esprootd" "$ROOT_DIR" "$TARGET_ARCH" || fail "setting up UKI"
+fi
+
+if [ "$secureboot" = "true" ]; then
+    vr secureboot_setup "$esprootd" "$OUT_DIR/secureboot" ||
+        fail "secureboot setup failed"
+fi
+
+vr mkfs_esp "$pt_esp" || fail
+
+vr populate_esp "$esprootd" "$pt_esp" || fail

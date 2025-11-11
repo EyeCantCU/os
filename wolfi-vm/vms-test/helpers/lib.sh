@@ -87,3 +87,63 @@ parse_awspubins() {
     [ "$n" -ne 0 ] || { stderr "did not process any files"; return 1; }
     return 0
 }
+
+# goarch(arch) - print GOARCH equivalent of arch
+goarch() {
+    local arch="$1" goarch=""
+    shift 1
+    case "$arch" in
+        aarch64|arm64) goarch="arm64";;
+        x86_64|amd64|x64) goarch="amd64";;
+        *) stderr "unknown arch $arch"; return 1;;
+    esac
+    printf "%s" "$goarch"
+    return 0
+}
+
+# Check whether a test binary emits metrics
+test_emits_metrics() {
+    local tfile="$1"
+    # Heuristic: Check whether the binary might call metrics.Log(); one match is sufficient.
+    strings "$tfile" | grep -qm1 "chainguard.dev/wolfi-vm/vms-test/pkg/artifacts[.]\(Log\|File\)"
+}
+
+# yqassert(expected, yq args...)
+yqassert() {
+  local out="" expected="$1"
+  shift
+  out=$(yq "$@") || { stderr "failed [$?] 'yq $*'"; return 1; }
+  [ "$out" = "$expected" ] || return 1
+  return 0
+}
+
+# strContains(string, substring)
+strContains() {
+    local str="$1" substr="$2"
+    #shellcheck disable=SC2295
+    [ "${str#*${substr}}" != "$str" ]
+}
+
+retry() {
+    local retries="$1" naptime="$2" trynum=0 rc=0 tries=0
+    tries=$((retries+1))
+    shift 2
+    while trynum=$((trynum+1)); do
+        if [ $trynum -ne 1 ]; then
+            stderr "cmd try $trynum/$tries [$*]"
+        fi
+        "$@" && rc=0 || rc=$?
+        if [ $rc -eq 0 ]; then
+            if [ $trynum -ne 1 ]; then
+                stderr "cmd succeeded on try $trynum/$tries [$*]"
+            fi
+            return $rc
+        elif [ "$trynum" -eq "$tries" ]; then
+            stderr "cmd exited $rc on retry $trynum/$tries [$*]"
+            return $rc
+        else
+            stderr "cmd exited $rc on try $trynum/$tries. retry after $naptime [$*]"
+        fi
+        sleep "$naptime" || { stderr "sleep $naptime exited $?"; return 99; }
+    done
+}

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util/qmp"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util/qmp"
 	"github.com/spf13/cobra"
 )
 

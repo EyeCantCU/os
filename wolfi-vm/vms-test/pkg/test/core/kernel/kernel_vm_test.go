@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/systemd"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/vmtest"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/metrics"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/systemd"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 )
 
 var (
@@ -86,10 +86,10 @@ func TestCollectLogs(t *testing.T) {
 	myCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// wait for graphical.target
-	st, err := systemd.GetServiceStartMonotonic(myCtx, "graphical.target")
+	// wait for default.target
+	st, err := systemd.GetServiceStartMonotonic(myCtx, "default.target")
 	if err != nil {
-		t.Errorf("fail waiting for graphical.target: %v\n", err)
+		t.Errorf("fail waiting for default.target: %v\n", err)
 	}
 
 	artifacts.Log(t, metrics.MultiUserTarget, fmt.Sprintf("%f", st.Seconds()), nil)

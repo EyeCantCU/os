@@ -14,11 +14,11 @@ import (
 
 type Interface interface {
 	// Convert reads the image from the reader and writers the converted image
-	// to the writer.
-	Convert(context.Context, io.Reader, io.Writer, types.Architecture) error
+	// to the writers for the image & UEFI variables
+	Convert(context.Context, io.Reader, io.Writer, io.Writer, types.Architecture) error
 
 	// ConvertToFile acts like Convert, but takes an output path
-	// and returns error.
+	// and returns error. UEFI variables are written next to the output path
 	ConvertToFile(context.Context, io.Reader, string, types.Architecture) error
 
 	// Cleanup deletes any temporary files created for the functioning of

@@ -285,3 +285,16 @@ Example of using GCE
     $ ./runner/gcp terminate --name test-vm --project zmarano-chainguard
     2025/04/11 09:22:47 Instance test-vm deleted successfully.
     ```
+
+### Artifacts
+Running these tests stores output in provided directories.
+The output is json formatted with base64 encoded content inline.
+To extract that content, use `artifacts` tool like the following:
+
+    make tools/artifacts
+    ./tools/artifacts extract <results-dir> [output-dir]
+
+output-dir defaults to results-dir if not provided.
+That will create 'metrics.txt', which is tab delimited text
+with all the metrics and a directory for each of the tests with
+the base64 encoded files stored by their ID.

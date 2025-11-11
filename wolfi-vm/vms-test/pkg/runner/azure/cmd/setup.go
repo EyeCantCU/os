@@ -3,7 +3,7 @@ package cmd
 import (
 	"log"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"

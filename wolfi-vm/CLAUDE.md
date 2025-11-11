@@ -11,7 +11,7 @@ This is `wolfi-vm`, a project for building virtual machine disk images from apko
 - **Main CLI**: `apkoaas` binary built from Go code in `main.go` and `pkg/cli/`
 - **Build System**: Uses both Makefile and Go-based CLI for VM image creation
 - **Image Configs**: YAML files in `configs/` directory define packages and settings for different VM variants
-- **Cloud Support**: Platform-specific configurations for AWS, Azure, GCP, and generic QEMU images
+- **Cloud Support**: Platform-specific configurations for AWS, Azure, GCP, and QEMU images
 - **Testing Framework**: Comprehensive testing system in `vms-test/` for validating images across platforms
 
 ## Architecture
@@ -36,7 +36,7 @@ Core directories:
 # Build specific VM image
 make disk-<config-name>
 # Examples:
-make disk-generic-base
+make disk-qemu-base
 make disk-aws-base
 make disk-azure-docker
 
@@ -54,15 +54,15 @@ make disk-debug-<config-name>
 ```bash
 # Run VM locally with QEMU
 make run-<config-name>
-make run-generic-base  # Boot locally, SSH via port 6379
+make run-qemu-base  # Boot locally, SSH via port 6379
 
 # Run debug version with console access
 make run-debug-<config-name>
 make debug-shell-<config-name>  # Connect to debug console
 
 # Run comprehensive tests
-make test                    # Go unit tests
-make test-generic           # Full VM testing on generic image
+make test-gotest            # Go unit tests
+make test-qemu-base         # Full VM testing on qemu-base image
 ```
 
 ### Development
@@ -181,14 +181,14 @@ Tests are organized into logical groups under `vms-test/pkg/test/`:
 
 **Basic Test Execution:**
 ```bash
-# Run comprehensive VM testing on generic image
-make test-generic
+# Run comprehensive VM testing on qemu-base image
+make test-qemu-base
 
 # Build and run tests for specific architecture
 make -C vms-test TEST_ARCHES="x86_64" runners tests
 
 # Run tests using helpers (manual execution)
-QEMU_VMS="generic-base" ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD qemu ./test-results
+QEMU_VMS="qemu-base" ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD qemu ./test-results
 ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD aws ./test-results -- --launch-group=some-launch-group --awspub-inputs=./output/$arch/awspub/create/
 AZ_SUBSCRIPTION=$(az account show | jq -r .id) ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD azure ./test-results -- --subscription-id $AZ_SUBSCRIPTION --resource-group some-resource-group --azure-inputs output/
 GCP_PROJECT=$(gcloud config get project) ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD gcp ./test-results -- --project $GCP_PROJECT --gcp-inputs ./output/
@@ -235,7 +235,7 @@ The test helpers automatically discover and test images using publishing output 
 - Supports filtering by project and image family
 
 **QEMU Testing:**
-- Uses local disk images from `output/<arch>/generic-*/disk.raw`
+- Uses local disk images from `output/<arch>/qemu-*/disk.raw`
 - Supports both raw and qcow2 formats
 
 #### Metrics and Logging

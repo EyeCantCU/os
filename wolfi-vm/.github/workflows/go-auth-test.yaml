@@ -24,10 +24,10 @@ jobs:
       id-token: write # To support federating to assume chainguard identity
 
     steps:
-      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
         with:
           egress-policy: audit
-      - uses: chainguard-dev/actions/apt-faster@8e97c1fc72515d627456cb0b92e9c9f299356375 # v1.5.2
+      - uses: chainguard-dev/actions/apt-faster@abcc11e1cf9073eff6c69e91c49756c1430b094c # v1.5.8
 
 
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -35,16 +35,27 @@ jobs:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           persist-credentials: false
 
+      - uses: chainguard-dev/actions/setup-melange@abcc11e1cf9073eff6c69e91c49756c1430b094c # v1.5.8
+
       - run: |
           make install-deps
 
-      # Enable KVM
+      # Enable KVM and Vhost
       # ref: https://github.blog/changelog/2023-02-23-hardware-accelerated-android-virtualization-on-actions-windows-and-linux-larger-hosted-runners/
-      - run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+      - name: Grant kvm/vhost perms
+        run: |
+          set -x
+          sudo tee /etc/udev/rules.d/99-kvm4all.rules <<"EOF"
+          KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"
+          EOF
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          ls -l /dev/vhost* /dev/kvm* || :
+          sudo sh -c 'for p in kvm vhost-net vhost-vsock; do \
+              d=/dev/$$p; [ -e "$$d" ] || { echo "no $$d"; continue; } ; \
+              chmod ugo+rw $$d && ls -l $$d || exit; done'
           kvm-ok
+          groups || :
 
       - uses: chainguard-dev/setup-chainctl@be0acd273acf04bfdf91f51198327e719f6af978 # v0.4.0
         with:
@@ -52,12 +63,15 @@ jobs:
           # env/chainguard-images/iac/wolfi-vm-presubmit.tf
           identity: ce2d1984a010471142503340d670612d63ffb9f6/bd9fd6bb14892849
 
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v3.0.0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
           go-version-file: './go.mod'
-          check-latest: true
+
+      - name: Build cgr-install apk
+        run: |
+          make cgr-install-apk
 
       # Add a block like this in a separate PR *before* landing tests in a new module.
-      - name: Run apkoaas Tests
+      - name: Run go tests
         run: |
-          TMPDIR=$HOME go test -tags withauth ./...
+          TMPDIR=$HOME make test-gotest

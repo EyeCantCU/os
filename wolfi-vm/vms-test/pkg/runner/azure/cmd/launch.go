@@ -6,8 +6,8 @@ import (
 	"log"
 	"os"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/internal/utils/sshutils"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/internal/utils/sshutils"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
@@ -92,6 +92,7 @@ func launchCmd() *cobra.Command {
 				Location: &region,
 				Tags:     resourceTags,
 				Properties: &armnetwork.InterfacePropertiesFormat{
+					EnableAcceleratedNetworking: utils.ToPtr(true),
 					IPConfigurations: []*armnetwork.InterfaceIPConfiguration{
 						{
 							Name: utils.ToPtr(fmt.Sprintf("ipconfig-%s", vmName)),
@@ -137,6 +138,13 @@ func launchCmd() *cobra.Command {
 				Properties: &armcompute.VirtualMachineProperties{
 					HardwareProfile: &armcompute.HardwareProfile{
 						VMSize: utils.ToPtr(armcompute.VirtualMachineSizeTypes(vmSize)),
+					},
+					SecurityProfile: &armcompute.SecurityProfile{
+						SecurityType: utils.ToPtr(armcompute.SecurityTypesTrustedLaunch),
+						UefiSettings: &armcompute.UefiSettings{
+							SecureBootEnabled: utils.ToPtr(true),
+							VTpmEnabled:       utils.ToPtr(true),
+						},
 					},
 					StorageProfile: &armcompute.StorageProfile{
 						ImageReference: &armcompute.ImageReference{

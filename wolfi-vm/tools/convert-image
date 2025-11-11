@@ -21,6 +21,7 @@ Options:
     --format-dest FMT   Override destination format detection
     --vmdk-format FMT   VMDK subformat (streamOptimized, monolithicFlat, monolithicSparse)
                         Default: streamOptimized (for AWS compatibility)
+    --ova-template FILE OVA template YAML file (required for .ova output)
     --help              Show this help message
 
 Supported conversions:
@@ -28,6 +29,7 @@ Supported conversions:
     raw → qcow2         QEMU/local use, always compressed
     raw → vmdk          AWS EC2, streamOptimized format
     raw → vhd           Azure VMs, aka vpc
+    raw → ova           VMware OVA package (requires vmdk-convert and ova-compose)
     <same> → <same>     In-place resize operations
 
 Examples:
@@ -39,12 +41,16 @@ Examples:
     # ESXi-compatible VMDK formats
     $myname --vmdk-format monolithicFlat disk.raw disk.vmdk
 
+    # OVA package creation (for VMware ESXi)
+    $myname --ova-template template.yaml disk.raw disk.ova
+
     # In-place resize (no conversion)
     $myname --resize 30G disk.raw disk.raw
 
     # Combined resize and convert
     $myname --resize 30G disk.raw disk.vhd
     $myname --resize 30G --vmdk-format monolithicFlat disk.raw disk.vmdk
+    $myname --resize 30G --ova-template template.yaml disk.raw disk.ova
 
 EOF
 }
@@ -62,6 +68,7 @@ detect_format() {
         qcow2) echo "qcow2" ;;
         vmdk) echo "vmdk" ;;
         vpc|vhd) echo "vpc" ;;
+        ova) echo "ova" ;;
         *) stderr "Unknown format for file: $file"; return 1 ;;
     esac
 }
@@ -71,12 +78,63 @@ resize_disk() {
     local file="$1"
     local format="$2"
     local size="$3"
-    
+
     stderr "Resizing $file to $size"
     qemu-img resize -f "$format" "$file" "$size" || {
         stderr "Failed to resize $file to $size"
         return 1
     }
+}
+
+# Create OVA package from raw disk image
+create_ova() {
+    local source_file="$1"
+    local dest_file="$2"
+    local ova_template="$3"
+
+    # Validate template file
+    if [ -z "$ova_template" ]; then
+        stderr "Error: --ova-template is required for OVA output"
+        return 1
+    fi
+
+    if [ ! -f "$ova_template" ]; then
+        stderr "Error: OVA template file does not exist: $ova_template"
+        return 1
+    fi
+
+    # Check for required tools
+    if ! command -v vmdk-convert >/dev/null 2>&1; then
+        stderr "Error: vmdk-convert is not installed or not in PATH"
+        return 1
+    fi
+
+    if ! command -v ova-compose >/dev/null 2>&1; then
+        stderr "Error: ova-compose is not installed or not in PATH"
+        return 1
+    fi
+
+    # Create temporary sparse VMDK
+    local temp_vmdk="${dest_file%.ova}-sparse.vmdk"
+
+    stderr "Converting $source_file to sparse VMDK format"
+    vmdk-convert "$source_file" "$temp_vmdk" || {
+        stderr "Failed to convert $source_file to sparse VMDK"
+        return 1
+    }
+
+    stderr "Creating OVA package from template $ova_template"
+    ova-compose -i "$ova_template" --param rootdisk="$temp_vmdk" -o "$dest_file" || {
+        stderr "Failed to create OVA package"
+        rm -f "$temp_vmdk"
+        return 1
+    }
+
+    # Clean up temporary sparse VMDK
+    stderr "Cleaning up temporary VMDK file"
+    rm -f "$temp_vmdk"
+
+    stderr "Successfully created OVA package: $dest_file"
 }
 
 
@@ -88,6 +146,7 @@ convert_image() {
     local format_from_override="$4"
     local format_to_override="$5"
     local vmdk_format="$6"
+    local ova_template="$7"
 
     local source_format
     local dest_format
@@ -108,6 +167,12 @@ convert_image() {
     
     # Only convert if source and destination are different files
     if [ "$source_file" != "$dest_file" ]; then
+        # Special handling for OVA format
+        if [ "$dest_format" = "ova" ]; then
+            create_ova "$source_file" "$dest_file" "$ova_template"
+            return $?
+        fi
+
         # Get format-specific options as array
         local format_opts=()
         case "$dest_format" in
@@ -128,7 +193,7 @@ convert_image() {
                 format_opts=(-o "subformat=fixed,force_size")
                 ;;
         esac
-        
+
         # Execute conversion
         stderr "Converting $source_file ($source_format) to $dest_file ($dest_format)"
         qemu-img convert -f "$source_format" -O "$dest_format" ${format_opts[@]+"${format_opts[@]}"} "$source_file" "$dest_file" || {
@@ -144,6 +209,7 @@ main() {
     local format_source=""
     local format_dest=""
     local vmdk_format=""
+    local ova_template=""
 
     # Parse command line arguments
     while [ $# -gt 0 ]; do
@@ -171,6 +237,10 @@ main() {
                         exit 1
                         ;;
                 esac
+                shift 2
+                ;;
+            --ova-template)
+                ova_template="$2"
                 shift 2
                 ;;
             --help)
@@ -205,7 +275,7 @@ main() {
     fi
 
     # Run the conversion
-    convert_image "$source_file" "$dest_file" "$resize" "$format_source" "$format_dest" "$vmdk_format"
+    convert_image "$source_file" "$dest_file" "$resize" "$format_source" "$format_dest" "$vmdk_format" "$ova_template"
 }
 
 main "$@"

@@ -16,4 +16,7 @@ const (
 	NestedQemuConsole
 	ComplianceHTMLReport
 	ComplianceXMLResults
+	BootCtl
+	SystemdStatusStateFailed
+	SystemdListUnits
 )

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/files"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/artifacts/metrics"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/metrics"
 )
 
 var (
@@ -102,7 +102,7 @@ type TestFile struct {
 	ID      files.ID
 	Content []byte
 	Data    map[string]any
-	Error   error `json:"error,omitempty"`
+	Error   *string `json:"error,omitempty"`
 }
 
 // testingT is an interface containing what metrics needs from testing.T
@@ -152,11 +152,16 @@ func (tr *TestRun) File(t testingT, fID files.ID, content []byte, fErr error, ex
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	testfunc, _ := tr.Functions[t.Name()]
+	var errStr *string
+	if fErr != nil {
+		s := fErr.Error()
+		errStr = &s
+	}
 	newfile := TestFile{
 		ID:      fID,
 		Content: content,
 		Data:    extra,
-		Error:   fErr,
+		Error:   errStr,
 	}
 	if newfile.Data == nil {
 		newfile.Data = make(map[string]any)

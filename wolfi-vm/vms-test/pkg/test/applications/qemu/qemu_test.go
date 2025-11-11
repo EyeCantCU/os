@@ -124,6 +124,7 @@ func TestGenerateQEMUCommand(t *testing.T) {
 				UseKVM:       true,
 				Memory:       "512M",
 				TempDir:      "/tmp/test",
+				VhostCID:     3,
 			},
 			want: []string{
 				"qemu-system-x86_64", "-machine", "q35",
@@ -136,6 +137,7 @@ func TestGenerateQEMUCommand(t *testing.T) {
 				"-drive", "if=virtio,format=raw,file=/tmp/disk.raw",
 				"-netdev", "user,id=net0",
 				"-device", "virtio-net,netdev=net0",
+				"-device", "vhost-vsock-pci,guest-cid=3",
 			},
 		},
 		{
@@ -147,6 +149,7 @@ func TestGenerateQEMUCommand(t *testing.T) {
 				UseKVM:       false,
 				Memory:       "256M",
 				TempDir:      "/tmp/test",
+				VhostCID:     -1,
 			},
 			want: []string{
 				"qemu-system-aarch64", "-machine", "virt",

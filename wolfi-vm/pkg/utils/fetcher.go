@@ -24,8 +24,8 @@ import (
 
 // for the future, to be set with ldflags to freeze versions
 var (
-	qemuSystemVersion = ""
-	kernelVersion     = ""
+	edk2Version   = ""
+	kernelVersion = ""
 )
 
 func fetchPackageVersion(repo, pkg, apkArch string) (string, error) {
@@ -172,17 +172,25 @@ func FetchBios(destdir, apkArch string) (string, error) {
 		return "", fmt.Errorf("os.MkdirTemp() failed with %w", err)
 	}
 
-	if qemuSystemVersion == "" {
-		qemuSystemVersion, err = fetchPackageVersion("apk.cgr.dev/chainguard", fmt.Sprintf("qemu-system-%s", apkArch), apkArch)
+	if edk2Version == "" {
+		edk2Version, err = fetchPackageVersion("apk.cgr.dev/chainguard-private", "edk2", apkArch)
 		if err != nil {
 			return "", fmt.Errorf("failed to fetch package version: %w", err)
 		}
 	}
 
-	err = fetchAndUnpack("apk.cgr.dev/chainguard", fmt.Sprintf("qemu-system-%s", apkArch), apkArch, qemuSystemVersion, td)
+	err = fetchAndUnpack("apk.cgr.dev/chainguard-private", "edk2", apkArch, edk2Version, td)
 	if err != nil {
 		return "", fmt.Errorf("fatch failed with %w", err)
 	}
 
-	return filepath.Join(td, fmt.Sprintf("usr/share/qemu/edk2-%s-code.fd", apkArch)), nil
+	var ovmf string
+	switch apkArch {
+	case "x86_64":
+		ovmf = fmt.Sprintf("usr/share/edk2/%s/OVMF_CODE.fd", apkArch)
+	case "aarch64":
+		ovmf = fmt.Sprintf("usr/share/edk2/%s/QEMU_EFI.fd", apkArch)
+	}
+
+	return filepath.Join(td, ovmf), nil
 }

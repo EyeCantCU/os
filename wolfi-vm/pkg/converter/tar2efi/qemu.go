@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/apkoaas/pkg/utils"
+	"chainguard.dev/wolfi-vm/pkg/utils"
 )
 
 type qemuInfo struct {

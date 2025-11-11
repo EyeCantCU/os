@@ -3,6 +3,7 @@ package qemu
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 	"time"
 
 	"chainguard.dev/apko/pkg/build/types"
-	"chainguard.dev/wolfi-vm/vm-test/pkg/runner/qemu/util"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/runner/qemu/util"
 )
 
 // QEMUConfig holds configuration for QEMU VM execution
@@ -21,6 +22,7 @@ type QEMUConfig struct {
 	UseKVM       bool
 	Memory       string
 	TempDir      string
+	VhostCID     int // 0 : pick random CID, > 0: use that CID, < 0: do not add vhost-vsock-pci
 }
 
 // CreateTestDisk creates a minimal blank disk image for QEMU testing
@@ -39,6 +41,18 @@ func CreateTestDisk(ctx context.Context, workDir string, filename string) (strin
 // GetOVMFFirmwarePath returns the standard OVMF firmware path for the given architecture
 func GetOVMFFirmwarePath(arch types.Architecture) string {
 	return fmt.Sprintf("/usr/share/qemu/edk2-%s-code.fd", arch.ToQEmu())
+}
+
+func randomCID() uint32 {
+	rand.Seed(time.Now().UnixNano())
+	var cid uint32
+	for {
+		cid = rand.Uint32()
+		if cid > 2 {
+			break
+		}
+	}
+	return cid
 }
 
 // GenerateQEMUCommand generates a QEMU command line for the given configuration
@@ -82,6 +96,17 @@ func GenerateQEMUCommand(config QEMUConfig) []string {
 		"-netdev", "user,id=net0",
 		"-device", "virtio-net,netdev=net0",
 	)
+
+	var cid uint32
+	if config.VhostCID == 0 {
+		cid = randomCID()
+	} else if config.VhostCID > 0 {
+		cid = uint32(config.VhostCID)
+	}
+
+	if cid > 0 {
+		cmd = append(cmd, "-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", cid))
+	}
 
 	return cmd
 }
@@ -144,11 +169,6 @@ func TerminateVM(ctx context.Context, workDir string) error {
 	// Send quit command
 	_, err = conn.Write([]byte("quit\n"))
 	return err
-}
-
-// CanUseKVM checks if KVM acceleration is available
-func CanUseKVM() bool {
-	return util.CanUseKVM()
 }
 
 // CheckQEMUBinary verifies that the required QEMU binary is available
