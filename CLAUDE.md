@@ -36,9 +36,9 @@ Core directories:
 # Build specific VM image
 make disk-<config-name>
 # Examples:
-make disk-qemu-base
-make disk-aws-base
-make disk-azure-docker
+make disk-qemu-base-slim
+make disk-aws-base-slim
+make disk-azure-docker-slim
 
 # Build all images for a cloud platform
 make disks-aws
@@ -54,7 +54,7 @@ make disk-debug-<config-name>
 ```bash
 # Run VM locally with QEMU
 make run-<config-name>
-make run-qemu-base  # Boot locally, SSH via port 6379
+make run-qemu-base-slim  # Boot locally, SSH via port 6379
 
 # Run debug version with console access
 make run-debug-<config-name>
@@ -62,7 +62,7 @@ make debug-shell-<config-name>  # Connect to debug console
 
 # Run comprehensive tests
 make test-gotest            # Go unit tests
-make test-qemu-base         # Full VM testing on qemu-base image
+make test-qemu-base-slim         # Full VM testing on qemu-base-slim image
 ```
 
 ### Development
@@ -112,9 +112,9 @@ make aws-create-<image-name>
 make aws-publish-<image-name>
 
 # Examples:
-PUBLISH_TARGET=dev make publish-gcp-base
-PUBLISH_TARGET=staging make publish-azure-docker
-PUBLISH_TARGET=eap make publish-qemu-base
+PUBLISH_TARGET=dev make publish-gcp-base-slim
+PUBLISH_TARGET=staging make publish-azure-docker-slim
+PUBLISH_TARGET=eap make publish-qemu-base-slim
 ```
 
 #### Publishing Output Files
@@ -140,7 +140,7 @@ Each config in `configs/` contains:
 
 Example config structure:
 ```
-configs/aws-base/
+configs/aws-base-slim/
 ├── build.yaml    # Package list, repos, arch settings
 └── test.yaml     # Test cases for this image variant
 ```
@@ -181,14 +181,14 @@ Tests are organized into logical groups under `vms-test/pkg/test/`:
 
 **Basic Test Execution:**
 ```bash
-# Run comprehensive VM testing on qemu-base image
-make test-qemu-base
+# Run comprehensive VM testing on qemu-base-slim image
+make test-qemu-base-slim
 
 # Build and run tests for specific architecture
 make -C vms-test TEST_ARCHES="x86_64" runners tests
 
 # Run tests using helpers (manual execution)
-QEMU_VMS="qemu-base" ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD qemu ./test-results
+QEMU_VMS="qemu-base-slim" ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD qemu ./test-results
 ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD aws ./test-results -- --launch-group=some-launch-group --awspub-inputs=./output/$arch/awspub/create/
 AZ_SUBSCRIPTION=$(az account show | jq -r .id) ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD azure ./test-results -- --subscription-id $AZ_SUBSCRIPTION --resource-group some-resource-group --azure-inputs output/
 GCP_PROJECT=$(gcloud config get project) ./vms-test/helpers/test-wolfi-vm --wolfi-vm $PWD gcp ./test-results -- --project $GCP_PROJECT --gcp-inputs ./output/
@@ -222,7 +222,7 @@ The test helpers automatically discover and test images using publishing output 
 **AWS Image Selection:**
 - Uses `awspub create` JSON output files from `output/<arch>/awspub/create/`
 - Parses AMI IDs and regions from JSON metadata
-- Example input: `output/x86_64/awspub/create/aws-base.json`
+- Example input: `output/x86_64/awspub/create/aws-base-slim.json`
 
 **Azure Image Selection:**
 - Uses published image information from Azure galleries
@@ -326,7 +326,7 @@ test-results/<arch>/
    ```bash
    # When you find a failure, check the corresponding build config
    # Look for recently changed packages or missing dependencies
-   # Example: if aws-base tests fail, examine configs/aws-base/build.yaml
+   # Example: if aws-base-slim tests fail, examine configs/aws-base-slim/build.yaml
    ```
 
 **Common Failure Patterns to Look For:**

@@ -31,8 +31,8 @@ $(go_tools_bin): go.mod pkg/tools/tools.go
 	GOBIN=$$(pwd)/tools/ go install "$${TOOL_PKG}@$${TOOL_VER}"
 
 # Space-separated list of image names to exclude from all groups
-# Example: SKIP_IMAGES="aws-ecs-foo qemu-base" make disks-aws-ecs
-SKIP_IMAGES = aws-agents-selinux
+# Example: SKIP_IMAGES="aws-ecs-foo qemu-base-slim" make disks-aws-ecs
+SKIP_IMAGES = aws-base-selinux-full
 cfgs = $(wildcard configs/*-*)
 # names is a list of each basename cfg
 names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
@@ -342,7 +342,7 @@ awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
 	./$(TOOLS_SUBD)/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
 
 .PHONY: aws-create aws-create-% aws-publish aws-publish-% aws-share aws-share-%
-# these are just so human can type 'make aws-create-aws-base' to do the create/publish
+# these are just so human can type 'make aws-create-aws-base-slim' to do the create/publish
 $(foreach name,$(disks_aws),aws-image-create-$(name)): aws-image-create-%: $(ARCH_OUT_D)/awspub/create/%.json
 $(foreach name,$(disks_aws),aws-image-share-$(name)): aws-image-share-%: $(ARCH_OUT_D)/awspub/share/%.json
 $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
