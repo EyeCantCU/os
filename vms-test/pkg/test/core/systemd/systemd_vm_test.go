@@ -14,6 +14,7 @@ import (
 	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/files"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/artifacts/metrics"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/systemd"
+	"chainguard.dev/wolfi-vm/vms-test/pkg/test/selinux/selinux"
 	"chainguard.dev/wolfi-vm/vms-test/pkg/vmtest"
 )
 
@@ -86,22 +87,30 @@ func TestSystemdStatus(t *testing.T) {
 
 func TestNoOrderingCycles(t *testing.T) {
 	ctx := vmtest.Context(t)
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "journalctl", "-b0")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Error executing journalctl -b0: %v", err)
-	}
 
 	// Looking to match lines like
 	// systemd-tmpfiles-setup.service: Found ordering cycle: systemd-journal-flush.service/start after...
 	// systemd-tmpfiles-setup.service: Job systemd-journal-flush.service/start deleted to
 	//    break ordering cycle starting with systemd-tmpfiles-setup.service/start
-	for _, line := range strings.Split(string(output), "\n") {
+	for _, line := range JournalEntries(t, ctx) {
 		if strings.Contains(line, "ordering cycle") {
 			t.Error("Ordering cycle detected: " + line)
+		}
+	}
+}
+
+// Ensure SELinux has not logged any AVC denials since boot.
+// Intentionally run in the core/systemd test since images that are not
+// supposed to have SELinux enabled (and are not running the SELinux test)
+// also should not log any denials.
+func TestNoSELinuxAVCDenials(t *testing.T) {
+	ctx := vmtest.Context(t)
+	entries := JournalEntries(t, ctx)
+	avcDenials := selinux.ExtractAVCDenials(entries)
+	if numDenials := len(avcDenials); numDenials > 0 {
+		t.Errorf("Found %v AVC denials, expected 0", numDenials)
+		for _, denial := range avcDenials {
+			t.Error(denial)
 		}
 	}
 }
