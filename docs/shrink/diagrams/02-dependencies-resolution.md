@@ -82,7 +82,7 @@ digraph dependencies {
         fillcolor="#fce4ec";
 
         SD [label="stereo seed-dependencies\n(optional)", fillcolor="#fce4ec"];
-        SD1 [label="Read archive-seeds.json\nmanual seed packages", fillcolor="#fce4ec"];
+        SD1 [label="Read shrink/garbage-collection/archive-seeds.json\nmanual seed packages", fillcolor="#fce4ec"];
         SD2 [label="Create minimal APKO configs\nper seed package", fillcolor="#fce4ec"];
         SD3 [label="Resolve seed deps using\nlockImageDependencies", fillcolor="#fce4ec"];
         SD4 [label="resolved/seeds/{arch}/\naggregated + detailed deps", shape=folder, fillcolor="#f0f0f0"];

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ func archiveCmd() *cobra.Command {
 		durationDays      int
 		arch              string
 		generateWithdrawn bool
+		customerFilter    string
 	)
 
 	cmd := &cobra.Command{
@@ -33,6 +35,7 @@ based on the following criteria:
 - Not the most recent version if still built from origin melange configuration
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or manual seed dependencies
+- Not listed in customer APK filter file (if present)
 
 When no --arch is specified, analysis is performed across both x86_64 and aarch64 architectures,
 consolidating age-based candidates from all architectures and considering a package for archival
@@ -45,13 +48,14 @@ only if it meets dependency criteria on ALL supported architectures.`,
 				architectures = []string{"x86_64", "aarch64"}
 			}
 			duration := time.Duration(durationDays*24) * time.Hour
-			return archive(cmd.Context(), duration, architectures, generateWithdrawn)
+			return archive(cmd.Context(), duration, architectures, generateWithdrawn, customerFilter)
 		},
 	}
 
 	cmd.Flags().IntVar(&durationDays, "duration", 365, "Age threshold for archive candidates in days (default: 365)")
 	cmd.Flags().StringVar(&arch, "arch", "", "Architecture to evaluate (default: both x86_64 and aarch64)")
 	cmd.Flags().BoolVar(&generateWithdrawn, "generate-withdrawn", false, "Generate withdrawn-packages.txt files for each repository")
+	cmd.Flags().StringVar(&customerFilter, "customer-filter", "shrink/garbage-collection/customer-apk-filter.txt", "Path to customer APK filter file (optional)")
 
 	return cmd
 }
@@ -83,7 +87,7 @@ type ArchiveContext struct {
 	Architectures   []string                           // all architectures being analyzed
 }
 
-func archive(ctx context.Context, duration time.Duration, architectures []string, generateWithdrawn bool) error {
+func archive(ctx context.Context, duration time.Duration, architectures []string, generateWithdrawn bool, customerFilter string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -174,6 +178,16 @@ func archive(ctx context.Context, duration time.Duration, architectures []string
 	retainedPackages = append(retainedPackages, retained...)
 
 	log.Printf("After filtering version streams: %d packages remain", len(filtered))
+	candidates = filtered
+
+	// Step 10: Filter out packages listed in customer APK filter
+	filtered, retained, err = filterByCustomerFilter(candidates, customerFilter)
+	if err != nil {
+		return fmt.Errorf("filtering by customer filter: %w", err)
+	}
+	retainedPackages = append(retainedPackages, retained...)
+
+	log.Printf("After filtering customer APK filter: %d packages remain", len(filtered))
 	candidates = filtered
 
 	// Create archive and retain directories if they don't exist
@@ -1053,6 +1067,77 @@ func filterByVersionStreams(candidates []ArchiveCandidate) ([]ArchiveCandidate, 
 	log.Printf("Remaining candidates after version stream filtering: %d", len(filtered))
 
 	return filtered, retained, nil
+}
+
+func filterByCustomerFilter(candidates []ArchiveCandidate, customerFilterFile string) ([]ArchiveCandidate, []RetainCandidate, error) {
+	log.Printf("Checking for customer APK filter: %s...", customerFilterFile)
+
+	// Check if the customer filter file exists
+	if _, err := os.Stat(customerFilterFile); os.IsNotExist(err) {
+		log.Printf("Customer APK filter file not found: %s. Skipping customer filter.", customerFilterFile)
+		// No filter file, return all candidates as-is
+		return candidates, nil, nil
+	}
+
+	// Load customer filter APKs
+	customerFilterAPKs, err := loadCustomerFilterAPKs(customerFilterFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading customer filter file: %w", err)
+	}
+
+	log.Printf("Loaded %d APK entries from customer filter file", len(customerFilterAPKs))
+
+	var filtered []ArchiveCandidate
+	var retained []RetainCandidate
+
+	for _, candidate := range candidates {
+		apkFileName := fmt.Sprintf("%s-%s.apk", candidate.Name, candidate.Version)
+
+		if customerFilterAPKs[apkFileName] {
+			// This package is in the customer filter, retain it
+			retained = append(retained, RetainCandidate{
+				Name:       candidate.Name,
+				Version:    candidate.Version,
+				Repository: candidate.Repository,
+				Age:        candidate.Age,
+				Reason:     "listed in customer APK filter",
+			})
+		} else {
+			// Not in customer filter, continue filtering
+			candidate.Reasons = append(candidate.Reasons, "not in customer filter")
+			filtered = append(filtered, candidate)
+		}
+	}
+
+	log.Printf("Filtered out %d candidates that are in customer APK filter", len(retained))
+	log.Printf("Remaining candidates after customer filter: %d", len(filtered))
+
+	return filtered, retained, nil
+}
+
+func loadCustomerFilterAPKs(filename string) (map[string]bool, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", filename, err)
+	}
+	defer file.Close()
+
+	customerAPKs := make(map[string]bool)
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue // Skip empty lines and comments
+		}
+		customerAPKs[line] = true
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading %s: %w", filename, err)
+	}
+
+	return customerAPKs, nil
 }
 
 func generateWithdrawnPackagesFiles(candidatesByRepo map[string][]ArchiveCandidate) error {
