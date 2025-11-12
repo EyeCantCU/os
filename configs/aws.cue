@@ -41,5 +41,7 @@ packages: [
 	"amazon-ec2-utils",
 	"aws-configs",
 	"busybox",
+	"chrony",
+	"chrony-aws",
 	"ec2-user",
 ]
