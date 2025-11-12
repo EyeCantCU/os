@@ -34,7 +34,7 @@ packages: [
 	"linux-jitterentropy-6.12-test-objects=6.12.54-r3",
 ]
 
-art: images: aws_atsec_jitterentropy: {
+art: images: aws_atsec_jitterentropy_full: {
 	metadata: fips: true
 	pkgs: list.Concat([packages, aws.fips_full])
 }
