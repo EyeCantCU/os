@@ -138,15 +138,15 @@ func TestConverter(t *testing.T) {
 			}
 		},
 	}, {
-		filename:     "testdata/generic.yaml",
+		filename:     "testdata/qemu-base-slim.yaml",
 		expectedSize: 2 * GiB,
-		// TODO(mattmoor): How do we want to test the generic image?
+		// TODO(mattmoor): How do we want to test the qemu base image?
 	}, {
-		filename:     "testdata/gcp-docker.yaml",
+		filename:     "testdata/gcp-docker-slim.yaml",
 		expectedSize: 3 * GiB,
-		// TODO(mattmoor): How do we want to test the generic-docker image?
+		// TODO(mattmoor): How do we want to test the docker image?
 	}, {
-		filename:     "testdata/gcp-base.yaml",
+		filename:     "testdata/gcp-base-slim.yaml",
 		expectedSize: 2 * GiB,
 		testDisk: func(t *testing.T, disk string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -158,7 +158,7 @@ func TestConverter(t *testing.T) {
 			}
 		},
 	}, {
-		filename:     "testdata/aws-base.yaml",
+		filename:     "testdata/aws-base-slim.yaml",
 		expectedSize: 2 * GiB,
 		testDisk: func(t *testing.T, disk string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

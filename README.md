@@ -13,10 +13,10 @@ Once you have created a config, you can run the following command:
 make disk-<your config>
 ```
 
-For example, the following command will build a raw disk image from the `configs/qemu-base/build.yaml` file.
+For example, the following command will build a raw disk image from the `configs/qemu-base-slim/build.yaml` file.
 
 ```
-make disk-qemu-base
+make disk-qemu-base-slim
 ```
 
 ## Build RPi images
@@ -24,15 +24,15 @@ make disk-qemu-base
 Build using:
 
 ```
-make ARCH=aarch64 disk-rpi-base
-make ARCH=aarch64 disk-rpi-docker
+make ARCH=aarch64 disk-rpi-base-slim
+make ARCH=aarch64 disk-rpi-docker-slim
 ```
 
 Flash them to sdcard using:
 
 ```
-dd if=output/aarch64/rpi-base/disk.raw of=/dev/sdX conv=fsync status=progress
-dd if=output/aarch64/rpi-docker/disk.raw of=/dev/sdX conv=fsync status=progress
+dd if=output/aarch64/rpi-base-slim/disk.raw of=/dev/sdX conv=fsync status=progress
+dd if=output/aarch64/rpi-docker-slim/disk.raw of=/dev/sdX conv=fsync status=progress
 ```
 
 Or the official RPi imager that can be found [here](https://www.raspberrypi.com/software/)
@@ -40,7 +40,7 @@ Or the official RPi imager that can be found [here](https://www.raspberrypi.com/
 ## Running your VM
 Images built for a cloud have a kernel and packages built for that platform.  They aren't necessarily of any use inside qemu.
 
-That being said, to test a VM locally, you can make similar changes to a qemu image (like 'qemu-base/build.yaml') and boot it.
+That being said, to test a VM locally, you can make similar changes to a qemu image (like 'qemu-base-slim/build.yaml') and boot it.
 
 You can test run your VM with:
 
@@ -48,9 +48,9 @@ You can test run your VM with:
 
 As an example:
 
-    make run-qemu-base
+    make run-qemu-base-slim
 
-That will boot a VM with the qemu-base disk image.  You can watch it boot and will get a login prompt on your terminal.
+That will boot a VM with the qemu-base-slim disk image.  You can watch it boot and will get a login prompt on your terminal.
 
 There are no builtin passwords, so you won't be able to log in. :cry:
 
@@ -61,9 +61,9 @@ There are no builtin passwords, so you won't be able to log in. :cry:
    The `make run-<vmname>` will supply ssh keys to the guest vm via smbios in a way that
    A vm that has `qemu-guesthelper-authorized-keys-command` installed can read.
 
-   So if your vm has that package installed (like 'qemu-base' does) then you can do:
+   So if your vm has that package installed (like 'qemu-base-slim' does) then you can do:
 
-       make run-qemu-base
+       make run-qemu-base-slim
 
    And then switch to another terminal and
 
@@ -100,11 +100,11 @@ have sudo access.
 
 To add your .ssh/id_ed25519.pub key into the vm:
 
-    sudo ./tools/backdoor-image --pubkeys ~/.ssh/id_ed25519.pub output/x86_64/qemu-base/disk.raw
+    sudo ./tools/backdoor-image --pubkeys ~/.ssh/id_ed25519.pub output/x86_64/qemu-base-slim/disk.raw
 
 To insert github user 'smoser' public keys:
 
-    sudo ./tools/backdoor-image --import-id=smoser output/x86_64/aws-base/disk.raw
+    sudo ./tools/backdoor-image --import-id=smoser output/x86_64/aws-base-slim/disk.raw
 
 Just run the script on your image before publishing (or before running `make run-<vmname>`)
 and you should then be able to ssh in as the 'backdoor' user.
@@ -115,7 +115,7 @@ Run `make test` to test builder logic and run other tests.
 There are more vm tests in vms-test/ directory.  To run those tests for a given image, you
 can run `make test-<image-name>`.  As example, try running
 
-    make test-qemu-base
+    make test-qemu-base-slim
 
 That will create test-results/ with the test output.
 
