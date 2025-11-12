@@ -32,7 +32,7 @@ $(go_tools_bin): go.mod pkg/tools/tools.go
 
 # Space-separated list of image names to exclude from all groups
 # Example: SKIP_IMAGES="aws-ecs-foo qemu-base" make disks-aws-ecs
-SKIP_IMAGES =
+SKIP_IMAGES = aws-agents-selinux
 cfgs = $(wildcard configs/*-*)
 # names is a list of each basename cfg
 names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
