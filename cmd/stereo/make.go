@@ -109,15 +109,19 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 		return err
 	}
 
+	args := []string{}
+
 	// Silence output when using melange compile
 	// Allows us to parse compiled manifest directly
-	makeopts := "-s"
-	if subcmd != "compile" {
-		makeopts = ""
+	if subcmd == "compile" {
+		args = append(args, "-s")
+	} else {
 		log.Printf("found %s in %s", pkg, dir)
 	}
 
-	cmd := exec.CommandContext(ctx, "make", makeopts, path.Join(subcmd, pkg))
+	args = append(args, path.Join(subcmd, pkg))
+
+	cmd := exec.CommandContext(ctx, "make", args...)
 	cmd.Dir = dir
 
 	cmd.Stdin = os.Stdin
