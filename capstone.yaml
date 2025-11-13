@@ -1,0 +1,100 @@
+package:
+  name: capstone
+  version: 5.0.6
+  epoch: 0
+  description: "Capstone disassembly/disassembler framework for ARM, ARM64 (ARMv8), Alpha, BPF, Ethereum VM, HPPA, LoongArch, M68K, M680X, Mips, MOS65XX, PPC, RISC-V(rv32G/rv64G), SH, Sparc, SystemZ, TMS320C64X, TriCore, Webassembly, XCore and X86."
+  copyright:
+    - license: BSD-3-Clause
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cmocka-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/capstone-engine/capstone
+      tag: ${{package.version}}
+      expected-commit: accf4df62f1fba6f92cae692985d27063552601c
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCAPSTONE_USE_ARCH_REGISTRATION=1 \
+        -DCAPSTONE_BUILD_CSTEST=1 \
+        -DCAPSTONE_BUILD_SHARED_LIBS=ON \
+        -DENABLE_ASAN=1
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - name: "Run test cases with our build"
+    runs: |
+      cd tests
+      make INCDIR=${{targets.contextdir}}/usr/include LIBDIR=${{targets.contextdir}}/usr/lib all
+      chmod +x test_all.sh; ./test_all.sh
+      cd -
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/pkgconf
+
+update:
+  enabled: true
+  git:
+    tag-filter-prefix: 5
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-dev
+        - gcc
+  pipeline:
+    - uses: test/tw/ldd-check
+    # https://www.capstone-engine.org/lang_c.html
+    - runs: |
+        cat <<EOF > test1.c
+        #include <capstone/capstone.h>
+
+        #define CODE "\x55\x48\x8b\x05\xb8\x13\x00\x00"
+
+        int main(void) {
+          csh handle;
+          cs_insn *insn;
+          size_t count;
+
+          if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
+            return -1;
+          }
+
+          count = cs_disasm(handle, CODE, sizeof(CODE)-1, 0x1000, 0, &insn);
+          if (count > 0) {
+            size_t j;
+            for (j = 0; j < count; j++) {
+              printf("0x%"PRIx64":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic, insn[j].op_str);
+            }
+            cs_free(insn, count);
+          } else {
+            printf("ERROR: Failed to disassemble given code!\n");
+          }
+
+          cs_close(&handle);
+          return 0;
+        }
+        EOF
+        cc -c test1.c -o test1.o
+        cc test1.o -O3 -Wall -lcapstone -o test1
+        ./test1
