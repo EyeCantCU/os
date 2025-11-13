@@ -234,7 +234,7 @@ func parseMetadataString(input string) map[string]string {
 		if item == "" {
 			continue
 		}
-		split := strings.SplitN(input, "=", 2)
+		split := strings.SplitN(item, "=", 2)
 		if len(split) != 2 {
 			log.Fatalf("malformed metadata %q can't be parsed into key value pair", item)
 		}
