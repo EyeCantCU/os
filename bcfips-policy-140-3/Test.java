@@ -237,9 +237,9 @@ public class Test {
         String expectedProvider = "BCRNG";
         String expectedConfig = "org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider C:HYBRID;ENABLE{ALL};";
         if ("file:/dev/random".equals(Security.getProperty("securerandom.source"))) {
-                expectedAlgorithm = "NativePRNGBlocking";
-                expectedProvider = "SUN";
-                expectedConfig = "org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider C:DEFRND[SHA256];ENABLE{ALL};";
+            expectedAlgorithm = "NativePRNGBlocking";
+            expectedProvider = "SUN";
+            expectedConfig = "org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider C:DEFRND[SHA256];ENABLE{ALL};";
         }
 
         // Validate BC RNG JENT configuration
@@ -251,10 +251,10 @@ public class Test {
             System.err.println("SecureRandom provider should be " + expectedProvider);
             System.exit(1);
         }
-	if (!expectedConfig.equals(Security.getProperty("security.provider.1"))) {
-	    System.err.println("BCFIPS config should be " + expectedConfig);
+        if (!expectedConfig.equals(Security.getProperty("security.provider.1"))) {
+            System.err.println("BCFIPS config should be " + expectedConfig);
             System.exit(1);
-	}
+        }
         System.out.println("SecureRandom configuration test passed");
 
         // Test for uniqueness
