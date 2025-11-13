@@ -1,0 +1,82 @@
+package:
+  name: nri-nagios-fips
+  version: "2.11.3"
+  epoch: 0
+  description: New Relic Infrastructure nagios Integration (FIPS)
+  copyright:
+    - license: MIT
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/newrelic/nri-nagios
+      expected-commit: 9b28a4d979db8adcf37248ed33541727cf509e51
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      modroot: .
+      packages: ./src/
+      output: nri-nagios
+      go-package: go-fips-md5
+      ldflags: |
+        -X main.integrationVersion=${{package.version}}
+        -X main.gitCommit=$(git rev-parse HEAD)
+        -X main.buildDate=$(date -u -d "@$SOURCE_DATE_EPOCH" "+%Y-%m-%dT%H:%M:%SZ")
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by newrelic-infrastructure-bundle"
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/var/db/newrelic-infra/newrelic-integrations/bin
+          ln -sf /usr/bin/nri-nagios ${{targets.contextdir}}/var/db/newrelic-infra/newrelic-integrations/bin/nri-nagios
+          install -Dm644 legacy/nagios-definition.yml ${{targets.contextdir}}/var/db/newrelic-infra/newrelic-integrations/nagios-definition.yml
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
+update:
+  enabled: true
+  github:
+    identifier: newrelic/nri-nagios
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: nri-nagios
+    - uses: test/tw/ver-check
+      with:
+        bins: nri-nagios
+        version-flag: "-show_version"
+    - name: Create test config
+      runs: |
+        cat <<EOF > /tmp/config.yml
+        service_checks:
+          - name: check_disk
+            command: ["/usr/lib/nagios/plugins/check_disk", "-w", "20%", "-c", "10%", "-p", "/"]
+            labels:
+              env: production
+              service: disk
+
+          - name: check_load
+            command: ["/usr/lib/nagios/plugins/check_load", "-w", "5,4,3", "-c", "10,8,6"]
+            labels:
+              env: production
+              service: load
+        EOF
+        chmod 600 /tmp/config.yml
+    - name: Test binary execution
+      runs: |
+        nri-nagios -service_checks_config /tmp/config.yml -metrics | grep -q "com.newrelic.nagios"
+        nri-nagios -service_checks_config /tmp/config.yml -metrics | grep -q "protocol_version"
+        nri-nagios -service_checks_config /tmp/config.yml -metrics | grep -q "integration_version"

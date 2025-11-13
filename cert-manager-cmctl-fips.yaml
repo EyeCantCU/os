@@ -3,18 +3,13 @@ package:
   # This got pulled from the cert-manager repo in the 1.15 release, prior to
   # that it was in the cert-manager/cert-manager repo.
   version: "2.3.0"
-  epoch: 4 # GHSA-f9f8-9pmf-xv68
+  epoch: 6 # GHSA-pwhc-rpq9-4c8w
   description: Automatically provision and manage TLS certificates in Kubernetes
   copyright:
     - license: Apache-2.0
   dependencies:
     provides:
       - cmctl-fips=${{package.full-version}}
-
-environment:
-  contents:
-    packages:
-      - go-fips
 
 pipeline:
   - uses: git-checkout
@@ -27,30 +22,55 @@ pipeline:
     with:
       deps: |-
         helm.sh/helm/v3@v3.18.5
+        github.com/containerd/containerd@v1.7.29
 
   - uses: go/build
     with:
       go-package: go-fips
       packages: main.go
       output: cmctl
-      ldflags: -X github.com/cert-manager/cmctl/pkg/util.AppVersion=$(git describe --tags --always --match='v*' --abbrev=14 --dirty) -X github.com/cert-manager/cmctl/pkg/util.AppGitCommit=$(git rev-parse HEAD)
+      ldflags: |
+        -X github.com/cert-manager/cert-manager/pkg/util.AppVersion=${{package.version}}
+        -X github.com/cert-manager/cert-manager/pkg/util.AppGitCommit=$(git rev-parse HEAD)
 
 update:
   enabled: true
-  github:
-    identifier: cert-manager/cmctl
+  ignore-regex-patterns:
+    - '.*-alpha.*'
+    - '.*-beta.*'
+    - '.*-rc.*'
+  git:
     strip-prefix: v
-    tag-filter: v
-    use-tag: true
 
 test:
-  environment:
-    contents:
-      packages:
-        - go-fips
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
-        cmctl --help
-    - runs: |
-        cmctl -h
+    - uses: test/tw/help-check
+      with:
+        bins: cmctl
+    - uses: test/kwok/cluster
+    - name: Install cert-manager CRDs
+      runs: |
+        set -euo pipefail
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.crds.yaml
+    - name: Test completion commands
+      runs: |
+        cmctl completion bash > /dev/null
+        cmctl completion zsh > /dev/null
+        cmctl completion fish > /dev/null
+    - name: Test convert command
+      runs: |
+        set -euo pipefail
+        tee /tmp/convert-test.yaml << 'EOF'
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: convert-test
+        spec:
+          secretName: convert-test-tls
+          issuerRef:
+            name: test-issuer
+          dnsNames:
+            - test.example.com
+        EOF
+        cmctl convert -f /tmp/convert-test.yaml | grep -F 'creationTimestamp'

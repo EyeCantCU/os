@@ -17,15 +17,7 @@ KEY ?= local-melange-enterprise.rsa
 REPO ?= $(shell pwd)/packages
 QEMU_KERNEL_REPO := https://apk.cgr.dev/chainguard-private/
 
-ifeq (${MELANGE_RUNNER},)
-MELANGE_RUNNER = qemu
-$(warning ****************************** WARNING ******************************)
-$(warning *** MELANGE_RUNNER is unset. The default runner is now qemu, which)
-$(warning *** requires chainctl authentication to access the Chainguard kernel.)
-$(warning *** See `melange build --help` for a list of other runner options.)
-$(warning ****************************** WARNING ******************************)
-endif
-
+MELANGE_RUNNER ?= qemu
 MELANGE_OPTS += --runner=${MELANGE_RUNNER}
 
 QEMU_KERNEL_IMAGE ?= kernel/$(ARCH)/vmlinuz
@@ -206,7 +198,7 @@ local-wolfi: ${KEY} apk-token
 	echo "https://packages.cgr.dev/extras" >> $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
-	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOSITORIES_FILE)
 endif
 	mkdir -p ${PWD}/packages
 	docker run --pull=always --rm -it \
@@ -259,7 +251,7 @@ dev-container-wolfi:
 	echo "https://packages.wolfi.dev/os" > $(TMP_REPOSITORIES_FILE)
 	echo "$(PACKAGES_CONTAINER_FOLDER)" >> $(TMP_REPOSITORIES_FILE)
 ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
-	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+	echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOSITORIES_FILE)
 endif
 	docker run --pull=always --rm -it \
 		--mount type=bind,source="${OUT_DIR}",destination="$(OUT_LOCAL_DIR)" \

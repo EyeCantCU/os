@@ -1,0 +1,184 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: quic-go-fips
+  version: "0.56.0"
+  epoch: 0
+  description: A production-ready QUIC implementation in pure Go
+  copyright:
+    - license: MIT
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/quic-go/quic-go
+      expected-commit: eb7fcf5637f780fe1355002534430d95bb5b53c8
+      tag: v${{package.version}}
+
+  - uses: patch
+    with:
+      fuzz: 0
+      patches: |
+        0001-Disable-unapproved-CHACHA20-and-POLY1305-suppport.patch
+        0002-Port-from-x-crypto-hkdf-to-crypto-hkdf.patch
+
+  - runs: |
+      install -dm0755 "${{targets.destdir}}/usr/share/quic-go"
+      git rev-parse HEAD | tee "${{targets.destdir}}/usr/share/quic-go/commit.txt"
+      install -Dpm0755 -t "${{targets.destdir}}/usr/libexec/quic-go/" interop/run_endpoint.sh
+
+subpackages:
+  - name: quic-go-server-fips
+    description: Server binary for quic-go
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./interop/server/main.go
+          output: server
+          ldflags: -X github.com/quic-go/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)
+          go-package: go-fips
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - mkcert
+      pipeline:
+        - uses: test/go-fips-check
+        - name: Test server startup
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /certs /logs
+              cd /certs
+              mkcert localhost
+              mv localhost.pem cert.pem
+              mv localhost-key.pem priv.key
+            start: |
+              env QUIC_GO_LOG_LEVEL=debug TESTCASE="http3" server
+            expected_output: " "
+            post: |
+              set -x
+              netstat -tulpn | grep -F -e "443"
+
+              curl -k --http3 https://localhost:443 | grep -F -e "404 not found"
+
+              grep -F -e "Recieved initial packet" /logs/log.txt
+              grep -F -e "Adding connection ID" /logs/log.txt
+              grep -F -e "Sending coalesced packet" /logs/log.txt
+              grep -F -e "Sending packet 1" /logs/log.txt
+              grep -F -e "Installed 1-RTT Write keys (using TLS_AES_128_GCM_SHA256)" /logs/log.txt
+              grep -F -e "Closing connection" /logs/log.txt
+        - name: Check if ZeroRTT is functional
+          uses: test/daemon-check-output
+          with:
+            start: |
+              env QUIC_GO_LOG_LEVEL=debug TESTCASE="zerortt" server
+            expected_output: " "
+            post: |
+              netstat -tulpn | grep -F -e "443"
+
+              curl -k --http3 https://localhost:443 | grep -F -e "404 not found"
+
+              grep -F -e "Recieved initial packet" /logs/log.txt
+              grep -F -e "Adding connection ID" /logs/log.txt
+              grep -F -e "Sending coalesced packet" /logs/log.txt
+              grep -F -e "Sending packet 1" /logs/log.txt
+              grep -F -e "Installed 1-RTT Write keys (using TLS_AES_128_GCM_SHA256)" /logs/log.txt
+              grep -F -e "Closing connection" /logs/log.txt
+
+  - name: quic-go-client-fips
+    description: Client binary for quic-go
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./interop/client/main.go
+          output: client
+          ldflags: -X github.com/quic-go/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)
+          go-package: go-fips
+    test:
+      environment:
+        contents:
+          packages:
+            - strace
+      pipeline:
+        - uses: test/go-fips-check
+        - runs: mkdir -p /logs
+        # Entire functionality relies on the server existing
+        - uses: test/tw/help-check
+          with:
+            bins: client
+            expect-contains: Usage of
+        - runs: |
+            env TESTCASE=handshake strace -ff --trace=network client dummy_arg 2>&1 | grep -F -e "(443)"
+
+  - name: quic-go-compat-fips
+    description: Compatibility subpackage for upstream image
+    dependencies:
+      runtime:
+        - quic-go-fips
+        - quic-go-client-fips
+        - quic-go-server-fips
+        - quic-network-simulator # Need this for the `setup.sh` and others
+        - quic-network-simulator-compat # /wait-for-it.sh
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/quic-go
+          ln -s ../usr/share/quic-go/commit.txt ${{targets.subpkgdir}}/quic-go/commit.txt
+          ln -s ../usr/bin/server ${{targets.subpkgdir}}/quic-go/server
+          ln -s ../usr/bin/client ${{targets.subpkgdir}}/quic-go/client
+          ln -s ../usr/libexec/quic-go/run_endpoint.sh ${{targets.subpkgdir}}/quic-go/run_endpoint.sh
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - quic-go-compat-fips
+        - mkcert
+        - curl
+        - netcat-openbsd
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        stat /usr/share/quic-go/commit.txt | grep 0644
+    - name: Test server startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          echo "127.0.0.1 sim" >> /etc/hosts
+          mkdir -p /certs /logs
+          cd /certs
+          mkcert localhost
+          mv localhost.pem cert.pem
+          mv localhost-key.pem priv.key
+        start: |
+          sh -c 'cd /quic-go ; env TESTCASE="http3" ROLE=server ./run_endpoint.sh'
+        expected_output: |
+          Running QUIC server.
+        post: |
+          set -x
+          netstat -tulpn | grep -F -e ":::443"
+
+          # We do not need the network simulator functionality of this repo to actually run client tests
+          nc -l sim 57832 &
+          SPOOF_SIM_SERVER=$!
+
+          cd /quic-go
+          TESTCASE="http3" ROLE=client CLIENT_PARAMS=/linky ./run_endpoint.sh | grep -F -e "Starting QUIC client"
+          grep -F -e "Activating reading of packet info" /logs/log.txt
+
+          curl -k --http3 https://localhost:443 | grep -F -e "404 not found"
+
+          grep -F -e "Recieved initial packet" /logs/log.txt
+          grep -F -e "Adding connection ID" /logs/log.txt
+          grep -F -e "Sending coalesced packet" /logs/log.txt
+          grep -F -e "Sending packet 1" /logs/log.txt
+          grep -F -e "Installed 1-RTT Write keys (using TLS_AES_128_GCM_SHA256)" /logs/log.txt
+          grep -F -e "Closing connection" /logs/log.txt

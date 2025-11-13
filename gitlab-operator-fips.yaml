@@ -1,0 +1,80 @@
+package:
+  name: gitlab-operator-fips
+  version: "2.5.1"
+  epoch: 1 # GHSA-pwhc-rpq9-4c8w
+  description: Kubernetes Operator for GitLab Server
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://gitlab.com/gitlab-org/cloud-native/gitlab-operator
+      tag: ${{package.version}}
+      expected-commit: 3af34a7ba61befd5b792e95151d34ae09d2b43d6
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/containerd/containerd@v1.7.29
+
+  - uses: go/build
+    with:
+      packages: .
+      output: manager
+      go-package: go-fips
+
+update:
+  enabled: true
+  git: {}
+
+test:
+  environment:
+    contents:
+      packages:
+        - mkcert
+        - curl
+        - gitlab-operator-charts
+  pipeline:
+    # manager does not have a version flag
+    - uses: test/tw/help-check
+      with:
+        bins: manager
+        expect-contains: "Usage of manager"
+    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+    - name: Apply CRDs
+      runs: |
+        set -o pipefail
+        kubectl apply -f https://gitlab.com/gitlab-org/cloud-native/gitlab-operator/-/raw/master/deploy/chart/crds/gitlab.yaml
+    - name: Test operator daemon
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/k8s-webhook-server/serving-certs/
+          mkcert -install
+          mkcert -key-file /tmp/k8s-webhook-server/serving-certs/tls.key \
+                 -cert-file /tmp/k8s-webhook-server/serving-certs/tls.crt \
+                 localhost
+
+          CHART_VERSION=$(curl -sSL https://gitlab.com/gitlab-org/cloud-native/gitlab-operator/-/raw/${{package.version}}/CHART_VERSIONS | head -n1)
+          curl -sSL https://gitlab.com/gitlab-org/cloud-native/gitlab-operator/-/raw/${{package.version}}/config/samples/gitlab.yaml -o /tmp/gitlab-test.yaml
+
+          sed -i "s/X.Y.Z/${CHART_VERSION}/" /tmp/gitlab-test.yaml
+          sed -i "s/configureCertmanager: true/configureCertmanager: false/" /tmp/gitlab-test.yaml
+        start: manager
+        timeout: 30
+        expected_output: |
+          chart added to the catalog
+          starting manager
+          Starting webhook server
+          Starting Controller
+          Starting workers
+        post: |
+          #!/bin/sh -e
+          curl -fsSL http://localhost:6060/liveness
+          kubectl apply -f /tmp/gitlab-test.yaml
+          kubectl get gitlab gitlab
+          # Only checking if Gitlab initializes, since it needs jobs to become Available
+          phase=$(kubectl get gitlab gitlab -o jsonpath='{.status.phase}')
+          [[ "$phase" == "Preparing" || "$phase" == "Initialized" ]]

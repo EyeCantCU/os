@@ -1,0 +1,53 @@
+From 01086cc29702c6fbbe40a5051d0e4e7a40ca88d1 Mon Sep 17 00:00:00 2001
+From: James Page <james.page@chainguard.dev>
+Date: Wed, 12 Nov 2025 08:30:37 +0000
+Subject: [PATCH] Fix yaml-rest-compat-test plugin when BWC version unavailable
+
+The AbstractYamlRestCompatTestPlugin was calling .get() on an Optional
+that could be empty when no unreleased BWC version from the previous
+major version was found. This caused builds to fail with
+NoSuchElementException during gradle verification metadata generation
+and other scenarios where BWC version information is not fully
+initialized.
+
+The fix gracefully handles the missing BWC version by:
+- Using .orElse(null) instead of .get() to safely handle empty Optional
+- Registering disabled no-op versions of expected tasks when no BWC
+  version is available
+- Returning early to skip the full compatibility test setup
+
+This allows builds to proceed successfully even when backward
+compatibility version information is unavailable.
+---
+ .../compat/AbstractYamlRestCompatTestPlugin.java  | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/build-tools-internal/src/main/java/org/elasticsearch/gradle/internal/test/rest/compat/compat/AbstractYamlRestCompatTestPlugin.java b/build-tools-internal/src/main/java/org/elasticsearch/gradle/internal/test/rest/compat/compat/AbstractYamlRestCompatTestPlugin.java
+index b511702d1c7..9ac7f637f69 100644
+--- a/build-tools-internal/src/main/java/org/elasticsearch/gradle/internal/test/rest/compat/compat/AbstractYamlRestCompatTestPlugin.java
++++ b/build-tools-internal/src/main/java/org/elasticsearch/gradle/internal/test/rest/compat/compat/AbstractYamlRestCompatTestPlugin.java
+@@ -101,7 +101,20 @@ public abstract class AbstractYamlRestCompatTestPlugin implements Plugin<Project
+             .stream()
+             .filter(v -> v.getMajor() == currentMajor - 1)
+             .min(Comparator.reverseOrder())
+-            .get();
++            .orElse(null);
++        if (lastMinor == null) {
++            // No unreleased BWC version from previous major found, register no-op tasks and skip setup
++            project.getTasks().register("yamlRestCompatTestTransform", RestCompatTestTransformTask.class, task -> {
++                task.setEnabled(false);
++                task.setDescription("Compatibility test transform (disabled - no BWC version available)");
++            });
++            // Register the test task as a no-op
++            registerTestTask(project, yamlCompatTestSourceSet).configure(task -> {
++                task.setEnabled(false);
++                task.setDescription("Compatibility tests (disabled - no BWC version available)");
++            });
++            return;
++        }
+         String lastMinorProjectPath = buildParams.getBwcVersions().unreleasedInfo(lastMinor).gradleProjectPath();
+ 
+         // copy compatible rest specs
+-- 
+2.51.0
+

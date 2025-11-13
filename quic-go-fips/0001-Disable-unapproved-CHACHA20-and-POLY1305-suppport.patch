@@ -1,0 +1,301 @@
+From 92dd5086eb282b18df8a1ce45adcfe11c287ba1a Mon Sep 17 00:00:00 2001
+From: Dimitri John Ledkov <dimitri.ledkov@surgut.co.uk>
+Date: Mon, 27 Oct 2025 17:16:42 +0000
+Subject: [PATCH 1/2] Disable unapproved CHACHA20 and POLY1305 suppport
+
+diff --git a/fuzzing/handshake/fuzz.go b/fuzzing/handshake/fuzz.go
+index 659eb58d..621982d8 100644
+--- a/fuzzing/handshake/fuzz.go
++++ b/fuzzing/handshake/fuzz.go
+@@ -189,8 +189,6 @@ func runHandshake(runConfig [confLen]byte, messageConfig uint8, clientConf *tls.
+ 		resetCipherSuite = qtls.SetCipherSuite(tls.TLS_AES_128_GCM_SHA256)
+ 	case 1:
+ 		resetCipherSuite = qtls.SetCipherSuite(tls.TLS_AES_256_GCM_SHA384)
+-	case 3:
+-		resetCipherSuite = qtls.SetCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256)
+ 	default:
+ 	}
+ 	defer resetCipherSuite()
+diff --git a/integrationtests/self/handshake_test.go b/integrationtests/self/handshake_test.go
+index 3e2ddf91..2fd6b875 100644
+--- a/integrationtests/self/handshake_test.go
++++ b/integrationtests/self/handshake_test.go
+@@ -118,7 +118,6 @@ func TestHandshakeCipherSuites(t *testing.T) {
+ 	for _, suiteID := range []uint16{
+ 		tls.TLS_AES_128_GCM_SHA256,
+ 		tls.TLS_AES_256_GCM_SHA384,
+-		tls.TLS_CHACHA20_POLY1305_SHA256,
+ 	} {
+ 		t.Run(tls.CipherSuiteName(suiteID), func(t *testing.T) {
+ 			reset := qtls.SetCipherSuite(suiteID)
+diff --git a/internal/handshake/cipher_suite.go b/internal/handshake/cipher_suite.go
+index d8a381da..46a69fbb 100644
+--- a/internal/handshake/cipher_suite.go
++++ b/internal/handshake/cipher_suite.go
+@@ -6,8 +6,6 @@ import (
+ 	"crypto/cipher"
+ 	"crypto/tls"
+ 	"fmt"
+-
+-	"golang.org/x/crypto/chacha20poly1305"
+ )
+ 
+ // These cipher suite implementations are copied from the standard library crypto/tls package.
+@@ -27,8 +25,6 @@ func getCipherSuite(id uint16) *cipherSuite {
+ 	switch id {
+ 	case tls.TLS_AES_128_GCM_SHA256:
+ 		return &cipherSuite{ID: tls.TLS_AES_128_GCM_SHA256, Hash: crypto.SHA256, KeyLen: 16, AEAD: aeadAESGCMTLS13}
+-	case tls.TLS_CHACHA20_POLY1305_SHA256:
+-		return &cipherSuite{ID: tls.TLS_CHACHA20_POLY1305_SHA256, Hash: crypto.SHA256, KeyLen: 32, AEAD: aeadChaCha20Poly1305}
+ 	case tls.TLS_AES_256_GCM_SHA384:
+ 		return &cipherSuite{ID: tls.TLS_AES_256_GCM_SHA384, Hash: crypto.SHA384, KeyLen: 32, AEAD: aeadAESGCMTLS13}
+ 	default:
+@@ -54,20 +50,6 @@ func aeadAESGCMTLS13(key, nonceMask []byte) *xorNonceAEAD {
+ 	return ret
+ }
+ 
+-func aeadChaCha20Poly1305(key, nonceMask []byte) *xorNonceAEAD {
+-	if len(nonceMask) != aeadNonceLength {
+-		panic("tls: internal error: wrong nonce length")
+-	}
+-	aead, err := chacha20poly1305.New(key)
+-	if err != nil {
+-		panic(err)
+-	}
+-
+-	ret := &xorNonceAEAD{aead: aead}
+-	copy(ret.nonceMask[:], nonceMask)
+-	return ret
+-}
+-
+ // xorNonceAEAD wraps an AEAD by XORing in a fixed pattern to the nonce
+ // before each call.
+ type xorNonceAEAD struct {
+diff --git a/internal/handshake/handshake_helpers_test.go b/internal/handshake/handshake_helpers_test.go
+index a684c2cc..bf295e6c 100644
+--- a/internal/handshake/handshake_helpers_test.go
++++ b/internal/handshake/handshake_helpers_test.go
+@@ -31,5 +31,4 @@ func TestSplitHexString(t *testing.T) {
+ var cipherSuites = []*cipherSuite{
+ 	getCipherSuite(tls.TLS_AES_128_GCM_SHA256),
+ 	getCipherSuite(tls.TLS_AES_256_GCM_SHA384),
+-	getCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256),
+ }
+diff --git a/internal/handshake/header_protector.go b/internal/handshake/header_protector.go
+index 2c5ee42f..d25711fd 100644
+--- a/internal/handshake/header_protector.go
++++ b/internal/handshake/header_protector.go
+@@ -4,11 +4,8 @@ import (
+ 	"crypto/aes"
+ 	"crypto/cipher"
+ 	"crypto/tls"
+-	"encoding/binary"
+ 	"fmt"
+ 
+-	"golang.org/x/crypto/chacha20"
+-
+ 	"github.com/quic-go/quic-go/internal/protocol"
+ )
+ 
+@@ -29,8 +26,6 @@ func newHeaderProtector(suite *cipherSuite, trafficSecret []byte, isLongHeader b
+ 	switch suite.ID {
+ 	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384:
+ 		return newAESHeaderProtector(suite, trafficSecret, isLongHeader, hkdfLabel)
+-	case tls.TLS_CHACHA20_POLY1305_SHA256:
+-		return newChaChaHeaderProtector(suite, trafficSecret, isLongHeader, hkdfLabel)
+ 	default:
+ 		panic(fmt.Sprintf("Invalid cipher suite id: %d", suite.ID))
+ 	}
+@@ -78,57 +73,3 @@ func (p *aesHeaderProtector) apply(sample []byte, firstByte *byte, hdrBytes []by
+ 		hdrBytes[i] ^= p.mask[i+1]
+ 	}
+ }
+-
+-type chachaHeaderProtector struct {
+-	mask [5]byte
+-
+-	key          [32]byte
+-	isLongHeader bool
+-}
+-
+-var _ headerProtector = &chachaHeaderProtector{}
+-
+-func newChaChaHeaderProtector(suite *cipherSuite, trafficSecret []byte, isLongHeader bool, hkdfLabel string) headerProtector {
+-	hpKey := hkdfExpandLabel(suite.Hash, trafficSecret, []byte{}, hkdfLabel, suite.KeyLen)
+-
+-	p := &chachaHeaderProtector{
+-		isLongHeader: isLongHeader,
+-	}
+-	copy(p.key[:], hpKey)
+-	return p
+-}
+-
+-func (p *chachaHeaderProtector) DecryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
+-	p.apply(sample, firstByte, hdrBytes)
+-}
+-
+-func (p *chachaHeaderProtector) EncryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
+-	p.apply(sample, firstByte, hdrBytes)
+-}
+-
+-func (p *chachaHeaderProtector) apply(sample []byte, firstByte *byte, hdrBytes []byte) {
+-	if len(sample) != 16 {
+-		panic("invalid sample size")
+-	}
+-	for i := 0; i < 5; i++ {
+-		p.mask[i] = 0
+-	}
+-	cipher, err := chacha20.NewUnauthenticatedCipher(p.key[:], sample[4:])
+-	if err != nil {
+-		panic(err)
+-	}
+-	cipher.SetCounter(binary.LittleEndian.Uint32(sample[:4]))
+-	cipher.XORKeyStream(p.mask[:], p.mask[:])
+-	p.applyMask(firstByte, hdrBytes)
+-}
+-
+-func (p *chachaHeaderProtector) applyMask(firstByte *byte, hdrBytes []byte) {
+-	if p.isLongHeader {
+-		*firstByte ^= p.mask[0] & 0xf
+-	} else {
+-		*firstByte ^= p.mask[0] & 0x1f
+-	}
+-	for i := range hdrBytes {
+-		hdrBytes[i] ^= p.mask[i+1]
+-	}
+-}
+diff --git a/internal/handshake/hkdf_test.go b/internal/handshake/hkdf_test.go
+index e43084f3..53ea769d 100644
+--- a/internal/handshake/hkdf_test.go
++++ b/internal/handshake/hkdf_test.go
+@@ -11,7 +11,7 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-var tls13CipherSuites = []uint16{tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384, tls.TLS_CHACHA20_POLY1305_SHA256}
++var tls13CipherSuites = []uint16{tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384}
+ 
+ type cipherSuiteTLS13 struct {
+ 	ID     uint16
+diff --git a/internal/handshake/updatable_aead.go b/internal/handshake/updatable_aead.go
+index ef92ab1c..edb46b2e 100644
+--- a/internal/handshake/updatable_aead.go
++++ b/internal/handshake/updatable_aead.go
+@@ -160,8 +160,6 @@ func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite *cipherSuite)
+ 	switch suite.ID {
+ 	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384:
+ 		a.invalidPacketLimit = protocol.InvalidPacketLimitAES
+-	case tls.TLS_CHACHA20_POLY1305_SHA256:
+-		a.invalidPacketLimit = protocol.InvalidPacketLimitChaCha
+ 	default:
+ 		panic(fmt.Sprintf("unknown cipher suite %d", suite.ID))
+ 	}
+diff --git a/internal/handshake/updatable_aead_test.go b/internal/handshake/updatable_aead_test.go
+index dcf16c7..a3e348e 100644
+--- a/internal/handshake/updatable_aead_test.go
++++ b/internal/handshake/updatable_aead_test.go
+@@ -75,45 +75,6 @@ func bothSides(ev qlogwriter.Event) []qlogwriter.Event {
+ 	}
+ }
+ 
+-func TestChaChaTestVector(t *testing.T) {
+-	testCases := []struct {
+-		name            string
+-		version         protocol.Version
+-		expectedPayload []byte
+-		expectedPacket  []byte
+-	}{
+-		{
+-			version:         protocol.Version1,
+-			expectedPayload: splitHexString(t, "655e5cd55c41f69080575d7999c25a5bfb"),
+-			expectedPacket:  splitHexString(t, "4cfe4189655e5cd55c41f69080575d7999c25a5bfb"),
+-		},
+-		{
+-			version:         protocol.Version2,
+-			expectedPayload: splitHexString(t, "0ae7b6b932bc27d786f4bc2bb20f2162ba"),
+-			expectedPacket:  splitHexString(t, "5558b1c60ae7b6b932bc27d786f4bc2bb20f2162ba"),
+-		},
+-	}
+-
+-	for _, tc := range testCases {
+-		t.Run(fmt.Sprintf("QUIC %s", tc.version), func(t *testing.T) {
+-			secret := splitHexString(t, "9ac312a7f877468ebe69422748ad00a1 5443f18203a07d6060f688f30f21632b")
+-			aead := newUpdatableAEAD(utils.NewRTTStats(), nil, nil, tc.version)
+-			chacha := cipherSuites[2]
+-			require.Equal(t, tls.TLS_CHACHA20_POLY1305_SHA256, chacha.ID)
+-			aead.SetWriteKey(chacha, secret)
+-			const pnOffset = 1
+-			header := splitHexString(t, "4200bff4")
+-			payloadOffset := len(header)
+-			plaintext := splitHexString(t, "01")
+-			payload := aead.Seal(nil, plaintext, 654360564, header)
+-			require.Equal(t, tc.expectedPayload, payload)
+-			packet := append(header, payload...)
+-			aead.EncryptHeader(packet[pnOffset+4:pnOffset+4+16], &packet[0], packet[pnOffset:payloadOffset])
+-			require.Equal(t, tc.expectedPacket, packet)
+-		})
+-	}
+-}
+-
+ func TestUpdatableAEADHeaderProtection(t *testing.T) {
+ 	for _, v := range []protocol.Version{protocol.Version1, protocol.Version2} {
+ 		for _, cs := range cipherSuites {
+diff --git a/internal/protocol/protocol.go b/internal/protocol/protocol.go
+index a8813a66..d99f5ed1 100644
+--- a/internal/protocol/protocol.go
++++ b/internal/protocol/protocol.go
+@@ -154,6 +154,3 @@ const MaxConnIDLen = 20
+ // InvalidPacketLimitAES is the maximum number of packets that we can fail to decrypt when using
+ // AEAD_AES_128_GCM or AEAD_AES_265_GCM.
+ const InvalidPacketLimitAES = 1 << 52
+-
+-// InvalidPacketLimitChaCha is the maximum number of packets that we can fail to decrypt when using AEAD_CHACHA20_POLY1305.
+-const InvalidPacketLimitChaCha = 1 << 36
+diff --git a/interop/client/main.go b/interop/client/main.go
+index fcde0bf7..88e75c2d 100644
+--- a/interop/client/main.go
++++ b/interop/client/main.go
+@@ -18,7 +18,6 @@ import (
+ 	"github.com/quic-go/quic-go/http3"
+ 	"github.com/quic-go/quic-go/internal/handshake"
+ 	"github.com/quic-go/quic-go/internal/protocol"
+-	"github.com/quic-go/quic-go/internal/qtls"
+ 	"github.com/quic-go/quic-go/interop/http09"
+ 	"github.com/quic-go/quic-go/interop/utils"
+ )
+@@ -85,9 +84,6 @@ func runTestcase(testcase string) error {
+ 	case "handshake", "transfer", "retry":
+ 	case "keyupdate":
+ 		handshake.FirstKeyUpdateInterval = 100
+-	case "chacha20":
+-		reset := qtls.SetCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256)
+-		defer reset()
+ 	case "multiconnect":
+ 		return runMultiConnectTest(r, urls)
+ 	case "versionnegotiation":
+diff --git a/interop/server/main.go b/interop/server/main.go
+index a809186d..0ff46dfd 100644
+--- a/interop/server/main.go
++++ b/interop/server/main.go
+@@ -10,7 +10,6 @@ import (
+ 
+ 	"github.com/quic-go/quic-go"
+ 	"github.com/quic-go/quic-go/http3"
+-	"github.com/quic-go/quic-go/internal/qtls"
+ 	"github.com/quic-go/quic-go/interop/http09"
+ 	"github.com/quic-go/quic-go/interop/utils"
+ )
+@@ -53,10 +52,6 @@ func main() {
+ 	switch testcase {
+ 	case "versionnegotiation", "handshake", "retry", "transfer", "resumption", "multiconnect", "zerortt":
+ 		err = runHTTP09Server(tlsConf, quicConf, testcase == "retry")
+-	case "chacha20":
+-		reset := qtls.SetCipherSuite(tls.TLS_CHACHA20_POLY1305_SHA256)
+-		defer reset()
+-		err = runHTTP09Server(tlsConf, quicConf, false)
+ 	case "http3":
+ 		tlsConf.NextProtos = []string{http3.NextProtoH3}
+ 		err = runHTTP3Server(tlsConf, quicConf)
+-- 
+2.51.0
+

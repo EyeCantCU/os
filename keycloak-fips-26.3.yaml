@@ -1,7 +1,7 @@
 package:
   name: keycloak-fips-26.3
   version: "26.3.5"
-  epoch: 1 # GHSA-3p8m-j85q-pgmj
+  epoch: 4
   description: Open Source Identity and Access Management For Modern Applications and Services
   copyright:
     - license: Apache-2.0
@@ -29,7 +29,7 @@ environment:
   contents:
     packages:
       - bash
-      - bouncycastle-fips~2.1
+      - bouncycastle-fips
       - build-base
       - busybox
       - gcc-14-default
@@ -55,6 +55,8 @@ pipeline:
         disable-rhel-fips-check.patch
         classpath-script.patch
         kc.sh-misc-FIPS-related-fixes.patch
+        default-FIPS-mode-to-on.patch
+        pom-fips-provider-fixes.patch
 
   - uses: maven/pombump
     with:
@@ -73,12 +75,14 @@ pipeline:
       # Gross hack to work around broken NAPI ast-grep module that has
       # undefined symbol: static_assert
       export LD_PRELOAD=/tmp/preload.so
-      ./mvnw clean install -DskipTests -Dmaven.test.skip=true -DskipITs -DskipProtoLock=true -Pdistribution
+      export KC_FEATURES=fips
+      ./mvnw clean install -DskipTests -Dmaven.test.skip=true -DskipITs -DskipProtoLock=true -Pdistribution -Dkc.features=fips
+      ./mvnw clean install -DskipTests -Dmaven.test.skip=true -DskipITs -DskipProtoLock=true -Pdistribution -pl crypto/fips1402
       unset LD_PRELOAD
 
       mkdir -p ${{targets.destdir}}/usr/share/java
       unzip -d ${{targets.destdir}}/usr/share/java quarkus/dist/target/keycloak-*.zip
-      cp -avR ${{targets.destdir}}/usr/share/java/keycloak-* ${{targets.destdir}}/usr/share/java/keycloak
+      mv ${{targets.destdir}}/usr/share/java/keycloak-* ${{targets.destdir}}/usr/share/java/keycloak
 
       # Create an empty data directory for keycloak. Required by the UI to store some data.
       mkdir -p ${{targets.destdir}}/usr/share/java/keycloak/data
@@ -88,20 +92,46 @@ pipeline:
         ln -sf /usr/share/java/keycloak/bin/$i ${{targets.destdir}}/usr/bin/$i
       done
 
-      # Remove any non-FIPS bcprov JARs dynamically across all possible locations
+      # Actually remove any non-FIPS bcprov JARs dynamically across all possible locations
       find ${{targets.destdir}} -type f \( \
-          -name "bcprov-jdk*.jar" -o \
-          -name "bcpkix-jdk*.jar" -o \
-          -name "bcutil-jdk*.jar" \) -delete
+          -name "*bcprov-jdk*.jar" -o \
+          -name "*bcpkix-jdk*.jar" -o \
+          -name "*bcutil-jdk*.jar" \) -delete
 
-      # Remove any existing providers
-      rm -r ${{targets.contextdir}}/usr/share/java/keycloak/providers/*
-
+      # Fips fips1402 provider, aka bcfips wrapper
+      # Symlink keycloak-crypto-fips1402 into all classpath locations
       mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/providers
+      cp ./crypto/fips1402/target/keycloak-crypto-fips1402-${{package.version}}.jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/keycloak-crypto-fips1402.jar
+
       ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/providers/
 
       mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib
       ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
+      ln -s ../../../providers/keycloak-crypto-fips1402.jar ${{targets.contextdir}}/usr/share/java/keycloak/bin/client/lib/
+
+      mkdir -p ${{targets.contextdir}}/usr/share/java/keycloak/lib/lib/main
+      ln -s /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/share/java/keycloak/lib/lib/main/
+      ln -s ../../../providers/keycloak-crypto-fips1402.jar ${{targets.contextdir}}/usr/share/java/keycloak/lib/lib/main/
+
+      # Replace vendored BC FIPS jars with relative symlinks to system libraries (without version numbers)
+      # Keeps vendored naming (org.bouncycastle.*.jar) to satisfy Quarkus metadata
+      cd ${{targets.contextdir}}/usr/share/java/keycloak/lib/lib/main
+      for vendored_jar in org.bouncycastle.bc*-fips-*.jar; do
+        [ -f "$vendored_jar" ] || continue
+        # Extract base name: org.bouncycastle.bc-fips-2.0.0.jar -> bc-fips
+        base_name=$(echo "$vendored_jar" | sed 's/org\.bouncycastle\.\(.*\)-fips-.*/\1/')
+        system_jar="${base_name}-fips.jar"
+        [ -f "$system_jar" ] && rm -f "$vendored_jar" && ln -s "$system_jar" "$vendored_jar"
+      done
+      cd -
+
+      # CRITICAL: Regenerate Quarkus metadata with FIPS enabled
+      # This ensures that the Quarkus classloader knows to ignore non-FIPS bcprov artifacts
+      # and only load the FIPS-compliant ones we've installed above.
+      cd ${{targets.contextdir}}/usr/share/java/keycloak
+      KC_DB=postgres KC_BOOTSTRAP_ADMIN_USERNAME=temp KC_BOOTSTRAP_ADMIN_PASSWORD=temp \
+        ./bin/kc.sh build --features=fips --db=postgres
+      cd -
 
 subpackages:
   - name: ${{package.name}}-operator
@@ -202,6 +232,7 @@ subpackages:
           sed -i 's/ensure_user_exists/# ensure_user_exists/g' /opt/iamguarded/scripts/keycloak/postunpack.sh
           sed -i 's/am_i_root/# am_i_root/g' /opt/iamguarded/scripts/keycloak/setup.sh
           sed -i 's/hostname --fqdn/hostname -f/g' /opt/iamguarded/scripts/keycloak-env.sh
+          sed -i 's/am_i_root/false/g' /opt/iamguarded/scripts/keycloak/run.sh
 
           # The `--userspec`` flag belongs to GNU's chroot, whereas we are use BusyBox's. As a workaround, use `su-exec` instead.
           sed -i 's|exec chroot --userspec="$userspec" /|exec chroot / su-exec "$userspec"|' /opt/iamguarded/scripts/libos.sh
@@ -249,6 +280,7 @@ subpackages:
           KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-}
           KC_BOOTSTRAP_ADMIN_PASSWORD: $KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD
           KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+          KEYCLOAK_DAEMON_USER: root
       pipeline:
         - uses: iamguarded/test-compat
           with:
