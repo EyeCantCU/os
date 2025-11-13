@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/spf13/cobra"
@@ -36,6 +37,7 @@ var (
 	dbHashes              []string
 	trustedLaunch         bool
 	apiCallAttempts       int
+	apiCallBackoff        time.Duration
 )
 
 const (
@@ -93,6 +95,7 @@ Examples:
 	rootCmd.Flags().IntVar(&deleteJobs, "delete-jobs", runtime.NumCPU()+1, "Parallel jobs for deletion")
 	rootCmd.Flags().StringSliceVar(&dbHashes, "db-hash", []string{}, "Secureboot db base64 encoded hashes to add")
 	rootCmd.Flags().IntVar(&apiCallAttempts, "api-attempts", 3, "Times to attempt Azure API calls")
+	rootCmd.Flags().DurationVar(&apiCallBackoff, "api-backoff", 5*time.Second, "Backoff betweeen failed API calls")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -223,6 +226,7 @@ func runUpload(cmd *cobra.Command, args []string) error {
 		tags:           azTags,
 		dbHashes:       dbHashes,
 		Attempts:       apiCallAttempts,
+		AttemptBackoff: apiCallBackoff,
 	}
 	err = createImageVersion(ctx, clients, opts, verbose)
 	if err != nil {

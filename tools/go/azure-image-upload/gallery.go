@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -185,6 +186,7 @@ type createImageVersionOpts struct {
 	tags           map[string]*string
 	dbHashes       []string
 	Attempts       int
+	AttemptBackoff time.Duration
 }
 
 func createImageVersion(ctx context.Context, clients *AzureClients, opts *createImageVersionOpts, verbose bool) error {
@@ -240,7 +242,7 @@ func createImageVersion(ctx context.Context, clients *AzureClients, opts *create
 		return clients.ImageVersions.BeginCreateOrUpdate(ctx, opts.resourceGroup, opts.galleryName, opts.definitionName, opts.version, imageVersion, nil)
 	}
 
-	poller, err := tryAPICall(makeVer, opts.Attempts)
+	poller, err := tryAPICall(makeVer, opts.Attempts, opts.AttemptBackoff)
 	if err != nil {
 		return fmt.Errorf("failed to start image version creation: %w", err)
 	}
