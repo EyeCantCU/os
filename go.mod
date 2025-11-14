@@ -1,6 +1,6 @@
 module chainguard.dev/wolfi-vm
 
-go 1.25
+go 1.25.3
 
 require (
 	chainguard.dev/apko v0.30.20
@@ -19,7 +19,7 @@ require (
 	github.com/canonical/go-efilib v1.6.0
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/chainguard-dev/yam v0.2.31
-	github.com/chainguard-images/images-private v0.0.0-20251021212256-84aeb4666e96
+	github.com/chainguard-images/images-private v0.0.0-20251114223733-e95dee04c731
 	github.com/charmbracelet/log v0.4.2
 	github.com/dmarkham/enumer v1.6.1
 	github.com/godbus/dbus/v5 v5.1.0
