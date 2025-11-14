@@ -6,12 +6,21 @@ package:
   copyright:
     - license: BSD-3-Clause
 
+data:
+  - name: py-versions
+    items:
+      3.10: "310"
+      3.11: "311"
+      3.12: "312"
+      3.13: "313"
+
 environment:
   contents:
     packages:
+      - bash
       - build-base
       - busybox
-      - cmocka-dev
+      - py3-supported-pip
 
 pipeline:
   - uses: git-checkout
@@ -20,18 +29,19 @@ pipeline:
       tag: ${{package.version}}
       expected-commit: accf4df62f1fba6f92cae692985d27063552601c
 
-  - uses: cmake/configure
-    with:
-      opts: |
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCAPSTONE_USE_ARCH_REGISTRATION=1 \
-        -DCAPSTONE_BUILD_CSTEST=1 \
-        -DCAPSTONE_BUILD_SHARED_LIBS=ON \
-        -DENABLE_ASAN=1
+  - name: "Build"
+    runs: |
+      ./make.sh gcc
 
-  - uses: cmake/build
+  - name: "Install"
+    runs: |
+      ./make.sh install
 
-  - uses: cmake/install
+  - name: "Relocate libraries to their expected locations"
+    runs: |
+      mkdir -p ${{targets.contextdir}}/usr/include/capstone ${{targets.contextdir}}/usr/lib
+      cp -a /usr/include/capstone/* ${{targets.contextdir}}/usr/include/capstone
+      cp -a /usr/lib/libcapstone* ${{targets.contextdir}}/usr/lib
 
   - name: "Run test cases with our build"
     runs: |
@@ -49,7 +59,47 @@ subpackages:
       - uses: split/dev
     test:
       pipeline:
-        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+  - range: py-versions
+    name: py${{range.key}}-${{package.name}}
+    description: ${{package.name}} bindings for python${{range.key}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-dev
+        - py${{range.key}}-setuptools
+      provides:
+        - py3-${{package.name}}
+      provider-priority: ${{range.value}}
+    pipeline:
+      - runs: |
+          cd bindings/python
+          LIBCAPSTONE_PATH="${{targets.contextdir}}/usr/lib" \
+          python${{range.key}} setup.py install --prefix=/usr --root="${{targets.contextdir}}"
+          cd -
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{range.key}}
+      pipeline:
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: capstone
+        - runs: |
+            cat <<EOF > test1.py
+            from capstone import *
+
+            CODE = b"\x55\x48\x8b\x05\xb8\x13\x00\x00"
+
+            md = Cs(CS_ARCH_X86, CS_MODE_64)
+            for i in md.disasm(CODE, 0x1000):
+                print("0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
+            EOF
+            python3 test1.py
 
 update:
   enabled: true
