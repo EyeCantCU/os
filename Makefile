@@ -625,8 +625,8 @@ azure-marketplace-install-extension:
 azure-marketplace-update-technical-plan: $(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name)))
 $(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name))): azure-marketplace-update-technical-plan-%: output/azure-marketplace-update-technical-plan-%s.json
 
-output/azure-marketplace-update-technical-plan-%s.json: AZNAME=$(PREFIX)-$*
-output/azure-marketplace-update-technical-plan-%s.json: azure-marketplace-install-extension
+output/azure-marketplace-update-technical-plan-%.json: AZNAME=$(PREFIX)-$*
+output/azure-marketplace-update-technical-plan-%.json: azure-marketplace-install-extension
 # We don't want to publish devel or testing images by mistake
 ifneq ("$(AZGALLERY)","eap_chainguard_vms")
 	$(error This gallery is not allowed listed in the makefile if you want to upload images from it please update the makefile.)
