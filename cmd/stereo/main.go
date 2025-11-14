@@ -57,10 +57,8 @@ func supportsApkoArchitecture(cfg *apko_types.ImageConfiguration, arch string) b
 }
 
 var dirToRepo map[string]string = map[string]string{
-	// TODO: These aren't all apk.cgr.dev because there is a
-	// meaningful diff for build dependencies of some packages.
-	"os":                  "https://packages.wolfi.dev/os",
-	"extra-packages":      "https://packages.cgr.dev/extras",
+	"os":                  "https://apk.cgr.dev/chainguard",
+	"extra-packages":      "https://apk.cgr.dev/extra-packages",
 	"enterprise-packages": "https://apk.cgr.dev/chainguard-private",
 }
 
@@ -90,12 +88,14 @@ func main() {
 	root.AddCommand(bucketsCmd())
 	root.AddCommand(buildDepsCmd())
 	root.AddCommand(bumpCmd())
+	root.AddCommand(checkCmd())
 	root.AddCommand(imageDependenciesCmd())
 	root.AddCommand(lintCmd())
 	root.AddCommand(makeCmd())
 	root.AddCommand(impactCmd())
 	root.AddCommand(seedDependenciesCmd())
 	root.AddCommand(unguardedCmd())
+	root.AddCommand(outdatedCmd())
 	root.AddCommand(vmDependenciesCmd())
 	root.AddCommand(withdrawCmd())
 	root.AddCommand(transitionCmd())
@@ -238,7 +238,7 @@ func NewOrigins(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (m
 		g.Go(func() error {
 			c, err := config.ParseConfiguration(ctx, path, config.WithFS(fsys))
 			if err != nil {
-				return err
+				return fmt.Errorf("parsing %q: %w", path, err)
 			}
 
 			// Resolve all `uses` used by the pipeline. This updates the set of
