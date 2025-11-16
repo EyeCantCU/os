@@ -1,0 +1,160 @@
+From 30f363be1cf07468fa45fb80fe274407a456d85a Mon Sep 17 00:00:00 2001
+From: Dimitri John Ledkov <dimitri.ledkov@surgut.co.uk>
+Date: Wed, 20 Aug 2025 00:23:14 +0100
+Subject: [PATCH] Add quiche.patch
+
+The goal is to add a trivial ifdef to quiche from:
+- https://github.com/google/quiche/pull/93
+
+If you are reviewing this on github, you are likely looking at a
+patch, of a patch, to patch a vendored copy, in a vendored module.
+
+For more clarity please rewatch Inception the movie, especially the
+last scene with the spinning top.
+---
+ bazel/external/quiche.patch | 42 +++++++++++++++++++++++++++++++++++++
+ bazel/repositories.bzl      |  2 ++
+ 2 files changed, 44 insertions(+)
+ create mode 100644 bazel/external/quiche.patch
+
+diff --git a/bazel/external/quiche.patch b/bazel/external/quiche.patch
+new file mode 100644
+index 0000000000..8c61a51f28
+--- /dev/null
++++ b/bazel/external/quiche.patch
+@@ -0,0 +1,119 @@
++From 11fa5e1921749bffd4eadbd52bc4c14157c022e8 Mon Sep 17 00:00:00 2001
++From: Daniel Watkins <daniel@daniel-watkins.co.uk>
++Date: Fri, 14 Nov 2025 12:02:21 -0500
++Subject: [PATCH] Revert "Remove stale BORINGSSL_API_VERSION ifdefs"
++
++This reverts commit d825ed231325b00d09e51adbd01fefadabeb76e0.
++---
++ quiche/quic/core/crypto/tls_server_connection.cc | 5 +++++
++ quiche/quic/core/tls_client_handshaker.cc        | 6 ++++++
++ quiche/quic/core/tls_client_handshaker_test.cc   | 2 ++
++ quiche/quic/core/tls_server_handshaker.cc        | 2 ++
++ 4 files changed, 15 insertions(+)
++
++diff --git a/quiche/quic/core/crypto/tls_server_connection.cc b/quiche/quic/core/crypto/tls_server_connection.cc
++index 06c582508..bedfa30a5 100644
++--- a/quiche/quic/core/crypto/tls_server_connection.cc
+++++ b/quiche/quic/core/crypto/tls_server_connection.cc
++@@ -76,6 +76,7 @@ absl::Status TlsServerConnection::ConfigureSSL(
++ void TlsServerConnection::SetCertChain(
++     const std::vector<CRYPTO_BUFFER*>& cert_chain,
++     const std::string& trust_anchor_id) {
+++#if defined(BORINGSSL_API_VERSION) && BORINGSSL_API_VERSION >= 36
++   if (GetQuicReloadableFlag(enable_tls_trust_anchor_ids)) {
++     QUIC_RELOADABLE_FLAG_COUNT_N(enable_tls_trust_anchor_ids, 1, 2);
++     bssl::UniquePtr<SSL_CREDENTIAL> credential(SSL_CREDENTIAL_new_x509());
++@@ -96,6 +97,10 @@ void TlsServerConnection::SetCertChain(
++       SSL_CREDENTIAL_set_must_match_issuer(credential.get(), 1);
++     }
++     SSL_add1_credential(ssl(), credential.get());
+++#else
+++  (void)trust_anchor_id;  // Suppress unused parameter error.
+++  if (false) {
+++#endif
++   } else {
++     SSL_set_chain_and_key(ssl(), cert_chain.data(), cert_chain.size(), nullptr,
++                           &TlsServerConnection::kPrivateKeyMethod);
++diff --git a/quiche/quic/core/tls_client_handshaker.cc b/quiche/quic/core/tls_client_handshaker.cc
++index 7b5bf9719..00f56edb5 100644
++--- a/quiche/quic/core/tls_client_handshaker.cc
+++++ b/quiche/quic/core/tls_client_handshaker.cc
++@@ -89,8 +89,10 @@ bool TlsClientHandshaker::CryptoConnect() {
++ 
++   // TODO(b/193650832) Add SetFromConfig to QUIC handshakers and remove reliance
++   // on session pointer.
+++#if BORINGSSL_API_VERSION >= 16
++   // Ask BoringSSL to randomize the order of TLS extensions.
++   SSL_set_permute_extensions(ssl(), true);
+++#endif  // BORINGSSL_API_VERSION
++ 
++   // Set the SNI to send, if any.
++   SSL_set_connect_state(ssl());
++@@ -154,6 +156,7 @@ bool TlsClientHandshaker::CryptoConnect() {
++   // if set.
++   if (GetQuicReloadableFlag(enable_tls_trust_anchor_ids)) {
++     QUIC_RELOADABLE_FLAG_COUNT_N(enable_tls_trust_anchor_ids, 2, 2);
+++#if defined(BORINGSSL_API_VERSION) && BORINGSSL_API_VERSION >= 36
++     if (tls_connection_.ssl_config().trust_anchor_ids.has_value()) {
++       if (!SSL_set1_requested_trust_anchors(
++               ssl(),
++@@ -165,6 +168,7 @@ bool TlsClientHandshaker::CryptoConnect() {
++         return false;
++       }
++     }
+++#endif
++   }
++ 
++   // Start the handshake.
++@@ -523,7 +527,9 @@ QuicAsyncStatus TlsClientHandshaker::VerifyCertChain(
++     const std::vector<std::string>& certs, std::string* error_details,
++     std::unique_ptr<ProofVerifyDetails>* details, uint8_t* out_alert,
++     std::unique_ptr<ProofVerifierCallback> callback) {
+++#if defined(BORINGSSL_API_VERSION) && BORINGSSL_API_VERSION >= 36
++   matched_trust_anchor_id_ = SSL_peer_matched_trust_anchor(ssl());
+++#endif
++ 
++   const uint8_t* ocsp_response_raw;
++   size_t ocsp_response_len;
++diff --git a/quiche/quic/core/tls_client_handshaker_test.cc b/quiche/quic/core/tls_client_handshaker_test.cc
++index 79864f0f7..58d26a0f5 100644
++--- a/quiche/quic/core/tls_client_handshaker_test.cc
+++++ b/quiche/quic/core/tls_client_handshaker_test.cc
++@@ -366,6 +366,7 @@ TEST_P(TlsClientHandshakerTest, HandshakeWithAsyncProofVerifier) {
++   EXPECT_TRUE(stream()->one_rtt_keys_available());
++ }
++ 
+++#if defined(BORINGSSL_API_VERSION) && BORINGSSL_API_VERSION >= 36
++ TEST_P(TlsClientHandshakerTest, HandshakeWithTrustAnchorIds) {
++   SetQuicReloadableFlag(enable_tls_trust_anchor_ids, true);
++   const std::string kTestTrustAnchorId = {0x03, 0x01, 0x02, 0x03};
++@@ -434,6 +435,7 @@ TEST_P(TlsClientHandshakerTest, HandshakeWithEmptyTrustAnchorIdList) {
++   ASSERT_TRUE(stream()->encryption_established());
++   EXPECT_TRUE(callback_ran);
++ }
+++#endif
++ 
++ TEST_P(TlsClientHandshakerTest, Resumption) {
++   // Disable 0-RTT on the server so that we're only testing 1-RTT resumption:
++diff --git a/quiche/quic/core/tls_server_handshaker.cc b/quiche/quic/core/tls_server_handshaker.cc
++index d667ab80c..4293d04e5 100644
++--- a/quiche/quic/core/tls_server_handshaker.cc
+++++ b/quiche/quic/core/tls_server_handshaker.cc
++@@ -943,6 +943,7 @@ ssl_select_cert_result_t TlsServerHandshaker::EarlySelectCertCallback(
++ 
++     int use_alps_new_codepoint = 0;
++ 
+++#if BORINGSSL_API_VERSION >= 27
++     alps_new_codepoint_received_ = SSL_early_callback_ctx_extension_get(
++         client_hello, TLSEXT_TYPE_application_settings, &unused_extension_bytes,
++         &unused_extension_len);
++@@ -953,6 +954,7 @@ ssl_select_cert_result_t TlsServerHandshaker::EarlySelectCertCallback(
++     }
++     QUIC_DLOG(INFO) << "ALPS use new codepoint: " << use_alps_new_codepoint;
++     SSL_set_alps_use_new_codepoint(ssl(), use_alps_new_codepoint);
+++#endif  // BORINGSSL_API_VERSION
++ 
++     if (use_alps_new_codepoint == 0) {
++       QUIC_CODE_COUNT(quic_gfe_alps_use_old_codepoint);
++-- 
++2.43.0
+diff --git a/bazel/repositories.bzl b/bazel/repositories.bzl
+index 211e9d8060..9900c53964 100644
+--- a/bazel/repositories.bzl
++++ b/bazel/repositories.bzl
+@@ -775,6 +775,8 @@ def _com_github_google_quiche():
+         name = "com_github_google_quiche",
+         patch_cmds = ["find quiche/ -type f -name \"*.bazel\" -delete"],
+         build_file = "@envoy//bazel/external:quiche.BUILD",
++        patches = ["@envoy//bazel/external:quiche.patch"],
++        patch_args = ["-p1"],
+     )
+ 
+ def _com_googlesource_googleurl():
+-- 
+2.48.1
+
