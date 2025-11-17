@@ -623,7 +623,7 @@ azure-marketplace-install-extension:
 
 .PHONY: azure-marketplace-update-technical-plan
 azure-marketplace-update-technical-plan: $(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name)))
-$(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name))): azure-marketplace-update-technical-plan-%: output/azure-marketplace-update-technical-plan-%s.json
+$(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name))): azure-marketplace-update-technical-plan-%: output/azure-marketplace-update-technical-plan-%.json
 
 output/azure-marketplace-update-technical-plan-%.json: AZNAME=$(PREFIX)-$*
 output/azure-marketplace-update-technical-plan-%.json: azure-marketplace-install-extension
