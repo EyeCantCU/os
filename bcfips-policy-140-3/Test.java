@@ -235,10 +235,11 @@ public class Test {
 
         String expectedAlgorithm = "ENTROPY";
         String expectedProvider = "BCRNG";
-        String environmentSetting = System.getenv("ENTROPY");
-        if (environmentSetting != null && environmentSetting.equals("KERNEL")) {
-                expectedAlgorithm = "NativePRNGBlocking";
-                expectedProvider = "SUN";
+        String expectedConfig = "org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider C:HYBRID;ENABLE{ALL};";
+        if ("file:/dev/random".equals(Security.getProperty("securerandom.source"))) {
+            expectedAlgorithm = "NativePRNGBlocking";
+            expectedProvider = "SUN";
+            expectedConfig = "org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider C:DEFRND[SHA256];ENABLE{ALL};";
         }
 
         // Validate BC RNG JENT configuration
@@ -248,6 +249,10 @@ public class Test {
         }
         if (!expectedProvider.equals(secureRandom.getProvider().getName())) {
             System.err.println("SecureRandom provider should be " + expectedProvider);
+            System.exit(1);
+        }
+        if (!expectedConfig.equals(Security.getProperty("security.provider.1"))) {
+            System.err.println("BCFIPS config should be " + expectedConfig);
             System.exit(1);
         }
         System.out.println("SecureRandom configuration test passed");

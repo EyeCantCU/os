@@ -401,7 +401,6 @@ harden_stig_sysctl()
 		"net.ipv6.conf.default.accept_ra=0"
 		"net.ipv6.conf.default.accept_redirects=0"
 		"net.ipv6.conf.default.accept_source_route=0"
-		"user.max_user_namespaces=0"
 	)
 
 	{
@@ -449,7 +448,7 @@ harden_stig_kmods()
 
 harden_stig_systemd_target()
 {
-	ln -sf /usr/lib/systemd/system/multi-user.target ${sysroot}/etc/systemd/system/default.target
+	ln -sf /usr/lib/systemd/system/multi-user.target "${sysroot}/etc/systemd/system/default.target"
 }
 
 apply_pwquality_config()
@@ -489,17 +488,34 @@ harden_stig_pam()
 			bail "Failed to configure pwquality with '${option} ${value}'"
 		fi
 	done
-	sed -i "s|^#? *enforce_for_root|enforce_for_root|g" "${sysroot}/etc/security/pwquality.conf"
+
+	sed -i "s|^# enforce_for_root|enforce_for_root|g" "${sysroot}/etc/security/pwquality.conf"
+
+	sed -i '/^auth.*sufficient.*pam_rootok.so/a auth required pam_wheel.so use_uid' "${sysroot}/etc/pam.d/su"
+
+	sed -i '/^auth.*sufficient.*pam_rootok.so/a auth required pam_wheel.so use_uid' "${sysroot}/etc/pam.d/su"
 	for i in base-password base-auth base-account; do
 		sed -i '/^password required/i password requisite pam_pwquality.so' "${sysroot}/etc/pam.d/$i"
 		sed -i 's|nullok||g' "${sysroot}/etc/pam.d/$i"
-		echo 'auth        required      pam_faillock.so preauth silent' >> "${sysroot}/etc/pam.d/$i"
-		echo 'auth        required      pam_faillock.so authfail' >> "${sysroot}/etc/pam.d/$i"
-		echo 'account     required      pam_faillock.so' >> "${sysroot}/etc/pam.d/$i"
+		sed -i 's/^\(password.*pam_unix\.so.*\)$/\1 rounds=100000/' "${sysroot}/etc/pam.d/$i"
+		sed -i 's/^password.*required.*pam_unix\.so/password sufficient pam_unix.so/' "${sysroot}/etc/pam.d/$i"
+		if ! grep -q pam_faillock.so "${sysroot}/etc/pam.d/$i"; then
+			echo 'auth        required      pam_faillock.so preauth silent' >> "${sysroot}/etc/pam.d/$i"
+			echo 'auth        sufficient    pam_unix.so try_first_pass' >> "${sysroot}/etc/pam.d/$i"
+			echo 'auth        required      pam_faillock.so authfail' >> "${sysroot}/etc/pam.d/$i"
+			echo 'account     required      pam_faillock.so' >> "${sysroot}/etc/pam.d/$i"
+			echo 'account     required      pam_unix.so' >> "${sysroot}/etc/pam.d/$i"
+		fi
 	done
 	# TODO: fix the benchmark to search our own paths
 	ln -sf /etc/pam.d/base-password "${sysroot}/etc/pam.d/password-auth"
 	ln -sf /etc/pam.d/base-password "${sysroot}/etc/pam.d/system-auth"
+
+	cat > "${sysroot}/etc/pam.d/postlogin" << 'EOF'
+#%PAM-1.0
+# Display last login/logon information
+session     optional      pam_lastlog.so showfailed
+EOF
 }
 
 harden_stig_systemd_ctrlaltdel()
@@ -521,6 +537,39 @@ harden_stig_fixnews()
 	chown 0:0 "${sysroot}/usr/lib/news"
 }
 
+harden_stig_faillock()
+{
+	sed -i 's|^# dir = .*|dir = /var/log/faillock|' "${sysroot}/etc/security/faillock.conf"
+	sed -i 's/^# audit/audit/' "${sysroot}/etc/security/faillock.conf"
+	sed -i 's/^# deny = .*/deny = 3/' "${sysroot}/etc/security/faillock.conf"
+	sed -i 's/^# even_deny_root/even_deny_root/' "${sysroot}/etc/security/faillock.conf"
+	sed -i 's/^# fail_interval.*/fail_interval = 900/' "${sysroot}/etc/security/faillock.conf"
+	sed -i 's/^# unlock_time.*/unlock_time = 0/' "${sysroot}/etc/security/faillock.conf"
+}
+
+harden_stig_logindefs()
+{
+	echo "PASS_MAX_DAYS 60" >> "${sysroot}/etc/login.defs"
+	echo "PASS_MIN_DAYS 1" >> "${sysroot}/etc/login.defs"
+	echo "ENCRYPT_METHOD SHA512" >> "${sysroot}/etc/login.defs"
+	echo "FAIL_DELAY 4" >> "${sysroot}/etc/login.defs"
+	echo "CREATE_HOME yes" >> "${sysroot}/etc/login.defs"
+	echo "UMASK 077" >> "${sysroot}/etc/login.defs"
+}
+
+harden_stig_limits()
+{
+	echo "* hard maxlogins 10" >> "${sysroot}/etc/security/limits.conf"
+	echo "* hard core 0" >> "${sysroot}/etc/security/limits.conf"
+}
+
+harden_stig_selinux_sudo()
+{
+	cat << "EOF" > "${sysroot}/etc/sudoers.d/11-stig-selinux.conf"
+%wheel ALL=(ALL) TYPE=sysadm_t ROLE=sysadm_r ALL
+EOF
+}
+
 harden_stig()
 {
 	harden_stig_sshd
@@ -533,6 +582,10 @@ harden_stig()
 	harden_stig_systemd_ctrlaltdel
 	harden_stig_systemd_coredump
 	harden_stig_fixnews
+	harden_stig_faillock
+	harden_stig_logindefs
+	harden_stig_limits
+	harden_stig_selinux_sudo
 }
 
 main()

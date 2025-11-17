@@ -1,10 +1,10 @@
 package:
   name: intel-onemkl
   version: "2025.3.0.462"
-  epoch: 0
+  epoch: 1
   description: Intel® oneAPI Math Kernel Library
   copyright:
-    - license: PROPRIETARY
+    - license: Intel
 
 environment:
   contents:
@@ -240,6 +240,7 @@ subpackages:
       runtime:
         - intel-oneapi-mkl-cg=${{package.full-version}}
         - intel-oneapi-mkl-core=${{package.full-version}}
+        - intel-oneapi-mkl-core-static-dev=${{package.full-version}}
         - intel-oneapi-mkl-classic-include=${{package.full-version}}
         - intel-oneapi-common-vars=${{package.full-version}}
         - intel-oneapi-common-licensing=${{package.full-version}}
@@ -259,26 +260,24 @@ subpackages:
           srclib="$src/lib"
           destlib="$dest/lib"
           mkdir -p "$destlib"
-          mv \
-            "$srclib"/libmkl_blas95_*.a    \
-            "$srclib/libmkl_core.a"        \
-            "$srclib/"libmkl_gf_*.a        \
-            "$srclib"/libmkl_gnu_thread.a  \
-            "$srclib"/libmkl_intel_*.a     \
-            "$srclib"/libmkl_lapack95_*.a  \
-            "$srclib"/libmkl_sequential.a  \
-            "$srclib"/libmkl_tbb_thread.a  \
-            "$srclib"/cmake                \
-            "$srclib"/pkgconfig            \
-            "$destlib"
 
-          mkdir -p "$dest"/share/mkl
-          mv "$src/share/mkl/interfaces" "$dest"/share/mkl
+          mkdir -p "$destlib/pkgconfig"
+          for pc in "$srclib"/pkgconfig/*; do
+            case "$pc" in
+              "$srclib"/pkgconfig/mkl-static-*)
+                continue
+                ;;
+              *)
+                mv "$pc" "$destlib/pkgconfig"
+                ;;
+            esac
+          done
     test:
       environment:
         contents:
           packages:
             - build-base
+            - posix-libc-utils # ldd
         environment:
           C_INCLUDE_PATH: "/opt/intel/oneapi/mkl/latest/include"
           LIBRARY_PATH: "/opt/intel/oneapi/mkl/latest/lib"
@@ -304,6 +303,82 @@ subpackages:
             EOF
             gcc app.c -o app -lmkl_rt
             ./app | grep -w '${{vars.mangled-version}}'
+            ldd app | grep "libmkl_rt\.so\."
+        - if: ${{build.arch}} != 'x86_64'
+          uses: test/emptypackage
+
+  # This is split out from core-dev because PyTorch expects only static libraries to
+  # be present (it uses mkl_static fom pypi). If dynamic libraries are available,
+  # they'll get used instead. That causes them to get vendored into the wheel, which
+  # increases the size and breaks parity.
+  - name: intel-oneapi-mkl-core-static-dev
+    description: Intel® oneAPI Math Kernel Library for core development - no dynamic libraries
+    dependencies:
+      runtime:
+        - intel-oneapi-mkl-cg=${{package.full-version}}
+        - intel-oneapi-mkl-classic-include=${{package.full-version}}
+        - intel-oneapi-common-vars=${{package.full-version}}
+        - intel-oneapi-common-licensing=${{package.full-version}}
+        - intel-oneapi-common-oneapi-vars=${{package.full-version}}
+    pipeline:
+      - if: ${{build.arch}} == 'x86_64'
+        runs: |
+          src="unpack/mkl/${{vars.mangled-version}}"
+          dest="${{targets.contextdir}}/opt/intel/oneapi/mkl/${{vars.mangled-version}}"
+          mkdir -p "$dest"
+
+          srclib="$src/lib"
+          destlib="$dest/lib"
+          mkdir -p "$destlib"
+          mv \
+            "$srclib"/libmkl_blas95_*.a    \
+            "$srclib/libmkl_core.a"        \
+            "$srclib/"libmkl_gf_*.a        \
+            "$srclib"/libmkl_gnu_thread.a  \
+            "$srclib"/libmkl_intel_*.a     \
+            "$srclib"/libmkl_lapack95_*.a  \
+            "$srclib"/libmkl_sequential.a  \
+            "$srclib"/libmkl_tbb_thread.a  \
+            "$srclib"/cmake                \
+            "$destlib"
+
+          mkdir -p "$destlib/pkgconfig"
+          mv "$srclib"/pkgconfig/mkl-static-* "$destlib/pkgconfig"
+    test:
+      environment:
+        contents:
+          packages:
+            - build-base
+            - posix-libc-utils # ldd
+        environment:
+          C_INCLUDE_PATH: "/opt/intel/oneapi/mkl/latest/include"
+          LIBRARY_PATH: "/opt/intel/oneapi/mkl/latest/lib"
+      pipeline:
+        - if: ${{build.arch}} == 'x86_64'
+          uses: test/tw/ldd-check
+        - if: ${{build.arch}} == 'x86_64'
+          runs: |
+            set -o pipefail
+            cat > app.c <<EOF
+            #include <stdio.h>
+            #include "mkl.h"
+
+            int main()
+            {
+              MKLVersion mkl_version;
+              mkl_get_version(&mkl_version);
+
+              printf("You are using oneMKL %d.%d\n", mkl_version.MajorVersion, mkl_version.UpdateVersion);
+
+              return 0;
+            }
+            EOF
+            gcc app.c -o app -lmkl_gf_ilp64 -lmkl_core
+            ./app | grep -w '${{vars.mangled-version}}'
+            if ldd app | grep libmkl; then
+              echo "ERROR: Dynamic libmkl libraries should not be installed." 1>&2
+              exit 1
+            fi
         - if: ${{build.arch}} != 'x86_64'
           uses: test/emptypackage
 
