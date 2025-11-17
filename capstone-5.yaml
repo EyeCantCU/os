@@ -35,20 +35,13 @@ pipeline:
 
   - name: "Install"
     runs: |
-      ./make.sh install
-
-  - name: "Relocate libraries to their expected locations"
-    runs: |
-      mkdir -p ${{targets.contextdir}}/usr/include/capstone ${{targets.contextdir}}/usr/lib
-      cp -a /usr/include/capstone/* ${{targets.contextdir}}/usr/include/capstone
-      cp -a /usr/lib/libcapstone* ${{targets.contextdir}}/usr/lib
+      DESTDIR=${{targets.contextdir}} ./make.sh install
 
   - name: "Run test cases with our build"
     runs: |
-      cd tests
       make INCDIR=${{targets.contextdir}}/usr/include LIBDIR=${{targets.contextdir}}/usr/lib all
       chmod +x test_all.sh; ./test_all.sh
-      cd -
+    working-directory: tests
 
   - uses: strip
 
@@ -58,8 +51,46 @@ subpackages:
     pipeline:
       - uses: split/dev
     test:
+      environment:
+        contents:
+          packages:
+            - gcc
       pipeline:
         - uses: test/tw/ldd-check
+        # https://www.capstone-engine.org/lang_c.html
+        - runs: |
+            cat <<EOF > test1.c
+            #include <capstone/capstone.h>
+
+            #define CODE "\x55\x48\x8b\x05\xb8\x13\x00\x00"
+
+            int main(void) {
+              csh handle;
+              cs_insn *insn;
+              size_t count;
+
+              if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
+                return -1;
+              }
+
+              count = cs_disasm(handle, CODE, sizeof(CODE)-1, 0x1000, 0, &insn);
+              if (count > 0) {
+                size_t j;
+                for (j = 0; j < count; j++) {
+                  printf("0x%"PRIx64":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic, insn[j].op_str);
+                }
+                cs_free(insn, count);
+              } else {
+                printf("ERROR: Failed to disassemble given code!\n");
+              }
+
+              cs_close(&handle);
+              return 0;
+            }
+            EOF
+            cc -c test1.c -o test1.o
+            cc test1.o -O3 -Wall -lcapstone -o test1
+            ./test1
 
   - range: py-versions
     name: py${{range.key}}-${{package.name}}
@@ -69,22 +100,18 @@ subpackages:
         - ${{package.name}}
         - ${{package.name}}-dev
         - py${{range.key}}-setuptools
-      provides:
-        - py3-${{package.name}}
       provider-priority: ${{range.value}}
     pipeline:
       - runs: |
-          cd bindings/python
-          LIBCAPSTONE_PATH="${{targets.contextdir}}/usr/lib" \
-          python${{range.key}} setup.py install --prefix=/usr --root="${{targets.contextdir}}"
-          cd -
+          LIBCAPSTONE_PATH="${{targets.contextdir}}/usr/lib"
+      - uses: py/pip-build-install
+        working-directory: bindings/python
+        with:
+          python: python${{range.key}}
       - uses: strip
     test:
-      environment:
-        contents:
-          packages:
-            - python-${{range.key}}
       pipeline:
+        - uses: test/tw/pip-check
         - uses: python/import
           with:
             python: python${{range.key}}
@@ -99,7 +126,7 @@ subpackages:
             for i in md.disasm(CODE, 0x1000):
                 print("0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
             EOF
-            python3 test1.py
+            python${{range.key}} test1.py
 
 update:
   enabled: true
@@ -107,44 +134,5 @@ update:
     tag-filter-prefix: 5
 
 test:
-  environment:
-    contents:
-      packages:
-        - ${{package.name}}-dev
-        - gcc
   pipeline:
     - uses: test/tw/ldd-check
-    # https://www.capstone-engine.org/lang_c.html
-    - runs: |
-        cat <<EOF > test1.c
-        #include <capstone/capstone.h>
-
-        #define CODE "\x55\x48\x8b\x05\xb8\x13\x00\x00"
-
-        int main(void) {
-          csh handle;
-          cs_insn *insn;
-          size_t count;
-
-          if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
-            return -1;
-          }
-
-          count = cs_disasm(handle, CODE, sizeof(CODE)-1, 0x1000, 0, &insn);
-          if (count > 0) {
-            size_t j;
-            for (j = 0; j < count; j++) {
-              printf("0x%"PRIx64":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic, insn[j].op_str);
-            }
-            cs_free(insn, count);
-          } else {
-            printf("ERROR: Failed to disassemble given code!\n");
-          }
-
-          cs_close(&handle);
-          return 0;
-        }
-        EOF
-        cc -c test1.c -o test1.o
-        cc test1.o -O3 -Wall -lcapstone -o test1
-        ./test1
