@@ -39,15 +39,15 @@ func Create(dir, disk, fwcode, fwvars string) error {
 	}
 
 	if _, err := util.CopyFile(disk, filepath.Join(dir, "disk.raw")); err != nil {
-		return fmt.Errorf("Failed copy %s ->L %s", disk, filepath.Join(dir, "disk.raw"))
+		return fmt.Errorf("Failed copy %s -> %s: %w", disk, filepath.Join(dir, "disk.raw"), err)
 	}
 
 	if _, err := util.CopyFile(fwcode, filepath.Join(dir, "fw-code.fd")); err != nil {
-		return fmt.Errorf("Failed copy %s ->L %s", disk, filepath.Join(dir, "fw-code.fd"))
+		return fmt.Errorf("Failed copy %s -> %s: %w", disk, filepath.Join(dir, "fw-code.fd"), err)
 	}
 
 	if _, err := util.CopyFile(fwvars, filepath.Join(dir, "fw-vars.fd")); err != nil {
-		return fmt.Errorf("Failed copy %s ->L %s", disk, filepath.Join(dir, "fw-vars.fd"))
+		return fmt.Errorf("Failed copy %s -> %s: %w", disk, filepath.Join(dir, "fw-vars.fd"), err)
 	}
 
 	fmt.Printf("Created %s\n", dir)
