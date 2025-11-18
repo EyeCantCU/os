@@ -1,13 +1,13 @@
 package:
-  name: tomcat-9
-  version: "9.0.113"
+  name: tomcat-fips-9
+  version: "9.0.112"
   epoch: 0
   description: Apache Tomcat Web Server
   copyright:
     - license: Apache-2.0
   dependencies:
     provides:
-      - tomcat=${{package.full-version}}
+      - tomcat-fips=${{package.full-version}}
 
 data:
   - name: openjdk-versions
@@ -15,11 +15,16 @@ data:
       21:
       17:
       11:
-      8:
+
+var-transforms:
+  - from: ${{package.name}}
+    match: ^tomcat-fips-(\d+)
+    replace: "$1"
+    to: major-version
 
 vars:
-  # This is the version of OpenJDK actually used for building
   target-jdk-version: 17
+  fips-policy: 140-3
 
 environment:
   contents:
@@ -27,14 +32,19 @@ environment:
       - ant
       - busybox
       - openjdk-${{vars.target-jdk-version}}
-      - openjdk-8
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/apache/tomcat
       tag: ${{package.version}}
-      expected-commit: 1da89d3d01aece456d622548d92055a60ff19c37
+      expected-commit: f2263db7a592f43aa1faa9408ecfeb5d9f83b75f
+
+  - uses: patch
+    with:
+      patches: |
+        Enable-FIPS.patch \
+        classpath.patch
 
   - runs: |
       tee build.properties <<EOF
@@ -48,16 +58,16 @@ subpackages:
     name: ${{package.name}}-openjdk-${{range.key}}
     dependencies:
       runtime:
+        - bcfips-policy-${{vars.fips-policy}}-j${{range.key}}
         - openjdk-${{range.key}}-default-jvm
         - tomcat-native
+        - openssl-config-fipshardened
+      provides:
+        - tomcat-${{vars.major-version}}-openjdk-${{range.key}}-fips-policy-${{vars.fips-policy}}=${{package.full-version}}
     pipeline:
-      - runs: |
-          if [[ "${{range.key}}" == "8" ]]; then
-            export JAVA_HOME="/usr/lib/jvm/java-1.8-openjdk"
-          else
-            export JAVA_HOME="/usr/lib/jvm/java-${{vars.target-jdk-version}}-openjdk"
-          fi
-
+      - environment:
+          JAVA_HOME: /usr/lib/jvm/java-${{vars.target-jdk-version}}-openjdk
+        runs: |
           ant -Dskip.build.java.version=true
 
           install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/tomcat/" LICENSE
@@ -77,6 +87,12 @@ subpackages:
           cp -r output/build/webapps/* ${{targets.contextdir}}/usr/share/tomcat/webapps.dist/
     test:
       environment:
+        environment:
+          # Required to run tomcat with FIPS, follows image configuration
+          CLASSPATH: "/usr/share/java/bouncycastle-fips/*:./*:."
+          JAVA_TOOL_OPTIONS: "-Djava.class.path=/usr/share/java/bouncycastle-fips/bc-fips.jar"
+          JAVA_TRUSTSTORE_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS"
+          JDK_JAVA_OPTIONS: "--add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED -Djavax.net.ssl.trustStoreType=FIPS"
         contents:
           packages:
             - curl
@@ -89,20 +105,12 @@ subpackages:
             version: "Server version: Apache Tomcat/${{package.version}}"
         - name: Test Tomcat catalina.sh with OpenJDK ${{range.key}}
           environment:
+            JAVA_HOME: /usr/lib/jvm/java-${{range.key}}-openjdk
             LD_LIBRARY_PATH: /usr/lib/tomcat-native
           uses: test/daemon-check-output
           with:
             setup: cp /usr/share/tomcat/webapps.dist/docs/appdev/sample/sample.war /usr/share/tomcat/webapps/
-            start: |
-              sh -c "
-                if [[ "${{range.key}}" == "8" ]]; then
-                  export JAVA_HOME=/usr/lib/jvm/java-1.8-openjdk
-                else
-                  export JAVA_HOME=/usr/lib/jvm/java-${{range.key}}-openjdk
-                fi
-                export LD_LIBRARY_PATH=/usr/lib/tomcat-native
-                /usr/share/tomcat/bin/catalina.sh run
-              "
+            start: /usr/share/tomcat/bin/catalina.sh run
             expected_output: |
               Tomcat/${{package.version}}
               JVM.Version
@@ -119,16 +127,7 @@ subpackages:
             JAVA_HOME: /usr/lib/jvm/java-${{range.key}}-openjdk
           uses: test/daemon-check-output
           with:
-            start: |
-              sh -c "
-                if [[ "${{range.key}}" == "8" ]]; then
-                  export JAVA_HOME=/usr/lib/jvm/java-1.8-openjdk
-                else
-                  export JAVA_HOME=/usr/lib/jvm/java-${{range.key}}-openjdk
-                fi
-                export LD_LIBRARY_PATH=/usr/lib/tomcat-native
-                /usr/share/tomcat/bin/startup.sh
-              "
+            start: /usr/share/tomcat/bin/startup.sh
             expected_output: |
               Tomcat started.
             post: |
@@ -146,4 +145,7 @@ update:
 
 test:
   pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.target-jdk-version}}
     - uses: test/emptypackage
