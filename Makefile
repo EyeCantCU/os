@@ -30,9 +30,24 @@ $(go_tools_bin): go.mod pkg/tools/tools.go
 	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_VER}"; \
 	GOBIN=$$(pwd)/tools/ go install "$${TOOL_PKG}@$${TOOL_VER}"
 
-# Space-separated list of image names to exclude from all groups
-# Example: SKIP_IMAGES="aws-ecs-foo qemu-base-slim" make disks-aws-ecs
-SKIP_IMAGES = aws-base-selinux-full
+# SKIP_IMAGES is a space-separated list of image names to exclude from all groups.
+# Enforce a minimum amount of meta data for each skipped image.
+SKIP_IMAGES_INVALID = $(shell \
+	yq '.[] \
+	    | select((.since | type) != "!!timestamp" or (.issue | test("^https://") | not)) \
+	    | .name \
+	' skipped-images.yaml \
+)
+ifneq ($(SKIP_IMAGES_INVALID),)
+$(error The skipped-images.yaml file contains the following invalid entries: $(SKIP_IMAGES_INVALID))
+endif
+SKIP_IMAGES = $(shell yq '.[].name' skipped-images.yaml)
+
+PHONY: debug
+debug:
+	@echo "invalid: $(SKIP_IMAGES_INVALID)"
+	@echo "  valid: $(SKIP_IMAGES)"
+
 cfgs = $(wildcard configs/*-*)
 # names is a list of each basename cfg
 names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
