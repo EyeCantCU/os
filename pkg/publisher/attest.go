@@ -107,7 +107,12 @@ func (p *Publisher) signImage(ctx context.Context, ref name.Reference, opts *Att
 
 	// Configure key options
 	keyOpts := options.KeyOpts{
-		KeyRef: opts.KeyRef,
+		KeyRef:           opts.KeyRef,
+		FulcioURL:        options.DefaultFulcioURL,
+		OIDCIssuer:       options.DefaultOIDCIssuerURL,
+		OIDCClientID:     "sigstore",
+		RekorURL:         options.DefaultRekorURL,
+		SkipConfirmation: true,
 	}
 
 	// Prepare signing command
@@ -160,7 +165,12 @@ func (p *Publisher) generateSignedAttestation(ctx context.Context, predicate Pre
 
 	// Get signer
 	keyOpts := options.KeyOpts{
-		KeyRef: opts.KeyRef,
+		KeyRef:           opts.KeyRef,
+		FulcioURL:        options.DefaultFulcioURL,
+		OIDCIssuer:       options.DefaultOIDCIssuerURL,
+		OIDCClientID:     "sigstore",
+		RekorURL:         options.DefaultRekorURL,
+		SkipConfirmation: true,
 	}
 	sv, genKey, err := sign.SignerFromKeyOpts(ctx, "", "", keyOpts)
 	if err != nil {

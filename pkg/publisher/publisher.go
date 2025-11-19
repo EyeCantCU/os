@@ -224,6 +224,13 @@ func (p *Publisher) PublishSingleConfig(ctx context.Context, config *PublishConf
 				return nil, fmt.Errorf("merging architectures into existing index: %w", err)
 			}
 			log.Infof("Successfully merged architectures into existing index: %s", digest)
+
+			// Sign and attest the merged index if requested
+			if opts.SignAndAttest {
+				if err := p.SignAndAttestMultiArch(ctx, digest, artifactsByArch, opts.AttestationKeyRef, opts.SkipTransparencyLog); err != nil {
+					return nil, fmt.Errorf("signing and attesting merged index: %w", err)
+				}
+			}
 		} else {
 			// No existing index - fall back to batch mode
 			log.Infof("No existing index found - creating new multi-arch index")

@@ -143,7 +143,7 @@ Each multi-arch index contains x86_64 and aarch64 sub-indexes with all artifact 
 	cmd.Flags().BoolVar(&skipIfExists, "skip-if-exists", true, "Skip publishing if the image already exists in the registry")
 
 	// Signing and attestation options
-	cmd.Flags().BoolVar(&signAndAttest, "sign-and-attest", false, "Sign images and attach attestations using cosign")
+	cmd.Flags().BoolVar(&signAndAttest, "sign-and-attest", true, "Sign images and attach attestations using cosign")
 	cmd.Flags().StringVar(&attestationKey, "attestation-key", "", "Path to private key for signing (empty = keyless/OIDC)")
 	cmd.Flags().BoolVar(&skipTransparencyLog, "skip-transparency-log", false, "Skip logging to Rekor transparency log")
 

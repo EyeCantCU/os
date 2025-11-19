@@ -49,7 +49,7 @@ $(foreach name,$(names),publish-registry-$(name)): publish-registry-%: $(ARCH_OU
 		--registry $(REGISTRY_REPO) \
 		--architectures $(ARCH) \
 		--timestamp $(BUILD_TIMESTAMP) \
-		--sign-and-attest=false \
+		--sign-and-attest=true \
 		--skip-if-exists \
 		--merge
 
@@ -64,5 +64,5 @@ $(foreach name,$(names),publish-registry-multi-$(name)): publish-registry-multi-
 		--registry $(REGISTRY_REPO) \
 		--architectures x86_64,aarch64 \
 		--timestamp $(BUILD_TIMESTAMP) \
-		--sign-and-attest=false \
+		--sign-and-attest=true \
 		--skip-if-exists
