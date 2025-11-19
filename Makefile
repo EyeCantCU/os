@@ -60,6 +60,7 @@ endef
 
 shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
+# Per-cloud lists
 disks_aws := $(call list_cloud_images,aws)
 disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu := $(call list_cloud_images,qemu)
@@ -97,6 +98,7 @@ $(TOOLS_SUBD)/%: $(TOOLS_SUBD)/go/%/*.go
 	go build -o $(TOOLS_SUBD)/$* ./$(TOOLS_SUBD)/go/$*
 
 include cgr-install.mk
+include registry-publish.mk
 
 .PHONY: test-gotest
 test-gotest: $(CGR_INSTALL_APK)
@@ -142,6 +144,7 @@ list-rpi:
 	@for n in $(disks_rpi); do echo $$n; done
 list-lxd:
 	@for n in $(disks_lxd); do echo $$n; done
+
 list-%:
 	@groups="$(group_$(subst -,_,$(*)))"; \
 	[ -n "$$groups" ] || { echo "no group $*"; exit 1; }; \
@@ -277,6 +280,7 @@ builder/ovmf-%.fd: apkoaas
 builder/kernel-%: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* kernel $@
 
+ARCHES = aarch64 x86_64
 PUBLISH_TARGET ?= dev
 COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
 PREFIX ?= $(shell id -un)
@@ -602,12 +606,11 @@ show-vars:
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk-flat.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%/build.yaml builder/ovmf-%.fd
 
-arches = aarch64 x86_64
-ifneq ($(filter-out $(arches),$(BUILDER_ARCH)),)
-  $(error BUILDER_ARCH '$(BUILDER_ARCH)' not supported. Must be one of $(arches))
+ifneq ($(filter-out $(ARCHES),$(BUILDER_ARCH)),)
+  $(error BUILDER_ARCH '$(BUILDER_ARCH)' not supported. Must be one of $(ARCHES))
 endif
-ifneq ($(filter-out $(arches),$(ARCH)),)
-  $(error ARCH '$(ARCH)' not supported. Must be one of $(arches))
+ifneq ($(filter-out $(ARCHES),$(ARCH)),)
+  $(error ARCH '$(ARCH)' not supported. Must be one of $(ARCHES))
 endif
 
 .PHONY: azure-marketplace-install-extension

@@ -58,7 +58,7 @@ func buildCmd() *cobra.Command {
 
 			var buildFilePath string
 			if len(args) > 0 {
-				buildFilePath = args[0] // e.g. "generic.yaml"
+				buildFilePath = args[0] // e.g. "qemu.yaml"
 			}
 
 			if arch == "" {

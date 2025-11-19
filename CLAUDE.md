@@ -80,57 +80,263 @@ make clean
 
 ### Publishing
 
-Publishing is controlled by the `PUBLISH_TARGET` environment variable which determines the target cloud environment and resources.
+The project uses a **multi-cloud** publishing approach where all cloud variants of an application are published to a single OCI repository with cloud-specific tags. Each cloud variant is a complete, separate multi-arch image with its own kernel, packages, and disk formats.
 
-#### Publishing Environments
+#### Multi-Cloud Structure
 
-The system supports four publishing environments:
+```
+Repository: cgr.dev/chainguard-vms/base
 
-1. **dev** (default): Development environment using your personal GCP project
-2. **staging**: Staging environment for pre-production testing
-3. **eap**: Early Access Program (production-level for EAP users)
-4. **production**: Production environment
+Tags (each pointing to a separate multi-arch index):
+  qemu-latest               → qemu multi-arch index
+  qemu-20241103-1234        → qemu timestamped
+  aws-latest                → aws multi-arch index (AWS kernel + packages)
+  aws-20241103-1234         → aws timestamped
+  azure-latest              → azure multi-arch index (Azure kernel + packages)
+  azure-20241103-1234       → azure timestamped
+  gcp-latest                → gcp multi-arch index (GCP kernel + packages)
+  gcp-20241103-1234         → gcp timestamped
+
+Each multi-arch index contains:
+  - x86_64 sub-index → apko tar, disk.raw.tgz, disk.qcow2, disk.vmdk, disk.vhd, SBOMs
+  - aarch64 sub-index → apko tar, disk.raw.tgz, disk.qcow2, disk.vmdk, disk.vhd, SBOMs
+```
 
 #### Publishing Commands
 
+The publishing system supports two modes for creating multi-architecture OCI images:
+
+**INCREMENTAL MODE (Default)**: Publish architectures independently with automatic merging
+- Each architecture can be built and published separately
+- New architectures merge into existing multi-arch OCI index
+- Safe for CI/CD pipelines with separate arch-specific runners
+- Uses `--merge` flag automatically
+
+**BATCH MODE**: Build all architectures first, then publish together
+- Ensures both architectures are available when creating the index
+- Creates fresh multi-arch OCI index
+- Useful for local development or sequential builds
+- Uses `publish-registry-multi-*` targets
+
+**Makefile Targets - Incremental Mode (Recommended for CI/CD):**
 ```bash
-# Publish to development (default)
-make publish-azure-<image-name>
-make publish-gcp-<image-name>
-make publish-qemu-<image-name>
+# Publish current architecture with --merge (default: merges into existing index)
+make publish-registry-azure-python-313-slim
+make publish-registry-qemu-base-slim
+make publish-registry-aws-base-slim
 
-# Publish to staging
-PUBLISH_TARGET=staging make publish-azure-<image-name>
-PUBLISH_TARGET=staging make publish-gcp-<image-name>
+# Publish different architecture (merges into existing index)
+ARCH=aarch64 make publish-registry-azure-docker-full
 
-# Publish to EAP
-PUBLISH_TARGET=eap make publish-azure-<image-name>
-PUBLISH_TARGET=eap make publish-gcp-<image-name>
+# Publish with custom registry and timestamp
+REGISTRY_REPO=cgr.dev/custom-org BUILD_TIMESTAMP=20250115-1200 make publish-registry-gcp-nginx-full
+
+# Example CI/CD workflow (parallel builds):
+# Runner 1: ARCH=x86_64 make publish-registry-aws-base-slim
+# Runner 2: ARCH=aarch64 make publish-registry-aws-base-slim
+# Result: Multi-arch index with both architectures
+```
+
+**Makefile Targets - Batch Mode (Recommended for local dev):**
+```bash
+# Build both architectures, then publish together as fresh multi-arch index
+make publish-registry-multi-aws-base-slim
+make publish-registry-multi-qemu-base
+make publish-registry-multi-azure-docker-full
+
+# With custom registry and timestamp
+REGISTRY_REPO=cgr.dev/custom-org BUILD_TIMESTAMP=20250115-1200 make publish-registry-multi-gcp-nginx-full
+```
+
+**Direct CLI Publishing - Incremental Mode:**
+```bash
+# First architecture (creates new index or merges if exists)
+./apkoaas publish \
+  --config configs/azure-python-313-slim/publish.yaml \
+  --output-dir output/x86_64/azure-python-313-slim \
+  --registry cgr.dev/chainguard-vms \
+  --architectures x86_64 \
+  --timestamp 20251103-1234 \
+  --merge
+
+# Second architecture (merges into existing index)
+./apkoaas publish \
+  --config configs/azure-python-313-slim/publish.yaml \
+  --output-dir output/aarch64/azure-python-313-slim \
+  --registry cgr.dev/chainguard-vms \
+  --architectures aarch64 \
+  --timestamp 20251103-1234 \
+  --merge
+```
+
+**Direct CLI Publishing - Batch Mode:**
+```bash
+# Publish both architectures together (auto-derives paths)
+./apkoaas publish \
+  --config configs/qemu-base-slim/publish.yaml \
+  --output-dir output/x86_64/qemu-base-slim \
+  --registry cgr.dev/chainguard-vms \
+  --architectures x86_64,aarch64 \
+  --timestamp 20241103-1234
+
+# The CLI automatically derives output/aarch64/qemu-base-slim from the x86_64 path
+```
+
+**Cloud-Specific Publishing (AWS, Azure, GCP):**
+```bash
+# Publish to cloud-specific registries (creates AMIs, Azure images, GCP images)
+make publish-azure-<config-name>
+make publish-gcp-<config-name>
+make publish-qemu-<config-name>
 
 # AWS publishing (uses awspub configuration)
 make aws-create-<image-name>
 make aws-publish-<image-name>
 
-# Examples:
+# Examples with environment targeting:
 PUBLISH_TARGET=dev make publish-gcp-base-slim
 PUBLISH_TARGET=staging make publish-azure-docker-slim
 PUBLISH_TARGET=eap make publish-qemu-base-slim
 ```
 
-#### Publishing Output Files
+#### Publishing Variables
 
-Published images create tracking files:
-- Azure: `output/<arch>/<image>/publish.<env>.json`
-- GCP: `output/<arch>/<image>/publish.<env>.yaml`
-- QEMU: `output/<arch>/<image>/publish.<env>.json`
-- AWS: `output/<arch>/awspub/publish/<image>.output`
+**OCI Registry Publishing:**
+- `REGISTRY_REPO`: Base repository path (default: `cgr.dev/chainguard-vms`)
+- `BUILD_TIMESTAMP`: Timestamp for version tags (auto-generated as `YYYYMMDD-HHMM`)
+- `ARCH`: Target architecture (x86_64 or aarch64)
 
-#### Additional Publishing Variables
+**Cloud-Specific Publishing:**
+- `PUBLISH_TARGET`: Publishing environment (dev/staging/eap/production) - for cloud-specific publishing
 
-- `PREFIX`: Image name prefix (defaults to username via `id -un`)
-- `BUILD_TIMESTAMP`: Timestamp for image versioning (auto-generated)
-- `COMMIT`: Git commit hash for tagging
-- `AZVERSION`: Azure-specific version format
+#### Platform Validation and Error Handling
+
+**Strict Platform Detection**: The publisher package enforces strict platform validation with no fallback behavior. All platforms must be explicitly recognized.
+
+**Valid Platforms:**
+- `aws` - Amazon Web Services
+- `azure` - Microsoft Azure
+- `gcp` - Google Cloud Platform
+- `vmware` - VMware
+- `qemu` - QEMU images
+- `rpi` - Raspberry Pi
+
+**Error-Returning Functions:**
+The following functions return errors for unrecognized platforms (no silent fallbacks):
+- `ParsePlatform(s string) (Platform, error)` - Parse platform string like "aws", "azure"
+- `ToCloudPlatforms() ([]string, error)` - Convert platform to cloud identifiers
+
+**Failure Modes:**
+- Unknown platform strings cause immediate errors: `unrecognized platform: "foo"`
+- Invalid directory naming (no hyphen) fails: `no hyphen found in basename "test"`
+- Invalid enum values fail: `unrecognized platform enum value: unknown`
+
+#### Troubleshooting Publishing Errors
+
+**Error: `unrecognized platform: "foo"`**
+- **Cause**: Directory name doesn't start with a valid platform prefix
+- **Solution**: Rename directory to use one of: `aws`, `azure`, `gcp`, `vmware`, `qemu`, `rpi`
+- **Example**: Rename `foo-base` → `qemu-base` or `aws-base`
+
+**Error: `no hyphen found in basename "myapp"`**
+- **Cause**: Directory name missing hyphen separator between platform and application
+- **Solution**: Add hyphen in format `{platform}-{application}`
+- **Example**: Rename `awsbase` → `aws-base`, `test` → `qemu-test`
+
+**Error: `failed to detect platform from output directory`**
+- **Cause**: Output directory path doesn't contain a recognizable platform-prefixed directory
+- **Solution**: Ensure output structure is `output/{arch}/{platform}-{app}/`
+- **Example**: Check that you have `output/x86_64/aws-base/` not `output/x86_64/base/`
+
+**Error: `unrecognized platform enum value`**
+- **Cause**: Internal error - corrupted or invalid Platform value in code
+- **Solution**: This shouldn't happen in normal use. Check for manual Platform type construction without validation
+- **Prevention**: Always use `ParsePlatform()` to create Platform values
+
+#### Direct Publishing with apkoaas
+
+For advanced use cases or scripting, you can call `apkoaas publish` directly.
+
+**Config-Driven Publishing:**
+Publishing requires a `publish.yaml` config file that defines the OCI image name and tags:
+
+```bash
+# Basic single-architecture publishing
+./apkoaas publish \
+  --config configs/azure-python-313-slim/publish.yaml \
+  --output-dir output/x86_64/azure-python-313-slim \
+  --registry cgr.dev/chainguard-vms \
+  --architectures x86_64
+
+# Multi-architecture publishing with timestamp
+./apkoaas publish \
+  --config configs/azure-python-313-slim/publish.yaml \
+  --output-dir output/x86_64/azure-python-313-slim \
+  --registry cgr.dev/chainguard-vms \
+  --architectures x86_64,aarch64 \
+  --timestamp 20241103-1234
+```
+
+**The publish.yaml config specifies:**
+- `image`: The OCI image name (e.g., `python` becomes `cgr.dev/chainguard-vms/python`)
+- `tags`: List of base tag names (each expands to 2 variants: `tag-TIMESTAMP` and `tag-latest`)
+- `disk_formats`: **Required** list specifying which disk formats to publish (e.g., `[vhd]`, `[qcow2]`, `[raw.tgz, vmdk]`)
+
+**Example publish.yaml:**
+```yaml
+version: 1
+cloud: azure
+name: azure-python-313-slim
+oci_config:
+  image: python
+  tags:
+    - azure-python-3.13-slim    # Expands to -20241103-1234 and -latest variants
+    - azure-python-slim
+  disk_formats:  # Required: specify which formats to publish
+    - vhd
+```
+
+**Tag Expansion:**
+Each tag is automatically expanded into 2 variants:
+- `tag-TIMESTAMP`: e.g., `azure-python-slim-20241103-1234`
+- `tag-latest`: e.g., `azure-python-slim-latest`
+
+**Disk Format Selection:**
+The `disk_formats` field is required and explicitly controls which disk formats appear in the published OCI artifacts:
+- Specify exactly which formats you want (e.g., `[vhd]` for Azure, `[qcow2]` for QEMU)
+- All specified formats must exist in the output directory
+- Common combinations:
+  - AWS: `[vmdk]` - for EC2 AMI import
+  - Azure: `[vhd]` - required for Azure VMs
+  - GCP: `[raw]` - for Compute Engine
+  - QEMU: `[qcow2]` - for local testing
+  - VMware: `[vmdk, ova]` - VMware formats
+  - Multi-cloud: `[raw, qcow2, vmdk, vhd]` - publish multiple formats
+
+#### Cloud-Specific Publishing (AWS, Azure, GCP)
+
+For publishing to cloud-specific image registries (not OCI registries):
+
+```bash
+# Publish to cloud-specific registries (creates AMIs, Azure images, GCP images)
+make publish-azure-<config-name>
+make publish-gcp-<config-name>
+make publish-qemu-<config-name>
+
+# AWS publishing (uses awspub configuration)
+make aws-create-<config-name>
+make aws-publish-<config-name>
+
+# With environment targeting
+PUBLISH_TARGET=staging make publish-azure-base
+PUBLISH_TARGET=eap make publish-gcp-docker
+
+# Output tracking files:
+# - Azure: output/<arch>/<image>/publish.<env>.json
+# - GCP: output/<arch>/<image>/publish.<env>.yaml
+# - QEMU: output/<arch>/<image>/publish.<env>.json
+# - AWS: output/<arch>/awspub/publish/<image>.output
+```
 
 ## Configuration Structure
 
@@ -144,6 +350,23 @@ configs/aws-base-slim/
 ├── build.yaml    # Package list, repos, arch settings
 └── test.yaml     # Test cases for this image variant
 ```
+
+**Config Organization (REQUIRED):**
+- **Naming Pattern**: All configs MUST follow `{cloud}-{application}[-variant]` pattern
+- **Valid Cloud Prefixes**: `aws`, `azure`, `gcp`, `vmware`, `qemu`, `rpi`
+- **Examples**:
+  - ✅ Valid: `aws-base`, `azure-docker-dev`, `qemu-nginx-full`, `gcp-eks-1.33`
+  - ❌ Invalid: `base` (no cloud prefix), `unknown-base` (invalid cloud), `myapp` (no hyphen)
+
+**Why This Matters:**
+- Publisher extracts platform from directory names for validation
+- Invalid naming causes publishing to fail with clear error messages
+- Platform is used for validation and organization (disk formats are specified in publish.yaml)
+
+**Multi-Cloud Applications:**
+- Applications can have multiple cloud variants (e.g., `aws-base`, `azure-base`, `gcp-base`)
+- The Makefile provides per-application grouping via `app_*` variables and `disks-app-*` targets
+- Single-cloud applications (like `aws-eks-*`) also get per-application organization
 
 ## Testing
 
