@@ -533,3 +533,135 @@ func (p *Publisher) MergeArchIntoIndex(ctx context.Context, existingIndex v1.Ima
 
 	return indexDigest.String(), nil
 }
+
+// mergePublishedIndexes merges two already-published OCI indexes from the registry.
+// This is used to handle race conditions where another process publishes an index
+// between our publish and tag operations. The function fetches both indexes,
+// combines their sub-index manifests (preferring newIndexDigest for overlapping architectures),
+// and publishes a merged result.
+//
+// Returns the digest of the newly published merged index.
+func (p *Publisher) mergePublishedIndexes(ctx context.Context, newIndexDigest string, existingIndexDigest string, ref name.Repository, remoteOpts []remote.Option) (string, error) {
+	log := clog.FromContext(ctx)
+	log.Infof("Merging published indexes: new=%s, existing=%s", newIndexDigest, existingIndexDigest)
+
+	// If they're the same, no merge needed
+	if newIndexDigest == existingIndexDigest {
+		log.Infof("Indexes are identical, no merge needed")
+		return newIndexDigest, nil
+	}
+
+	// Fetch both indexes from the registry
+	newIdxRef, err := name.NewDigest(newIndexDigest)
+	if err != nil {
+		return "", fmt.Errorf("parsing new index digest: %w", err)
+	}
+
+	existingIdxRef, err := name.NewDigest(existingIndexDigest)
+	if err != nil {
+		return "", fmt.Errorf("parsing existing index digest: %w", err)
+	}
+
+	newIdx, err := remote.Index(newIdxRef, remoteOpts...)
+	if err != nil {
+		return "", fmt.Errorf("fetching new index: %w", err)
+	}
+
+	existingIdx, err := remote.Index(existingIdxRef, remoteOpts...)
+	if err != nil {
+		return "", fmt.Errorf("fetching existing index: %w", err)
+	}
+
+	// Get manifests from both indexes
+	newManifest, err := newIdx.IndexManifest()
+	if err != nil {
+		return "", fmt.Errorf("getting new index manifest: %w", err)
+	}
+
+	existingManifest, err := existingIdx.IndexManifest()
+	if err != nil {
+		return "", fmt.Errorf("getting existing index manifest: %w", err)
+	}
+
+	// Track which architectures are in the new index
+	newArchs := make(map[types.Architecture]v1.Descriptor)
+	subIndexesByHash := make(map[v1.Hash]v1.ImageIndex)
+
+	for _, desc := range newManifest.Manifests {
+		if desc.Platform == nil {
+			log.Warnf("Skipping descriptor without platform in new index")
+			continue
+		}
+		arch := types.ParseArchitecture(desc.Platform.Architecture)
+		newArchs[arch] = desc
+
+		// Fetch the sub-index for later reconstruction
+		subIdxRef := ref.Digest(desc.Digest.String())
+		subIdx, err := remote.Index(subIdxRef, remoteOpts...)
+		if err != nil {
+			return "", fmt.Errorf("fetching new sub-index for %s: %w", arch.ToAPK(), err)
+		}
+		subIndexesByHash[desc.Digest] = subIdx
+		log.Infof("Including new sub-index for %s", arch.ToAPK())
+	}
+
+	// Add existing architectures that aren't in the new index
+	for _, desc := range existingManifest.Manifests {
+		if desc.Platform == nil {
+			log.Warnf("Skipping descriptor without platform in existing index")
+			continue
+		}
+		arch := types.ParseArchitecture(desc.Platform.Architecture)
+
+		// Skip if we already have this architecture from the new index
+		if _, exists := newArchs[arch]; exists {
+			log.Infof("Replacing existing sub-index for %s with new version", arch.ToAPK())
+			continue
+		}
+
+		// Fetch the sub-index for later reconstruction
+		subIdxRef := ref.Digest(desc.Digest.String())
+		subIdx, err := remote.Index(subIdxRef, remoteOpts...)
+		if err != nil {
+			return "", fmt.Errorf("fetching existing sub-index for %s: %w", arch.ToAPK(), err)
+		}
+		subIndexesByHash[desc.Digest] = subIdx
+		newArchs[arch] = desc
+		log.Infof("Preserving existing sub-index for %s", arch.ToAPK())
+	}
+
+	// Build merged top-level index manifest
+	mergedManifest := &v1.IndexManifest{
+		SchemaVersion: 2,
+		MediaType:     ggcrtypes.OCIImageIndex,
+		Manifests:     []v1.Descriptor{},
+		Annotations: map[string]string{
+			AnnotationBuildTime: time.Now().Format(time.RFC3339),
+		},
+	}
+
+	// Add all descriptors to the merged manifest
+	for _, desc := range newArchs {
+		mergedManifest.Manifests = append(mergedManifest.Manifests, desc)
+	}
+
+	// Create the merged index
+	mergedIdx := &staticIndex{
+		indexManifest: mergedManifest,
+		subIndexes:    subIndexesByHash,
+	}
+
+	// Publish the merged index
+	h, err := mergedIdx.Digest()
+	if err != nil {
+		return "", fmt.Errorf("computing merged index digest: %w", err)
+	}
+	mergedDigest := ref.Digest(h.String())
+
+	if err := remote.WriteIndex(mergedDigest, mergedIdx, remoteOpts...); err != nil {
+		return "", fmt.Errorf("publishing merged index: %w", err)
+	}
+
+	log.Infof("Published merged index with %d architectures: %s", len(newArchs), mergedDigest.String())
+	return mergedDigest.String(), nil
+}

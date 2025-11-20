@@ -176,27 +176,39 @@ Configuration directories must follow the `{platform}-{application}` naming patt
 - ✅ Valid: `aws-base-full`, `azure-docker-slim`, `qemu-base-full`, `gcp-nginx-slim`
 - ❌ Invalid: `unknown-base`, `test`, `foo-bar`, `myapp` (no platform prefix)
 
-### Multi-Architecture Publishing Modes
+### How Publishing Works
 
-The publishing system supports two modes for creating multi-architecture OCI images:
+Each architecture is published separately and automatically merged into the existing multi-arch
+index. This allows parallel CI/CD builds where different runners can publish different
+architectures concurrently.
 
-**Individual arch (Default)** - Publish architectures independently with automatic merging
-- Each architecture can be built and published separately
-- New architectures merge into existing multi-arch OCI index
-- Uses `--merge` flag automatically in Makefile targets
-- Uses `publish-registry-*` Makefile targets
+**Key Features:**
+- Each architecture is published independently
+- New architectures automatically merge into existing multi-arch OCI index
+- Safe for CI/CD pipelines with parallel arch-specific runners
+- Creates new index if none exists
+- **Race condition protection**: Automatically detects and merges concurrent publishes
 
-**Multi arch** - Build all architectures first, then publish together
-- Ensures both architectures are available when creating the index
-- Creates fresh multi-arch OCI index with all architectures
-- Uses `publish-registry-multi-*` Makefile targets
+#### Concurrent Publish Handling
+
+The system includes automatic race condition handling for parallel publishes:
+
+1. **Detection**: Before applying tags, the system re-checks the registry for concurrent publishes
+2. **Merging**: If another process published while we were building, indexes are automatically merged
+3. **Preservation**: Final multi-arch index contains all architectures from both publishes
+4. **CI/CD Safe**: Parallel runners building different architectures will result in a properly merged multi-arch index
+
+**Example scenario:**
+- CI Runner 1 (x86_64) and Runner 2 (aarch64) publish simultaneously
+- Runner 1 publishes x86_64 index → Runner 2 publishes aarch64 index
+- Before applying tags, Runner 2 detects Runner 1's index
+- Runner 2 merges both indexes and publishes combined result
+- Final index contains both x86_64 and aarch64 architectures
 
 ### Publishing with Makefile
 
-**Individual arch:**
-
 ```bash
-# Build and publish current architecture (merges into existing index)
+# Build and publish current architecture (default: x86_64)
 make vhd-azure-python-313-slim
 make publish-registry-azure-python-313-slim
 
@@ -204,30 +216,19 @@ make publish-registry-azure-python-313-slim
 make publish-registry-qemu-base-slim
 make publish-registry-aws-base-slim
 
-# Publish different architecture (merges into existing index)
+# Publish different architecture
 ARCH=aarch64 make publish-registry-azure-docker-full
 
 # Publish with custom registry and timestamp
 REGISTRY_REPO=cgr.dev/custom-org BUILD_TIMESTAMP=20250115-1200 make publish-registry-gcp-nginx-full
 
-# Example parallel CI/CD workflow:
+# Parallel CI/CD workflow example:
 # Runner 1: ARCH=x86_64 make disk-aws-base && make publish-registry-aws-base
 # Runner 2: ARCH=aarch64 make disk-aws-base && make publish-registry-aws-base
 # Result: Multi-arch index with both x86_64 and aarch64
 ```
 
-**Multi arch:**
-
-```bash
-# Build both architectures, then publish together as fresh multi-arch index
-make vmdk-aws-base-slim ARCH=x86_64
-make vmdk-aws-base-slim ARCH=aarch64
-make publish-registry-multi-aws-base-slim
-```
-
 ### Publishing with CLI
-
-**Individual arch:**
 
 ```bash
 # First architecture (creates new index or merges if exists)
@@ -235,32 +236,16 @@ make publish-registry-multi-aws-base-slim
   --config configs/azure-python-313-slim/publish.yaml \
   --output-dir output/x86_64/azure-python-313-slim \
   --registry cgr.dev/chainguard-vms \
-  --architectures x86_64 \
-  --timestamp 20251103-1234 \
-  --merge
+  --architecture x86_64 \
+  --timestamp 20251103-1234
 
-# Second architecture (merges into existing index)
+# Second architecture (automatically merges into existing index)
 ./apkoaas publish \
   --config configs/azure-python-313-slim/publish.yaml \
   --output-dir output/aarch64/azure-python-313-slim \
   --registry cgr.dev/chainguard-vms \
-  --architectures aarch64 \
-  --timestamp 20251103-1234 \
-  --merge
-```
-
-**Multi arch:**
-
-```bash
-# Publish both architectures together (auto-derives paths)
-./apkoaas publish \
-  --config configs/qemu-base-slim/publish.yaml \
-  --output-dir output/x86_64/qemu-base-slim \
-  --registry cgr.dev/chainguard-vms \
-  --architectures x86_64,aarch64 \
-  --timestamp $(date +%Y%m%d-%H%M)
-
-# The CLI automatically derives output/aarch64/qemu-base-slim from the x86_64 path
+  --architecture aarch64 \
+  --timestamp 20251103-1234
 ```
 
 **Required flags:**
@@ -269,9 +254,8 @@ make publish-registry-multi-aws-base-slim
 - `--registry` - Registry prefix (e.g., `cgr.dev/chainguard-vms`)
 
 **Optional flags:**
-- `--architectures` - Architectures to publish (default: `x86_64,aarch64`)
+- `--architecture` - Architecture to publish (default: `x86_64`)
 - `--timestamp` - Timestamp for tag expansion (default: auto-generated as `YYYYMMDD-HHMM`)
-- `--merge` - Merge new architectures into existing multi-arch index
 - `--sign-and-attest` - Sign images with cosign
 
 

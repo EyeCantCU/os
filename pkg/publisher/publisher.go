@@ -35,11 +35,11 @@ func New(remoteOpts ...remote.Option) *Publisher {
 	}
 }
 
-// publishMultiArch publishes VM artifacts for one or more architectures using apko's OCI functions.
+// buildAndPublishIndex publishes VM artifacts for one or more architectures using apko's OCI functions.
 // Creates separate images for each artifact type and architecture, then publishes them in an index.
 // Returns the digest reference of the published index.
-// This is an internal function used by PublishMultiCloud.
-func (p *Publisher) publishMultiArch(ctx context.Context, artifactsByArch map[types.Architecture]*Artifacts, repoRef string, opts *PublishOptions) (string, error) {
+// This is the core publishing function called by PublishSingleConfig.
+func (p *Publisher) buildAndPublishIndex(ctx context.Context, artifactsByArch map[types.Architecture]*Artifacts, repoRef string, opts *PublishOptions) (string, error) {
 	if opts == nil {
 		opts = &PublishOptions{}
 	}
@@ -74,25 +74,65 @@ func (p *Publisher) publishMultiArch(ctx context.Context, artifactsByArch map[ty
 		allImages = append(allImages, images...)
 	}
 
-	// Publish indexes (tags are applied by PublishMultiCloud)
+	// Publish index without tags (tags are applied later by the caller)
 	digestRef, err := p.publishIndex(ctx, allImages, ref, []string{}, opts.SkipIfExists, remoteOpts)
 	if err != nil {
 		return "", err
 	}
 
-	// Sign and attest if requested (multi-arch version)
+	// Sign and attest if requested
 	if opts.SignAndAttest {
-		if err := p.SignAndAttestMultiArch(ctx, digestRef, artifactsByArch, opts.AttestationKeyRef, opts.SkipTransparencyLog); err != nil {
-			return "", fmt.Errorf("signing and attesting multi-arch: %w", err)
+		if err := p.SignAndAttestIndex(ctx, digestRef, artifactsByArch, opts.AttestationKeyRef, opts.SkipTransparencyLog); err != nil {
+			return "", fmt.Errorf("signing and attesting: %w", err)
 		}
 	}
 
 	return digestRef, nil
 }
 
-// PublishSingleConfig publishes a single VM configuration to an OCI registry using a publish config.
-// This is a simplified version of PublishMultiCloud for config-driven publishing.
+// handleConcurrentPublish re-checks for concurrent publishes and merges if necessary.
+// This handles race conditions where another process publishes an index between our
+// publish and tag operations, which can occur in parallel CI/CD pipelines.
+//
+// Returns the final digest (merged or original) to use for tagging.
+func (p *Publisher) handleConcurrentPublish(ctx context.Context, publishedDigest string, checkTag string, ref name.Repository, remoteOpts []remote.Option) (string, error) {
+	log := clog.FromContext(ctx)
+
+	if checkTag == "" {
+		// No tag to check against, return original digest
+		return publishedDigest, nil
+	}
+
+	log.Infof("Re-checking for concurrent publishes before applying tags")
+	recheckIdx, err := p.FetchExistingIndex(ctx, ref.String(), checkTag, remoteOpts)
+	if err != nil {
+		return "", fmt.Errorf("re-checking for existing index: %w", err)
+	}
+
+	finalDigest := publishedDigest
+	if recheckIdx != nil {
+		// Another process published while we were working - check if it's different
+		recheckDigest, err := recheckIdx.Digest()
+		if err != nil {
+			return "", fmt.Errorf("getting recheck digest: %w", err)
+		}
+		recheckDigestStr := ref.Digest(recheckDigest.String()).String()
+
+		if recheckDigestStr != publishedDigest {
+			log.Infof("Concurrent publish detected - merging indexes")
+			finalDigest, err = p.mergePublishedIndexes(ctx, publishedDigest, recheckDigestStr, ref, remoteOpts)
+			if err != nil {
+				return "", fmt.Errorf("merging with concurrent publish: %w", err)
+			}
+		}
+	}
+
+	return finalDigest, nil
+}
+
+// PublishSingleConfig publishes VM artifacts to an OCI registry using a publish config.
 // It loads artifacts from output directories, applies config-specified tags, and publishes as a multi-arch index.
+// This function handles incremental publishing by merging new architectures into existing indexes.
 // Returns a list of all applied tags.
 func (p *Publisher) PublishSingleConfig(ctx context.Context, config *PublishConfig, outputDirs map[types.Architecture]string, repoRef string, opts *PublishOptions) ([]string, error) {
 	if opts == nil {
@@ -171,127 +211,98 @@ func (p *Publisher) PublishSingleConfig(ctx context.Context, config *PublishConf
 	// Expand tags from config into timestamped and latest variants
 	tags := ExpandTags(config.OCIConfig.Tags, opts.Timestamp)
 
-	// Determine whether to use merge mode or batch mode
-	var digest string
-
-	if opts.Merge {
-		// Merge mode: Try to fetch existing index and merge new architectures into it
-		log.Infof("Merge mode enabled - checking for existing multi-arch index")
-
-		// Use the first tag with "-latest" suffix to check for existing index
-		// This ensures we're always merging into the current latest version
-		var checkTag string
-		for _, tag := range tags {
-			if len(tag) >= 7 && tag[len(tag)-7:] == "-latest" {
-				checkTag = tag
-				break
-			}
+	// Use the first tag with "-latest" suffix to check for existing index
+	// This ensures we're always merging into the current latest version
+	var checkTag string
+	for _, tag := range tags {
+		if len(tag) >= 7 && tag[len(tag)-7:] == "-latest" {
+			checkTag = tag
+			break
 		}
-
-		if checkTag == "" {
-			return nil, fmt.Errorf("merge mode requires at least one tag ending with '-latest'")
-		}
-
-		log.Infof("Checking for existing index at tag: %s", checkTag)
-		existingIdx, err := p.FetchExistingIndex(ctx, repoRef, checkTag, remoteOpts)
-		if err != nil {
-			return nil, fmt.Errorf("fetching existing index for merge: %w", err)
-		}
-
-		if existingIdx != nil {
-			// Existing index found - merge new architectures into it
-			log.Infof("Found existing index - merging new architectures")
-
-			// Convert artifactsByArch to []ImageWithMetadata for merging
-			var allImages []ImageWithMetadata
-			for arch, artifacts := range artifactsByArch {
-				log.Infof("Building images for %s", arch.ToAPK())
-
-				if err := artifacts.Validate(); err != nil {
-					return nil, fmt.Errorf("validating artifacts for %s: %w", arch.ToAPK(), err)
-				}
-
-				images, err := p.createImages(ctx, artifacts)
-				if err != nil {
-					return nil, fmt.Errorf("creating images for %s: %w", arch.ToAPK(), err)
-				}
-				allImages = append(allImages, images...)
-			}
-
-			// Merge and publish
-			digest, err = p.MergeArchIntoIndex(ctx, existingIdx, allImages, ref, tags, opts.SkipIfExists, remoteOpts)
-			if err != nil {
-				return nil, fmt.Errorf("merging architectures into existing index: %w", err)
-			}
-			log.Infof("Successfully merged architectures into existing index: %s", digest)
-
-			// Sign and attest the merged index if requested
-			if opts.SignAndAttest {
-				if err := p.SignAndAttestMultiArch(ctx, digest, artifactsByArch, opts.AttestationKeyRef, opts.SkipTransparencyLog); err != nil {
-					return nil, fmt.Errorf("signing and attesting merged index: %w", err)
-				}
-			}
-		} else {
-			// No existing index - fall back to batch mode
-			log.Infof("No existing index found - creating new multi-arch index")
-			digest, err = p.publishMultiArch(ctx, artifactsByArch, repoRef, opts)
-			if err != nil {
-				return nil, fmt.Errorf("publishing multi-arch index: %w", err)
-			}
-			log.Infof("Published new multi-arch index: %s", digest)
-
-			// Apply tags since publishMultiArch doesn't do it
-			digestRef, err := name.NewDigest(digest)
-			if err != nil {
-				return nil, fmt.Errorf("parsing digest: %w", err)
-			}
-
-			idx, err := remote.Index(digestRef, remoteOpts...)
-			if err != nil {
-				return nil, fmt.Errorf("fetching published index: %w", err)
-			}
-
-			log.Infof("Applying %d tags: %v", len(tags), tags)
-			appliedTags, err := applyTagsToTarget(ctx, ref, idx, tags, remoteOpts)
-			if err != nil {
-				return nil, fmt.Errorf("applying tags: %w", err)
-			}
-
-			log.Infof("Publishing complete. Applied %d tags", len(appliedTags))
-			return appliedTags, nil
-		}
-	} else {
-		// Batch mode: Create fresh multi-arch index with all provided architectures
-		log.Infof("Batch mode - creating new multi-arch index for %s", config.Name)
-		digest, err = p.publishMultiArch(ctx, artifactsByArch, repoRef, opts)
-		if err != nil {
-			return nil, fmt.Errorf("publishing multi-arch index: %w", err)
-		}
-		log.Infof("Published multi-arch index: %s", digest)
-
-		// Fetch the published index for tagging
-		digestRef, err := name.NewDigest(digest)
-		if err != nil {
-			return nil, fmt.Errorf("parsing digest: %w", err)
-		}
-
-		idx, err := remote.Index(digestRef, remoteOpts...)
-		if err != nil {
-			return nil, fmt.Errorf("fetching published index: %w", err)
-		}
-
-		// Apply tags
-		log.Infof("Applying %d tags: %v", len(tags), tags)
-		appliedTags, err := applyTagsToTarget(ctx, ref, idx, tags, remoteOpts)
-		if err != nil {
-			return nil, fmt.Errorf("applying tags: %w", err)
-		}
-
-		log.Infof("Publishing complete. Applied %d tags", len(appliedTags))
-		return appliedTags, nil
 	}
 
-	// If we got here via merge mode with existing index, tags were already applied by MergeArchIntoIndex
-	log.Infof("Publishing complete via merge mode")
-	return tags, nil
+	if checkTag == "" {
+		return nil, fmt.Errorf("publishing requires at least one tag ending with '-latest'")
+	}
+
+	log.Infof("Checking for existing index at tag: %s", checkTag)
+	existingIdx, err := p.FetchExistingIndex(ctx, repoRef, checkTag, remoteOpts)
+	if err != nil {
+		return nil, fmt.Errorf("fetching existing index: %w", err)
+	}
+
+	var digest string
+
+	if existingIdx != nil {
+		// Existing index found - merge new architectures into it
+		log.Infof("Found existing index - merging new architectures")
+
+		// Convert artifactsByArch to []ImageWithMetadata for merging
+		var allImages []ImageWithMetadata
+		for arch, artifacts := range artifactsByArch {
+			log.Infof("Building images for %s", arch.ToAPK())
+
+			if err := artifacts.Validate(); err != nil {
+				return nil, fmt.Errorf("validating artifacts for %s: %w", arch.ToAPK(), err)
+			}
+
+			images, err := p.createImages(ctx, artifacts)
+			if err != nil {
+				return nil, fmt.Errorf("creating images for %s: %w", arch.ToAPK(), err)
+			}
+			allImages = append(allImages, images...)
+		}
+
+		// Merge and publish
+		digest, err = p.MergeArchIntoIndex(ctx, existingIdx, allImages, ref, tags, opts.SkipIfExists, remoteOpts)
+		if err != nil {
+			return nil, fmt.Errorf("merging architectures into existing index: %w", err)
+		}
+		log.Infof("Successfully merged architectures into existing index: %s", digest)
+
+		// Sign and attest the merged index if requested
+		if opts.SignAndAttest {
+			if err := p.SignAndAttestIndex(ctx, digest, artifactsByArch, opts.AttestationKeyRef, opts.SkipTransparencyLog); err != nil {
+				return nil, fmt.Errorf("signing and attesting merged index: %w", err)
+			}
+		}
+
+		// Tags were already applied by MergeArchIntoIndex
+		log.Infof("Publishing complete")
+		return tags, nil
+	}
+
+	// No existing index - create new multi-arch index
+	log.Infof("No existing index found - creating new multi-arch index")
+	digest, err = p.buildAndPublishIndex(ctx, artifactsByArch, repoRef, opts)
+	if err != nil {
+		return nil, fmt.Errorf("publishing index: %w", err)
+	}
+	log.Infof("Published new index: %s", digest)
+
+	// Re-check and merge if there was a concurrent publish
+	finalDigest, err := p.handleConcurrentPublish(ctx, digest, checkTag, ref, remoteOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch the final index for tagging
+	digestRef, err := name.NewDigest(finalDigest)
+	if err != nil {
+		return nil, fmt.Errorf("parsing final digest: %w", err)
+	}
+
+	idx, err := remote.Index(digestRef, remoteOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("fetching published index: %w", err)
+	}
+
+	log.Infof("Applying %d tags: %v", len(tags), tags)
+	appliedTags, err := applyTagsToTarget(ctx, ref, idx, tags, remoteOpts)
+	if err != nil {
+		return nil, fmt.Errorf("applying tags: %w", err)
+	}
+
+	log.Infof("Publishing complete. Applied %d tags", len(appliedTags))
+	return appliedTags, nil
 }

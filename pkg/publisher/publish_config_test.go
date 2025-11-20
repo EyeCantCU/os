@@ -84,6 +84,64 @@ oci_config:
 			},
 		},
 		{
+			name: "lxd config",
+			configYAML: `version: 1
+cloud: lxd
+name: lxd-python-313-full
+oci_config:
+  image: python
+  tags:
+    - lxd-python-3.13-full
+  disk_formats:
+    - raw.tgz
+`,
+			wantErr: false,
+			validate: func(t *testing.T, c *PublishConfig) {
+				if c.Cloud != "lxd" {
+					t.Errorf("Cloud = %q, want %q", c.Cloud, "lxd")
+				}
+				if c.Name != "lxd-python-313-full" {
+					t.Errorf("Name = %q, want %q", c.Name, "lxd-python-313-full")
+				}
+				platform, err := c.GetPlatform()
+				if err != nil {
+					t.Fatalf("GetPlatform() error = %v", err)
+				}
+				if platform != PlatformLXD {
+					t.Errorf("GetPlatform() = %v, want PlatformLXD", platform)
+				}
+			},
+		},
+		{
+			name: "hyperv config",
+			configYAML: `version: 1
+cloud: hyperv
+name: hyperv-docker-full
+oci_config:
+  image: docker
+  tags:
+    - hyperv-docker-full
+  disk_formats:
+    - vhd
+`,
+			wantErr: false,
+			validate: func(t *testing.T, c *PublishConfig) {
+				if c.Cloud != "hyperv" {
+					t.Errorf("Cloud = %q, want %q", c.Cloud, "hyperv")
+				}
+				if c.Name != "hyperv-docker-full" {
+					t.Errorf("Name = %q, want %q", c.Name, "hyperv-docker-full")
+				}
+				platform, err := c.GetPlatform()
+				if err != nil {
+					t.Fatalf("GetPlatform() error = %v", err)
+				}
+				if platform != PlatformHyperV {
+					t.Errorf("GetPlatform() = %v, want PlatformHyperV", platform)
+				}
+			},
+		},
+		{
 			name: "missing version",
 			configYAML: `cloud: azure
 name: test

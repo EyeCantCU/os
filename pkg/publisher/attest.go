@@ -268,8 +268,8 @@ func (p *Publisher) attachAttestation(ctx context.Context, ref name.Reference, p
 	return nil
 }
 
-// SignAndAttestMultiArch signs and attests a multi-arch image by processing each architecture
-func (p *Publisher) SignAndAttestMultiArch(ctx context.Context, indexRef string, artifactsByArch map[types.Architecture]*Artifacts, keyRef string, skipTlog bool) error {
+// SignAndAttestIndex signs and attests an image index by processing each architecture
+func (p *Publisher) SignAndAttestIndex(ctx context.Context, indexRef string, artifactsByArch map[types.Architecture]*Artifacts, keyRef string, skipTlog bool) error {
 	log := clog.FromContext(ctx)
 
 	// Parse the index reference

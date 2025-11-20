@@ -59,6 +59,4 @@ type PublishOptions struct {
 	AttestationKeyRef   string // Path to private key for signing (empty = keyless/OIDC)
 	SkipTransparencyLog bool   // If true, skip logging to Rekor transparency log
 	Timestamp           string // Timestamp for cloud-specific tags (e.g., "20241103-1234")
-	ArtifactTags        bool   // If true, apply architecture-specific tags to individual disk format artifacts
-	Merge               bool   // If true, merge new architectures into existing multi-arch index instead of replacing
 }

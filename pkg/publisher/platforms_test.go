@@ -57,6 +57,16 @@ func TestParsePlatform(t *testing.T) {
 			wantPlat: PlatformRPI,
 			wantErr:  false,
 		},
+		{
+			input:    "lxd",
+			wantPlat: PlatformLXD,
+			wantErr:  false,
+		},
+		{
+			input:    "hyperv",
+			wantPlat: PlatformHyperV,
+			wantErr:  false,
+		},
 		// Unrecognized platforms - should return error
 		{
 			input:    "unknown",
@@ -136,6 +146,16 @@ func TestPlatform_ToCloudPlatforms(t *testing.T) {
 		{
 			platform: PlatformQEMU,
 			want:     []string{"qemu"},
+			wantErr:  false,
+		},
+		{
+			platform: PlatformLXD,
+			want:     []string{"lxd"},
+			wantErr:  false,
+		},
+		{
+			platform: PlatformHyperV,
+			want:     []string{"hyperv"},
 			wantErr:  false,
 		},
 		// Unknown platform should return error

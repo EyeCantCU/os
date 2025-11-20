@@ -104,82 +104,53 @@ Each multi-arch index contains:
 
 #### Publishing Commands
 
-The publishing system supports two modes for creating multi-architecture OCI images:
+Each architecture is published separately and automatically merged into the existing multi-arch
+index. This allows parallel CI/CD builds where different runners can publish different
+architectures concurrently.
 
-**INCREMENTAL MODE (Default)**: Publish architectures independently with automatic merging
-- Each architecture can be built and published separately
-- New architectures merge into existing multi-arch OCI index
-- Safe for CI/CD pipelines with separate arch-specific runners
-- Uses `--merge` flag automatically
+**Key Features:**
+- Each architecture is published independently
+- New architectures automatically merge into existing multi-arch OCI index
+- Safe for CI/CD pipelines with parallel arch-specific runners
+- Creates new index if none exists
+- Automatically detects and handles concurrent publishes
 
-**BATCH MODE**: Build all architectures first, then publish together
-- Ensures both architectures are available when creating the index
-- Creates fresh multi-arch OCI index
-- Useful for local development or sequential builds
-- Uses `publish-registry-multi-*` targets
-
-**Makefile Targets - Incremental Mode (Recommended for CI/CD):**
+**Makefile Targets:**
 ```bash
-# Publish current architecture with --merge (default: merges into existing index)
+# Publish current architecture (default: x86_64)
 make publish-registry-azure-python-313-slim
 make publish-registry-qemu-base-slim
 make publish-registry-aws-base-slim
 
-# Publish different architecture (merges into existing index)
+# Publish different architecture
 ARCH=aarch64 make publish-registry-azure-docker-full
 
 # Publish with custom registry and timestamp
 REGISTRY_REPO=cgr.dev/custom-org BUILD_TIMESTAMP=20250115-1200 make publish-registry-gcp-nginx-full
 
-# Example CI/CD workflow (parallel builds):
+# Parallel CI/CD workflow example:
 # Runner 1: ARCH=x86_64 make publish-registry-aws-base-slim
 # Runner 2: ARCH=aarch64 make publish-registry-aws-base-slim
-# Result: Multi-arch index with both architectures
+# Result: Multi-arch index with both x86_64 and aarch64
 ```
 
-**Makefile Targets - Batch Mode (Recommended for local dev):**
-```bash
-# Build both architectures, then publish together as fresh multi-arch index
-make publish-registry-multi-aws-base-slim
-make publish-registry-multi-qemu-base
-make publish-registry-multi-azure-docker-full
-
-# With custom registry and timestamp
-REGISTRY_REPO=cgr.dev/custom-org BUILD_TIMESTAMP=20250115-1200 make publish-registry-multi-gcp-nginx-full
-```
-
-**Direct CLI Publishing - Incremental Mode:**
+**Direct CLI Publishing:**
 ```bash
 # First architecture (creates new index or merges if exists)
 ./apkoaas publish \
   --config configs/azure-python-313-slim/publish.yaml \
   --output-dir output/x86_64/azure-python-313-slim \
   --registry cgr.dev/chainguard-vms \
-  --architectures x86_64 \
-  --timestamp 20251103-1234 \
-  --merge
+  --architecture x86_64 \
+  --timestamp 20251103-1234
 
-# Second architecture (merges into existing index)
+# Second architecture (automatically merges into existing index)
 ./apkoaas publish \
   --config configs/azure-python-313-slim/publish.yaml \
   --output-dir output/aarch64/azure-python-313-slim \
   --registry cgr.dev/chainguard-vms \
-  --architectures aarch64 \
-  --timestamp 20251103-1234 \
-  --merge
-```
-
-**Direct CLI Publishing - Batch Mode:**
-```bash
-# Publish both architectures together (auto-derives paths)
-./apkoaas publish \
-  --config configs/qemu-base-slim/publish.yaml \
-  --output-dir output/x86_64/qemu-base-slim \
-  --registry cgr.dev/chainguard-vms \
-  --architectures x86_64,aarch64 \
-  --timestamp 20241103-1234
-
-# The CLI automatically derives output/aarch64/qemu-base-slim from the x86_64 path
+  --architecture aarch64 \
+  --timestamp 20251103-1234
 ```
 
 **Cloud-Specific Publishing (AWS, Azure, GCP):**
@@ -208,6 +179,39 @@ PUBLISH_TARGET=eap make publish-qemu-base-slim
 
 **Cloud-Specific Publishing:**
 - `PUBLISH_TARGET`: Publishing environment (dev/staging/eap/production) - for cloud-specific publishing
+
+#### Race Condition Handling
+
+The publishing system includes automatic protection against race conditions when multiple CI/CD runners publish different architectures concurrently.
+
+**How It Works:**
+
+1. **Initial Publish**: Each runner publishes its architecture-specific images and creates an index
+2. **Pre-Tag Re-check**: Before applying tags, the system re-checks the registry for concurrent publishes
+3. **Automatic Merging**: If another index was published while we were building, both indexes are merged
+4. **Final Result**: Tags are applied to the merged index containing all architectures
+
+**Implementation Details:**
+
+The race condition handling is implemented in `pkg/publisher/publisher.go`:
+- `recheckAndMergeIfNeeded()`: Re-checks registry and initiates merge if needed
+- `mergePublishedIndexes()` (in `pkg/publisher/index.go`): Fetches both indexes, combines sub-index manifests, publishes merged result
+- Always enabled for all publishes
+- Uses the `-latest` tag as the check point for detecting concurrent publishes
+
+**Why This Matters:**
+
+Without this protection:
+- CI Runner 1 publishes x86_64 → Runner 2 publishes aarch64 → Runner 2's tags overwrite → Only aarch64 remains
+
+With this protection:
+- CI Runner 1 publishes x86_64 → Runner 2 publishes aarch64 → Runner 2 detects and merges → Final index has both architectures
+
+**Edge Cases Handled:**
+
+- Both runners finish at exactly the same time: Last to tag wins, but merges the other's work
+- Runner 1 fails after publishing: Runner 2 detects and includes Runner 1's index in merge
+- No concurrent publish detected: Original index is tagged without modification
 
 #### Platform Validation and Error Handling
 

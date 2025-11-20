@@ -26,6 +26,8 @@ const (
 	PlatformVMware Platform = "vmware"
 	PlatformQEMU   Platform = "qemu"
 	PlatformRPI    Platform = "rpi"
+	PlatformLXD    Platform = "lxd"
+	PlatformHyperV Platform = "hyperv"
 )
 
 // ParsePlatform converts a string to a Platform type
@@ -44,6 +46,10 @@ func ParsePlatform(s string) (Platform, error) {
 		return PlatformQEMU, nil
 	case "rpi":
 		return PlatformRPI, nil
+	case "lxd":
+		return PlatformLXD, nil
+	case "hyperv":
+		return PlatformHyperV, nil
 	default:
 		return "", fmt.Errorf("unrecognized platform: %q", s)
 	}
@@ -66,6 +72,10 @@ func (p Platform) ToCloudPlatforms() ([]string, error) {
 		return []string{"rpi"}, nil
 	case PlatformQEMU:
 		return []string{"qemu"}, nil
+	case PlatformLXD:
+		return []string{"lxd"}, nil
+	case PlatformHyperV:
+		return []string{"hyperv"}, nil
 	default:
 		return nil, fmt.Errorf("unrecognized platform enum value: %v", p)
 	}

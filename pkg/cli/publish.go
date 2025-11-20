@@ -35,13 +35,12 @@ func publishCmd() *cobra.Command {
 	var attestationKey string
 	var skipTransparencyLog bool
 	var timestamp string
-	var merge bool
 
 	// Config-driven flags
 	var configPath string
 	var outputDir string
 	var registry string
-	var architectures []string
+	var architecture string
 
 	cmd := &cobra.Command{
 		Use:   "publish",
@@ -50,40 +49,33 @@ func publishCmd() *cobra.Command {
 
 Config-driven publishing uses publish.yaml files to define OCI image names, tags, and disk formats.
 
-USAGE:
-  Basic publishing with single architecture:
-    apkoaas publish \
-      --config configs/azure-python-313-slim/publish.yaml \
-      --output-dir output/x86_64/azure-python-313-slim \
-      --registry cgr.dev/chainguard-vms \
-      --architectures x86_64
+Each architecture is published separately and automatically merged into the existing multi-arch
+index. This allows parallel CI/CD builds where different runners can publish different
+architectures concurrently.
 
-  Multi-architecture publishing (batch mode - default):
+USAGE:
+  Publish single architecture (merges into existing index or creates new one):
     apkoaas publish \
       --config configs/azure-python-313-slim/publish.yaml \
       --output-dir output/x86_64/azure-python-313-slim \
       --registry cgr.dev/chainguard-vms \
-      --architectures x86_64,aarch64 \
+      --architecture x86_64 \
       --timestamp 20251103-1234
 
-  Incremental publishing (merge mode):
-    # First architecture (creates new index)
-    apkoaas publish \
-      --config configs/azure-python-313-slim/publish.yaml \
-      --output-dir output/x86_64/azure-python-313-slim \
-      --registry cgr.dev/chainguard-vms \
-      --architectures x86_64 \
-      --timestamp 20251103-1234 \
-      --merge
-
-    # Second architecture (merges into existing index)
+  Publish another architecture (automatically merges with existing):
     apkoaas publish \
       --config configs/azure-python-313-slim/publish.yaml \
       --output-dir output/aarch64/azure-python-313-slim \
       --registry cgr.dev/chainguard-vms \
-      --architectures aarch64 \
-      --timestamp 20251103-1234 \
-      --merge
+      --architecture aarch64 \
+      --timestamp 20251103-1234
+
+CONCURRENT PUBLISHING:
+  The system automatically handles concurrent publishes from parallel CI/CD runners:
+  - Each runner publishes its architecture independently
+  - Before applying tags, the system checks for concurrent publishes
+  - If another architecture was published concurrently, indexes are merged
+  - Final result contains all architectures from all concurrent publishes
 
 PUBLISH CONFIG FORMAT (publish.yaml):
   version: 1
@@ -113,7 +105,7 @@ PUBLISHED STRUCTURE:
     azure-python-slim-20251103-1234       → multi-arch index
     azure-python-slim-latest              → multi-arch index
 
-Each multi-arch index contains x86_64 and aarch64 sub-indexes with all artifact types
+Each multi-arch index contains sub-indexes for each architecture with all artifact types
 (apko tar, disk formats, SBOMs, secure boot files).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -124,7 +116,7 @@ Each multi-arch index contains x86_64 and aarch64 sub-indexes with all artifact 
 				return fmt.Errorf("--config is required")
 			}
 
-			return publishFromConfig(ctx, configPath, outputDir, registry, architectures, timestamp, skipIfExists, signAndAttest, attestationKey, skipTransparencyLog, merge, userAgent)
+			return publishFromConfig(ctx, configPath, outputDir, registry, architecture, timestamp, skipIfExists, signAndAttest, attestationKey, skipTransparencyLog, userAgent)
 		},
 	}
 
@@ -132,11 +124,10 @@ Each multi-arch index contains x86_64 and aarch64 sub-indexes with all artifact 
 	cmd.Flags().StringVar(&configPath, "config", "", "Path to publish.yaml config file (required)")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "Output directory containing artifacts (required)")
 	cmd.Flags().StringVar(&registry, "registry", "", "Registry prefix like 'cgr.dev/chainguard-vms' (required)")
-	cmd.Flags().StringSliceVar(&architectures, "architectures", []string{"x86_64", "aarch64"}, "Architectures to publish")
+	cmd.Flags().StringVar(&architecture, "architecture", "x86_64", "Architecture to publish (x86_64 or aarch64)")
 
 	// Publishing options
 	cmd.Flags().StringVar(&timestamp, "timestamp", "", "Timestamp for tag expansion (format: YYYYMMDD-HHMM, default: auto-generated)")
-	cmd.Flags().BoolVar(&merge, "merge", false, "Merge new architectures into existing multi-arch index (incremental publishing)")
 
 	// Registry options
 	cmd.Flags().StringVar(&userAgent, "user-agent", "wolfi-vm-publisher", "User agent for registry requests")
@@ -151,7 +142,7 @@ Each multi-arch index contains x86_64 and aarch64 sub-indexes with all artifact 
 }
 
 // publishFromConfig handles config-driven publishing using a publish.yaml file
-func publishFromConfig(ctx context.Context, configPath, outputDir, registry string, architectures []string, timestamp string, skipIfExists, signAndAttest bool, attestationKey string, skipTransparencyLog, merge bool, userAgent string) error {
+func publishFromConfig(ctx context.Context, configPath, outputDir, registry, architecture, timestamp string, skipIfExists, signAndAttest bool, attestationKey string, skipTransparencyLog bool, userAgent string) error {
 	// Validate required flags
 	if outputDir == "" {
 		return fmt.Errorf("--output-dir is required when using --config")
@@ -177,80 +168,12 @@ func publishFromConfig(ctx context.Context, configPath, outputDir, registry stri
 	repoRef := fmt.Sprintf("%s/%s", registry, config.OCIConfig.Image)
 	slog.InfoContext(ctx, "Publishing config", "name", config.Name, "cloud", config.Cloud, "repository", repoRef)
 
-	// Build output directory map for each architecture
-	//
-	// For batch mode (multi-arch publishing), the user should provide an outputDir that:
-	// 1. Contains one architecture's path (e.g., output/x86_64/config-name)
-	// 2. Allows us to derive other architectures by replacing the arch component
-	//
-	// For incremental mode (--merge), the user provides a single architecture's outputDir.
-	//
-	// Expected directory structure:
-	//   output/x86_64/azure-python-313-slim/
-	//   output/aarch64/azure-python-313-slim/
-	outputDirs := make(map[types.Architecture]string)
-
-	if len(architectures) == 1 {
-		// Single architecture - use outputDir directly (works for both merge and batch modes)
-		arch := types.ParseArchitecture(architectures[0])
-		outputDirs[arch] = outputDir
-		slog.InfoContext(ctx, "Publishing single architecture", "arch", arch.ToAPK(), "dir", outputDir)
-	} else {
-		// Multiple architectures (batch mode) - derive paths by replacing architecture component
-		// Try to detect and replace the architecture string in the path
-		slog.InfoContext(ctx, "Batch mode: deriving paths for multiple architectures", "archs", architectures, "baseDir", outputDir)
-
-		for _, archStr := range architectures {
-			arch := types.ParseArchitecture(archStr)
-
-			// Try to derive the path by replacing known architecture strings
-			derivedPath := outputDir
-			replaced := false
-
-			// Try replacing x86_64 or aarch64 in the path
-			for _, replaceArch := range []string{"x86_64", "aarch64"} {
-				if replaceArch != arch.ToAPK() {
-					// Found a different architecture in the path - replace it
-					newPath := outputDir
-					// Simple string replacement
-					for i := range outputDir {
-						if i+len(replaceArch) <= len(outputDir) {
-							if outputDir[i:i+len(replaceArch)] == replaceArch {
-								newPath = outputDir[:i] + arch.ToAPK() + outputDir[i+len(replaceArch):]
-								replaced = true
-								break
-							}
-						}
-					}
-					if replaced {
-						derivedPath = newPath
-						break
-					}
-				}
-			}
-
-			// If we couldn't derive the path, check if the current path contains this arch
-			if !replaced {
-				// Check if outputDir contains the current arch string
-				containsArch := false
-				for i := range outputDir {
-					if i+len(arch.ToAPK()) <= len(outputDir) {
-						if outputDir[i:i+len(arch.ToAPK())] == arch.ToAPK() {
-							containsArch = true
-							break
-						}
-					}
-				}
-
-				if !containsArch {
-					return fmt.Errorf("cannot derive output path for %s: outputDir %q does not contain an architecture component (x86_64 or aarch64) that can be replaced", arch.ToAPK(), outputDir)
-				}
-			}
-
-			outputDirs[arch] = derivedPath
-			slog.InfoContext(ctx, "Derived output directory for architecture", "arch", arch.ToAPK(), "dir", derivedPath)
-		}
+	// Build output directory map for the single architecture
+	arch := types.ParseArchitecture(architecture)
+	outputDirs := map[types.Architecture]string{
+		arch: outputDir,
 	}
+	slog.InfoContext(ctx, "Publishing architecture", "arch", arch.ToAPK(), "dir", outputDir)
 
 	// Configure remote options
 	remoteOpts := []remote.Option{
@@ -263,15 +186,13 @@ func publishFromConfig(ctx context.Context, configPath, outputDir, registry stri
 	// Create publisher
 	pub := publisher.New(remoteOpts...)
 
-	// Publish using config-driven approach
+	// Publish using config-driven approach with incremental merging
 	opts := &publisher.PublishOptions{
 		SkipIfExists:        skipIfExists,
 		SignAndAttest:       signAndAttest,
 		AttestationKeyRef:   attestationKey,
 		SkipTransparencyLog: skipTransparencyLog,
 		Timestamp:           timestamp,
-		ArtifactTags:        false, // Config-driven doesn't use artifact tags for now
-		Merge:               merge,
 	}
 
 	appliedTags, err := pub.PublishSingleConfig(ctx, config, outputDirs, repoRef, opts)
