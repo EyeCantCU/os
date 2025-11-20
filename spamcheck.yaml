@@ -1,26 +1,13 @@
 package:
   name: spamcheck
   version: "3.5.3"
-  epoch: 1
+  epoch: 3
   description: Spamcheck is a gRPC-based spam classification service for GitLab
   copyright:
     - license: MIT
   dependencies:
     runtime:
       - coreutils
-      - py${{vars.python-version}}-cloudevents
-      - py${{vars.python-version}}-distconfig3
-      - py${{vars.python-version}}-google-cloud-pubsub
-      - py${{vars.python-version}}-google-cloud-storage
-      - py${{vars.python-version}}-grpcio-1.76
-      - py${{vars.python-version}}-grpcio-reflection
-      - py${{vars.python-version}}-numpy
-      - py${{vars.python-version}}-protobuf
-      - py${{vars.python-version}}-python-json-logger
-      - py${{vars.python-version}}-pyyaml
-      - py${{vars.python-version}}-tflite-runtime
-      - py${{vars.python-version}}-ulid-py
-      - py${{vars.python-version}}-vyper-config
       - python-${{vars.python-version}}
 
 vars:
@@ -31,10 +18,14 @@ vars:
 environment:
   contents:
     packages:
+      - build-base
       - busybox
-      - py${{vars.python-version}}-grpcio-tools
-      - py${{vars.python-version}}-protobuf
+      - gfortran
+      - meson
+      - openblas-dev
+      - py${{vars.python-version}}-pipenv-bin
       - python-${{vars.python-version}}
+      - python-${{vars.python-version}}-dev
 
 pipeline:
   - uses: git-checkout
@@ -43,9 +34,37 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: 1fcd02900134ad4e70df212c6157787d9cacc5d8
 
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  # Install spamcheck dependencies using uv, sourced from libraries
+  - runs: |
+      uv venv $PWD/venv
+      pipenv requirements > /tmp/requirements.txt
+      uv pip sync /tmp/requirements.txt --directory $PWD/venv
+
+      # Fix CVEs
+      # Remediate GHSA-9hjg-9r4m-mvj7
+      uv pip install --upgrade "requests>=2.32.4" --directory $PWD/venv
+
+      # Remediate GHSA-8qvm-5x2c-j2w7
+      # Pin to protobuf < 6 until https://github.com/chainguard-dev/internal-dev/issues/24449 is resolved
+      uv pip install --upgrade "protobuf>=5.29.5,<6" --directory $PWD/venv
+
+      # Remediate GHSA-5rjg-fvgr-3xxf
+      uv pip install --upgrade "setuptools>=78.1.1" --directory $PWD/venv
+
+      # Remediate GHSA-48p4-8xcf-vxj5 and GHSA-pq67-6m6q-mj2v
+      uv pip install --upgrade "urllib3>=2.5.0" --directory $PWD/venv
+
+      # Move venv dependencies to site-packages
+      mkdir -p ${{targets.destdir}}/usr/lib/python${{vars.python-version}}/site-packages
+      cp -r $PWD/venv/lib/python${{vars.python-version}}/site-packages/* ${{targets.destdir}}/usr/lib/python${{vars.python-version}}/site-packages/
+
   - runs: |
       # Generate gRPC proto files
-      python${{vars.python-version}} -m grpc_tools.protoc --proto_path=${PWD} --python_out=${PWD} --grpc_python_out=${PWD} api/v1/*.proto
+      $PWD/venv/bin/python${{vars.python-version}} -m grpc_tools.protoc --proto_path=${PWD} --python_out=${PWD} --grpc_python_out=${PWD} api/v1/*.proto
 
       mkdir -p ${{targets.destdir}}/spamcheck
       cp -r api app server *.py ${{targets.destdir}}/spamcheck/
