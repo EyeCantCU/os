@@ -120,12 +120,13 @@ disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
 disks-aws-main: $(foreach name,$(group_aws_main),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
-disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
-disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
 disks-hyperv: $(foreach name,$(disks_hyperv),disk-$(name))
-disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
-ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
 disks-lxd: $(foreach name,$(disks_lxd),stamp-$(name))
+disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
+disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
+disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
+ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
+
 
 .PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-hyperv list-rpi list-lxd
 list-all:

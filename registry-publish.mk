@@ -45,3 +45,21 @@ $(foreach name,$(names),publish-registry-$(name)): publish-registry-%: $(ARCH_OU
 		--timestamp $(BUILD_TIMESTAMP) \
 		--sign-and-attest=true \
 		--skip-if-exists
+
+# Cloud-specific registry publishing grouping targets
+# These targets group all configs for a specific cloud platform, allowing parallel publishing
+# with make -j. Example: make -j$(nproc) publish-registry-gcp ARCH=x86_64
+.PHONY: publish-registry-aws publish-registry-azure publish-registry-gcp publish-registry-hyperv publish-registry-qemu publish-registry-vmware publish-registry-rpi publish-registry-lxd
+.PHONY: publish-registry-aws-ecs publish-registry-aws-eks publish-registry-aws-main
+
+publish-registry-aws: $(foreach name,$(disks_aws),publish-registry-$(name))
+publish-registry-aws-ecs: $(foreach name,$(group_aws_ecs),publish-registry-$(name))
+publish-registry-aws-eks: $(foreach name,$(group_aws_eks),publish-registry-$(name))
+publish-registry-aws-main: $(foreach name,$(group_aws_main),publish-registry-$(name))
+publish-registry-azure: $(foreach name,$(disks_azure),publish-registry-$(name))
+publish-registry-gcp: $(foreach name,$(disks_gcp),publish-registry-$(name))
+publish-registry-hyperv: $(foreach name,$(disks_hyperv),publish-registry-$(name))
+publish-registry-qemu: $(foreach name,$(disks_qemu),publish-registry-$(name))
+publish-registry-vmware: $(foreach name,$(disks_vmware),publish-registry-$(name))
+publish-registry-rpi: $(foreach name,$(disks_rpi),publish-registry-$(name))
+publish-registry-lxd: $(foreach name,$(disks_lxd),publish-registry-$(name))
