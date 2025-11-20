@@ -66,6 +66,7 @@ disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu := $(call list_cloud_images,qemu)
 disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
+disks_hyperv := $(call list_cloud_images,hyperv)
 disks_rpi := $(call list_cloud_images,rpi)
 disks_lxd := $(call list_cloud_images,lxd)
 
@@ -112,7 +113,7 @@ $(test_targets_qemu): test-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
 		QEMU_VMS=$* ./vms-test/helpers/test-wolfi-vm \
 	    --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results"
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi ovas-vmware
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-hyperv disks-rpi ovas-vmware
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-aws-ecs: $(foreach name,$(group_aws_ecs),disk-$(name))
 disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
@@ -121,11 +122,12 @@ disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
 disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
 disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
+disks-hyperv: $(foreach name,$(disks_hyperv),disk-$(name))
 disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
 ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
 disks-lxd: $(foreach name,$(disks_lxd),stamp-$(name))
 
-.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-rpi list-lxd
+.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-hyperv list-rpi list-lxd
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -140,6 +142,8 @@ list-qemu-nonrc:
 	@for n in $(group_qemu_nonrc); do echo $$n; done
 list-vmware:
 	@for n in $(disks_vmware); do echo $$n; done
+list-hyperv:
+	@for n in $(disks_hyperv); do echo $$n; done
 list-rpi:
 	@for n in $(disks_rpi); do echo $$n; done
 list-lxd:
@@ -223,9 +227,10 @@ art-render-aws-eks: $(foreach name,$(group_aws_eks),art-render-$(name))
 art-render-aws-main: $(foreach name,$(group_aws_main),art-render-$(name))
 art-render-gcp: $(filter art-render-gcp-%,$(art_render_targets))
 art-render-vmware: $(filter art-render-vmware-%,$(art_render_targets))
+art-render-hyperv: $(filter art-render-hyperv-%,$(art_render_targets))
 art-render-rpi: $(filter art-render-rpi-%,$(art_render_targets))
 art-render-lxd: $(filter art-render-lxd-%,$(art_render_targets))
-.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-aws-ecs art-render-aws-eks art-render-aws-main art-render-gcp art-render-vmware art-render-rpi art-render-lxd $(art_render_targets)
+.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-aws-ecs art-render-aws-eks art-render-aws-main art-render-gcp art-render-vmware art-render-hyperv art-render-rpi art-render-lxd $(art_render_targets)
 $(art_render_targets): art-render-%: configs/%/build.yaml
 
 configs/%/build.yaml: $(ART) $(YQ) $(YAM) $(cue_files)
@@ -248,9 +253,10 @@ art-diff-aws-eks: $(foreach name,$(group_aws_eks),art-diff-$(name))
 art-diff-aws-main: $(foreach name,$(group_aws_main),art-diff-$(name))
 art-diff-gcp: $(filter art-diff-gcp-%,$(art_diff_targets))
 art-diff-vmware: $(filter art-diff-vmware-%,$(art_diff_targets))
+art-diff-hyperv: $(filter art-diff-hyperv-%,$(art_diff_targets))
 art-diff-rpi: $(filter art-diff-rpi-%,$(art_diff_targets))
 art-diff-lxd: $(filter art-diff-lxd-%,$(art_diff_targets))
-.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-aws-ecs art-diff-aws-eks art-diff-aws-main art-diff-gcp art-diff-vmware art-diff-rpi art-diff-lxd $(art_diff_targets)
+.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-aws-ecs art-diff-aws-eks art-diff-aws-main art-diff-gcp art-diff-vmware art-diff-hyperv art-diff-rpi art-diff-lxd $(art_diff_targets)
 # The purpose of this is to catch build.yaml files committed in CI which differ from the rendered build.yaml
 # that goes with the associated cue file.
 # This is desirable to 1. make it easier to analyze what's happening in an image
@@ -353,6 +359,7 @@ AZ_IMAGEUPLOAD_FLAGS ?=
 QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
 VMWARE_AZSTORAGECONTAINER = chainguard-vms-vmware
 LXD_AZSTORAGECONTAINER = chainguard-vms-lxd
+HYPERV_AZSTORAGECONTAINER = chainguard-vms-hyperv
 
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
@@ -494,6 +501,34 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 		--raw-path $(dir $@)disk.raw \
 		--sbom-path $(dir $@)syft.sbom.json \
 		--ova-path $(dir $@)disk.ova)
+
+# Publish to cloud storage
+.PHONY: publish-hyperv
+publish-hyperv: $(foreach name,$(disks_hyperv),publish-hyperv-$(subst hyperv-,,$(name)))
+$(foreach name,$(disks_hyperv),publish-hyperv-$(subst hyperv-,,$(name))): publish-hyperv-%: $(ARCH_OUT_D)/hyperv-%/publish.$(PUBLISH_TARGET).json
+$(ARCH_OUT_D)/hyperv-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/hyperv-%/disk.raw $(ARCH_OUT_D)/hyperv-%/disk.vhd
+	@mkdir -p $(dir $@)
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name hyperv-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(HYPERV_AZSTORAGECONTAINER) \
+		--vhd-path $(dir $@)disk.vhd \
+		--sbom-path $(dir $@)syft.sbom.json)
+
+# Publish to azure galleries
+.PHONY: publish-hyperv-azure
+publish-hyperv-azure: $(foreach name,$(disks_hyperv),publish-hyperv-azure-$(subst hyperv-,,$(name)))
+$(foreach name,$(disks_hyperv),publish-hyperv-azure-$(subst hyperv-,,$(name))): publish-hyperv-azure-%: $(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json
+$(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-hyperv-$*-$(AZARCH)
+$(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json: _AZTAGS=$(AZTAGS),local-name=hyperv-$*
+$(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json: $(TOOLS_SUBD)/azure-image-upload $(ARCH_OUT_D)/hyperv-%/disk.raw
+	@$(call capture_stdout,$@,\
+		./$(TOOLS_SUBD)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
+		$(addprefix --db-hash=,$(shell cat $(dir $@)db-b64-hashes.txt)) \
+		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(AZ_IMAGEUPLOAD_FLAGS) $(dir $@)disk.raw)
 
 .PHONY: publish-rpi
 publish-rpi: $(foreach name,$(disks_rpi),publish-$(name))
