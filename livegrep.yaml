@@ -1,0 +1,127 @@
+package:
+  name: livegrep
+  version: 0_git20250814
+  epoch: 0
+  description: Fast, indexed regex search over large codebases
+  copyright:
+    - license: BSD-3-Clause
+  resources:
+    cpu: 16
+    memory: 32Gi
+  dependencies:
+    provides:
+      - livegrep=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bazel-7
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang-18
+      - cmake
+      - git
+      - libtool
+      - lld-18
+      - llvm-18-dev
+      - openjdk-21-default-jdk
+      - python3-dev
+      - samurai
+      - wolfi-baselayout
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/livegrep/livegrep
+      branch: main
+      expected-commit: 84f1eb0de5bd0396b18ce476d46f32b520d3e071
+      destination: livegrep
+
+  - runs: |
+      export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+      mkdir -p .cache/bazel/_bazel_root
+
+      cd livegrep
+
+      # Setup clang toolchain
+      ../bazel/setup_clang.sh /usr || true
+
+      # Create symlink for llvm-ar
+      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-18
+
+      # Build the codesearch backend using clang to avoid GCC 15 / abseil-cpp compatibility issues
+      export CC=clang
+      export CXX=clang++
+      bazel build --verbose_failures -c opt //src/tools:codesearch
+
+      # Install codesearch binary
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      mv bazel-bin/src/tools/codesearch ${{targets.destdir}}/usr/bin/codesearch
+
+      # Clean up bazel cache
+      rm -rf ../.cache/bazel/_bazel_root
+
+  - uses: strip
+
+# TODO: Frontend and other subpackages disabled due to npm/webpack tarball extraction issues
+# The frontend build requires working npm/aspect_rules_js which is currently failing
+# Will need to investigate Bazel npm/webpack dependencies to enable frontend, github-reindex, and compat packages
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - curl
+        - jq
+        - netcat-openbsd
+  pipeline:
+    - name: "Verify codesearch binary"
+      runs: |
+        set -euo pipefail
+        codesearch --help
+
+    - name: "Test codesearch indexing and search"
+      runs: |
+        set -euo pipefail
+
+        # Create a test repository with some code
+        mkdir -p /tmp/test-repo
+        tee /tmp/test-repo/test.go << 'EOF'
+        package main
+
+        import "fmt"
+
+        func main() {
+            fmt.Println("Hello from livegrep test")
+        }
+        EOF
+
+        tee /tmp/test-repo/README.md << 'EOF'
+        # Test Repository
+        This is a test repository for livegrep indexing.
+        EOF
+
+        # Create index configuration
+        tee /tmp/index.json << 'EOF'
+        {
+          "name": "test",
+          "fs_paths": ["/tmp/test-repo"],
+          "metadata": {
+            "url": "file:///tmp/test-repo"
+          }
+        }
+        EOF
+
+        # Build index
+        codesearch -dump_index /tmp/index.idx -load_index /tmp/index.json
+
+        # Verify index file was created
+        if [ ! -f /tmp/index.idx ]; then
+          echo "Index file was not created"
+          exit 1
+        fi
+
+        echo "Index successfully created"
