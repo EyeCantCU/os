@@ -97,8 +97,6 @@ func TestGenerateComplianceReports(t *testing.T) {
 	}{
 		{"CIS Server L1", "xccdf_org.ssgproject.content_profile_cis_server_l1"},
 		{"STIG", "xccdf_org.ssgproject.content_profile_stig"},
-		{"STIG Draft9", "xccdf_org.ssgproject.content_profile_stig_draft9"},
-		{"STIG Draft24", "xccdf_org.ssgproject.content_profile_stig_draft24"},
 	}
 
 	for _, profile := range profiles {
