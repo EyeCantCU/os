@@ -130,3 +130,16 @@ Nov 11 15:28:27 chainguard audit: CWD cwd="/"
 		t.Errorf("ExtractAVCDenials found %d denials but expected 2", numDenials)
 	}
 }
+
+func TestExtractAuditSELinuxErrors(t *testing.T) {
+	journal := `Nov 21 04:38:56 i-0b7654899732b4b0b kernel: audit: type=1131 audit(1763699936.037:926): pid=1 uid=0 auid=4294967295 ses=4294967295 subj=system_u:system_r:init_t:s0 msg='unit=refresh-policy-routes@ens5 comm="systemd" exe="/usr/lib/systemd/systemd" hostname=? addr=? terminal=? res=success'
+Nov 21 04:39:41 i-0b7654899732b4b0b audit: SELINUX_ERR op=security_compute_sid invalid_context="system_u:system_r:cloud_ssh_keys_fetcher_t:s0-s0:c0.c1023" scontext=system_u:system_r:sshd_t:s0-s0:c0.c1023 tcontext=system_u:object_r:cloud_ssh_keys_fetcher_exec_t:s0 tclass=process
+Nov 21 04:39:41 i-0b7654899732b4b0b sshd-session[19147]: error: AuthorizedKeysCommand execve "/usr/bin/cloud-ssh-keys-fetcher ec2-user SHA256:leHZrfnE5RsCx+v0AdIzWULtwYe0FsI/AIQ+0dpBGZ0": Permission denied
+`
+	entries := strings.Split(journal, "\n")
+
+	selinuxErrors := ExtractAuditSELinuxErrors(entries)
+	if numErrors := len(selinuxErrors); numErrors != 1 {
+		t.Errorf("ExtractAuditSELinuxErrors found %d errors but expected 1", numErrors)
+	}
+}

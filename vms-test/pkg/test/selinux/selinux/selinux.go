@@ -59,8 +59,13 @@ type SELinuxStatus struct {
 	MaxKernelPolicyVersion   int              // maximum policy version understood by the kernel
 }
 
-// Regular expression to identify AVC denials in the system journal
-var avcDenialPattern = regexp.MustCompile(`avc:\s+denied\s+.*`)
+var (
+	// Regular expression to identify AVC denials in the system journal
+	avcDenialPattern = regexp.MustCompile(`avc:\s+denied\s+.*`)
+
+	// Regular expression to identify generic SELinux errors in the system journal
+	selinuxErrorsPattern = regexp.MustCompile(`audit:\s+SELINUX_ERR`)
+)
 
 // Determine the status and configuration of SELinux on the running system
 func GetSELinuxStatus(ctx context.Context) (*SELinuxStatus, error) {
@@ -140,4 +145,13 @@ func ExtractAVCDenials(journalEntries []string) (denials []string) {
 		}
 	}
 	return denials
+}
+
+func ExtractAuditSELinuxErrors(journalEntries []string) (selinuxErrors []string) {
+	for _, entry := range journalEntries {
+		if selinuxError := selinuxErrorsPattern.FindString(entry); selinuxError != "" {
+			selinuxErrors = append(selinuxErrors, selinuxError)
+		}
+	}
+	return selinuxErrors
 }
