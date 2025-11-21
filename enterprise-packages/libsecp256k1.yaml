@@ -1,0 +1,261 @@
+package:
+  name: libsecp256k1
+  version: 0.7.0
+  epoch: 0
+  description: Optimized C library for EC operations on curve secp256k1
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - coreutils
+      - libtool
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/bitcoin-core/secp256k1
+      expected-commit: a660a4976efe880bae7982ee410b9e0dc59ac983
+      tag: v${{package.version}}
+
+  - runs: ./autogen.sh
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --disable-static \
+        --enable-module-ecdh \
+        --enable-module-recovery \
+        --enable-module-schnorrsig \
+        --enable-module-extrakeys \
+        --disable-benchmark \
+        --disable-exhaustive-tests \
+        --disable-examples
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: Headers and dev libraries from ${{package.name}}
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+test:
+  environment:
+    contents:
+      packages:
+        - gcc
+        - glibc-dev
+        - ${{package.name}}-dev
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test basic library functionality
+      runs: |
+        set -euo pipefail
+        # Create a simple C program to test the library
+        cat > /tmp/test_secp256k1.c << 'EOF'
+        #include <secp256k1.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        int main() {
+            secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+            if (ctx == NULL) {
+                fprintf(stderr, "Failed to create context\n");
+                return 1;
+            }
+
+            // Test key generation
+            unsigned char seckey[32];
+            memset(seckey, 1, 32);
+
+            secp256k1_pubkey pubkey;
+            if (!secp256k1_ec_pubkey_create(ctx, &pubkey, seckey)) {
+                fprintf(stderr, "Failed to create public key\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            printf("Successfully created public key\n");
+
+            // Test signature creation and verification
+            unsigned char msg_hash[32];
+            memset(msg_hash, 2, 32);
+
+            secp256k1_ecdsa_signature sig;
+            if (!secp256k1_ecdsa_sign(ctx, &sig, msg_hash, seckey, NULL, NULL)) {
+                fprintf(stderr, "Failed to create signature\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            printf("Successfully created signature\n");
+
+            if (!secp256k1_ecdsa_verify(ctx, &sig, msg_hash, &pubkey)) {
+                fprintf(stderr, "Failed to verify signature\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            printf("Successfully verified signature\n");
+
+            secp256k1_context_destroy(ctx);
+            printf("All tests passed\n");
+            return 0;
+        }
+        EOF
+
+        # Compile the test program
+        gcc -o /tmp/test_secp256k1 /tmp/test_secp256k1.c -lsecp256k1
+
+        # Run the test
+        /tmp/test_secp256k1
+    - name: Test ECDH module
+      runs: |
+        set -euo pipefail
+        cat > /tmp/test_ecdh.c << 'EOF'
+        #include <secp256k1.h>
+        #include <secp256k1_ecdh.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        int main() {
+            secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN);
+            if (ctx == NULL) {
+                fprintf(stderr, "Failed to create context\n");
+                return 1;
+            }
+
+            // Create two key pairs
+            unsigned char seckey1[32];
+            unsigned char seckey2[32];
+            memset(seckey1, 1, 32);
+            memset(seckey2, 2, 32);
+
+            secp256k1_pubkey pubkey1, pubkey2;
+            if (!secp256k1_ec_pubkey_create(ctx, &pubkey1, seckey1) ||
+                !secp256k1_ec_pubkey_create(ctx, &pubkey2, seckey2)) {
+                fprintf(stderr, "Failed to create public keys\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            // Compute shared secrets
+            unsigned char shared1[32];
+            unsigned char shared2[32];
+
+            if (!secp256k1_ecdh(ctx, shared1, &pubkey2, seckey1, NULL, NULL) ||
+                !secp256k1_ecdh(ctx, shared2, &pubkey1, seckey2, NULL, NULL)) {
+                fprintf(stderr, "Failed to compute ECDH\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            // Verify shared secrets match
+            if (memcmp(shared1, shared2, 32) != 0) {
+                fprintf(stderr, "ECDH shared secrets do not match\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            printf("ECDH module test passed\n");
+            secp256k1_context_destroy(ctx);
+            return 0;
+        }
+        EOF
+
+        gcc -o /tmp/test_ecdh /tmp/test_ecdh.c -lsecp256k1
+        /tmp/test_ecdh
+    - name: Test recovery module
+      runs: |
+        set -euo pipefail
+        cat > /tmp/test_recovery.c << 'EOF'
+        #include <secp256k1.h>
+        #include <secp256k1_recovery.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        int main() {
+            secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+            if (ctx == NULL) {
+                fprintf(stderr, "Failed to create context\n");
+                return 1;
+            }
+
+            unsigned char seckey[32];
+            memset(seckey, 1, 32);
+
+            secp256k1_pubkey pubkey;
+            if (!secp256k1_ec_pubkey_create(ctx, &pubkey, seckey)) {
+                fprintf(stderr, "Failed to create public key\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            unsigned char msg_hash[32];
+            memset(msg_hash, 2, 32);
+
+            // Create recoverable signature
+            secp256k1_ecdsa_recoverable_signature sig;
+            if (!secp256k1_ecdsa_sign_recoverable(ctx, &sig, msg_hash, seckey, NULL, NULL)) {
+                fprintf(stderr, "Failed to create recoverable signature\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            // Recover public key from signature
+            secp256k1_pubkey recovered_pubkey;
+            if (!secp256k1_ecdsa_recover(ctx, &recovered_pubkey, &sig, msg_hash)) {
+                fprintf(stderr, "Failed to recover public key\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            // Serialize both public keys and compare
+            unsigned char pubkey_serialized[65];
+            unsigned char recovered_serialized[65];
+            size_t len = 65;
+
+            if (!secp256k1_ec_pubkey_serialize(ctx, pubkey_serialized, &len, &pubkey, SECP256K1_EC_UNCOMPRESSED)) {
+                fprintf(stderr, "Failed to serialize original public key\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            len = 65;
+            if (!secp256k1_ec_pubkey_serialize(ctx, recovered_serialized, &len, &recovered_pubkey, SECP256K1_EC_UNCOMPRESSED)) {
+                fprintf(stderr, "Failed to serialize recovered public key\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            if (memcmp(pubkey_serialized, recovered_serialized, 65) != 0) {
+                fprintf(stderr, "Recovered public key does not match original\n");
+                secp256k1_context_destroy(ctx);
+                return 1;
+            }
+
+            printf("Recovery module test passed\n");
+            secp256k1_context_destroy(ctx);
+            return 0;
+        }
+        EOF
+
+        gcc -o /tmp/test_recovery /tmp/test_recovery.c -lsecp256k1
+        /tmp/test_recovery
