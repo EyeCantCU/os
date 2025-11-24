@@ -1,0 +1,103 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Check for stale images
+
+on:
+  schedule:
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+    inputs:
+      stale-after-days:
+        type: number
+        default: 7
+        required: false
+        description: 'Number of days without update before an image is considered stale'
+
+permissions: {}
+
+jobs:
+  check-for-stale-images:
+    runs-on: ubuntu-8-core
+
+    permissions:
+      contents: read
+      id-token: write # To support federating to assume chainguard identity
+
+    steps:
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version-file: './go.mod'
+
+      - name: Build stalemate
+        run: |
+          make tools/stalemate
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          # AWS account aws-marketplace
+          role-to-assume: arn:aws:iam::607334848609:role/wolfi-vms-github-postsubmit-role
+          aws-region: us-east-1
+
+      - name: Find stale images
+        run: |
+          stale_after_days=${{ inputs.stale-after-days || 7 }}
+
+          if ! tools/stalemate \
+                 --stale-after-days "$stale_after_days" \
+                 --output json \
+                 awspub \
+               >stale-images.json
+          then
+            echo 'Failed to determine stale images!'
+            exit 1
+          fi
+
+          read -r num_unpublished num_current num_stale < <(
+            jq -r '[
+                     (.unpublished | length),
+                     (.published   | length),
+                     (.stale       | length)
+                   ]
+                   | join(" ")
+            ' stale-images.json
+          )
+
+          stale_images_list=$(jq -r '
+            def format_arch: .arch + ": " + (.days_ago | tostring) + " days";
+            def format_group: "- " + .[0].name + " (" + (map(format_arch) | sort | join(", ")) + ")";
+
+            .stale | group_by(.name) | map(format_group) | .[]
+          ' stale-images.json)
+
+          {
+            echo "The latest data from the AWS Marketplace is in:"
+            echo
+            echo "- $num_current images are current"
+            echo "- $num_unpublished images are created but not published"
+            echo "- $num_stale images are stale (last updated more than $stale_after_days days ago)"
+            if [[ $num_stale -gt 0 ]]; then
+              echo
+              echo "The stale images are:"
+              echo
+              echo "$stale_images_list"
+            fi
+          } >stale-images.txt
+
+      - name: Notify Slack channel #eng-vm-notifications of stale images
+        uses: './.github/actions/notify-slack'
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
+          title: Image Staleness Report
+          message-color: '#6226fb'
+          text-file: stale-images.txt
