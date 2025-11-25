@@ -1,3 +1,4 @@
+#nolint:valid-pipeline-git-checkout-tag
 package:
   name: livegrep
   version: 0_git20250814
@@ -23,6 +24,7 @@ environment:
       - clang-18
       - cmake
       - git
+      - gnutar # GNU tar required for Bazel aspect_rules_js npm package extraction
       - libtool
       - lld-18
       - llvm-18-dev
@@ -65,9 +67,101 @@ pipeline:
 
   - uses: strip
 
-# TODO: Frontend and other subpackages disabled due to npm/webpack tarball extraction issues
-# The frontend build requires working npm/aspect_rules_js which is currently failing
-# Will need to investigate Bazel npm/webpack dependencies to enable frontend, github-reindex, and compat packages
+subpackages:
+  - name: ${{package.name}}-frontend
+    description: Web frontend for livegrep code search
+    dependencies:
+      runtime:
+        - ${{package.name}}
+      provides:
+        - livegrep-frontend=${{package.full-version}}
+    pipeline:
+      - runs: |
+          export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+          mkdir -p .cache/bazel/_bazel_root
+
+          cd livegrep
+
+          # Build the livegrep web frontend using clang
+          export CC=clang
+          export CXX=clang++
+          bazel build --verbose_failures -c opt //cmd/livegrep
+
+          # Install livegrep binary
+          mkdir -p ${{targets.subpkgdir}}/usr/bin/
+          mv bazel-bin/cmd/livegrep/livegrep_/livegrep ${{targets.subpkgdir}}/usr/bin/livegrep
+
+          # Install web assets
+          mkdir -p ${{targets.subpkgdir}}/usr/share/livegrep
+          cp -r web ${{targets.subpkgdir}}/usr/share/livegrep/
+
+          # Clean up bazel cache
+          rm -rf ../.cache/bazel/_bazel_root
+      - uses: strip
+    test:
+      pipeline:
+        - name: "Verify frontend binary"
+          runs: |
+            set -euo pipefail
+            livegrep --help
+
+  - name: ${{package.name}}-github-reindex
+    description: GitHub repository indexing helper for livegrep
+    dependencies:
+      runtime:
+        - ${{package.name}}
+      provides:
+        - livegrep-github-reindex=${{package.full-version}}
+    pipeline:
+      - runs: |
+          export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+          mkdir -p .cache/bazel/_bazel_root
+
+          cd livegrep
+
+          # Build the github reindex tool using clang
+          export CC=clang
+          export CXX=clang++
+          bazel build --verbose_failures -c opt //cmd/livegrep-github-reindex
+
+          # Install binary
+          mkdir -p ${{targets.subpkgdir}}/usr/bin/
+          mv bazel-bin/cmd/livegrep-github-reindex/livegrep-github-reindex_/livegrep-github-reindex ${{targets.subpkgdir}}/usr/bin/livegrep-github-reindex
+
+          # Clean up bazel cache
+          rm -rf ../.cache/bazel/_bazel_root
+      - uses: strip
+    test:
+      pipeline:
+        - name: "Verify github-reindex binary"
+          runs: |
+            set -euo pipefail
+            livegrep-github-reindex --help
+
+  - name: ${{package.name}}-compat
+    description: Compatibility package for upstream livegrep container images
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-frontend
+      provides:
+        - livegrep-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          # Create symlinks matching upstream container paths
+          mkdir -p ${{targets.subpkgdir}}/livegrep/bin
+          ln -sf /usr/bin/codesearch ${{targets.subpkgdir}}/livegrep/bin/codesearch
+          ln -sf /usr/bin/livegrep ${{targets.subpkgdir}}/livegrep/bin/livegrep
+
+          # Link web assets
+          mkdir -p ${{targets.subpkgdir}}/livegrep
+          ln -sf /usr/share/livegrep/web ${{targets.subpkgdir}}/livegrep/web
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: livegrep-compat
+            real-pkg-name: ${{subpkg.name}}
 
 test:
   environment:
@@ -82,7 +176,6 @@ test:
       runs: |
         set -euo pipefail
         codesearch --help
-
     - name: "Test codesearch indexing and search"
       runs: |
         set -euo pipefail
@@ -125,3 +218,10 @@ test:
         fi
 
         echo "Index successfully created"
+
+update:
+  enabled: true
+  git: {}
+  schedule:
+    period: weekly
+    reason: Upstream does not maintain tags or releases
