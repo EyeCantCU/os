@@ -1,0 +1,293 @@
+package:
+  name: geoserver-2.28
+  version: "2.28.1"
+  epoch: 1
+  description: GeoServer is an open source server for sharing geospatial data
+  copyright:
+    - license: GPL-2.0-or-later
+  resources:
+    cpu: 16
+    memory: 32Gi
+  dependencies:
+    provides:
+      - geoserver=${{package.full-version}}
+    runtime:
+      - fontconfig
+      - freetype
+      - glibc-locales
+      - openjdk-${{vars.java-version}}-jre
+      - openssl
+      - tomcat-${{vars.tomcat-version}}-openjdk-${{vars.java-version}} # Upstream hardcodes this version, no multi-Tomcat support
+
+vars:
+  # Upstream supports OpenJDK 11, 17 and 21.
+  # We use 17 as it is compatible with Tomcat and upstream uses eclipse-temurin:17 as base image.
+  # Upstream image doesn't build for multi-JDK, so we don't either.
+  java-version: 17
+  # Upstream hardcodes this version, no multi-Tomcat support
+  tomcat-version: 9
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+    CATALINA_HOME: usr/share/tomcat # Upstream default is /usr/local/tomcat but we use /usr/share/tomcat in Tomcat packages
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/geoserver/geoserver
+      tag: ${{package.version}}
+      expected-commit: 8c27edc016185d4e6c101fc8fb66e769fbaa254c
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+      pom: src/pom.xml
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties-activemq-broker.yaml
+      patch-file: pombump-deps-activemq-broker.yaml
+      pom: src/community/jms-cluster/activemqBroker/pom.xml
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties-jms-commons.yaml
+      pom: src/community/jms-cluster/jms-commons/pom.xml
+
+  - name: Build
+    runs: |
+      mvn clean install \
+        -B -ntp -U -fae \
+        -T$(nproc)C \
+        -Prelease \
+        -Drelease \
+        -DskipTests \
+        --no-snapshot-updates \
+        --no-transfer-progress \
+        --fail-fast \
+        -f src/pom.xml
+
+  # Parallel build removed (-T$(nproc)C) to avoid Maven lock acquisition issues (MNG-7868)
+  # that occur with large multi-module projects. The main build above still uses parallel
+  # execution for performance. Building community modules sequentially prevents
+  # "Could not acquire lock(s)" errors without significant time impact.
+  - name: Build Community Modules
+    runs: |
+      mvn clean install \
+        -B -ntp -U -fae -nsu \
+        -PcommunityRelease \
+        -Drelease \
+        -DskipTests \
+        --no-snapshot-updates \
+        --no-transfer-progress \
+        --fail-fast \
+        -f src/community/pom.xml
+
+  - name: Install
+    runs: |
+      dest="${{targets.contextdir}}/${CATALINA_HOME}/webapps/geoserver"
+      mkdir -p "$dest"
+
+      tmpdir=$(mktemp -d)
+      unzip -q ./src/web/app/target/geoserver.war -d "$tmpdir"
+
+      cp -ar "$tmpdir"/* "$dest"
+
+  - name: Create symlinks
+    runs: |
+      mkdir -p "${{targets.contextdir}}/$CATALINA_HOME/lib"
+      # Upstream equivalent of: mv "${{targets.destdir}}"/$CATALINA_HOME/webapps/geoserver/WEB-INF/lib/marlin-*.jar "${{targets.destdir}}"/$CATALINA_HOME/lib/marlin.jar
+      if MARLIN_JAR=$(ls "${{targets.contextdir}}/$CATALINA_HOME/webapps/geoserver/WEB-INF/lib"/marlin-*.jar 2>/dev/null | sort -V | tail -n 1); then
+        echo "Symlinking Marlin JAR: $MARLIN_JAR"
+        ln -sf "$MARLIN_JAR" "${{targets.contextdir}}/$CATALINA_HOME/lib/marlin.jar"
+      fi
+      # Upstream equivalent of: mv "${{targets.destdir}}"/$CATALINA_HOME/webapps/geoserver/WEB-INF/lib/postgresql-*.jar "${{targets.destdir}}"/$CATALINA_HOME/lib/
+      if POSTGRES_JAR=$(ls "${{targets.contextdir}}/$CATALINA_HOME/webapps/geoserver/WEB-INF/lib"/postgresql-*.jar 2>/dev/null | sort -V | tail -n 1); then
+        echo "Symlinking PostgreSQL JAR: $POSTGRES_JAR"
+        ln -sf "$POSTGRES_JAR" "${{targets.contextdir}}/$CATALINA_HOME/lib/postgresql.jar"
+      fi
+
+  - name: Cleanup
+    runs: |
+      rm -rf ${{targets.contextdir}}/$CATALINA_HOME/webapps/ROOT
+      rm -rf ${{targets.contextdir}}/$CATALINA_HOME/webapps/docs
+      rm -rf ${{targets.contextdir}}/$CATALINA_HOME/webapps/examples
+      rm -rf ${{targets.contextdir}}/$CATALINA_HOME/webapps/host-manager
+      rm -rf ${{targets.contextdir}}/$CATALINA_HOME/webapps/manager
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-community
+    description: "GeoServer community modules and extensions"
+    pipeline:
+      - runs: |
+          libdir="${{targets.contextdir}}/usr/share/java/geoserver/WEB-INF/lib"
+          mkdir -p "$libdir"
+          find src/community -path '*/target/*.jar' -type f -exec install -m644 -t "$libdir" {} +
+          find src/extension -path '*/target/*.jar' -type f -exec install -m644 -t "$libdir" {} +
+
+  - name: ${{package.name}}-docker
+    description: Scripts needed to run GeoServer in a Docker container
+    dependencies:
+      runtime:
+        - bash
+        - curl
+        - unzip
+        - gettext
+        - gosu
+        - wget
+        - glibc-locale-en
+        - posix-libc-utils
+      provides:
+        - geoserver-docker=${{package.full-version}}
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/geoserver/docker
+          expected-commit: 76a09a91b2fca093746abb29fc9efcd68ff743e5
+          tag: ""
+          branch: master
+      - name: Create directories
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/opt/config
+          mkdir -p "${{targets.contextdir}}"/opt/additional_fonts
+          mkdir -p "${{targets.contextdir}}"/opt/additional_libs
+          mkdir -p "${{targets.contextdir}}"/opt/geoserver_data
+      - name: Install scripts
+        runs: |
+          install -Dm644 config/* "${{targets.contextdir}}"/opt/config/
+          install -m755 ./*.sh "${{targets.contextdir}}"/opt/
+          cp -ar ./geoserver_data "${{targets.contextdir}}"/opt/geoserver_data/
+          cp -ar ./additional_fonts "${{targets.contextdir}}"/opt/additional_fonts/
+          cp -ar ./additional_libs "${{targets.contextdir}}"/opt/additional_libs/
+    test:
+      pipeline:
+        - name: Ensure installed files
+          runs: |
+            stat /opt/startup.sh
+            stat /opt/config/server.xml
+            stat /opt/config/server-https.xml
+        - name: Ensure symlinks
+          runs: |
+            test -d $(readlink /$CATALINA_HOME/lib/marlin.jar)
+            test -d $(readlink /$CATALINA_HOME/lib/postgresql.jar)
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -RC
+    - -M
+  github:
+    identifier: geoserver/geoserver
+    use-tag: true
+    tag-filter: 2.28.
+
+# CVE Status Documentation:
+# GeoServer 2.28.0 uses Spring Framework 5.3.39 and Spring Security 5.8.16, both EOL (Aug 2024).
+# Multiple CVEs cannot be fixed without commercial Broadcom support or upstream Spring 6 migration.
+#
+# Unfixable CVEs (require commercial Spring or Spring 6 migration):
+# - CVE-2024-38820, CVE-2025-22233 (spring-context) - require Spring 5.3.41+/5.3.43+ (commercial)
+# - CVE-2025-41249 (spring-core) - requires Spring 5.3.45+ (commercial)
+# - CVE-2025-22228 (spring-security-crypto) - requires Spring Security 5.8.18+ (commercial)
+# - CVE-2024-38828, CVE-2024-38816, CVE-2024-38819, CVE-2025-41242 (spring-webmvc) - require 5.3.40-5.3.44 (commercial)
+# - CVE-2016-1000027 (spring-web) - requires Spring 6.x, but only affects HTTP Invoker (likely N/A)
+# - CVE-2025-48924 (commons-lang 2.6) - transitive dep from json-lib, cannot exclude without breaking build
+#
+# False Positives:
+# - CVE-2023-35042 (geoserver) - Disputed by vendor, duplicate of already-fixed CVE-2022-24846
+# - CVE-2020-11971 (camel-core) - False positive, GeoServer doesn't use Apache Camel
+test:
+  environment:
+    contents:
+      packages:
+        - wait-for-it
+        - ${{package.name}}-docker
+        - libxml2-utils
+    environment:
+      PATH: /usr/share/tomcat/bin:/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      LANG: en_US.UTF-8
+      LANGUAGE: en_US:en
+      LC_ALL: en_US.UTF-8
+      JAVA_VERSION: jdk-${{vars.java-version}}
+      CATALINA_HOME: /usr/share/tomcat
+      TOMCAT_NATIVE_LIBDIR: /usr/share/tomcat/native-jni-lib
+      LD_LIBRARY_PATH: /usr/local/lib:/usr/share/tomcat/native-jni-lib
+      TOMCAT_MAJOR: ${{vars.tomcat-version}}
+      ADDITIONAL_FONTS_DIR: /opt/additional_fonts/
+      ADDITIONAL_LIBS_DIR: /opt/additional_libs/
+      COMMUNITY_EXTENSIONS: ""
+      COMMUNITY_PLUGIN_URL: https://build.geoserver.org/geoserver/main/community-latest
+      CONFIG_DIR: /opt/config
+      CONFIG_OVERRIDES_DIR: /opt/config_overrides
+      CORS_ALLOWED_HEADERS: Origin,Accept,X-Requested-With,Content-Type,Access-Control-Request-Method,Access-Control-Request-Headers
+      CORS_ALLOWED_METHODS: GET,POST,PUT,DELETE,HEAD,OPTIONS
+      CORS_ALLOWED_ORIGINS: "*"
+      CORS_ALLOW_CREDENTIALS: false
+      CORS_ENABLED: false
+      GEOSERVER_DATA_DIR: /opt/geoserver_data/
+      GEOSERVER_LIB_DIR: /usr/share/tomcat/webapps/geoserver/WEB-INF/lib/
+      SET_GEOSERVER_REQUIRE_FILE: "true"
+      GEOSERVER_VERSION: ${{package.version}}
+      HEALTHCHECK_URL: ""
+      INSTALL_EXTENSIONS: false
+      POSTGRES_JNDI_ENABLED: false
+      ROOT_WEBAPP_REDIRECT: false
+      RUN_UNPRIVILEGED: false
+      RUN_WITH_USER_UID:
+      RUN_WITH_USER_GID:
+      CHANGE_OWNERSHIP_ON_FOLDERS: /opt /opt/geoserver_data/
+      SKIP_DEMO_DATA: false
+      STABLE_EXTENSIONS:
+      STABLE_PLUGIN_URL: https://build.geoserver.org/geoserver/main/ext-latest
+      WAR_ZIP_URL: https://build.geoserver.org/geoserver/main/geoserver-main-latest-war.zip
+      WEBAPP_CONTEXT: geoserver
+      CATALINA_OPTS: -Xms256m -Xmx1g     --add-exports=java.desktop/sun.awt.image=ALL-UNNAMED     --add-opens=java.base/java.lang=ALL-UNNAMED     --add-opens=java.base/java.util=ALL-UNNAMED     --add-opens=java.base/java.lang.reflect=ALL-UNNAMED     --add-opens=java.base/java.text=ALL-UNNAMED     --add-opens=java.desktop/java.awt.font=ALL-UNNAMED     --add-opens=java.desktop/sun.awt.image=ALL-UNNAMED     --add-opens=java.naming/com.sun.jndi.ldap=ALL-UNNAMED     --add-opens=java.desktop/sun.java2d.pipe=ALL-UNNAMED     -Djava.awt.headless=true -server     -Dfile.encoding=UTF-8     -Djavax.servlet.request.encoding=UTF-8     -Djavax.servlet.response.encoding=UTF-8     -D-XX:SoftRefLRUPolicyMSPerMB=36000     -Xbootclasspath/a:/usr/share/tomcat/lib/marlin.jar     -Dsun.java2d.renderer=sun.java2d.marlin.DMarlinRenderingEngine     -Dorg.geotools.coverage.jaiext.enabled=true
+  pipeline:
+    - name: "start daemon on localhost"
+      uses: test/daemon-check-output
+      with:
+        start: "bash -x /opt/startup.sh"
+        timeout: 30
+        # Override to include GeoServer specific errors
+        error_strings: |
+          ERROR
+          FAIL
+          FATAL
+          Traceback.*most.recent.call
+          Exception in thread
+          java.lang.*Exception
+          command not found
+          environment variable is not defined correctly
+        expected_output: |
+          Welcome to GeoServer
+          Finished installation of extension
+          Server startup
+        post: |
+          set -o pipefail
+          wait-for-it -t 10 --strict localhost:8080
+          curl -sf "$(cat $CATALINA_HOME/conf/healthcheck_url.txt)"
+          curl -sf http://localhost:8080/geoserver/web/ | grep -iF "GeoServer"
+          curl -sf -u admin:geoserver -XGET http://localhost:8080/geoserver/rest/about/version.xml | grep -iF "<about>"
+          curl -sf -G http://localhost:8080/geoserver/ows \
+            --data-urlencode "service=WMS" \
+            --data-urlencode "version=1.3.0" \
+            --data-urlencode "request=GetCapabilities" \
+            | xmllint --noout -
+          curl -sf -G http://localhost:8080/geoserver/ows \
+            --data-urlencode "service=WFS" \
+            --data-urlencode "version=2.0.0" \
+            --data-urlencode "request=GetCapabilities" \
+            | xmllint --noout -
