@@ -1,0 +1,139 @@
+package:
+  name: capstone-5
+  version: 5.0.6
+  epoch: 0
+  description: "Capstone disassembly/disassembler framework for ARM, ARM64 (ARMv8), Alpha, BPF, Ethereum VM, HPPA, LoongArch, M68K, M680X, Mips, MOS65XX, PPC, RISC-V(rv32G/rv64G), SH, Sparc, SystemZ, TMS320C64X, TriCore, Webassembly, XCore and X86."
+  copyright:
+    - license: BSD-3-Clause
+
+data:
+  - name: py-versions
+    items:
+      3.10: "310"
+      3.11: "311"
+      3.12: "312"
+      3.13: "313"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - py3-supported-pip
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/capstone-engine/capstone
+      tag: ${{package.version}}
+      expected-commit: accf4df62f1fba6f92cae692985d27063552601c
+
+  - name: "Build"
+    runs: |
+      ./make.sh gcc
+
+  - name: "Install"
+    runs: |
+      DESTDIR=${{targets.contextdir}} ./make.sh install
+
+  - name: "Run test cases with our build"
+    runs: |
+      make INCDIR=${{targets.contextdir}}/usr/include LIBDIR=${{targets.contextdir}}/usr/lib all
+      chmod +x test_all.sh; ./test_all.sh
+    working-directory: tests
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      environment:
+        contents:
+          packages:
+            - gcc
+      pipeline:
+        - uses: test/tw/ldd-check
+        # https://www.capstone-engine.org/lang_c.html
+        - runs: |
+            cat <<EOF > test1.c
+            #include <capstone/capstone.h>
+
+            #define CODE "\x55\x48\x8b\x05\xb8\x13\x00\x00"
+
+            int main(void) {
+              csh handle;
+              cs_insn *insn;
+              size_t count;
+
+              if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
+                return -1;
+              }
+
+              count = cs_disasm(handle, CODE, sizeof(CODE)-1, 0x1000, 0, &insn);
+              if (count > 0) {
+                size_t j;
+                for (j = 0; j < count; j++) {
+                  printf("0x%"PRIx64":\t%s\t\t%s\n", insn[j].address, insn[j].mnemonic, insn[j].op_str);
+                }
+                cs_free(insn, count);
+              } else {
+                printf("ERROR: Failed to disassemble given code!\n");
+              }
+
+              cs_close(&handle);
+              return 0;
+            }
+            EOF
+            cc -c test1.c -o test1.o
+            cc test1.o -O3 -Wall -lcapstone -o test1
+            ./test1
+
+  - range: py-versions
+    name: py${{range.key}}-${{package.name}}
+    description: ${{package.name}} bindings for python${{range.key}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-dev
+        - py${{range.key}}-setuptools
+      provider-priority: ${{range.value}}
+    pipeline:
+      - runs: |
+          export LIBCAPSTONE_PATH="${{targets.contextdir}}/usr/lib"
+      - uses: py/pip-build-install
+        working-directory: bindings/python
+        with:
+          python: python${{range.key}}
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: capstone
+        - runs: |
+            cat <<EOF > test1.py
+            from capstone import *
+
+            CODE = b"\x55\x48\x8b\x05\xb8\x13\x00\x00"
+
+            md = Cs(CS_ARCH_X86, CS_MODE_64)
+            for i in md.disasm(CODE, 0x1000):
+                print("0x%x:\t%s\t%s" %(i.address, i.mnemonic, i.op_str))
+            EOF
+            python${{range.key}} test1.py
+
+update:
+  enabled: true
+  git:
+    tag-filter-prefix: 5
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check

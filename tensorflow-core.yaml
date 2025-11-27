@@ -1,28 +1,35 @@
 package:
   name: tensorflow-core
   description: Framework for data-graph oriented computing (core libraries, oneDNN build)
-  version: "2.19.0"
-  epoch: 7
+  version: "2.20.0"
+  epoch: 0
   copyright:
     - license: Apache-2.0
   resources:
     cpu: 65
     memory: 64Gi
 
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).\d+.\d+$
+    replace: "$1"
+    to: major-version
+
 vars:
   # Axion has BTI which causes SIGILL errors; use PAC for now
-  bazel-common-opts-aarch64: --bazelrc=.tf_configure.bazelrc build --config=mkl_threadpool --config=opt --config=opt --copt="-mbranch-protection=pac-ret+leaf+b-key"
-  bazel-common-opts-x86: --bazelrc=.tf_configure.bazelrc build --config=mkl_threadpool --config=opt --config=opt
+  # Explicit linkopts needed for system libraries when using TF_SYSTEM_LIBS
+  bazel-common-opts-aarch64: --bazelrc=.tf_configure.bazelrc build --config=mkl_threadpool --config=opt --config=opt --copt="-mbranch-protection=pac-ret+leaf+b-key" --linkopt=-lz --linkopt=-lssl --linkopt=-lcrypto --linkopt=-lgif --linkopt=-ljpeg --linkopt=-lpng
+  bazel-common-opts-x86: --bazelrc=.tf_configure.bazelrc build --config=mkl_threadpool --config=opt --config=opt --linkopt=-lz --linkopt=-lssl --linkopt=-lcrypto --linkopt=-lgif --linkopt=-ljpeg --linkopt=-lpng
   import: tensorflow
   pypi-package: tensorflow-core
 
 data:
   - name: py-versions
     items:
-      # this upstream release did not provide lockfiles for > 3.12
       3.10: "310"
       3.11: "311"
       3.12: "312"
+      3.13: "313"
 
 environment:
   contents:
@@ -97,54 +104,91 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/tensorflow/tensorflow
-      expected-commit: e36baa302922ea3c7131b302c2996bd2051ee5c4
+      expected-commit: 72fbba3d20f4616d7312b5e2b7f79daf6e82f2fa
       tag: v${{package.version}}
 
   - uses: patch
     with:
-      patches: h5py-3.13.patch
+      patches: fix-protobuf-deps-for-non-pywrap-builds.patch
 
   - environment:
-      # It otherwise defaults to the latest while the upstream does not provide lockfiles for > 3.12.
-      HERMETIC_PYTHON_VERSION: "3.12"
+      HERMETIC_PYTHON_VERSION: "3.13"
     runs: |
       ./configure
 
+      # With USE_PYWRAP_RULES=True (default in 2.20.0), libraries are built via pywrap rules
+      # pywrap_tensorflow_binaries builds all Python extension modules
+      # pywrap_tensorflow_framework builds libtensorflow_framework.so
+      # cheaders packages headers into a tarball for distribution
       if [ "${{build.arch}}" = "aarch64" ]; then
-        bazel ${{vars.bazel-common-opts-aarch64}} //tensorflow:libtensorflow.so //tensorflow:libtensorflow_cc.so //tensorflow:install_headers //tensorflow:libtensorflow_framework.so
+        bazel ${{vars.bazel-common-opts-aarch64}} //tensorflow/python:pywrap_tensorflow_binaries //tensorflow/python:pywrap_tensorflow_framework //tensorflow/tools/lib_package:cheaders
       else
-        bazel ${{vars.bazel-common-opts-x86}} //tensorflow:libtensorflow.so //tensorflow:libtensorflow_cc.so //tensorflow:install_headers //tensorflow:libtensorflow_framework.so
+        bazel ${{vars.bazel-common-opts-x86}} //tensorflow/python:pywrap_tensorflow_binaries //tensorflow/python:pywrap_tensorflow_framework //tensorflow/tools/lib_package:cheaders
+      fi
+
+  - environment:
+      HERMETIC_PYTHON_VERSION: "3.13"
+      USE_PYWRAP_RULES: ""
+    runs: |
+      # Create a separate workspace to keep artifacts cleanly separated
+      mkdir -p /tmp/tensorflow-c-api-build
+      cp -r . /tmp/tensorflow-c-api-build/
+      cd /tmp/tensorflow-c-api-build
+
+      ./configure
+
+      # Build ONLY the C API library
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        bazel ${{vars.bazel-common-opts-aarch64}} --repo_env=USE_PYWRAP_RULES= --define=framework_shared_object=true //tensorflow:libtensorflow.so
+      else
+        bazel ${{vars.bazel-common-opts-x86}} --repo_env=USE_PYWRAP_RULES= --define=framework_shared_object=true //tensorflow:libtensorflow.so
       fi
 
   - runs: |
-      install -d "${{targets.destdir}}"/usr/include/tensorflow
-      cp -r bazel-bin/tensorflow/include/* "${{targets.destdir}}"/usr/include/tensorflow/
-
       _pkgver=${{package.version}}
+
+      # Extract headers from cheaders.tar (tarball contains include/ directory)
+      mkdir -p "${{targets.destdir}}"/usr
+      tar -xf bazel-bin/tensorflow/tools/lib_package/cheaders.tar -C "${{targets.destdir}}"/usr/
 
       tensorflow/c/generate-pc.sh --prefix=/usr --version=${_pkgver}
       sed -e 's@/include$@/include/tensorflow@' -i tensorflow.pc -i tensorflow_cc.pc
       install -Dm644 tensorflow.pc "${{targets.destdir}}"/usr/lib/pkgconfig/tensorflow.pc
       install -Dm644 tensorflow_cc.pc "${{targets.destdir}}"/usr/lib/pkgconfig/tensorflow_cc.pc
 
-      install -Dm755 bazel-bin/tensorflow/libtensorflow.so "${{targets.destdir}}"/usr/lib/libtensorflow.so.${_pkgver}
-      ln -s libtensorflow.so.${_pkgver} "${{targets.destdir}}"/usr/lib/libtensorflow.so.${_pkgver:0:1}
-      ln -s libtensorflow.so.${_pkgver:0:1} "${{targets.destdir}}"/usr/lib/libtensorflow.so
+      install -Dm755 /tmp/tensorflow-c-api-build/bazel-bin/tensorflow/libtensorflow.so.${_pkgver} "${{targets.destdir}}"/usr/lib/libtensorflow.so.${_pkgver}
+      ln -sf libtensorflow.so.${_pkgver} "${{targets.destdir}}"/usr/lib/libtensorflow.so.${_pkgver:0:1}
+      ln -sf libtensorflow.so.${_pkgver:0:1} "${{targets.destdir}}"/usr/lib/libtensorflow.so
 
-      install -Dm755 bazel-bin/tensorflow/libtensorflow_cc.so "${{targets.destdir}}"/usr/lib/libtensorflow_cc.so.${_pkgver}
-      ln -s libtensorflow_cc.so.${_pkgver} "${{targets.destdir}}"/usr/lib/libtensorflow_cc.so.${_pkgver:0:1}
-      ln -s libtensorflow_cc.so.${_pkgver:0:1} "${{targets.destdir}}"/usr/lib/libtensorflow_cc.so
+      install -Dm755 bazel-bin/tensorflow/python/libtensorflow_cc.so.2 "${{targets.destdir}}"/usr/lib/libtensorflow_cc.so.${_pkgver}
+      ln -sf libtensorflow_cc.so.${_pkgver} "${{targets.destdir}}"/usr/lib/libtensorflow_cc.so.${_pkgver:0:1}
+      ln -sf libtensorflow_cc.so.${_pkgver:0:1} "${{targets.destdir}}"/usr/lib/libtensorflow_cc.so
 
-      install -Dm755 bazel-bin/tensorflow/libtensorflow_framework.so "${{targets.destdir}}"/usr/lib/libtensorflow_framework.so.${_pkgver}
-      ln -s libtensorflow_framework.so.${_pkgver} "${{targets.destdir}}"/usr/lib/libtensorflow_framework.so.${_pkgver:0:1}
-      ln -s libtensorflow_framework.so.${_pkgver:0:1} "${{targets.destdir}}"/usr/lib/libtensorflow_framework.so
+      install -Dm755 bazel-bin/tensorflow/python/libtensorflow_framework.so.2 "${{targets.destdir}}"/usr/lib/libtensorflow_framework.so.${_pkgver}
+      ln -sf libtensorflow_framework.so.${_pkgver} "${{targets.destdir}}"/usr/lib/libtensorflow_framework.so.${_pkgver:0:1}
+      ln -sf libtensorflow_framework.so.${_pkgver:0:1} "${{targets.destdir}}"/usr/lib/libtensorflow_framework.so
 
-      install -Dm644 tensorflow/c/c_api.h "${{targets.destdir}}"/usr/include/tensorflow/tensorflow/c/c_api.h
+      install -Dm644 tensorflow/c/c_api.h "${{targets.destdir}}"/usr/include/tensorflow/c/c_api.h
       install -Dm644 LICENSE "${{targets.destdir}}"/usr/share/licenses/${pkgname}/LICENSE
 
   - uses: strip
 
 subpackages:
+  # Split out versioned libraries for easier updates
+  - name: libtensorflow${{vars.major-version}}
+    description: TensorFlow ${{vars.major-version}} shared libraries
+    dependencies:
+      runtime:
+        - giflib
+        - icu
+        - libjpeg-turbo
+        - libpng
+    pipeline:
+      - uses: split/lib
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
   - range: py-versions
     name: py${{range.key}}-${{vars.pypi-package}}
     description: Tensorflow Python API

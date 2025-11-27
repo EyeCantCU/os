@@ -1,0 +1,111 @@
+package:
+  name: rancher-tgt
+  version: "1.0.79.2"
+  epoch: 0
+  description: Linux SCSI target framework (tgtd) - Rancher fork with Longhorn patches
+  copyright:
+    - license: GPL-2.0
+  dependencies:
+    runtime:
+      - perl-config-general
+      - sg3-utils # lots of functionality is based on this
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(.+)\.(\d+)$
+    replace: $1+$2
+    to: git-tag-version
+  - from: ${{package.version}}
+    match: '(\d+)\.(\d+).(\d+)\.(\d+)'
+    replace: "$1.$2.$3"
+    to: mangled-package-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - docbook-xml
+      - libaio-dev
+      - liblonghorn
+      - libxslt
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/rancher/tgt.git
+      tag: v${{vars.git-tag-version}}
+      expected-commit: c0d56b89b449f910a69fff22fe388293e000fc21
+
+  - runs: |
+      # Remove -Werror from the Makefile to prevent build failures on warnings
+      sed -i 's/-Werror//g' usr/Makefile
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+    with:
+      opts: |
+        sbindir=/usr/bin
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    description: ${{package.name}} dev
+
+  - name: ${{package.name}}-doc
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          tgt-admin
+          tgt-setup-lun
+          tgtadm
+          tgtd
+          tgtimg
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          tgtadm
+          tgtd
+        version: ${{vars.mangled-package-version}}
+    - runs: |
+        tgtimg --op new --device-type tape --file test.img --type WORM --barcode linky --size 10
+        xxd test.img | head -n 30 | grep -F -e "linky_1"
+        xxd test.img | head -n 30 | grep -F -e "Foo"
+        xxd test.img | head -n 30 | grep -F -e "Bar"
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /var/run
+          tee /etc/tgt/conf.d/test.conf <<'EOF'
+          default-driver iscsi
+          <target iqn.2008-09.com.example:server.target1>
+            backing-store /dev/LVM/somedevice
+            vendor_id LinkyCo
+          </target>
+          EOF
+        start: tgtd -D -d 1
+        expected_output: " "
+        post: |
+          tgt-admin -e
+          tgt-admin --dump | grep -F -e "default-driver iscsi"
+          tgt-admin --show | grep -F -e "Online: Yes"

@@ -1,0 +1,190 @@
+package:
+  name: sg3-utils
+  version: "1.48"
+  epoch: 1
+  description: SCSI utilities for Linux, Unix and Windows
+  copyright:
+    - license: GPL-2.0-or-later
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - libtool
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/doug-gilbert/sg3_utils.git
+      tag: release-${{package.version}}
+      expected-commit: d176dd620541c74dcf9df7f80720861579890f2c
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --disable-static
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} dev
+    # No `ldd-check` since this just ships a symlink to a `.so` and a few `.h`s
+    # No pkgconfig configurations either
+    pipeline:
+      - uses: split/dev
+
+  - name: ${{package.name}}-doc
+    description: ${{package.name}} manpages
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+update:
+  enabled: true
+  github:
+    identifier: doug-gilbert/sg3_utils
+    strip-prefix: release-
+    tag-filter-prefix: release-
+    use-tag: true
+
+test:
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          rescan-scsi-bus.sh
+          scsi_logging_level
+          scsi_mandat
+          scsi_readcap
+          scsi_ready
+          scsi_satl
+          scsi_start
+          scsi_stop
+          scsi_temperature
+          sg_bg_ctl
+          sg_compare_and_write
+          sg_copy_results
+          sg_dd
+          sg_decode_sense
+          sg_emc_trespass
+          sg_format
+          sg_get_elem_status
+          sg_get_lba_status
+          sg_ident
+          sg_inq
+          sg_logs
+          sg_luns
+          sg_map
+          sg_map26
+          sg_modes
+          sg_opcodes
+          sg_persist
+          sg_prevent
+          sg_raw
+          sg_rbuf
+          sg_rdac
+          sg_read
+          sg_read_attr
+          sg_read_block_limits
+          sg_read_buffer
+          sg_read_long
+          sg_readcap
+          sg_reassign
+          sg_referrals
+          sg_rem_rest_elem
+          sg_rep_density
+          sg_rep_pip
+          sg_rep_zones
+          sg_requests
+          sg_reset
+          sg_reset_wp
+          sg_rmsn
+          sg_rtpg
+          sg_safte
+          sg_sanitize
+          sg_sat_datetime
+          sg_sat_identify
+          sg_sat_phy_event
+          sg_sat_read_gplog
+          sg_sat_set_features
+          sg_scan
+          sg_seek
+          sg_senddiag
+          sg_ses
+          sg_ses_microcode
+          sg_start
+          sg_stpg
+          sg_stream_ctl
+          sg_sync
+          sg_test_rwbuf
+          sg_timestamp
+          sg_turs
+          sg_unmap
+          sg_verify
+          sg_vpd
+          sg_wr_mode
+          sg_write_attr
+          sg_write_buffer
+          sg_write_long
+          sg_write_same
+          sg_write_verify
+          sg_write_x
+          sg_xcopy
+          sg_z_act_query
+          sg_zone
+          sginfo
+          sgm_dd
+          sgp_dd
+    - uses: test/tw/ldd-check
+    # We need virtual SCSI devices (scsi_debug module) to functionally test actual SCSI command execution
+    # and device I/O.
+    # We're only testing response parsing/decoding logic using pre-captured hex data files.
+    - name: "Test sense data decoding"
+      runs: |
+        sg_decode_sense --list-err | grep -F "2: Device not ready"
+        sg_decode_sense 70 00 02 00 00 00 00 0a 00 00 00 00 04 01 | grep -F "Sense key: Not Ready"
+        sg_decode_sense ZZ ZZ 2>&1 | grep -F "Invalid byte 'ZZ'"
+    - name: "Test INQUIRY parsing"
+      runs: |
+        # INQUIRY response from a Seagate SSD
+        cat > /tmp/inq.hex <<EOF
+        00 00 05 32 00 00 00 5a 53 45 41 47 41 54 45 20
+        53 54 32 30 30 46 4d 30 30 37 33 20 20 20 20 20
+        43 42 30 32
+        EOF
+        sg_inq --inhex=/tmp/inq.hex | grep "Vendor identification: SEAGATE"
+        sg_inq /dev/nonexistent 2>&1 | grep "sg_inq failed"
+    - name: "Test serial number extraction"
+      runs: |
+        sg_vpd --enumerate | grep "0x80" | grep "Unit serial number"
+        # Serial number "12345678" in ASCII hex: 31 32 33 34 35 36 37 38
+        cat > /tmp/vpd.hex <<EOF
+        00 80 00 08 31 32 33 34 35 36 37 38
+        EOF
+        sg_vpd --page=0x80 --inhex=/tmp/vpd.hex | grep "Product serial number: 12345678"
+    - name: "Test read capacity"
+      runs: |
+        # Last LBA: 0x0007ffff (524287 decimal), block size: 0x0200 (512 bytes)
+        # Total capacity: 524288 blocks × 512 bytes = 256 MB
+        cat > /tmp/rc.hex <<EOF
+        00 07 ff ff 00 00 02 00
+        EOF
+        sg_readcap --inhex=/tmp/rc.hex | grep -F "LBA=524287 (0x7ffff)"
+        sg_readcap --inhex=/tmp/rc.hex | grep -F "Logical block length=512 bytes"
+        sg_readcap --inhex=/tmp/rc.hex | grep -F "Device size" | grep -F "256.0 MiB"
+    - name: "Test log page parsing"
+      runs: |
+        sg_logs --enumerate | grep -F "All log pages in acronym order"
+        sg_logs --enumerate | grep -E "0x2.*Write error"
+        # create a log pages list with page 0x02 (write errors)
+        cat > /tmp/log.hex <<EOF
+        00 00 00 05 00 02 03 0d 2f
+        EOF
+        sg_logs --inhex=/tmp/log.hex | grep "0x02.*Write error"
