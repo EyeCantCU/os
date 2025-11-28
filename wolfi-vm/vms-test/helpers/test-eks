@@ -32,7 +32,7 @@ Usage: ${0##*/} dump-awspubin awspubfile
       - ami-id: AMI ID (e.g. ami-01234678abcdef)
       - architecture: aarch64 or x86_64
       - family: image family (e.g. chainguard-docker-dev)
-      - localname: (e.g. aws-docker-dev)
+      - localname: (e.g. aws-docker-slim)
 
 EOF
 }
@@ -220,16 +220,43 @@ EOF
 }
 
 cluster_create_if_needed() {
-    local name="$1" version="$2" status=""
-    status=$(cluster_status "$name") ||
-        { stderr "Failed to get cluster status"; return 1; }
-    case "$status" in
-        NONE) cluster_create "$name" "$version" ||
-            { stderr "Failed to create cluster $name"; return 1; };;
-        ACTIVE) stderr "Re-using existing cluster $name";;
-        *) stderr "Cluster $name is in status '$status'. Not sure what to do"
-            return 1;;
-    esac
+    local name="$1" version="$2"
+    local status="" attempt=0
+
+    for (( attempt = 0; attempt < 30; attempt++ )); do
+        status=$(cluster_status "$name") ||
+            { stderr "Failed to get cluster status"; return 1; }
+        case "$status" in
+            NONE)
+                if cluster_create "$name" "$version"; then
+                    return 0
+                else
+                    stderr "Failed to create cluster $name"
+                    return 1
+                fi
+                ;;
+            ACTIVE)
+                if [ "$attempt" -gt 0 ]; then
+                    stderr "Waiting 5 minutes for cluster add-ons to be deployed"
+                    sleep 300
+                fi
+                stderr "Re-using existing cluster $name"
+                return 0
+                ;;
+            CREATING)
+                stderr "Cluster $name is in state CREATING... waiting for it to go to ACTIVE"
+                sleep 60
+                continue
+                ;;
+            *)
+                stderr "Cluster $name is in status '$status'. Not sure what to do"
+                return 1
+                ;;
+        esac
+    done
+
+    stderr "Timed out waiting for cluster $name to become ACTIVE"
+    return 1
 }
 
 Usage_cluster_destroy() {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -47,7 +48,7 @@ func createAzureClients(ctx context.Context, subscriptionID string) (*AzureClien
 	return clients, nil
 }
 
-func tryAPICall[T any](call func() (*runtime.Poller[T], error), tries int) (*runtime.Poller[T], error) {
+func tryAPICall[T any](call func() (*runtime.Poller[T], error), tries int, backoff time.Duration) (*runtime.Poller[T], error) {
 	var p *runtime.Poller[T]
 	var err error
 	for i := 0; i < tries; i++ {
@@ -55,6 +56,7 @@ func tryAPICall[T any](call func() (*runtime.Poller[T], error), tries int) (*run
 		if err == nil {
 			return p, err
 		}
+		time.Sleep(time.Duration(i+1) * backoff)
 	}
 	return p, err
 }

@@ -43,6 +43,20 @@ rq() {
     return "$rc"
 }
 
+# rqc(output, cmd) - run quiet capture
+#   run cmd quietly unless it fails. either way, capture stdout
+#   into output.
+rqc() {
+    local output="$1" rc="" out=""
+    shift
+    # Save original stdout, send stdout to file, send stderr to (saved) stdout
+    out=$("$@" 3>&1 1>"$output" 2>&3 ) && return 0
+    rc=$?
+    stderr "failed [$rc]: $*"
+    printf "%s\n" "$out" | sed -e 's,^,> ,' 1>&2
+    return "$rc"
+}
+
 dump_awspubin() {
     local f="$1" out="" arch="" localname=""
     out=$(jq -r '.images | to_entries[] | . as $entry | $entry.value |

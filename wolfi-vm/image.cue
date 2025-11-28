@@ -116,7 +116,7 @@ _img: img={
 
 	metadata: {
 		// If we set metadata.fips: strings.Contains(_id, "fips"), being named "fips" would be the only way to control metadata.fips.
-		// We want images to be able to turn fips setting to true regardless of naming. (aws-atsec-jitterentropy does this).
+		// We want images to be able to turn fips setting to true regardless of naming. (aws-atsec-jitterentropy-fips-full does this).
 		if strings.Contains(_id, "fips") {
 			fips: true
 		}
