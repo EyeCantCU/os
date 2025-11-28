@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -57,6 +58,14 @@ type SELinuxStatus struct {
 	MemoryProtectionChecking MemoryProtection // actual (secure)/requested (insecure)
 	MaxKernelPolicyVersion   int              // maximum policy version understood by the kernel
 }
+
+var (
+	// Regular expression to identify AVC denials in the system journal
+	avcDenialPattern = regexp.MustCompile(`avc:\s+denied\s+.*`)
+
+	// Regular expression to identify generic SELinux errors in the system journal
+	selinuxErrorsPattern = regexp.MustCompile(`audit:\s+SELINUX_ERR`)
+)
 
 // Determine the status and configuration of SELinux on the running system
 func GetSELinuxStatus(ctx context.Context) (*SELinuxStatus, error) {
@@ -126,4 +135,23 @@ func ParseSELinuxStatus(output string) (*SELinuxStatus, error) {
 	}
 
 	return status, nil
+}
+
+// Extract all AVC denials from the given system journal entries
+func ExtractAVCDenials(journalEntries []string) (denials []string) {
+	for _, entry := range journalEntries {
+		if denial := avcDenialPattern.FindString(entry); denial != "" {
+			denials = append(denials, denial)
+		}
+	}
+	return denials
+}
+
+func ExtractAuditSELinuxErrors(journalEntries []string) (selinuxErrors []string) {
+	for _, entry := range journalEntries {
+		if selinuxError := selinuxErrorsPattern.FindString(entry); selinuxError != "" {
+			selinuxErrors = append(selinuxErrors, selinuxError)
+		}
+	}
+	return selinuxErrors
 }

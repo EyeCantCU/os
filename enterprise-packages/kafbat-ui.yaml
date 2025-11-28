@@ -1,0 +1,299 @@
+package:
+  name: kafbat-ui
+  version: 1.4.2
+  epoch: 0
+  description: "Kafbat UI - A web tool for managing Apache Kafka clusters"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openjdk-${{vars.java-version}}-default-jvm
+
+# Using java 21 to match upstream java version used
+# REF: https://github.com/kafbat/kafka-ui/blob/v1.4.2/.github/workflows/release.yml#L28-L31
+vars:
+  java-version: 21
+  java-home: /usr/lib/jvm/default-jvm
+
+var-transforms:
+  - from: ${{package.name}}
+    match: "-"
+    replace: ""
+    to: mangled-package-name
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - gradle
+      - npm
+      - openjdk-${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: ${{vars.java-home}}
+    GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx2g -Xms2g"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kafbat/kafka-ui.git
+      tag: v${{package.version}}
+      expected-commit: dfa5a7e9068ea47b34bf7323dc7610432a4b1ab6
+
+  - name: "Build kafbat-ui"
+    runs: |
+      ./gradlew clean build -x test \
+      -Pinclude-frontend=true \
+      -Pversion=v${{package.version}}
+
+  - name: "Install jar"
+    runs: |
+      # Create install directory
+      mkdir -p "${{targets.destdir}}/usr/share/java/${{vars.mangled-package-name}}"
+
+      # Install jar
+      install -m644 "api/build/libs/api-v${{package.version}}.jar" "${{targets.destdir}}/usr/share/java/${{vars.mangled-package-name}}/api.jar"
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package with upstream Docker image
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"
+
+          # Matching upstream config directory name
+          # REF: https://github.com/kafbat/kafka-ui/blob/v1.4.2/api/Dockerfile#L14
+          mkdir -p "${{targets.destdir}}/etc/kafkaui"
+
+          # Create symlinks
+          ln -sf "./usr/share/java/${{vars.mangled-package-name}}/api.jar" "${{targets.subpkgdir}}/api.jar"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - kafka
+        - uuidgen
+        - wait-for-it
+        - ${{package.name}}-compat
+    environment:
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+      JAR_FILE: "/usr/share/java/kafbatui/api.jar"
+      HTTP_PORT: "8080"
+      KAFKA_PORT: "9092"
+      KAFKA_HOME: "/usr/lib/kafka"
+      CLUSTER1: "local"
+      CLUSTER2: "secondLocal"
+  pipeline:
+    - name: "Test kafbat-ui startup and functionality"
+      uses: test/daemon-check-output
+      with:
+        setup: |-
+          set -euo pipefail
+
+          cd "${KAFKA_HOME}"
+
+          # Generate a cluster ID for KRaft mode
+          KAFKA_CLUSTER_ID=$(bin/kafka-storage.sh random-uuid)
+          echo "Generated Kafka Cluster ID: ${KAFKA_CLUSTER_ID}"
+
+          # Format the storage directory
+          mkdir -p /tmp/kafka-logs
+          bin/kafka-storage.sh format -t "${KAFKA_CLUSTER_ID}" -c config/server.properties.original --standalone 2>&1
+
+          # Start Kafka in the background
+          bin/kafka-server-start.sh config/server.properties.original > /tmp/kafka-logs/kafka.log 2>&1 &
+          KAFKA_PID=$!
+          echo "Kafka PID: ${KAFKA_PID}"
+
+          # Wait for kafka to be ready
+          wait-for-it localhost:${KAFKA_PORT}
+
+          # Create test topics
+          TOPIC1="test-topic-$(uuidgen)"
+          TOPIC2="demo-topic-$(uuidgen)"
+
+          echo "Creating test topics: ${TOPIC1} and ${TOPIC2}"
+          bin/kafka-topics.sh --create \
+            --topic "${TOPIC1}" \
+            --partitions 3 \
+            --replication-factor 1 \
+            --bootstrap-server localhost:${KAFKA_PORT}
+
+          bin/kafka-topics.sh --create \
+            --topic "${TOPIC2}" \
+            --partitions 2 \
+            --replication-factor 1 \
+            --bootstrap-server localhost:${KAFKA_PORT}
+
+          # Produce some test messages
+          echo "Producing test messages..."
+          echo "test-message-1" | bin/kafka-console-producer.sh \
+            --bootstrap-server localhost:${KAFKA_PORT} \
+            --topic "${TOPIC1}"
+
+          echo "test-message-2" | bin/kafka-console-producer.sh \
+            --bootstrap-server localhost:${KAFKA_PORT} \
+            --topic "${TOPIC2}"
+
+          # Store topic names for later validation
+          echo "${TOPIC1}" > /tmp/test-topic-1.txt
+          echo "${TOPIC2}" > /tmp/test-topic-2.txt
+          echo "${KAFKA_PID}" > /tmp/kafka.pid
+
+          echo "Kafka setup complete..."
+
+          # Create kafbat-ui configuration file with 2 cluster definitions
+          echo "Kafbat-UI configuration created at /tmp/kafbat-ui-config.yml"
+          tee /tmp/kafbat-ui-config.yml << 'EOF'
+          kafka:
+            clusters:
+              - name: local
+                bootstrapServers: localhost:${KAFKA_PORT}
+                properties:
+                  connections.max.idle.ms: 10000
+                  request.timeout.ms: 10000
+              - name: secondLocal
+                bootstrapServers: localhost:${KAFKA_PORT}
+                properties:
+                  connections.max.idle.ms: 10000
+                  request.timeout.ms: 10000
+
+          server:
+            port: ${HTTP_PORT}
+
+          logging:
+            level:
+              root: INFO
+              io.kafbat.ui: DEBUG
+          EOF
+        start: |
+          java --add-opens java.rmi/javax.rmi.ssl=ALL-UNNAMED \
+          -Dspring.config.additional-location=/tmp/kafbat-ui-config.yml \
+          -jar "$JAR_FILE"
+        timeout: 180
+        expected_output: |
+          Starting KafkaUiApplication
+          Netty started on port 8080
+          Started KafkaUiApplication
+        post: |-
+          set -o pipefail
+
+          # Wait for kafbat-ui web server ready
+          wait-for-it localhost:${HTTP_PORT}
+
+          # Kafbat-UI has two separate initialization phases (web-server and cluster metadata)
+          # Need to wait for the metadata initialization phase to finish before proceeding
+          # Otherwise test will fail with "500 Server Error for HTTP GET "/api/clusters/local/topics"
+          echo "Waiting for topics endpoint to be ready..."
+
+          for cluster in ${CLUSTER1} ${CLUSTER2}; do
+            curl -sf --retry 10 "http://localhost:${HTTP_PORT}/api/clusters/${cluster}/topics"
+          done
+
+          # Test1 health endpoint - verify application is UP
+          echo "Testing health endpoint..."
+          curl -sf "http://localhost:${HTTP_PORT}/actuator/health" | jq -r '.status' | grep -Fx "UP"
+
+          # Test2 info endpoint - verify actuator endpoints are accessible
+          echo "Testing info endpoint..."
+          curl -sf "http://localhost:${HTTP_PORT}/actuator/info" | jq -r '.build.version' | grep -Fx "v${{package.version}}"
+
+          # Test3 main UI is accessible - verify React app is served
+          echo "Testing web UI accessibility..."
+          curl -sf "http://localhost:${HTTP_PORT}/" | grep -F "Kafbat UI"
+
+          # Test4 cluster endpoint - verify Kafka CLUSTERS are ONLINE and reachable
+          for cluster in ${CLUSTER1} ${CLUSTER2}
+          do
+            echo "Verifying cluster: ${cluster} is ONLINE"
+            curl -sf "http://localhost:${HTTP_PORT}/api/clusters" | jq -r ".[] | select(.name == \"${cluster}\") | .status" | grep -Fx "ONLINE"
+          done
+
+          # Helper function to verify topic exists in cluster
+          verify_topic_exists() {
+            cluster=$1
+            topic=$2
+
+            topics_response=$(curl -sf "http://localhost:${HTTP_PORT}/api/clusters/${cluster}/topics")
+            topics_list=$(echo "${topics_response}" | jq -r ".topics[].name")
+
+            if ! echo "${topics_list}" | grep -Fx "${topic}"; then
+              echo "FAIL: Topic ${topic} not found in cluster ${cluster}"
+              echo "Expected topic: ${topic}"
+              echo "Available topics: ${topics_list}"
+              exit 1
+            fi
+          }
+
+          # Helper function to verify partition count for a topic
+          verify_partition_count() {
+            cluster=$1
+            topic=$2
+            expected_count=$3
+
+            echo "Checking topic: ${topic} in cluster: ${cluster}..."
+            actual_count=$(curl -sf "http://localhost:${HTTP_PORT}/api/clusters/${cluster}/topics/${topic}" | jq -r ".partitionCount")
+
+            if [ "${actual_count}" != "${expected_count}" ]; then
+              echo "FAIL: Expected ${expected_count} partitions for ${topic} in ${cluster}, got ${actual_count}"
+              exit 1
+            fi
+            echo "PASS: ${topic} in ${cluster} has ${actual_count} partitions"
+          }
+
+          # Helper function to verify message count for a topic
+          verify_message_count() {
+            cluster=$1
+            topic=$2
+            expected_count=$3
+
+            echo "Checking topic: ${topic} in cluster: ${cluster}..."
+            actual_count=$(curl -sf "http://localhost:${HTTP_PORT}/api/clusters/${cluster}/topics" | jq -r ".topics[] | select(.name == \"${topic}\") | .messagesCount")
+
+            if [ "${actual_count}" != "${expected_count}" ]; then
+              echo "FAIL: Expected ${expected} messages for ${topic} in ${cluster}, got ${actual_count}"
+              exit 1
+            fi
+            echo "PASS: ${topic} in ${cluster} has ${actual_count} messages"
+          }
+
+          # Test5: Verify topics exist in each cluster
+          echo "Grabbing topic names..."
+          TOPIC1=$(cat /tmp/test-topic-1.txt)
+          TOPIC2=$(cat /tmp/test-topic-2.txt)
+
+          for cluster in ${CLUSTER1} ${CLUSTER2}; do
+            echo "Verifying topics in cluster: ${cluster}..."
+            verify_topic_exists "${cluster}" "${TOPIC1}"
+            verify_topic_exists "${cluster}" "${TOPIC2}"
+            echo "PASS: Both test topics exist in cluster ${cluster}"
+          done
+
+          # Test6: Verify partition counts
+          echo "Verifying topic details..."
+          for cluster in ${CLUSTER1} ${CLUSTER2}; do
+            verify_partition_count "${cluster}" "${TOPIC1}" 3
+            verify_partition_count "${cluster}" "${TOPIC2}" 2
+          done
+
+          # Test7: Verify message counts
+          echo "Verifying message counts..."
+          for cluster in ${CLUSTER1} ${CLUSTER2}; do
+            verify_message_count "${cluster}" "${TOPIC1}" 1
+            verify_message_count "${cluster}" "${TOPIC2}" 1
+          done
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v

@@ -1,0 +1,113 @@
+# gdrcopy is built against a specific CUDA version. The CUDA version in the package name
+# (e.g., cuda-12.9) determines compatibility. When newer CUDA versions are needed,
+# create a new package file (e.g., gdrcopy-cuda-13.0.yaml).
+# Check NVIDIA's gdrcopy releases for CUDA compatibility: https://github.com/NVIDIA/gdrcopy
+package:
+  name: gdrcopy-cuda-12.9
+  version: "2.5.1"
+  epoch: 0
+  description: A fast GPU memory copy library based on NVIDIA GPUDirect RDMA technology
+  copyright:
+    - license: MIT
+  target-architecture:
+    # gdrcopy requires NVIDIA GPUDirect RDMA which is only supported on x86_64.
+    # ARM support would require gdrdrv kernel module changes and is not currently available in our ecosystem.
+    - x86_64
+  dependencies:
+    runtime:
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - binutils
+      - busybox
+      - check-dev
+      - cmake
+      - make
+      - nvcc-${{vars.cuda-version}}-gcc-default
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+      - nvidia-cuda-nvcc-${{vars.cuda-version}}
+      - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
+  environment:
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    PATH: /usr/local/cuda-${{vars.cuda-version}}/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NVIDIA/gdrcopy.git
+      tag: v${{package.version}}
+      expected-commit: 0f7366e73b019e7facf907381f6b0b2f5a1576e4
+
+  - runs: |
+      make CUDA=$CUDA_HOME lib lib_install DESTLIB=${{targets.destdir}}/usr/lib
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/usr/include
+      cp ./include/gdrapi.h "${{targets.destdir}}"/usr/include/
+      cp ./include/gdrconfig.h "${{targets.destdir}}"/usr/include/
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: gdrcopy development files
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        # gdrcopy doesn't ship a .pc file, just check headers exist and do ldd check, pkgconf test not applicable
+        - runs: |
+            [ -f /usr/include/gdrapi.h ] && [ -f /usr/include/gdrconfig.h ]
+
+  - name: ${{package.name}}-tests
+    description: gdrcopy test utilities
+    pipeline:
+      - runs: |
+          make CUDA=$CUDA_HOME exes exes_install DESTBIN=${{targets.contextdir}}/usr/bin
+          ln -sf gdrcopy_apiperf "${{targets.contextdir}}/usr/bin/apiperf"
+          ln -sf gdrcopy_copylat "${{targets.contextdir}}/usr/bin/copylat"
+          ln -sf gdrcopy_sanity "${{targets.contextdir}}/usr/bin/sanity"
+          ln -sf gdrcopy_copybw "${{targets.contextdir}}/usr/bin/copybw"
+    test:
+      pipeline:
+        # gdrcopy binaries use -h for help (not --help)
+        - uses: test/tw/help-check
+          with:
+            bins: gdrcopy_sanity
+            help-flag: "-h"
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/gdrcopy
+    strip-prefix: v
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - libcuda-stub-cuda-${{vars.cuda-version}}-dev
+  pipeline:
+    - runs: |
+        set -eux
+        # Check library exists (headers are in -dev subpackage)
+        ls -la /usr/lib/libgdrapi.so*
+    - uses: test/tw/ldd-check

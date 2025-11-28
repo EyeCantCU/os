@@ -30,9 +30,24 @@ $(go_tools_bin): go.mod pkg/tools/tools.go
 	echo "GOBIN=\$$(pwd)/tools/ go install $${TOOL_PKG}@$${TOOL_VER}"; \
 	GOBIN=$$(pwd)/tools/ go install "$${TOOL_PKG}@$${TOOL_VER}"
 
-# Space-separated list of image names to exclude from all groups
-# Example: SKIP_IMAGES="aws-ecs-foo qemu-base" make disks-aws-ecs
-SKIP_IMAGES =
+# SKIP_IMAGES is a space-separated list of image names to exclude from all groups.
+# Enforce a minimum amount of meta data for each skipped image.
+SKIP_IMAGES_INVALID = $(shell \
+	yq '.[] \
+	    | select((.since | type) != "!!timestamp" or (.issue | test("^https://") | not)) \
+	    | .name \
+	' skipped-images.yaml \
+)
+ifneq ($(SKIP_IMAGES_INVALID),)
+$(error The skipped-images.yaml file contains the following invalid entries: $(SKIP_IMAGES_INVALID))
+endif
+SKIP_IMAGES = $(shell yq '.[].name' skipped-images.yaml)
+
+PHONY: debug
+debug:
+	@echo "invalid: $(SKIP_IMAGES_INVALID)"
+	@echo "  valid: $(SKIP_IMAGES)"
+
 cfgs = $(wildcard configs/*-*)
 # names is a list of each basename cfg
 names = $(foreach cfg,$(cfgs),$(notdir $(cfg)))
@@ -45,11 +60,13 @@ endef
 
 shell_scripts:=$(shell git grep -lIE "^$(HASH)!/(usr/)?s?bin/(env )?(ba)?sh")
 
+# Per-cloud lists
 disks_aws := $(call list_cloud_images,aws)
 disks_gcp := $(call list_cloud_images,gcp)
 disks_qemu := $(call list_cloud_images,qemu)
 disks_azure := $(call list_cloud_images,azure)
 disks_vmware := $(call list_cloud_images,vmware)
+disks_hyperv := $(call list_cloud_images,hyperv)
 disks_rpi := $(call list_cloud_images,rpi)
 disks_lxd := $(call list_cloud_images,lxd)
 
@@ -82,6 +99,7 @@ $(TOOLS_SUBD)/%: $(TOOLS_SUBD)/go/%/*.go
 	go build -o $(TOOLS_SUBD)/$* ./$(TOOLS_SUBD)/go/$*
 
 include cgr-install.mk
+include registry-publish.mk
 
 .PHONY: test-gotest
 test-gotest: $(CGR_INSTALL_APK)
@@ -95,20 +113,22 @@ $(test_targets_qemu): test-%: $(ARCH_OUT_D)/%/disk.raw builder/ovmf-$(ARCH).fd
 		QEMU_VMS=$* ./vms-test/helpers/test-wolfi-vm \
 	    --test-arch="$(ARCH)" --wolfi-vm="$(TOP_D)" qemu "$(TOP_D)/test-results"
 
-.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-rpi ovas-vmware
+.PHONY: disks-aws disks-azure disks-gcp disks-qemu disks-vmware disks-hyperv disks-rpi ovas-vmware
 disks-aws: $(foreach name,$(disks_aws),disk-$(name))
 disks-aws-ecs: $(foreach name,$(group_aws_ecs),disk-$(name))
 disks-aws-eks: $(foreach name,$(group_aws_eks),disk-$(name))
 disks-aws-main: $(foreach name,$(group_aws_main),disk-$(name))
 disks-azure: $(foreach name,$(disks_azure),disk-$(name))
 disks-gcp: $(foreach name,$(disks_gcp),disk-$(name))
-disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
-disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
-disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
-ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
+disks-hyperv: $(foreach name,$(disks_hyperv),disk-$(name))
 disks-lxd: $(foreach name,$(disks_lxd),stamp-$(name))
+disks-qemu: $(foreach name,$(disks_qemu),disk-$(name))
+disks-rpi: $(foreach name,$(disks_rpi),disk-$(name))
+disks-vmware: $(foreach name,$(disks_vmware),disk-$(name))
+ovas-vmware: $(foreach name,$(disks_vmware),ova-$(name))
 
-.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-rpi list-lxd
+
+.PHONY: list list-all list-aws list-azure list-gcp list-qemu list-qemu-nonrc list-vmware list-hyperv list-rpi list-lxd
 list-all:
 	@for n in $(names); do echo $$n; done
 list-aws:
@@ -123,10 +143,13 @@ list-qemu-nonrc:
 	@for n in $(group_qemu_nonrc); do echo $$n; done
 list-vmware:
 	@for n in $(disks_vmware); do echo $$n; done
+list-hyperv:
+	@for n in $(disks_hyperv); do echo $$n; done
 list-rpi:
 	@for n in $(disks_rpi); do echo $$n; done
 list-lxd:
 	@for n in $(disks_lxd); do echo $$n; done
+
 list-%:
 	@groups="$(group_$(subst -,_,$(*)))"; \
 	[ -n "$$groups" ] || { echo "no group $*"; exit 1; }; \
@@ -205,9 +228,10 @@ art-render-aws-eks: $(foreach name,$(group_aws_eks),art-render-$(name))
 art-render-aws-main: $(foreach name,$(group_aws_main),art-render-$(name))
 art-render-gcp: $(filter art-render-gcp-%,$(art_render_targets))
 art-render-vmware: $(filter art-render-vmware-%,$(art_render_targets))
+art-render-hyperv: $(filter art-render-hyperv-%,$(art_render_targets))
 art-render-rpi: $(filter art-render-rpi-%,$(art_render_targets))
 art-render-lxd: $(filter art-render-lxd-%,$(art_render_targets))
-.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-aws-ecs art-render-aws-eks art-render-aws-main art-render-gcp art-render-vmware art-render-rpi art-render-lxd $(art_render_targets)
+.PHONY: art-render-all art-render-qemu art-render-azure art-render-aws art-render-aws-ecs art-render-aws-eks art-render-aws-main art-render-gcp art-render-vmware art-render-hyperv art-render-rpi art-render-lxd $(art_render_targets)
 $(art_render_targets): art-render-%: configs/%/build.yaml
 
 configs/%/build.yaml: $(ART) $(YQ) $(YAM) $(cue_files)
@@ -230,9 +254,10 @@ art-diff-aws-eks: $(foreach name,$(group_aws_eks),art-diff-$(name))
 art-diff-aws-main: $(foreach name,$(group_aws_main),art-diff-$(name))
 art-diff-gcp: $(filter art-diff-gcp-%,$(art_diff_targets))
 art-diff-vmware: $(filter art-diff-vmware-%,$(art_diff_targets))
+art-diff-hyperv: $(filter art-diff-hyperv-%,$(art_diff_targets))
 art-diff-rpi: $(filter art-diff-rpi-%,$(art_diff_targets))
 art-diff-lxd: $(filter art-diff-lxd-%,$(art_diff_targets))
-.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-aws-ecs art-diff-aws-eks art-diff-aws-main art-diff-gcp art-diff-vmware art-diff-rpi art-diff-lxd $(art_diff_targets)
+.PHONY: art-diff-all art-diff-qemu art-diff-azure art-diff-aws art-diff-aws-ecs art-diff-aws-eks art-diff-aws-main art-diff-gcp art-diff-vmware art-diff-hyperv art-diff-rpi art-diff-lxd $(art_diff_targets)
 # The purpose of this is to catch build.yaml files committed in CI which differ from the rendered build.yaml
 # that goes with the associated cue file.
 # This is desirable to 1. make it easier to analyze what's happening in an image
@@ -262,6 +287,7 @@ builder/ovmf-%.fd: apkoaas
 builder/kernel-%: apkoaas
 	$(TOP_D)/apkoaas fetch --arch=$* kernel $@
 
+ARCHES = aarch64 x86_64
 PUBLISH_TARGET ?= dev
 COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
 PREFIX ?= $(shell id -un)
@@ -334,6 +360,7 @@ AZ_IMAGEUPLOAD_FLAGS ?=
 QEMU_AZSTORAGECONTAINER = chainguard-vms-qemu
 VMWARE_AZSTORAGECONTAINER = chainguard-vms-vmware
 LXD_AZSTORAGECONTAINER = chainguard-vms-lxd
+HYPERV_AZSTORAGECONTAINER = chainguard-vms-hyperv
 
 awspub-%: AWSSTEM=$(subst awspub-aws-,,$@)
 awspub-%: AWSNAME=$(PREFIX)-$(AWSSTEM)-$(AWSARCH)-$(BUILD_TIMESTAMP)
@@ -342,7 +369,7 @@ awspub-%: $(ARCH_OUT_D)/%/disk.vmdk
 	./$(TOOLS_SUBD)/aws-image-upload --name=$(AWSNAME) --arch=$(AWSARCH) $(if $(SSM),--ssm=$(AWSSSM)) $(if $(SHARE),--share="$(SHARE)") $< $(BUCKET)
 
 .PHONY: aws-create aws-create-% aws-publish aws-publish-% aws-share aws-share-%
-# these are just so human can type 'make aws-create-aws-base' to do the create/publish
+# these are just so human can type 'make aws-create-aws-base-slim' to do the create/publish
 $(foreach name,$(disks_aws),aws-image-create-$(name)): aws-image-create-%: $(ARCH_OUT_D)/awspub/create/%.json
 $(foreach name,$(disks_aws),aws-image-share-$(name)): aws-image-share-%: $(ARCH_OUT_D)/awspub/share/%.json
 $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
@@ -476,6 +503,34 @@ $(ARCH_OUT_D)/vmware-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/vmware-%/di
 		--sbom-path $(dir $@)syft.sbom.json \
 		--ova-path $(dir $@)disk.ova)
 
+# Publish to cloud storage
+.PHONY: publish-hyperv
+publish-hyperv: $(foreach name,$(disks_hyperv),publish-hyperv-$(subst hyperv-,,$(name)))
+$(foreach name,$(disks_hyperv),publish-hyperv-$(subst hyperv-,,$(name))): publish-hyperv-%: $(ARCH_OUT_D)/hyperv-%/publish.$(PUBLISH_TARGET).json
+$(ARCH_OUT_D)/hyperv-%/publish.$(PUBLISH_TARGET).json: $(ARCH_OUT_D)/hyperv-%/disk.raw $(ARCH_OUT_D)/hyperv-%/disk.vhd
+	@mkdir -p $(dir $@)
+	$(call capture_stdout,$@, ./$(TOOLS_SUBD)/generic-image-upload \
+		--name hyperv-$* \
+		--timestamp $(BUILD_TIMESTAMP) \
+		--arch $(ARCH) \
+		--azure-account $(AZSTORAGEACCOUNT) \
+		--azure-container $(HYPERV_AZSTORAGECONTAINER) \
+		--vhd-path $(dir $@)disk.vhd \
+		--sbom-path $(dir $@)syft.sbom.json)
+
+# Publish to azure galleries
+.PHONY: publish-hyperv-azure
+publish-hyperv-azure: $(foreach name,$(disks_hyperv),publish-hyperv-azure-$(subst hyperv-,,$(name)))
+$(foreach name,$(disks_hyperv),publish-hyperv-azure-$(subst hyperv-,,$(name))): publish-hyperv-azure-%: $(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json
+$(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json: AZNAME=$(PREFIX)-hyperv-$*-$(AZARCH)
+$(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json: _AZTAGS=$(AZTAGS),local-name=hyperv-$*
+$(ARCH_OUT_D)/hyperv-%/azure-publish.$(PUBLISH_TARGET).json: $(TOOLS_SUBD)/azure-image-upload $(ARCH_OUT_D)/hyperv-%/disk.raw
+	@$(call capture_stdout,$@,\
+		./$(TOOLS_SUBD)/azure-image-upload --arch=$(AZARCH) --gallery=$(AZGALLERY) \
+		--name=$(AZNAME) --disk-name=$(AZNAME)-$(BUILD_TIMESTAMP) --image-version=$(AZVERSION) \
+		$(addprefix --db-hash=,$(shell cat $(dir $@)db-b64-hashes.txt)) \
+		--tags="$(_AZTAGS)" --resource-group=$(AZRESOURCEGROUP) $(AZ_IMAGEUPLOAD_FLAGS) $(dir $@)disk.raw)
+
 .PHONY: publish-rpi
 publish-rpi: $(foreach name,$(disks_rpi),publish-$(name))
 $(foreach name,$(disks_rpi),publish-$(name)): publish-%: $(ARCH_OUT_D)/%/publish.$(PUBLISH_TARGET).json
@@ -587,12 +642,11 @@ show-vars:
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk-flat.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
 .PRECIOUS: configs/%/build.yaml builder/ovmf-%.fd
 
-arches = aarch64 x86_64
-ifneq ($(filter-out $(arches),$(BUILDER_ARCH)),)
-  $(error BUILDER_ARCH '$(BUILDER_ARCH)' not supported. Must be one of $(arches))
+ifneq ($(filter-out $(ARCHES),$(BUILDER_ARCH)),)
+  $(error BUILDER_ARCH '$(BUILDER_ARCH)' not supported. Must be one of $(ARCHES))
 endif
-ifneq ($(filter-out $(arches),$(ARCH)),)
-  $(error ARCH '$(ARCH)' not supported. Must be one of $(arches))
+ifneq ($(filter-out $(ARCHES),$(ARCH)),)
+  $(error ARCH '$(ARCH)' not supported. Must be one of $(ARCHES))
 endif
 
 .PHONY: azure-marketplace-install-extension
@@ -623,10 +677,10 @@ azure-marketplace-install-extension:
 
 .PHONY: azure-marketplace-update-technical-plan
 azure-marketplace-update-technical-plan: $(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name)))
-$(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name))): azure-marketplace-update-technical-plan-%: output/azure-marketplace-update-technical-plan-%s.json
+$(foreach name,$(disks_azure),azure-marketplace-update-technical-plan-$(subst azure-,,$(name))): azure-marketplace-update-technical-plan-%: output/azure-marketplace-update-technical-plan-%.json
 
-output/azure-marketplace-update-technical-plan-%s.json: AZNAME=$(PREFIX)-$*
-output/azure-marketplace-update-technical-plan-%s.json: azure-marketplace-install-extension
+output/azure-marketplace-update-technical-plan-%.json: AZNAME=$(PREFIX)-$*
+output/azure-marketplace-update-technical-plan-%.json: azure-marketplace-install-extension
 # We don't want to publish devel or testing images by mistake
 ifneq ("$(AZGALLERY)","eap_chainguard_vms")
 	$(error This gallery is not allowed listed in the makefile if you want to upload images from it please update the makefile.)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 AZ_AUTH_MODE=${AZ_AUTH_MODE:-login}
+AZ_BLOB_TYPE=${AZ_BLOB_TYPE:-block}
 VERBOSITY=1
 
 Usage() {
@@ -26,6 +27,7 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH
     --qcow2-path PATH    Path to qcow2 image (generates qcow2 fields in JSON)
     --vmdk-path PATH     Path to vmdk image (generates vmdk fields in JSON)
     --vmdk-flat-path PATH Path to vmdk-flat image (generates vmdk_flat fields in JSON)
+    --vhd-path PATH      Path to vhd image (generates vhd fields in JSON)
     --ova-path PATH      Path to OVA image (generates ova fields in JSON)
     --edk2vars-path PATH Path to OVMF/AAVMF UEFI variables (generates uefi_edk2 fields in JSON)
     --awsvars-path PATH  Path to AWS UEFI variables (generated uefi_aws fields in JSON)
@@ -47,6 +49,8 @@ Usage: ${0##*/} [options] --name NAME --timestamp TIMESTAMP --arch ARCH
   Environment variables:
     GCP_PROJECT - if set, gcloud commands will use --project=GCP_PROJECT
     RPI_UPLOAD_SECRET - authentication secret for RPI upload service
+    AZ_AUTH_MODE - authentication mode for az cli storage uploads [default: login]
+    AZ_BLOB_TYPE - azure blob type (append, block, page) [default: block]
 
 EOF
 }
@@ -121,6 +125,7 @@ upload_azure_file() {
         --name "$blob_name" \
         --file "$local_path" \
         --auth-mode "$AZ_AUTH_MODE" \
+        --type "$AZ_BLOB_TYPE" \
         --tier "$tier" \
         >&2 || {
         stderr "ERROR: Failed to upload $local_path to Azure blob storage"
@@ -305,6 +310,7 @@ upload_rpi_file() {
 
     # Because reasons, we need to maintain the form rpi-generic-{base|docker}-arm64-YYYYMMDD-HHMMSS.raw.gz
     local vercel_filename="${rpi_filename/rpi-/rpi-generic-}"
+    vercel_filename="${vercel_filename/slim-/}"
 
     validate_rpi_filename "$vercel_filename" || return 1
 
@@ -377,7 +383,7 @@ upload_rpi_file() {
 
 main() {
     local short_opts="hv"
-    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,s3-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,ova-path:,edk2vars-path:,awsvars-path:,sbom-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,sign-s3-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,signed-s3-url-expiry:,azure-storage-tier:,rpi-upload,rpi-upload-secret:,lxd-metadata-path:,squashfs-path:,readme:"
+    local long_opts="help,verbose,name:,timestamp:,arch:,gcs-bucket:,s3-bucket:,azure-account:,azure-container:,raw-path:,qcow2-path:,vmdk-path:,vmdk-flat-path:,vhd-path:,ova-path:,edk2vars-path:,awsvars-path:,sbom-path:,artifact-prefix:,sign-gcs-urls,sign-az-urls,sign-s3-urls,signed-gcs-url-expiry:,signed-az-url-expiry:,signed-s3-url-expiry:,azure-storage-tier:,rpi-upload,rpi-upload-secret:,lxd-metadata-path:,squashfs-path:,readme:"
     local getopt_out=""
     if ! getopt_out=$(getopt --name "${0##*/}" \
         --options "${short_opts}" --long "${long_opts}" -- "$@"); then
@@ -386,7 +392,7 @@ main() {
     fi
     eval set -- "${getopt_out}"
 
-    local readme_path="" name="" timestamp="" arch="" gcs_bucket="" azure_account="" azure_container="" azure_storage_tier="cool" raw_path="" qcow2_path="" vmdk_path="" vmdk_flat_path="" edk2vars_path="" awsvars_path="" sbom_path=""
+    local readme_path="" name="" timestamp="" arch="" gcs_bucket="" azure_account="" azure_container="" azure_storage_tier="cool" raw_path="" qcow2_path="" vmdk_path="" vmdk_flat_path="" vhd_path="" edk2vars_path="" awsvars_path="" sbom_path=""
     local artifact_prefix="" sign_gcs_urls=false sign_az_urls=false signed_gcs_url_expiry="12h" signed_az_url_expiry="12 hours"
     local s3_bucket="" sign_s3_urls=false signed_s3_url_expiry="43200"
     local rpi_upload=false rpi_upload_secret="${RPI_UPLOAD_SECRET:-}"
@@ -408,6 +414,7 @@ main() {
             --qcow2-path) qcow2_path="$2"; shift;;
             --vmdk-path) vmdk_path="$2"; shift;;
             --vmdk-flat-path) vmdk_flat_path="$2"; shift;;
+            --vhd-path) vhd_path="$2"; shift;;
             --ova-path) ova_path="$2"; shift;;
             --edk2vars-path) edk2vars_path="$2"; shift;;
             --awsvars-path) awsvars_path="$2"; shift;;
@@ -471,6 +478,11 @@ main() {
 
     if [ -n "$vmdk_flat_path" ] && [ ! -f "$vmdk_flat_path" ]; then
         stderr "ERROR: VMDK flat disk image not found: $vmdk_flat_path"
+        return 1
+    fi
+
+    if [ -n "$vhd_path" ] && [ ! -f "$vhd_path" ]; then
+        stderr "ERROR: VHD disk image not found: $vhd_path"
         return 1
     fi
 
@@ -626,6 +638,19 @@ main() {
             gcs_json_parts+=("\"vmdk_flat\": \"$vmdk_flat_gcs_path\"")
         fi
 
+        if [ -n "$vhd_path" ]; then
+            local vhd_filename="${artifact_prefix}.vhd"
+            local vhd_gcs_path="${base_gcs_path}/${vhd_filename}"
+            vhd_gcs_path=$(upload_gcs_file "$vhd_path" "$vhd_gcs_path" "$vhd_filename") || return 1
+            gcs_json_parts+=("\"vhd\": \"$vhd_gcs_path\"")
+
+            if [ "$sign_gcs_urls" = true ]; then
+                local vhd_signed_url
+                vhd_signed_url=$(generate_gcs_signed_url "$vhd_gcs_path" "$signed_gcs_url_expiry") || return 1
+                gcs_json_parts+=("\"vhd_signed_url\": \"$vhd_signed_url\"")
+            fi
+        fi
+
         if [ -n "$ova_path" ]; then
             local ova_filename="${artifact_prefix}.ova"
             local ova_gcs_path="${base_gcs_path}/${ova_filename}"
@@ -760,6 +785,20 @@ main() {
             local vmdk_flat_azure_url
             vmdk_flat_azure_url=$(upload_azure_file "$vmdk_flat_path" "$azure_account" "$azure_container" "$vmdk_flat_blob_name" "$vmdk_flat_filename" "$azure_storage_tier") || return 1
             azure_json_parts+=("\"vmdk_flat\": \"$vmdk_flat_azure_url\"")
+        fi
+
+        if [ -n "$vhd_path" ]; then
+            local vhd_filename="${artifact_prefix}.vhd"
+            local vhd_blob_name="${azure_path_prefix}/${vhd_filename}"
+            local vhd_azure_url
+            vhd_azure_url=$(upload_azure_file "$vhd_path" "$azure_account" "$azure_container" "$vhd_blob_name" "$vhd_filename" "$azure_storage_tier") || return 1
+            azure_json_parts+=("\"vhd\": \"$vhd_azure_url\"")
+
+            if [ "$sign_az_urls" = true ]; then
+                local vhd_signed_url
+                vhd_signed_url=$(generate_azure_signed_url "$azure_account" "$azure_container" "$vhd_blob_name" "$signed_az_url_expiry") || return 1
+                azure_json_parts+=("\"vhd_signed_url\": \"$vhd_signed_url\"")
+            fi
         fi
 
         if [ -n "$ova_path" ]; then
@@ -898,6 +937,19 @@ main() {
             local vmdk_flat_s3_path="${base_s3_path}/${vmdk_flat_filename}"
             vmdk_flat_s3_path=$(upload_s3_file "$vmdk_flat_path" "$vmdk_flat_s3_path" "$vmdk_flat_filename") || return 1
             s3_json_parts+=("\"vmdk_flat\": \"$vmdk_flat_s3_path\"")
+        fi
+
+        if [ -n "$vhd_path" ]; then
+            local vhd_filename="${artifact_prefix}.vhd"
+            local vhd_s3_path="${base_s3_path}/${vhd_filename}"
+            vhd_s3_path=$(upload_s3_file "$vhd_path" "$vhd_s3_path" "$vhd_filename") || return 1
+            s3_json_parts+=("\"vhd\": \"$vhd_s3_path\"")
+
+            if [ "$sign_s3_urls" = true ]; then
+                local vhd_signed_url
+                vhd_signed_url=$(generate_s3_signed_url "$vhd_s3_path" "$signed_s3_url_expiry") || return 1
+                s3_json_parts+=("\"vhd_signed_url\": \"$vhd_signed_url\"")
+            fi
         fi
 
         if [ -n "$ova_path" ]; then

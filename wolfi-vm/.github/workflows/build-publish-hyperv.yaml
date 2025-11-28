@@ -1,0 +1,181 @@
+# Copyright 2025 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Build and push Hyper-V VMs images"
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      notify-slack:
+        type: boolean
+        required: false
+        default: false
+        description: Notify slack when the workflow finishes.
+      notify-slack-success:
+        type: boolean
+        required: false
+        default: true
+        description: Send notifications on success as well as failure.
+      with-compliance-scan:
+        type: boolean
+        required: true
+        description: Generate reports for CIS and STIG compliance
+
+permissions: {}
+
+# Allow only one workflow run at a time
+concurrency:
+  group: 'release-hyperv'
+  cancel-in-progress: false
+
+jobs:
+  init:
+    if: ${{ github.repository == 'chainguard-dev/wolfi-vm' }}
+
+    runs-on: ubuntu-8-core
+    outputs:
+      BUILD_TIMESTAMP: ${{ steps.timestamp.outputs.BUILD_TIMESTAMP }}
+    steps:
+      - id: timestamp
+        run: |
+          echo BUILD_TIMESTAMP=$(date --utc "+%Y%m%d-%H%M") >> "$GITHUB_OUTPUT"
+
+  hyperv-build-push:
+    runs-on: ubuntu-8-core
+    needs:
+      - init
+
+    permissions:
+      id-token: write # federated identity
+      contents: read # read repo
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
+
+    env:
+      BUILD_TIMESTAMP: ${{ needs.init.outputs.BUILD_TIMESTAMP }}
+      VM_ARCH: ${{ matrix.arch }}
+      VM_CLOUD: "hyperv"
+      WITH_COMPLIANCE_SCAN: ${{ github.event.inputs.with-compliance-scan || 'false' }}
+
+    steps:
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - uses: chainguard-dev/actions/apt-faster@b479012116eacde7f895586c17b598f7ba0ee700 # v1.5.9
+
+      - name: Checkout source
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build vms disks
+        uses: './.github/actions/build-disks'
+        with:
+          cg_identity: "ce2d1984a010471142503340d670612d63ffb9f6/381a2db906b88c20"
+          vm_group: "hyperv"
+          arch: '${{ matrix.arch }}'
+
+      - name: Scan disks
+        uses: './.github/actions/scan-disks'
+        with:
+          vm_group: "hyperv"
+          arch: '${{ matrix.arch }}'
+
+      - name: Setup environment variables
+        run: |
+          # ensure HOME/bin is in PATH
+          d="$HOME/bin"
+          mkdir -p "$d"
+          p="$PATH"
+          echo "original-path: $p"
+          p="$d:$PATH"
+          echo "new-path: $p"
+          echo "PATH=$p" >> "$GITHUB_ENV"
+
+      - name: "Install Azure Deps"
+        run: |
+          # Install the azure cli
+          # The script sets up the key, repos and then installs the package
+          # https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-linux?pivots=apt
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      - name: Login to Azure staging
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # generated in mono https://github.com/chainguard-dev/mono/tree/main/env/azure/chainguard-vms-staging/iac/200-infra
+          client-id: "c0acffef-1388-4428-be1c-dd84b8cbb070"
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: "ad60e736-b0ce-432e-b77c-4b8218f452ae"
+
+      # Token expires after 5 minutes, and we need it to re-auth in the background
+      # we can run tests for longer than 60 minutes. Every 4 minutes, refresh the
+      # token and use it to login again.
+      - name: Fetch staging OID token every 4 mins
+        shell: bash
+        run: |
+          while true; do
+            test -f .stop-refreshing-staging-token >/dev/null 2>&1 && break
+            token_request=$ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            token_uri=$ACTIONS_ID_TOKEN_REQUEST_URL
+            token=$(curl -H "Authorization: bearer $token_request" "${token_uri}&audience=api://AzureADTokenExchange" | jq .value -r)
+            az login --service-principal -u "c0acffef-1388-4428-be1c-dd84b8cbb070" -t "32b8c550-a021-45aa-b9ba-66ccba087fea" --federated-token $token --output none
+            # Sleep for 4 minutes
+            sleep 240
+          done &
+
+      - name: "Publish Hyper-V Images to Azure staging"
+        run: |
+          make -k -j$(nproc) --output-sync=recurse publish-hyperv-azure \
+            ARCH="${{ env.VM_ARCH }}" PUBLISH_TARGET=staging PREFIX=chainguard
+
+      - name: "Test Hyper-V Images in Azure staging"
+        uses: "./.github/actions/vms-test"
+        with:
+          cloud_provider: "azure"
+          vm_group: "azure"
+          arch: "${{ matrix.arch }}"
+          opts: |
+            -- --subscription-id="ad60e736-b0ce-432e-b77c-4b8218f452ae" \
+            --resource-group=chainguard-vms-staging \
+            --azure-inputs="./output" --azure-input-filename="azure-publish.staging.json"
+          with-compliance-scan: '${{ env.WITH_COMPLIANCE_SCAN }}'
+
+     # Publish to the registry
+      - name: Publish HyperV images to the registry
+        continue-on-error: true
+        run: |
+          arch="${{ env.VM_ARCH }}"
+          make -j$(nproc) --output-sync=recurse publish-registry-hyperv ARCH=$arch
+
+      - name: Login to Azure prod
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          # generated in mono https://github.com/chainguard-dev/mono/tree/main/env/azure/chainguard-vms-prod/iac/200-infra
+          client-id: "c5a91a71-f2b4-48b8-8604-dedfc7a258b2"
+          tenant-id: "32b8c550-a021-45aa-b9ba-66ccba087fea"
+          subscription-id: "ad60e736-b0ce-432e-b77c-4b8218f452ae"
+
+      - name: "Publish Hyper-V Images to EAP Cloud Storage"
+        run: |
+          make -k -j$(nproc) --output-sync=recurse publish-hyperv-docker-full publish-hyperv-docker-slim \
+            ARCH="${{ env.VM_ARCH }}" PUBLISH_TARGET=eap PREFIX=chainguard
+
+      - uses: './.github/actions/notify-slack'
+        if: ${{ (inputs.notify-slack-success || !success()) && (github.event_name == 'schedule' || inputs.notify-slack) }}
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_INPUT }}
+          title: ${{ github.workflow }} (${{ matrix.arch }}) ${{ job.status }}
+          message-color: ${{ job.status == 'success' && '#3fb950' || '#f85149'}}
+          text: |
+            For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Or run ./hack/fetch-test-result -c ${{ env.VM_CLOUD }} -r ${{ github.run_id }}
+          unfurl-links: true
