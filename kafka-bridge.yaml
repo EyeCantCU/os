@@ -1,0 +1,131 @@
+package:
+  name: kafka-bridge
+  version: 0.33.1
+  epoch: 5
+  description: HTTP-based bridge for Apache Kafka using Vert.x framework
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - coreutils
+      - dash-binsh
+      - gawk
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openssl
+      - sed
+      - tini
+      - wget
+
+vars:
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - unzip
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    MAVEN_OPTS: -Xmx2g
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/strimzi/strimzi-kafka-bridge
+      tag: ${{package.version}}
+      expected-commit: fc96ea42b24459837f5aebc0ef5dca559a6cee49
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+
+  - runs: |
+      mvn clean install -DskipTests -Dmaven.javadoc.skip=true
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}/usr/share/java/kafka-bridge"
+
+      cd "${{targets.destdir}}/usr/share/java/kafka-bridge"
+      unzip -q /home/build/target/kafka-bridge-${{package.version}}.zip
+      mv "kafka-bridge-${{package.version}}"/* ./
+
+      install -Dm0755 -t "${{targets.destdir}}/usr/share/java/kafka-bridge/bin/docker/" /home/build/bin/docker/*
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package providing Strimzi Dockerfile paths
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/opt"
+          ln -sf /usr/share/java/kafka-bridge "${{targets.contextdir}}/opt/strimzi"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - openjdk-${{vars.java-version}}-default-jvm
+        - wait-for-it
+        - curl
+    environment:
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      LANG: en_US.UTF-8
+      STRIMZI_HOME: /usr/share/java/kafka-bridge
+      HTTP_PORT: "18080"
+  pipeline:
+    - name: Check installation files
+      runs: |
+        set -euo pipefail
+        test -x /usr/share/java/kafka-bridge/bin/kafka_bridge_run.sh
+
+        test -f /usr/share/java/kafka-bridge/bin/docker/kafka_bridge_run.sh
+        test -f /usr/share/java/kafka-bridge/bin/docker/dynamic_resources.sh
+        test -f /usr/share/java/kafka-bridge/bin/docker/kafka_bridge_tls_prepare_certificates.sh
+        test -f /usr/share/java/kafka-bridge/bin/docker/to_bytes.gawk
+
+        test -f /usr/share/java/kafka-bridge/config/application.properties
+        test -f /usr/share/java/kafka-bridge/config/log4j2.properties
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          tee /tmp/bridge-config.properties << EOF
+          bridge.id=test-bridge
+          bridge.metrics=jmxPrometheusExporter
+          kafka.bootstrap.servers=localhost:9092
+          http.host=0.0.0.0
+          http.port=${HTTP_PORT}
+          kafka.producer.acks=1
+          kafka.consumer.auto.offset.reset=earliest
+          EOF
+        start: /usr/share/java/kafka-bridge/bin/kafka_bridge_run.sh --config-file=/tmp/bridge-config.properties
+        timeout: 60
+        expected_output: |
+          Strimzi Kafka Bridge
+          HTTP-Kafka Bridge started and listening on port
+          HTTP verticle instance
+        post: |
+          set -o pipefail
+          wait-for-it -t 30 localhost:${HTTP_PORT}
+          curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:${HTTP_PORT}/healthy | grep -F "204"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '-rc'
+  github:
+    identifier: strimzi/strimzi-kafka-bridge
+    use-tag: true
