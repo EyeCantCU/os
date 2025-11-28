@@ -1,0 +1,151 @@
+package:
+  name: rancher-nfs-ganesha-6
+  version: "6.5.0.3"
+  epoch: 0
+  description: "Rancher's minimal fork of NFS-Ganesha that runs inside the longhorn-shared-manager pod."
+  copyright:
+    - license: LGPL-3.0
+    - license: BSD-3-Clause
+  dependencies:
+    provides:
+      - rancher-nfs-ganesha=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: '^(\d+)\.(\d+)\.(\d+)\.(\d+)$'
+    replace: $1.$2.$3+$4
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: '^(\d+)\.(\d+)\..*$'
+    replace: "$1.$2"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - acl-dev
+      - bison
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - curl-dev
+      - dbus-dev
+      - doxygen
+      - flex
+      - gcc-14
+      - gcc-14-default
+      - json-c-dev
+      - libblkid
+      - lsb-release-minimal
+      - nfs-ganesha-libntirpc-6-dev
+      - nfs-utils-dev
+      - userspace-rcu-dev
+      - util-linux-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/rancher/nfs-ganesha
+      expected-commit: 95fdbc3c580d6e37f5f8422cb359119cc3c5783b
+      tag: v${{vars.mangled-package-version}}
+
+  # https://github.com/longhorn/dep-versions/blob/41e2272233b6d5600d6e994ee2885bacbaec37fc/scripts/build-nfs-ganesha.sh#L34
+  - name: "Remove local libntirpc to use nfs-ganesha-ntirpc"
+    runs: rm -rf src/libntirpc
+
+  # Minimal installation for longhorn: https://github.com/longhorn/dep-versions/blob/41e2272233b6d5600d6e994ee2885bacbaec37fc/scripts/build-nfs-ganesha.sh#L42
+  - working-directory: src
+    pipeline:
+      - uses: cmake/configure
+        with:
+          opts: |
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_CONFIG=vfs_only \
+            -DUSE_DBUS=OFF \
+            -DUSE_NLM=OFF \
+            -DUSE_RQUOTA=OFF \
+            -DUSE_9P=OFF \
+            -D_MSPAC_SUPPORT=OFF \
+            -DRPCBIND=OFF \
+            -DUSE_RADOS_RECOV=OFF \
+            -DRADOS_URLS=OFF \
+            -DUSE_FSAL_VFS=ON \
+            -DUSE_FSAL_XFS=OFF \
+            -DUSE_FSAL_PROXY_V4=OFF \
+            -DUSE_FSAL_PROXY_V3=OFF \
+            -DUSE_FSAL_LUSTRE=OFF \
+            -DUSE_FSAL_LIZARDFS=OFF \
+            -DUSE_FSAL_KVSFS=OFF \
+            -DUSE_FSAL_CEPH=OFF \
+            -DUSE_FSAL_GPFS=OFF \
+            -DUSE_FSAL_GLUSTER=OFF \
+            -DUSE_FSAL_RGW=OFF \
+            -DUSE_GSS=NO \
+            -DHAVE_ACL_GET_FD_NP=ON \
+            -DHAVE_ACL_SET_FD_NP=ON \
+            -DUSE_SYSTEM_NTIRPC=ON \
+            -DUSE_UNWIND=OFF \
+            -DUSE_MONITORING=OFF
+      - uses: cmake/build
+      - uses: cmake/install
+      - uses: strip
+      - name: "Copy daemon config"
+        runs: |
+          mkdir -p ${{targets.destdir}}/etc/dbus-1/system.d/
+          cp scripts/ganeshactl/org.ganesha.nfsd.conf ${{targets.destdir}}/etc/dbus-1/system.d/
+
+update:
+  enabled: true
+  github:
+    identifier: rancher/nfs-ganesha
+    strip-prefix: v
+    tag-filter: v6.
+    use-tag: true
+  ignore-regex-patterns:
+    - .*dev.*
+
+test:
+  environment:
+    contents:
+      packages:
+        - iproute2
+        - rpcbind
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: ganesha.nfsd
+    - uses: test/tw/ver-check
+      with:
+        bins: ganesha.nfsd
+        version: ${{vars.major-minor-version}}
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /var/run/ganesha
+          cat > /tmp/test.conf << 'EOF'
+          NFS_CORE_PARAM {
+              Nb_Worker = 1;
+              Allow_Set_IO_Flusher_Fail = true;
+          }
+
+          LOG {
+              default_log_level = EVENT;
+
+              facility {
+                  name = STDERR;
+                  destination = stderr;
+                  enable = active;
+                  max_level = FULL_DEBUG;
+              }
+          }
+          EOF
+        start: ganesha.nfsd -F -f /tmp/test.conf
+        timeout: 30
+        expected_output: |
+          NFS SERVER INITIALIZED
+        post: |
+          #!/bin/sh -e
+          ss -tlnp | grep :2049 | grep -F "ganesha.nfsd"
