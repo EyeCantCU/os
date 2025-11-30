@@ -1,0 +1,80 @@
+package:
+  name: cert-manager-openshift-routes-fips
+  version: "0.8.3"
+  epoch: 0
+  description: OpenShift Route support for cert-manager
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/cert-manager/openshift-routes
+      tag: v${{package.version}}
+      expected-commit: 517cf178eb6f7c87586720467b97c3dfa1862193
+
+  - uses: go/build
+    with:
+      packages: ./internal/cmd
+      modroot: .
+      go-package: go-fips
+      output: openshift-routes
+      ldflags: |
+        -X github.com/cert-manager/openshift-routes/pkg/internal/version.AppVersion==${{package.version}}
+        -X github.com/cert-manager/openshift-routes/pkg/internal/version.GitCommit=$(git rev-parse HEAD)
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    pipeline:
+      - runs: |
+          # As per upstream image requirements
+          # Ko uses the basename of the import path as the binary name, which is cmd (the last component of the path)
+          # https://github.com/cert-manager/openshift-routes/blob/v0.8.3/make/_shared/oci-build/01_mod.mk#L53
+          mkdir -p "${{targets.subpkgdir}}"/ko-app
+          ln -sf /usr/bin/openshift-routes "${{targets.contextdir}}"/ko-app/cmd
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - .*-alpha.*
+    - .*-beta.*
+  github:
+    identifier: cert-manager/openshift-routes
+    strip-prefix: v
+
+test:
+  environment:
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: 32764
+    contents:
+      packages:
+        - ${{package.name}}-compat
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: openshift-routes
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    # openshift-routes expects to run on an OpenShift cluster and talk to the route.openshift.io/v1 API (the native Route resource)
+    - name: "Basic binary test"
+      uses: test/daemon-check-output
+      with:
+        start: openshift-routes --server "${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" 2>&1
+        expected_output: |
+          default state
+          enabled=true
+          check if route.openshift.io/v1 exists
