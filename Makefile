@@ -289,9 +289,15 @@ builder/kernel-%: apkoaas
 
 ARCHES = aarch64 x86_64
 PUBLISH_TARGET ?= dev
-COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
-PREFIX ?= $(shell id -un)
-BUILD_TIMESTAMP ?= $(shell date -u "+%Y%m%d-%H%M")
+ifeq ($(origin COMMIT),undefined)
+COMMIT != git rev-parse HEAD || echo no-git
+endif
+ifeq ($(origin PREFIX),undefined)
+PREFIX != id -un
+endif
+ifeq ($(origin BUILD_TIMESTAMP),undefined)
+BUILD_TIMESTAMP != date -u "+%Y%m%d-%H%M"
+endif
 AZVERSION ?= $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
 AZTAGS += env=$(PUBLISH_TARGET),commit=$(COMMIT)
 GCPLABELS = env=$(PUBLISH_TARGET),commit=$(COMMIT)
@@ -637,6 +643,9 @@ show-vars:
 	@echo BUILDER_KERNEL=$(BUILDER_KERNEL)
 	@echo BUILDER_INITRD=$(BUILDER_INITRD)
 	@echo ALL_DISKS=$(ALL_DISKS)
+	@echo COMMIT=$(COMMIT)
+	@echo PREFIX=$(PREFIX)
+	@echo BUILD_TIMESTAMP=$(BUILD_TIMESTAMP)
 	@echo names=$(names)
 
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk-flat.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
