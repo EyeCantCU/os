@@ -1,7 +1,7 @@
 package:
   name: vllm-openai-cuda-12.9
   version: 0.11.2
-  epoch: 0
+  epoch: 1
   description: A high-throughput and memory-efficient inference and serving engine for LLMs
   target-architecture:
     - x86_64
@@ -31,6 +31,8 @@ package:
       # CUDA toolkit and libraries (use package names - NVIDIA packages don't provide so: deps)
       - cuda-toolkit-${{vars.cuda-version}}
       - curl
+      - ffmpeg-cuda-nozeromq # ffmpeg with CUDA support, no zeromq to avoid libsodium dependency (FIPS compliance), upstream comes with ffmpeg
+      - git # needed for EP kernels installation script (clone pplx-kernels, DeepEP)
       # OpenMPI/NVSHMEM (from nvshmem bootstrap plugins: libmpi.so.40, libpmix.so.2)
       # Note: liboshmem.so.40 is not provided as separate so: dep, comes with openmpi
       - libfabric1 # libfabric.so.1
@@ -44,7 +46,9 @@ package:
       - nvidia-nccl-cuda-${{vars.cuda-version}} # libnccl.so.2
       - openmpi-cuda-${{vars.cuda-version}} # provides so:libmpi.so.40
       - openpmix # provides so:libpmix.so.2
+      - py${{vars.python-version}}-opencv-python-headless # use system OpenCV instead of PyPI wheel to avoid vendored OpenSSL, needed for FIPS
       - py${{vars.python-version}}-pip # needed for JIT compilation, core performance feature of vLLM
+      - py${{vars.python-version}}-pyzmq # use system pyzmq (links to system zeromq) to avoid vendored libsodium, needed for FIPS
       - python-${{vars.python-version}}
       - python-${{vars.python-version}}-dev # needed for JIT compilation, core performance feature of vLLM
       # Core system libraries (glibc provides so:libc.so.6, so:libm.so.6, so:libpthread.so.0, so:librt.so.1, so:libdl.so.2)
@@ -60,6 +64,8 @@ package:
       # TBB (from numba tbbpool)
       - so:libtbb.so.12
       - so:libz.so.1
+      - wget # needed for EP kernels installation script (download NVSHMEM)
+      - zeromq-nocurve # provides libzmq without libsodium (FIPS compliant)
 
 vars:
   cudnn-major-version: 9
@@ -291,12 +297,29 @@ pipeline:
 
       # NOTE: torchaudio 2.9 removed torio module (deprecated in 2.8, removed in 2.9).
       # FFmpeg bindings are no longer shipped - torchaudio now uses TorchCodec.
-      # opencv-python-headless vendors its own FFmpeg libraries (e.g., libavcodec-e0dd92b8.so.59)
-      # with unique hashes, so no system FFmpeg is required.
 
-      # TODO: opencv-python-headless bundles vendored OpenSSL 1.1 in opencv_python_headless.libs/
-      # For FIPS compliance, opencv needs to be built from source against system OpenSSL.
-      # Until then, FIPS variant will be non-compliant due to vendored crypto libs.
+      # Remove PyPI opencv-python-headless in favor of system package (py3.12-opencv-python-headless)
+      # The PyPI wheel vendors OpenSSL 1.1 which is not FIPS compliant; our system package uses system OpenSSL
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" opencv-python-headless
+
+      # Remove PyPI pyzmq in favor of system package (py3.12-pyzmq)
+      # The PyPI wheel bundles libsodium; our system package links to system libsodium (no vendored libs)
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" pyzmq
+
+      # Remove PyPI numpy in favor of system package (py3.12-numpy-2.2)
+      # The system numpy is pulled in as a transitive dependency of py3.12-opencv-python-headless.
+      # Without this, the -dev subpackage would contain numpy headers that conflict with system numpy.
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" numpy
+
+      # Remove PyPI pygments in favor of system package (py3.12-pygments)
+      # Pygments comes from fastapi[standard] -> rich-toolkit -> rich -> pygments
+      # Without this, the main package would contain pygments files that conflict with system pygments coming from system numpy
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" pygments
+
+      # Remove PyPI setuptools in favor of system package (py3.12-setuptools)
+      # The system setuptools is pulled in via py3.12-pip -> py3.12-pip-base -> py3.12-setuptools.
+      # Without this, the main package would contain setuptools files that conflict with system setuptools.
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" setuptools
 
       # Remove uv lockfile (world-writable, triggers linter)
       rm -f ${{targets.contextdir}}/usr/.lock
