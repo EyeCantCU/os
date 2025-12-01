@@ -1,0 +1,125 @@
+package:
+  name: apache-tika-fips-3.1
+  version: "3.1.0"
+  epoch: 0
+  description: The Apache Tika toolkit detects and extracts metadata and text from over a thousand different file types (such as PPT, XLS, and PDF).
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - dash-binsh
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openssl-config-fipshardened
+    provides:
+      - apache-tika=${{package.full-version}}
+
+vars:
+  java-version: 17
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - coreutils
+      - fontconfig-config
+      - fontconfig-dev
+      - lcms2
+      - libfontconfig1
+      - libjpeg-turbo
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/tika
+      tag: ${{package.version}}
+      expected-commit: 25619272d2f615df4ad87e27e7c8dec576f37627
+
+  - uses: patch
+    with:
+      patches: CVE-2025-54988.patch
+
+  - uses: auth/maven
+
+  - uses: maven/pombump
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps-commons-lang3.yaml
+      pom: tika-parent/pom.xml
+
+  - runs: |
+      mvn clean install -am -DskipTests -Dossindex.skip
+      mkdir -p "${{targets.contextdir}}"/usr/share/java/
+      cp -r tika-server/tika-server-standard/target/tika-server-standard-${{package.version}}.jar "${{targets.contextdir}}"/usr/share/java/tika-server-standard-${{package.version}}.jar
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place binaries in the root folder"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/share/java/tika-server-standard-${{package.version}}.jar ${{targets.subpkgdir}}/tika-server-standard.jar
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+update:
+  enabled: true
+  github:
+    identifier: apache/tika
+    use-tag: true
+    tag-filter: 3.1.
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - ${{package.name}}-compat
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - openjdk-${{vars.java-version}}-default-jvm
+        - openjdk-${{vars.java-version}}-default-jdk
+    environment:
+      CLASSPATH: /usr/share/java/bouncycastle-fips/*:./*:.
+      JAVA_TOOL_OPTIONS: --module-path=/usr/share/java/bouncycastle-fips
+  pipeline:
+    - runs: apk fix openjdk-${{vars.java-version}} # Fixes "Module jdk.compiler not found" issue when running java-fips/algorithms
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - uses: test/daemon-check-output
+      with:
+        start: java -Dorg.bouncycastle.fips.approved.only=true -Djavax.net.ssl.trustStoreType=FIPS -Djava.security.properties=/usr/lib/jvm/default-jvm/conf/security/java.security --module-path=/usr/share/java/bouncycastle-fips --add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED -jar /tika-server-standard.jar
+        expected_output: |
+          Started Apache Tika server
+        post: |
+          fail() { echo "FATAL: $*"; exit 1; }
+          tmpd=$(mktemp -d)
+          trap "rm -Rf $tmpd" EXIT
+
+          url=http://localhost:9998/
+          curl -s "$url" > "$tmpd/req.out" 2>"$tmpd/req.err" ||
+              fail "[$?] curl -s $url"
+          grep -q "Welcome to the Apache Tika" "$tmpd/req.out" ||
+              fail "curl $url - no Welcome message"
+
+          msg="this is a test file"
+          echo "$msg" > "$tmpd/sample.txt" ||
+              fail "failed writing a file"
+          curl -X PUT --data-binary "@$tmpd/sample.txt" \
+              -H "Content-Type: text/plain" "http://localhost:9998/tika" \
+              > "$tmpd/post.out" ||
+              fail "failed PUT to curl $url/tika"
+          grep -q "$msg" "$tmpd/post.out" ||
+              fail "did not find $msg in output of PUT"
