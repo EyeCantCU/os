@@ -1,0 +1,129 @@
+package:
+  name: longhorn-backing-image-manager-fips-1.10
+  version: 1.10.1
+  epoch: 0
+  description: Longhorn Backing Image Managers handle creating, synchronizing and deleting backing images stored on a single Longhorn disk.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - longhorn-backing-image-manager-fips=${{package.full-version}}
+    runtime:
+      - cifs-utils
+      - curl
+      - e2fsprogs
+      - e2fsprogs-extra
+      - fuse2
+      - iperf3
+      - iproute2
+      - iputils
+      - kmod
+      - libaio
+      - nfs-utils
+      - qemu-utils
+      - rdma-core
+      - sg3-utils
+      - wget
+      - xfsprogs-extra
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/longhorn/backing-image-manager.git
+      tag: v${{package.version}}
+      expected-commit: d50c1b09092583692dc2e492e603e76eca3c23b1
+
+  # Longhorn's default LUKS configuration uses Argon2i as the PBKDF.
+  # Since it is not FIPS-compliant, cryptsetup rejects it and volume encryption will fail on any FIPS-enabled system
+  # See https://github.com/longhorn/longhorn/issues/4784 for details.
+  - name: "Replace argon2i with pbkdf2 as the default PBKDF for FIPS compliance"
+    runs: |
+      # Sanity check: ensure the upstream code still sets CryptoDefaultPBKDF to "argon2i".
+      grep 'CryptoDefaultPBKDF.*argon2i' pkg/crypto/crypto.go
+      sed -i '/CryptoDefaultPBKDF/ s/"argon2i"/"pbkdf2"/' pkg/crypto/crypto.go
+
+  - uses: go/build
+    with:
+      packages: .
+      output: backing-image-manager
+      ldflags: |
+        -X main.Version=${{package.version}}
+        -X main.GitCommit=$(git rev-parse HEAD)
+        -X main.BuildDate=$(date -d@${SOURCE_DATE_EPOCH} -u +'%Y-%m-%dT%H:%M:%SZ')
+      go-package: go-fips
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Test binary help"
+      uses: test/tw/help-check
+      with:
+        bins: backing-image-manager
+    - name: "Test binary version"
+      uses: test/tw/ver-check
+      with:
+        bins: backing-image-manager
+    - name: Test backing image daemon without config
+      uses: test/daemon-check-output
+      with:
+        start: backing-image-manager daemon 2>&1
+        expected_output: |
+          cannot find disk config file /data/longhorn-disk.cfg
+    - name: Test backing image sync
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          test_dir="/data/backing-images/test-image-test-uuid-123"
+          mkdir -p "$test_dir"
+          dd if=/dev/zero of="$test_dir/backing" bs=1M count=10
+          cat > /data/longhorn-disk.cfg << EOF
+          {
+            "diskUUID": "test-disk-123",
+            "disks": {
+              "default": {
+                "path": "/data/backing-images",
+                "allowScheduling": true,
+                "storageReserved": 0,
+                "tags": []
+              }
+            }
+          }
+          EOF
+        start: backing-image-manager daemon --disk-uuid test-disk-123
+        expected_output: |
+          Started sync server at localhost:8001
+          Backing Image Manager listening to localhost:8000
+        post: |
+          #!/bin/sh -e
+          test_img="/data/backing-images/test-image-test-uuid-123/backing"
+          img_size=$(stat -c%s "$test_img")
+          img_checksum=$(sha512sum "$test_img" | cut -d " " -f 1)
+          backing-image-manager backing-image list | jq -e "length==0"
+          backing-image-manager backing-image sync \
+            --name "test-image" \
+            --uuid "test-uuid-123" \
+            --size "$img_size" \
+            --checksum "$img_checksum"
+          backing-image-manager backing-image list | jq -e "length==1"
+          img_data=$(backing-image-manager backing-image get --name "test-image" --uuid "test-uuid-123")
+          echo $img_data | jq ".status.state" | grep "ready"
+          echo $img_data | jq ".size" | grep $img_size
+          echo $img_data | jq ".status.currentChecksum" | grep $img_checksum
+          backing-image-manager backing-image delete \
+            --name "test-image" --uuid "test-uuid-123"
+          backing-image-manager backing-image list | jq -e "length==0"
+
+update:
+  enabled: true
+  github:
+    identifier: longhorn/backing-image-manager
+    strip-prefix: v
+    tag-filter-prefix: v1.10.
+    use-tag: true
+  ignore-regex-patterns:
+    - '.*-rc\d+'
+    - ".*-dev-.*"
