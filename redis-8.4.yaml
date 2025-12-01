@@ -1,0 +1,402 @@
+package:
+  name: redis-8.4
+  version: "8.4.0"
+  epoch: 0
+  description: Advanced key-value store
+  copyright:
+    # IMPORTANT: redis v7.4+ introduced a licensing change, which provides two
+    # choices. We are selecting SSPL instead of RSAL, as that restricts our use-case.
+    - license: SSPL-1.0
+  dependencies:
+    provides:
+      - redis=${{package.full-version}}
+    runtime:
+      - merged-usrsbin
+      - posix-libc-utils # `getent` is required on startup in ha mode for ip introspection cluster formation
+      - wolfi-baselayout
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang
+      - cmake-3
+      - coreutils
+      - jemalloc
+      - libtool
+      - linux-headers
+      - m4
+      - openssl-dev
+      - pkgconf
+      - pkgconf-dev
+      - py3-pip
+      - py3-virtualenv
+      - python3
+      - rust
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 60ba86f3c8b4e1ec96451171753a0a38e5c45a0c
+      repository: https://github.com/redis/redis.git
+      tag: ${{package.version}}
+
+  - uses: patch
+    with:
+      patches: 0000-Disable-protected-mode.patch
+
+  - runs: |
+      export CFLAGS="$CFLAGS -std=gnu17"
+      export LDFLAGS="$LDFLAGS -latomic"
+      export BUILD_TLS=yes
+      export BUILD_WITH_MODULES=yes
+      export INSTALL_RUST_TOOLCHAIN=no
+      export CFLAGS="$CFLAGS -DUSE_MALLOC_USABLE_SIZE"
+      export IGNORE_MISSING_DEPS=1 # to avoid having an error like `Error: Unsupported operating system: wolfi.`
+        make \
+        all -j$(nproc)
+      make install PREFIX=/usr DESTDIR="${{targets.destdir}}" INSTALL_BIN="${{targets.destdir}}/usr/bin"
+
+  - uses: strip
+
+subpackages:
+  - name: redis-cli-${{vars.major-minor-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mv "${{targets.destdir}}"/usr/bin/redis-cli "${{targets.subpkgdir}}"/usr/bin/redis-cli
+    description: redis-cli is the command line interface utility to talk with Redis.
+    dependencies:
+      provides:
+        - redis-cli=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-cli
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: redis-benchmark-${{vars.major-minor-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mv "${{targets.destdir}}"/usr/bin/redis-benchmark "${{targets.subpkgdir}}"/usr/bin/redis-benchmark
+    description: redis-benchmark utility that simulates running commands done by N clients while at the same time sending M total queries.
+    dependencies:
+      provides:
+        - redis-benchmark=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-benchmark
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: redis-${{vars.major-minor-version}}-bitnami-compat
+    dependencies:
+      provides:
+        - redis-bitnami-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox # Required by startup scripts
+        - coreutils
+        - libxcrypt
+        - merged-usrsbin
+        - openssl
+        - redis
+        - redis-cli
+        - wait-for-port
+        - wolfi-baselayout
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: redis
+          version-path: ${{vars.major-minor-version}}/debian-12
+      - runs: |
+          # The bitnami startup scripts expect these directories to be
+          # in place. If not, redis will fail to launch.
+          mkdir -p "${{targets.subpkgdir}}"/bitnami/redis/data
+          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/redis/etc.default
+          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/redis/etc
+
+          # Moves in the default redis configuration. Note the bitnami scripts
+          # create a copy of this later and make some modifications.
+          cp redis.conf ${{targets.subpkgdir}}/opt/bitnami/redis/etc/redis-default.conf
+
+          ln -s /opt/bitnami/scripts/redis/entrypoint.sh ${{targets.subpkgdir}}/entrypoint.sh
+          ln -s /opt/bitnami/scripts/redis/run.sh ${{targets.subpkgdir}}/run.sh
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-bitnami-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: redis-${{vars.major-minor-version}}-iamguarded-compat
+    dependencies:
+      provides:
+        - redis-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox # Required by startup scripts
+        - coreutils
+        - libxcrypt
+        - merged-usrsbin
+        - openssl
+        - redis
+        - redis-cli
+        - wait-for-port
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: redis
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          # The startup scripts expect these directories to be in place.
+          # If not, redis will fail to launch.
+          mkdir -p /iamguarded/redis/data
+          mkdir -p /opt/iamguarded/redis/etc.default
+          mkdir -p /opt/iamguarded/redis/etc
+
+          # Moves in the default redis configuration. Note the iamguarded scripts
+          # create a copy of this later and make some modifications.
+          cp redis.conf /opt/iamguarded/redis/etc/redis-default.conf
+
+          ln -s /opt/iamguarded/scripts/redis/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
+          ln -s /opt/iamguarded/scripts/redis/run.sh ${{targets.contextdir}}/run.sh
+      - uses: iamguarded/finalize-compat
+        with:
+          package: redis
+          version: ${{vars.major-minor-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: redis
+            version: ${{vars.major-minor-version}}
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  # redis-sentinel is a symlink to redis-server, but paired with differently named startup scripts in bitnami
+  - name: redis-sentinel-${{vars.major-minor-version}}-bitnami-compat
+    dependencies:
+      provides:
+        - redis-sentinel-bitnami-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox # Required by startup scripts
+        - coreutils
+        - libxcrypt
+        - merged-usrsbin
+        - openssl
+        - redis
+        - redis-cli
+        - wait-for-port
+        - wolfi-baselayout
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: redis-sentinel
+          version-path: ${{vars.major-minor-version}}/debian-12
+      - runs: |
+          # Bitnami startup scripts _require_ the redis-default.conf to exist
+          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/redis-sentinel/etc
+          cp redis.conf ${{targets.subpkgdir}}/opt/bitnami/redis-sentinel/etc/redis-default.conf
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-sentinel-bitnami-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: redis-sentinel-${{vars.major-minor-version}}-iamguarded-compat
+    dependencies:
+      provides:
+        - redis-sentinel-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox # Required by startup scripts
+        - coreutils
+        - libxcrypt
+        - merged-usrsbin
+        - openssl
+        - redis
+        - redis-cli
+        - wait-for-port
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: redis-sentinel
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/redis-sentinel/etc
+          cp redis.conf /opt/iamguarded/redis-sentinel/etc/redis-default.conf
+      - uses: iamguarded/finalize-compat
+        with:
+          package: redis-sentinel
+          version: ${{vars.major-minor-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: redis-sentinel
+            version: ${{vars.major-minor-version}}
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-sentinel-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  # in bitnami, redis-cluster is redis-server paired with different startup to support cluster mode
+  # keep this as a subpackage in redis to avoid confusion
+  - name: redis-cluster-${{vars.major-minor-version}}-bitnami-compat
+    dependencies:
+      provides:
+        - redis-cluster-bitnami-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox # Required by startup scripts
+        - coreutils
+        - libxcrypt
+        - merged-usrsbin
+        - openssl
+        - redis
+        - redis-cli
+        - wait-for-port
+        - wolfi-baselayout
+    pipeline:
+      - uses: bitnami/compat
+        with:
+          image: redis-cluster
+          version-path: ${{vars.major-minor-version}}/debian-12
+      - runs: |
+          # Bitnami startup scripts _require_ the redis-default.conf to exist
+          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/redis/etc
+          mkdir -p "${{targets.subpkgdir}}"/opt/bitnami/redis/etc.default
+          cp redis.conf ${{targets.subpkgdir}}/opt/bitnami/redis/etc/redis-default.conf
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-cluster-bitnami-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: redis-cluster-${{vars.major-minor-version}}-iamguarded-compat
+    dependencies:
+      provides:
+        - redis-cluster-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox # Required by startup scripts
+        - coreutils
+        - libxcrypt
+        - merged-usrsbin
+        - openssl
+        - redis
+        - redis-cli
+        - wait-for-port
+        - wolfi-baselayout
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: redis-cluster
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/redis/etc
+          mkdir -p /opt/iamguarded/redis/etc.default
+          cp redis.conf /opt/iamguarded/redis/etc/redis-default.conf
+      - uses: iamguarded/finalize-compat
+        with:
+          package: redis-cluster
+          version: ${{vars.major-minor-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: redis-cluster
+            version: ${{vars.major-minor-version}}
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: redis-cluster-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+
+update:
+  enabled: true
+  github:
+    identifier: redis/redis
+    tag-filter-prefix: "8.4."
+
+test:
+  environment:
+    contents:
+      packages:
+        - redis-cli
+        - wait-for-port
+  pipeline:
+    - runs: |
+        set -euo pipefail
+        cat <<EOF >> /tmp/redis.conf
+        enable-module-command local
+        dbfilename dump.rdb
+        pidfile /tmp/redis_6379.pid
+        dir /tmp/
+        EOF
+
+        redis-server /tmp/redis.conf > /dev/null 2>&1 &
+        wait-for-port 6379 -t 10
+        redis-cli SET bike:1 "Process 134"
+        redis-cli GET bike:1 | grep 'Process 134'
+        redis-cli exists bike:1 | grep 1
+        redis-cli exists bike:2 | grep 0
+
+        # Redisearch
+        redis-cli MODULE LOAD /usr/lib/redis/modules/redisearch.so
+        redis-cli FT.CREATE idx ON HASH PREFIX 1 "bike:" SCHEMA name TEXT
+        redis-cli HSET bike:1 name "Process 134"
+        redis-cli FT.SEARCH idx "Process" RETURN 0
+
+        # RedisJSON (safe to overwrite on each run)
+        redis-cli MODULE LOAD /usr/lib/redis/modules/rejson.so
+        redis-cli JSON.SET json:bike:1 . '{"name":"Process 134"}'
+        redis-cli JSON.GET json:bike:1 .name | grep 'Process 134'
+        redis-cli JSON.GET json:bike:1 . | grep '"name":"Process 134"'
+
+        # RedisBloom
+        redis-cli MODULE LOAD /usr/lib/redis/modules/redisbloom.so
+        redis-cli BF.ADD bloom:bikes "Process 134"
+        redis-cli BF.EXISTS bloom:bikes "Process 134" | grep -E '(^1$|\(integer\) 1)'
+        redis-cli BF.EXISTS bloom:bikes "Process 135" | grep -E '(^0$|\(integer\) 0)'
+
+        # RedisTimeSeries
+        redis-cli MODULE LOAD /usr/lib/redis/modules/redistimeseries.so
+        redis-cli TS.CREATE timeseries:1
+        redis-cli TS.ADD timeseries:1 0 100 ON_DUPLICATE last
+        redis-cli --raw TS.RANGE timeseries:1 0 0 | tail -n1 | grep -E '^100(\.0+)?$'
+
+        echo "All module checks passed."
+    - runs: |
+        redis-server --version | grep "jemalloc" || exit 1
+    - uses: test/virtualpackage
+      with:
+        virtual-pkg-name: redis
+        real-pkg-name: ${{package.name}}
