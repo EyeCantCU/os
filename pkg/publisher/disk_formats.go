@@ -20,7 +20,7 @@ import "fmt"
 type DiskFormat string
 
 const (
-	DiskFormatRaw   DiskFormat = "raw.tgz"
+	DiskFormatRaw   DiskFormat = "raw"
 	DiskFormatQcow2 DiskFormat = "qcow2"
 	DiskFormatVmdk  DiskFormat = "vmdk"
 	DiskFormatVhd   DiskFormat = "vhd"

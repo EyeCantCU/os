@@ -49,13 +49,13 @@ func TestAllDiskFormats(t *testing.T) {
 }
 
 // TestDiskFormat_WithDiskPrefix tests adding "disk." prefix to format names
-// (e.g., raw.tgz → disk.raw.tgz, qcow2 → disk.qcow2).
+// (e.g., raw → disk.raw, qcow2 → disk.qcow2).
 func TestDiskFormat_WithDiskPrefix(t *testing.T) {
 	tests := []struct {
 		format DiskFormat
 		want   string
 	}{
-		{DiskFormatRaw, "disk.raw.tgz"},
+		{DiskFormatRaw, "disk.raw"},
 		{DiskFormatQcow2, "disk.qcow2"},
 		{DiskFormatVmdk, "disk.vmdk"},
 		{DiskFormatVhd, "disk.vhd"},

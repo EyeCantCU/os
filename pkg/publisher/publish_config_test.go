@@ -93,7 +93,7 @@ oci_config:
   tags:
     - lxd-python-3.13-full
   disk_formats:
-    - raw.tgz
+    - raw
 `,
 			wantErr: false,
 			validate: func(t *testing.T, c *PublishConfig) {
@@ -294,7 +294,7 @@ func TestPublishConfig_GetDiskFormats(t *testing.T) {
 		OCIConfig: OCIConfig{
 			Image:       "test",
 			Tags:        []string{"test"},
-			DiskFormats: []string{"vmdk", "raw.tgz"},
+			DiskFormats: []string{"vmdk", "raw"},
 		},
 	}
 

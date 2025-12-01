@@ -40,7 +40,7 @@ func TestBuildArtifactImage(t *testing.T) {
 	annotations := map[string]string{
 		AnnotationBuildTime:    time.Now().Format(time.RFC3339),
 		AnnotationArchitecture: "x86_64",
-		AnnotationArtifactType: "disk.raw.tgz.v1",
+		AnnotationArtifactType: "disk.raw.v1",
 	}
 
 	img, err := buildArtifactImage(layer, annotations, time.Now())

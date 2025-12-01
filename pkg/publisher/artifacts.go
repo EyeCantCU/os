@@ -47,7 +47,7 @@ func (a *Artifacts) Summary() []string {
 		singular string
 		plural   string
 	}{
-		{a.DiskRaw, "disk.raw.tgz.v1", ".raw files"},
+		{a.DiskRaw, "disk.raw.v1", ".raw files"},
 		{a.DiskQcow2, "disk.qcow2.v1", ".qcow2 files"},
 		{a.DiskVmdk, "disk.vmdk.v1", ".vmdk files"},
 		{a.DiskVhd, "disk.vhd.v1", ".vhd files"},
