@@ -1,0 +1,123 @@
+#!/bin/sh
+# shellcheck disable=SC3043
+URL_ENTERPRISE="https://apk.cgr.dev/chainguard-private"
+REPOSITORIES="/etc/apk/repositories"
+RC_ERROR=9
+Usage() {
+    cat <<EOF
+Usage: ${0##*/} sub [args ...]
+
+  subcommands:
+
+     add repo-url|repo-name
+
+       repo-name can be an alias or a https://*
+       aliases:
+          eprise|e|enterprise - $URL_ENTERPRISE
+
+     del repo-url|repo-name
+
+     check repo-url|repo-name
+
+       check if repo is present in $REPOSITORIES
+       exit 0 if found
+       exit 1 if not
+       exit $RC_ERROR on error
+EOF
+}
+
+resolve_repo() {
+    case "$1" in
+        https://*) echo "$1";;
+        eprise|e|enterprise) echo "${URL_ENTERPRISE}";;
+        *) stderr "unknown repo '$1'"; return 1;;
+    esac
+    return 0
+}
+
+bad_Usage() {
+    Usage 1>&2
+    fail "$@"
+}
+
+fail() {
+    [ $# -eq 0 ] || stderr "$@"
+    exit "$RC_ERROR"
+}
+
+stderr() {
+    echo "$@" 1>&2
+}
+
+_check_repo() {
+    local url="$1" rc=""
+    [ -f "$REPOSITORIES" ] || return 1
+    grep -q "^${URL_ENTERPRISE}$" "$REPOSITORIES" && return 0
+    rc=$?
+    [ $rc -eq 2 ] && rc=$RC_ERROR
+    return "$rc"
+}
+
+check_repo() {
+    local url="$1" rc=""
+    [ -f "$REPOSITORIES" ] ||
+        fail "$REPOSITORIES: not a file"
+    url=$(resolve_repo "$url") || fail
+    _check_repo "$url"
+    rc=$?
+    [ $rc -eq 0 ] && { stderr "$url present in $REPOSITORIES"; return 0; }
+    [ $rc -eq 1 ] && { stderr "$url not present in $REPOSITORIES"; return 1; }
+    stderr "error checking for $url in $REPOSITORIES"
+    return $rc
+}
+
+add_repo() {
+    local url="$1"
+    url=$(resolve_repo "$url") || fail
+
+    _check_repo "$url" "$REPOSITORIES" &&
+        return 0
+
+    [ -w "$REPOSITORIES" ] ||
+        fail "$REPOSITORIES: not is not writable"
+
+    printf "%s\n" "$url" >> "$REPOSITORIES" ||
+        fail "error [$?] appending '$url' to $REPOSITORIES"
+}
+
+del_repo() {
+    local rc="" url="$1"
+    url=$(resolve_repo "$url") || fail
+
+    _check_repo "$url" "$REPOSITORIES"
+    rc=$?
+    case "$rc" in
+        0) :;;
+        1) return 0;;
+        *) fail "checking $REPOSITORIES for $url failed";;
+    esac
+    [ -w "$REPOSITORIES" ] || fail "$REPOSITORIES - not writable"
+    sed -i -e "\|$url|d" "$REPOSITORIES" ||
+        fail "failed removing $url from $REPOSITORIES"
+}
+
+main() {
+    if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+        Usage
+        exit 0
+    fi
+    if [ $# -eq 0 ]; then
+        bad_Usage "need subcommand"
+    fi
+    subcmd="$1"
+    shift
+    case "$subcmd" in
+        check) check_repo "$@";;
+        add) add_repo "$@";;
+        del) del_repo "$@";;
+        *) bad_Usage "unexpected subcommand '$subcmd'";;
+    esac
+    return
+}
+
+main "$@"
