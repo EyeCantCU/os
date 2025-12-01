@@ -380,9 +380,9 @@ $(foreach name,$(disks_aws),aws-image-create-$(name)): aws-image-create-%: $(ARC
 $(foreach name,$(disks_aws),aws-image-share-$(name)): aws-image-share-%: $(ARCH_OUT_D)/awspub/share/%.json
 $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
 
-aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
-aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
-aws-share: $(foreach name,$(disks_aws),aws-share-$(name))
+aws-publish: $(foreach name,$(disks_aws),aws-image-publish-$(name))
+aws-create: $(foreach name,$(disks_aws),aws-image-create-$(name))
+aws-share: $(foreach name,$(disks_aws),aws-image-share-$(name))
 aws-publish-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-publish-$(name))
 aws-publish-aws-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
 aws-publish-aws-main: $(foreach name,$(group_aws_main),aws-image-publish-$(name))
