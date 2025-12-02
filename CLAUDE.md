@@ -454,3 +454,55 @@ Benefits of using `tee`:
 - Maintains the same functionality as `cat >` while improving observability
 
 **Note:** `tee` writes to both the file and stdout by default. This is desired behavior for test visibility.
+
+### 14. Avoid single quotes in `test/daemon-check-output` setup and post scripts
+The `test/daemon-check-output` pipeline has a shell quoting limitation: it wraps the `setup` and `post` parameters in single quotes internally. If your script content contains single quotes, the shell parsing will break with errors like `/bin/sh: /something: not found`.
+
+**The problem:**
+```yaml
+# Bad - single quotes in content break shell parsing
+post: |
+  echo 'create /test "data"' | zkCli.sh -server localhost:2181
+  echo 'get /test' | zkCli.sh -server localhost:2181
+```
+
+When this gets processed by the pipeline, it becomes:
+```bash
+post='#!/bin/sh -ex
+echo 'create /test "data"' | zkCli.sh'
+```
+
+The single quote after `echo` closes the opening quote after `post=`, breaking the string and causing the shell to try executing parts as commands.
+
+**Solutions:**
+
+1. **Use double quotes with escaped inner quotes:**
+```yaml
+# Good - use double quotes
+post: |
+  echo "create /test \"data\"" | zkCli.sh -server localhost:2181
+  echo "get /test" | zkCli.sh -server localhost:2181
+```
+
+2. **Use heredocs for complex strings:**
+```yaml
+# Good - use heredoc without quotes on delimiter
+post: |
+  zkCli.sh -server localhost:2181 << ZKCMD
+  create /test "data"
+  get /test
+  ZKCMD
+```
+
+3. **Avoid quotes when possible:**
+```yaml
+# Good - no quotes needed if data has no spaces
+post: |
+  echo create /test data | zkCli.sh -server localhost:2181
+```
+
+This limitation exists in the pipeline implementation of `pipelines/test/daemon-check-output.yaml` where it assigns:
+```bash
+setup='${{inputs.setup}}'
+post='${{inputs.post}}'
+```
