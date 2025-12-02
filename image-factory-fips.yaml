@@ -1,0 +1,148 @@
+package:
+  name: image-factory-fips
+  version: "0.8.4"
+  epoch: 0
+  description: Tooling for building Talos Linux boot assets, disk images, and other machine-ready artifacts.
+  copyright:
+    - license: MPL-2.0
+  dependencies:
+    runtime:
+      - acl
+      - ca-certificates
+      - cpio
+      - dosfstools
+      - e2fsprogs
+      - glib
+      - grub
+      - grub-efi-libs
+      - inih
+      - kmod
+      - libburn
+      - libisoburn
+      - libisofs
+      - liburcu
+      - mtools
+      - open-vmdk
+      - openssl
+      - pcre2
+      - pigz
+      - qemu-utils
+      - squashfs-tools
+      - xfsprogs
+      - xorriso
+      - xz
+      - zlib
+      - zstd
+
+environment:
+  environment:
+    ARTIFACTS: "_out"
+    GO111MODULE: "on"
+    CGO_ENABLED: 1
+    GOTOOLCHAIN: "local"
+    VERSION_PKG: "internal/version"
+  contents:
+    packages:
+      - bash
+      - build-base
+      - bun
+      - busybox
+      - curl
+      - git
+      - jq
+      - nodejs
+      - npm
+      - protobuf-dev
+      - protoc
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/siderolabs/image-factory
+      tag: v${{package.version}}
+      expected-commit: a3a7661df37083c3af0a929265a424f003c9db1a
+
+  - name: Prepare variables
+    runs: |
+      export SHA=$(git describe --match=none --always --abbrev=8 --dirty)
+      export TAG=$(git describe --tag --always --dirty --match 'v[0-9]*')
+      mkdir -p internal/version/data
+      echo -n ${SHA} > internal/version/data/sha
+      echo -n ${TAG} > internal/version/data/tag
+
+  - name: Tailwind update
+    runs: |
+      bun install
+      node_modules/.bin/tailwindcss -i internal/frontend/http/css/input.css -o internal/frontend/http/css/output.css --minify
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.45.0
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/image-factory
+      output: image-factory
+      ldflags: |
+        -X ${VERSION_PKG}.Name=image-factory
+        -X ${VERSION_PKG}.SHA=$(git rev-parse --short HEAD)
+        -X ${VERSION_PKG}.Tag=$(git describe --tag --always --dirty --match 'v[0-9]*')
+
+update:
+  enabled: true
+  github:
+    identifier: siderolabs/image-factory
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - curl
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/go-fips-check
+    - name: Test image-factory startup
+      runs: |
+        set -euo pipefail
+        openssl ecparam -name prime256v1 -genkey -noout -out cache-signing-key.key
+
+        image-factory \
+          -image-registry ghcr.io \
+          -external-url "http://localhost:8080" \
+          -cache-signing-key-path ./cache-signing-key.key \
+          > /tmp/image-factory.log 2>&1 &
+        FACTORY_PID=$!
+
+        for i in $(seq 1 20); do
+          if curl -fsS "http://localhost:8080/healthz" >/dev/null 2>&1; then
+            echo "Application is healthy"
+            break
+          fi
+          sleep 1
+          if [[ $i -eq 20 ]]; then
+            echo "Timed out waiting for image-factory health"
+            cat /tmp/image-factory.log || true
+            exit 1
+          fi
+        done
+    - name: Test required tools availability
+      runs: |
+        set -euo pipefail
+
+        # Test that required runtime tools are available
+        command -v cpio >/dev/null || { echo "cpio not found"; exit 1; }
+        command -v mkfs.vfat >/dev/null || { echo "mkfs.vfat not found"; exit 1; }
+        command -v mkfs.ext4 >/dev/null || { echo "mkfs.ext4 not found"; exit 1; }
+        command -v mkfs.xfs >/dev/null || { echo "mkfs.xfs not found"; exit 1; }
+        command -v grub-mkrescue >/dev/null || { echo "grub-mkrescue not found"; exit 1; }
+        command -v xorriso >/dev/null || { echo "xorriso not found"; exit 1; }
+        command -v zstd >/dev/null || { echo "zstd not found"; exit 1; }
+        command -v xz >/dev/null || { echo "xz not found"; exit 1; }
+        command -v pigz >/dev/null || { echo "pigz not found"; exit 1; }
+        command -v mksquashfs >/dev/null || { echo "mksquashfs not found"; exit 1; }
+        command -v vmdk-convert >/dev/null || { echo "vmdk-convert not found"; exit 1; }
+        command -v qemu-img >/dev/null || { echo "qemu-img not found"; exit 1; }
