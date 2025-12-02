@@ -1,0 +1,128 @@
+package:
+  name: nfs-ganesha-libntirpc-7
+  version: 7.2
+  epoch: 0
+  description: New transport-agnostic RPC library for NFS-Ganesha
+  copyright:
+    - license: BSD-3-Clause
+    - license: MIT
+  dependencies:
+    provides:
+      - nfs-ganesha-libntirpc=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - gcc-14
+      - gcc-14-default
+      - libnsl-dev
+      - userspace-rcu-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/nfs-ganesha/ntirpc.git
+      expected-commit: 3072c8f7c0d4cc4e4ab5134b0ac9506afa793eea
+      tag: v${{package.version}}
+      recurse-submodules: true
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_BUILD_TYPE=MinSizeRel
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: nfs-ganesha-libntirpc development files
+    pipeline:
+      - uses: split/dev
+      - name: Move libntirpc.pc file to -dev subpackage
+        runs: |
+          # libntirpc.pc is created in /usr/lib64/pkgconfig/libntirpc.pc
+          # split/dev pipeline only moves .pc file from /usr/lib and not /usr/lib64
+          mkdir -p ${{targets.contextdir}}/usr/lib/
+          mv ${{targets.destdir}}/usr/lib64/pkgconfig ${{targets.contextdir}}/usr/lib/
+      - name: Remove config.h includes from headers (unused and causes build conflicts)
+        runs: |
+          # config.h not needed: haproxy.h doesn't use it, and ntirpc_traces.h
+          # was built without LTTng so USE_LTTNG_NTIRPC should remain undefined
+          sed -i '/#include "config\.h"/d' \
+            ${{targets.contextdir}}/usr/include/ntirpc/rpc/haproxy.h
+
+          sed -i '/#include "config\.h"/d' \
+            ${{targets.contextdir}}/usr/include/ntirpc/lttng/ntirpc_traces.h
+    dependencies:
+      provides:
+        - nfs-ganesha-libntirpc-dev=${{package.full-version}}
+      runtime:
+        - nfs-ganesha-libntirpc=${{package.full-version}}
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v7.
+  ignore-regex-patterns:
+    - '.*rc\d+$'
+    - .*dev.*
+    - .*pre.*
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-dev
+        - gcc-14
+        - pkgconf
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test ntirpc library compilation and linking
+      runs: |
+        set -o pipefail
+
+        cat > ntirpc_test.c <<'EOF'
+        #include <ntirpc/rpc/types.h>
+        #include <ntirpc/rpc/xdr.h>
+        #include <ntirpc/rpc/rpc.h>
+        #include <stdio.h>
+
+        int main() {
+            XDR xdrs;
+            char buffer[256];
+
+            /* Initialize XDR stream for encoding */
+            xdrmem_create(&xdrs, buffer, sizeof(buffer), XDR_ENCODE);
+
+            /* Test basic XDR encoding */
+            int test_val = 42;
+            if (!xdr_int(&xdrs, &test_val)) {
+                fprintf(stderr, "XDR encoding failed\n");
+                return 1;
+            }
+
+            printf("ntirpc: XDR encoding test passed\n");
+
+            xdr_destroy(&xdrs);
+            return 0;
+        }
+        EOF
+
+        gcc-14 ntirpc_test.c -o ntirpc_test $(pkgconf --cflags --libs libntirpc)
+        ldd ./ntirpc_test | grep -F "libntirpc"
+
+        ./ntirpc_test
