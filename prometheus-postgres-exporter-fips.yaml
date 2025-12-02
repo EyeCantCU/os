@@ -1,13 +1,19 @@
 package:
   name: prometheus-postgres-exporter-fips
   version: "0.18.1"
-  epoch: 2 # GHSA-j5w8-q4qc-rx2x
+  epoch: 3 # GHSA-j5w8-q4qc-rx2x
   description: Prometheus Exporter for Postgres server metrics
   copyright:
     - license: Apache-2.0
 
 vars:
   PKG: "github.com/prometheus/common"
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
 
 pipeline:
   - uses: git-checkout
@@ -32,12 +38,72 @@ pipeline:
         -X ${{vars.PKG}}/version.Branch=$(git branch --show-current)
         -X ${{vars.PKG}}/version.Version=v${{package.version}}
 
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package for iamguarded"
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: prometheus-postgres-exporter
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/postgres-exporter
+          ln -s /usr/bin/postgres_exporter /opt/iamguarded/postgres-exporter/postgres_exporter
+      - uses: iamguarded/finalize-compat
+        with:
+          package: prometheus-postgres-exporter
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: prometheus-postgres-exporter
+            version: ${{vars.major-version}}
+        - runs: |
+            run-script --version
+            run-script --help
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
   pipeline:
     - uses: test/go-fips-check
     - runs: |
         postgres_exporter --version
         postgres_exporter --help
+    - name: "Test binary"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cat > postgres_exporter.yml <<'EOF'
+          auth_modules:
+            foo1:
+              type: userpass
+              userpass:
+                username: first
+                password: firstpass
+              options:
+                sslmode: disable
+          EOF
+        start: postgres_exporter
+        expected_output: |
+          Listening on
+        timeout: 60
+        post: |-
+          wait-for-it localhost:9187 -t 45
+          curl -fsSL http://localhost:9187/metrics | grep -q process_cpu_seconds_total
 
 update:
   enabled: true
