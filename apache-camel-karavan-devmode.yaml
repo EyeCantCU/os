@@ -1,20 +1,19 @@
 package:
   name: apache-camel-karavan-devmode
-  version: "4.10.2"
+  version: "4.14.2"
   epoch: 0
-  description: "Development runtime for Apache Camel Karavan with JBang and Camel CLI"
+  description: "Apache Camel Karavan a Low-code Data Integration Platform powered by Apache Camel"
   copyright:
     - license: Apache-2.0
   dependencies:
     runtime:
       - bash
-      - git
       - jbang
       - maven
       - openjdk-${{vars.JAVA_VERSION}}-jre
 
 vars:
-  JAVA_VERSION: 21
+  JAVA_VERSION: 17
 
 environment:
   contents:
@@ -32,31 +31,29 @@ pipeline:
     with:
       repository: https://github.com/apache/camel-karavan
       tag: ${{package.version}}
-      expected-commit: 61f1c0ad17fc50d50b60d7ffcd35c8bc7b3eaf98
+      expected-commit: 5175973d2e326e840b547a5951e2b61d49fd897a
 
   - name: Install Camel CLI using JBang
     runs: |
       jbang trust add https://github.com/apache/camel
       jbang app install camel@apache/camel
+      jbang config set cache-evict never
 
-      # Copy installed Camel CLI to destdir
       mkdir -p "${{targets.destdir}}/usr/share/jbang/bin"
-      cp ~/.jbang/bin/camel "${{targets.destdir}}/usr/share/jbang/bin/"
-
-      # Copy Camel CLI jar and dependencies
       mkdir -p "${{targets.destdir}}/usr/share/jbang/apps"
-      if [ -d ~/.jbang/apps ]; then
-        cp -r ~/.jbang/apps/* "${{targets.destdir}}/usr/share/jbang/apps/"
-      fi
+      cp ~/.jbang/bin/* "${{targets.destdir}}/usr/share/jbang/bin/"
+      cp -r ~/.jbang/cache "${{targets.destdir}}/usr/share/jbang/"
+      cp ~/.jbang/jbang.properties "${{targets.destdir}}/usr/share/jbang/"
 
       # Create camel wrapper script
       mkdir -p "${{targets.destdir}}/usr/bin"
-      cat > "${{targets.destdir}}/usr/bin/camel" <<EOF
+      tee "${{targets.destdir}}/usr/bin/camel" <<EOF
       #!/bin/bash
       set -e
       export JBANG_DIR="\${JBANG_DIR:-/usr/share/jbang}"
-      export CAMEL_VERSION="\${CAMEL_VERSION:-${{vars.CAMEL_VERSION}}}"
-      exec jbang -Dcamel.jbang.version="\${CAMEL_VERSION}" camel@apache/camel "\$@"
+      export CAMEL_VERSION="\${CAMEL_VERSION:-${{package.version}}}"
+      export CAMEL_KAMELETS_VERSION="\${CAMEL_KAMELETS_VERSION:-${{package.version}}}"
+      exec jbang -Dcamel.jbang.version="\${CAMEL_VERSION}" -Dcamel.jbang.kameletsVersion="\${CAMEL_KAMELETS_VERSION}" camel@apache/camel "\$@"
       EOF
       chmod +x "${{targets.destdir}}/usr/bin/camel"
 
@@ -66,67 +63,55 @@ pipeline:
       mkdir -p "${{targets.destdir}}/karavan/builder"
       mkdir -p "${{targets.destdir}}/karavan/kamelets"
 
-  - uses: strip
-
 subpackages:
   - name: ${{package.name}}-compat
     description: Compat package for ${{package.name}}
     dependencies:
       runtime:
-        - jbang
+        - ${{package.name}}
     pipeline:
       - runs: |
-          # Create compat symlinks matching the upstream image structure
           mkdir -p "${{targets.subpkgdir}}/karavan/.jbang"
           ln -sf /usr/share/jbang "${{targets.subpkgdir}}/karavan/.jbang/"
     test:
       pipeline:
-        - runs: |
-            set -euo pipefail
-            # Verify symlink exists
-            test -L /karavan/.jbang/
-            # Verify symlink target exists and is a directory
-            test -d "$(readlink -f /karavan/.jbang/)"
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
 
 update:
   enabled: true
-  github:
-    identifier: apache/camel-karavan
+  git: {}
 
 test:
   environment:
     contents:
       packages:
-        - openjdk-${{vars.JAVA_VERSION}}-default-jvm
-        - bash
-        - git
-        - maven
+        - openjdk-${{vars.JAVA_VERSION}}-default-jdk
     environment:
       JAVA_HOME: /usr/lib/jvm/java-${{vars.JAVA_VERSION}}-openjdk
       JBANG_DIR: /usr/share/jbang
   pipeline:
-    - uses: test/tw/ldd-check
     - uses: test/tw/help-check
       with:
         bins: camel
     - uses: test/tw/ver-check
       with:
         bins: camel
-    - name: Test simple Camel route
-      runs: |
-        set -euo pipefail
-        mkdir -p /tmp/camel-test
-        cd /tmp/camel-test
-
-        # Create a simple Camel route using tee for visibility
-        tee route.yaml <<'EOF'
-        - route:
-            from:
-              uri: "timer:tick"
-              steps:
-                - log:
-                    message: "Hello from Camel!"
-        EOF
-
-        # Validate the route
-        camel run --source-dir=. --console=false --max-messages=1 --max-seconds=5 route.yaml
+    - name: Test Karavan devmode runtime command
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /karavan/code
+          tee /karavan/code/test-route.yaml <<'EOF'
+          - route:
+              from:
+                uri: "timer:tick?period=1000"
+                steps:
+                  - log:
+                      message: "Karavan devmode test successful!"
+          EOF
+        start: jbang -Dcamel.jbang.version=${{package.version}} -Dcamel.jbang.kameletsVersion=${{package.version}} camel@apache/camel run --source-dir=/karavan/code --console
+        timeout: 90
+        expected_output: |
+          Karavan devmode test successful!
