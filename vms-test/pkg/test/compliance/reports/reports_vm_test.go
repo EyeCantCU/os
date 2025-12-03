@@ -97,6 +97,7 @@ func TestGenerateComplianceReports(t *testing.T) {
 	}{
 		{"CIS Server L1", "xccdf_org.ssgproject.content_profile_cis_server_l1"},
 		{"STIG", "xccdf_org.ssgproject.content_profile_stig"},
+		{"STIG GPOS", "xccdf_org.ssgproject.content_profile_stig_gpos"},
 	}
 
 	for _, profile := range profiles {
@@ -107,6 +108,7 @@ func TestGenerateComplianceReports(t *testing.T) {
 			// Filesystem-friendly name, e.g. "cis-server-l1"
 			fsName := strings.ToLower(strings.ReplaceAll(profile.prettyName, " ", "-"))
 			resultsFile := fsName + "-results.xml"
+			viewerFile := fsName + "-stigviewer.xml"
 			reportFile := fsName + "-report.html"
 
 			// Run the scan. This needs elevated privileges, because with hardening
@@ -116,6 +118,15 @@ func TestGenerateComplianceReports(t *testing.T) {
 				"--results", resultsFile,
 				"--report", reportFile,
 				ssgFile)
+			// Run stig-viewer output only on GPOS for now
+			if profile.profileName == "xccdf_org.ssgproject.content_profile_stig_gpos" {
+				cmd = exec.CommandContext(ctx, "oscap", "xccdf", "eval",
+					"--profile", profile.profileName,
+					"--results", resultsFile,
+					"--stig-viewer", viewerFile,
+					"--report", reportFile,
+					ssgFile)
+			}
 			output, err := cmd.CombinedOutput()
 			t.Logf("OpenSCAP output:\n%s", output)
 
@@ -153,6 +164,9 @@ func TestGenerateComplianceReports(t *testing.T) {
 
 			content, err = os.ReadFile(reportFile)
 			artifacts.File(t, files.ComplianceHTMLReport, content, err, meta)
+
+			content, err = os.ReadFile(viewerFile)
+			artifacts.File(t, files.ComplianceStigViewerXML, content, err, meta)
 		})
 	}
 }
