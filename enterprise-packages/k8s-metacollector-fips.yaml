@@ -1,0 +1,95 @@
+package:
+  name: k8s-metacollector-fips
+  version: "0.1.1"
+  epoch: 0
+  description: "k8s-metacollector fetches the metadata from k8s API server"
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/falcosecurity/k8s-metacollector.git
+      tag: v${{package.version}}
+      expected-commit: 244a3a29395f0a14395ff87799180849b68f69fd
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.38.0
+        golang.org/x/oauth2@v0.27.0
+        google.golang.org/protobuf@v1.33.0
+
+  - uses: go/build
+    with:
+      packages: .
+      go-package: go-fips
+      output: meta-collector
+      ldflags: |
+        -X github.com/falcosecurity/k8s-metacollector/pkg/version.semVersion=${{package.version}}
+        -X github.com/falcosecurity/k8s-metacollector/pkg/version.gitCommit=$(git rev-parse HEAD)
+        -X github.com/falcosecurity/k8s-metacollector/pkg/version.buildDate=$(date -u -d "@$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")
+
+subpackages:
+  - name: ${{package.name}}-compat
+    pipeline:
+      - runs: |
+          # Create a symlink to the binary to match binary name in upstream image (meta-collector)
+          mkdir -p ${{targets.contextdir}}
+          ln -sf /usr/bin/meta-collector ${{targets.contextdir}}/meta-collector
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+# NOTE:
+# Although the last official release was on Jun 5 2024, the maintainers have confirmed
+# that this project (k8s-metacollector) is still actively maintained.
+# Reference: https://github.com/falcosecurity/plugins/issues/1026#issuecomment-3401761383
+update:
+  enabled: true
+  github:
+    identifier: falcosecurity/k8s-metacollector
+    strip-prefix: v
+
+test:
+  environment:
+    environment:
+      METRICS_HOST: "127.0.0.1"
+      METRICS_PORT: 8080
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: meta-collector
+    - uses: test/tw/ver-check
+      with:
+        bins: meta-collector
+    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+    - name: Basic functional test
+      uses: test/daemon-check-output
+      with:
+        start: meta-collector run
+        timeout: 45
+        expected_output: |
+          starting manager
+          Starting EventSource
+          Starting workers
+        post: |
+          set -eu
+          wait-for-it ${METRICS_HOST}:${METRICS_PORT} -t 30
+          curl -fsS http://${METRICS_HOST}:${METRICS_PORT}/metrics > metrics.txt
+          grep -F -e "meta_collector_collector_event_api_server_received" metrics.txt
+          grep -F -e "meta_collector_broker_queue_duration_seconds_bucket" metrics.txt
+          grep -F -e "meta_collector_broker_queue_adds" metrics.txt
+          grep -F -e "meta_collector_broker_dispatched_events" metrics.txt
+          grep -F -e "workqueue_work_duration_seconds_bucket" metrics.txt
