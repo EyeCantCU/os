@@ -1,0 +1,120 @@
+package:
+  name: rancher-support-bundle-kit
+  description: A toolkit to generate and analyze the support bundles for Kubernetes and Kubernetes-native applications
+  epoch: 1 # GHSA-j5w8-q4qc-rx2x
+  version: "0.0.74"
+  copyright:
+    - license: Apache-2.0
+  checks:
+    disabled:
+      # App stores some scripts in the /tmp directory so this check needs to be disabled.
+      - tempdir
+  dependencies:
+    runtime:
+      - bash
+      - coreutils
+      - ctr
+      - curl
+      - gnutar
+      - grep
+      - gzip
+      - procps
+      - sed
+      - systemd
+      - tini
+      - util-linux
+      - yq
+      - zip
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/rancher/support-bundle-kit.git
+      expected-commit: bfd7fc041777fb956abca0db3fdf9724007b4c53
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/opencontainers/selinux@v1.13.0
+        golang.org/x/crypto@v0.45.0
+
+  - uses: go/build
+    with:
+      packages: .
+      output: support-bundle-kit
+      vendor: true
+      ldflags: |
+        -X github.com/rancher/support-bundle-kit/cmd.AppVersion=${{package.version}} \
+        -X github.com/rancher/support-bundle-kit/cmd.GitCommit=$(git rev-parse HEAD)
+
+  - name: Install collector scripts (collector-*)
+    runs: |
+      for collector in ./hack/collector-*; do
+        if [ -f "$collector" ]; then
+          install -Dm755 "$collector" ${{targets.destdir}}/usr/bin/$(basename "$collector")
+        fi
+      done
+
+  - runs: |
+      install -Dm755 ./package/entrypoint.sh ${{targets.destdir}}/usr/bin/entrypoint.sh
+      install -Dm755 ./hack/support-bundle-collector.sh ${{targets.destdir}}/usr/bin/support-bundle-collector.sh
+      install -Dm755 ./hack/common ${{targets.destdir}}/tmp/common
+
+update:
+  enabled: true
+  github:
+    identifier: rancher/support-bundle-kit
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - wait-for-it
+    environment:
+      TINI_SUBREAPER: 1
+      SUPPORT_BUNDLE_TARGET_NAMESPACES: harvester-system,longhorn-system
+      SUPPORT_BUNDLE_NAME: sample
+      SUPPORT_BUNDLE_DEBUG: "true"
+      SUPPORT_BUNDLE_MANAGER_POD_IP: 127.0.0.1
+      POD_NAMESPACE: default
+      SUPPORT_BUNDLE_IMAGE: rancher/support-bundle-kit:master-head
+      SUPPORT_BUNDLE_IMAGE_PULL_POLICY: Always
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: 32764
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: support-bundle-kit
+    - uses: test/tw/ver-check
+      with:
+        bins: support-bundle-kit
+        version-flag: version
+        verbose: true
+    - name: Verify some files exist
+      runs: |
+        stat /usr/bin/entrypoint.sh
+        stat /usr/bin/support-bundle-collector.sh
+        stat /usr/bin/collector-longhorn
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: "Start server and test endpoint with error checking"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl create namespace harvester-system
+          kubectl create namespace longhorn-system
+          kubectl create clusterrole default-view --verb=get,list,watch --resource=namespaces,pods
+          kubectl create clusterrolebinding default-view-binding --clusterrole=default-view --serviceaccount=default:default
+        start: entrypoint.sh /usr/bin/support-bundle-kit manager
+        timeout: 30
+        expected_output: |
+          Running phase init
+          Running phase node bundle
+          Succeed to run phase package
+          Succeed to run phase done. Progress (100)
+        post: |
+          wait-for-it -t 10 localhost:8080

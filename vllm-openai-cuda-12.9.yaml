@@ -1,0 +1,424 @@
+package:
+  name: vllm-openai-cuda-12.9
+  version: 0.11.2
+  epoch: 1
+  description: A high-throughput and memory-efficient inference and serving engine for LLMs
+  target-architecture:
+    - x86_64
+  resources:
+    cpu: 96
+    memory: 256Gi
+  copyright:
+    - license: Apache-2.0
+  options:
+    no-provides: true
+    # Python wheels (opencv-python-headless, pyzmq, etc.) bundle vendored .so files with unique hashes
+    # in their filenames (e.g., libavcodec-e0dd92b8.so.59). Without no-depends, SCA would generate
+    # unsatisfiable dependencies on these vendored libraries that no system package provides.
+    no-depends: true
+  # Runtime dependency notes:
+  # Since we use no-depends: true, SCA won't auto-generate library dependencies.
+  # We must explicitly list dependencies for libraries used at runtime to prevent drift on updates.
+  # Vendored libraries (with hashes in filename like libavif-850e7649.so) are bundled by PyPI wheels and not listed.
+  #
+  # NOTE: Unlike upstream, we do NOT ship XPU (Intel) support. The bitsandbytes XPU library is removed
+  # during build as it requires Intel oneAPI libraries (libsvml.so, libsycl.so.8, etc.) not in our ecosystem.
+  dependencies:
+    runtime:
+      # Package dependencies (for scripts/tools)
+      - bash
+      - busybox
+      # CUDA toolkit and libraries (use package names - NVIDIA packages don't provide so: deps)
+      - cuda-toolkit-${{vars.cuda-version}}
+      - curl
+      - ffmpeg-cuda-nozeromq # ffmpeg with CUDA support, no zeromq to avoid libsodium dependency (FIPS compliance), upstream comes with ffmpeg
+      - git # needed for EP kernels installation script (clone pplx-kernels, DeepEP)
+      # OpenMPI/NVSHMEM (from nvshmem bootstrap plugins: libmpi.so.40, libpmix.so.2)
+      # Note: liboshmem.so.40 is not provided as separate so: dep, comes with openmpi
+      - libfabric1 # libfabric.so.1
+      - nvidia-cuda-cudart-${{vars.cuda-version}} # libcudart.so.12
+      # cuDNN (from PyTorch libtorch_cuda.so, libtorch_python.so)
+      - nvidia-cudnn-${{vars.cudnn-major-version}}-cuda-${{vars.cuda-major-version}} # libcudnn.so.9
+      - nvidia-libcublas-${{vars.cuda-version}} # libcublas.so.12, libcublasLt.so.12
+      - nvidia-libcusparse-${{vars.cuda-version}} # libcusparse.so.12
+      - nvidia-libnvjitlink-${{vars.cuda-version}} # libnvJitLink.so.12
+      # NCCL (from PyTorch libtorch_cuda.so)
+      - nvidia-nccl-cuda-${{vars.cuda-version}} # libnccl.so.2
+      - openmpi-cuda-${{vars.cuda-version}} # provides so:libmpi.so.40
+      - openpmix # provides so:libpmix.so.2
+      - py${{vars.python-version}}-opencv-python-headless # use system OpenCV instead of PyPI wheel to avoid vendored OpenSSL, needed for FIPS
+      - py${{vars.python-version}}-pip # needed for JIT compilation, core performance feature of vLLM
+      - py${{vars.python-version}}-pyzmq # use system pyzmq (links to system zeromq) to avoid vendored libsodium, needed for FIPS
+      - python-${{vars.python-version}}
+      - python-${{vars.python-version}}-dev # needed for JIT compilation, core performance feature of vLLM
+      # Core system libraries (glibc provides so:libc.so.6, so:libm.so.6, so:libpthread.so.0, so:librt.so.1, so:libdl.so.2)
+      - so:libc.so.6
+      - so:libdl.so.2
+      - so:libgcc_s.so.1
+      # OpenMP (from numba omppool, PyTorch libtorch_cpu.so - note: PyTorch also bundles its own libgomp.so.1)
+      - so:libgomp.so.1
+      - so:libm.so.6
+      - so:libpthread.so.0
+      - so:librt.so.1
+      - so:libstdc++.so.6
+      # TBB (from numba tbbpool)
+      - so:libtbb.so.12
+      - so:libz.so.1
+      - wget # needed for EP kernels installation script (download NVSHMEM)
+      - zeromq-nocurve # provides libzmq without libsodium (FIPS compliant)
+
+vars:
+  cudnn-major-version: 9
+  import: vllm
+  pypi-package: vllm
+  flashinfer-cubin-version: "0.5.2"
+  flashinfer-jit-cache-version: "0.5.2"
+  install-kv-connectors: "false" # toggle to true to match upstream kv connectors layer
+  # For support of open-ai server, we also fix bitsandbytes version as per upstream and they are different for different archs
+  # It is critical for vllm-openai so please change when upstream changes
+  # for now we only ship x86_64
+  bitsandbytes-x86-version: "0.46.1"
+  timm-version: "1.0.17"
+  python-version: 3.12
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+  # Converts cuda-version 12.9 to 129 for wheel index URLs (e.g., cu129)
+  - from: ${{vars.cuda-version}}
+    match: '(\d+)\.(\d+)'
+    replace: '$1$2'
+    to: pytorch-cuda-suffix
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ccache
+      - cmake
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - ncurses-dev
+      - nvcc-${{vars.cuda-version}}-gcc-default
+      - nvidia-cuda-cccl-${{vars.cuda-version}}
+      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - py3-supported-build-base-dev
+      - python-${{vars.python-version}}
+      - samurai
+      - uv
+  environment:
+    CUDA_HOME: /usr/local/cuda-${{vars.cuda-version}}
+    LD_LIBRARY_PATH: /usr/local/cuda-${{vars.cuda-version}}/lib64:/usr/local/cuda-${{vars.cuda-version}}/lib
+    CMAKE_CUDA_ARCHITECTURES: all
+    CUDA_TOOLKIT_ROOT_DIR: /usr/local/cuda-${{vars.cuda-version}}
+    CUDAToolkit_ROOT: /usr/local/cuda-${{vars.cuda-version}}
+    CMAKE_ARGS: "-DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${{vars.cuda-version}} -DCUDAToolkit_ROOT=/usr/local/cuda-${{vars.cuda-version}} -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin:/usr/local/cuda-${{vars.cuda-version}}/bin"
+    FORCE_CUDA: 1
+    USE_CUDA: 1
+    USE_CUDNN: 1
+    VERBOSE: 1
+    TORCH_CUDA_ARCH_LIST: "7.0 7.2 7.5 8.0 8.6 8.7 8.9 9.0 10.0 10.1 12.0" # https://github.com/vllm-project/vllm/blob/7df0289782ab500b2713b7521979c28de2b21cac/CMakeLists.txt#L100C29-L100C75
+    MAX_JOBS: "64"
+    CMAKE_BUILD_TYPE: Release
+    # Use ccache
+    CC: ccache gcc
+    CXX: ccache g++
+    UV_LINK_MODE: copy
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/vllm-project/vllm.git
+      tag: v${{package.version}}
+      expected-commit: 275de34170654274616082721348b7edd9741d32
+
+  - runs: ccache -F 0 -M 0
+
+  - name: Detect dependency drift vs upstream
+    runs: |
+      set -eu
+
+      DOCKERFILE="docker/Dockerfile"
+
+      # CUDA
+      MELANGE_CUDA_MINOR="${{vars.cuda-version}}"
+      ARG_CUDA="$(grep -E '^[[:space:]]*ARG[[:space:]]+CUDA_VERSION=' "$DOCKERFILE" | head -1 | awk -F '=' '{print $2}' | tr -d '\"')"
+      echo "Dockerfile (upstream): $(grep -n '^[[:space:]]*ARG[[:space:]]\+CUDA_VERSION=' "$DOCKERFILE" | head -1)"
+      [ -n "${ARG_CUDA:-}" ] || { echo "CUDA_VERSION ARG not found"; exit 1; }
+      UPSTREAM_CUDA_MINOR="$(echo "$ARG_CUDA" | awk -F. '{print $1"."$2}')"
+      echo "CUDA  -> upstream=$UPSTREAM_CUDA_MINOR  melange=${MELANGE_CUDA_MINOR}"
+      [ "$UPSTREAM_CUDA_MINOR" = "$MELANGE_CUDA_MINOR" ] || { echo "CUDA drift"; exit 1; }
+
+      # Python
+      MELANGE_PY="${{vars.python-version}}"
+      ARG_PY="$(grep -E '^[[:space:]]*ARG[[:space:]]+PYTHON_VERSION=' "$DOCKERFILE" | head -1 | awk -F '=' '{print $2}' | tr -d '\"')"
+      echo "Dockerfile (upstream): $(grep -n '^[[:space:]]*ARG[[:space:]]\+PYTHON_VERSION=' "$DOCKERFILE" | head -1)"
+      [ -n "${ARG_PY:-}" ] || { echo "PYTHON_VERSION ARG not found"; exit 1; }
+      echo "Python-> upstream=$ARG_PY  melange=${MELANGE_PY}"
+      case "$ARG_PY" in ${MELANGE_PY}*) ;; *) echo "Python drift"; exit 1 ;; esac
+
+      # FlashInfer via cubin + jit-cache
+      MELANGE_FLASH_CUBIN="${{vars.flashinfer-cubin-version}}"
+      MELANGE_FLASH_JIT="${{vars.flashinfer-jit-cache-version}}"
+
+      echo "Dockerfile (upstream) FlashInfer lines:"
+      grep -n "flashinfer-cubin" "$DOCKERFILE"
+      grep -n "flashinfer-jit-cache" "$DOCKERFILE"
+
+      if ! grep -Eq "flashinfer-cubin==${MELANGE_FLASH_CUBIN}" "$DOCKERFILE"; then
+        echo "FlashInfer cubin drift: expected flashinfer-cubin==${MELANGE_FLASH_CUBIN}"
+        exit 1
+      fi
+
+      if ! grep -Eq "flashinfer-jit-cache==${MELANGE_FLASH_JIT}" "$DOCKERFILE"; then
+        echo "FlashInfer jit-cache drift: expected flashinfer-jit-cache==${MELANGE_FLASH_JIT}"
+        exit 1
+      fi
+
+      # bitsandbytes
+      MELANGE_BNB="${{vars.bitsandbytes-x86-version}}"
+      echo "Dockerfile (upstream) BNB lines:"
+      grep -n 'BITSANDBYTES_VERSION' "$DOCKERFILE"
+      echo "BnB   -> upstream: see lines above  melange=${MELANGE_BNB}"
+      if grep -Eq 'BITSANDBYTES_VERSION="?'"${MELANGE_BNB}"'"?' "$DOCKERFILE"; then
+        :
+      else
+        echo "bitsandbytes drift (melange=${MELANGE_BNB} not present in Dockerfile)"
+        exit 1
+      fi
+
+      # timm (simple lower-bound check: verify 'timm>=<melange>' appears in the Dockerfile)
+      MELANGE_TIMM="${{vars.timm-version}}"
+      echo "Dockerfile (upstream) timm lines:"
+      grep -n "timm>=" "$DOCKERFILE"
+      echo "timm  -> upstream: see lines above  melange>='${MELANGE_TIMM}'"
+      if grep -Eq "[\"']timm>="?${MELANGE_TIMM}"[\"']" "$DOCKERFILE"; then
+        :
+      else
+        echo "timm drift (expected 'timm>=${MELANGE_TIMM}' not found in Dockerfile)"
+        exit 1
+      fi
+
+      echo "No drift detected."
+
+  - name: Install build CUDA dependencies for vLLM wheel
+    runs: |
+      export UV_HTTP_TIMEOUT=500
+      export UV_INDEX_STRATEGY="unsafe-best-match"
+
+      uv pip install \
+        --system \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        -r requirements/cuda.txt
+
+  - name: Install build dependencies for vLLM wheel
+    runs: |
+      export UV_HTTP_TIMEOUT=500
+      export UV_INDEX_STRATEGY="unsafe-best-match"
+
+      uv pip install \
+        --system \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        -r requirements/build.txt
+
+  - name: Build vLLM wheel
+    runs: |
+      set -eux
+      python3 setup.py bdist_wheel --dist-dir dist --py-limited-api=cp38
+
+  - name: Install vLLM wheel into site-packages
+    runs: |
+      set -eux
+      export UV_INDEX_STRATEGY="unsafe-best-match"
+
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        dist/*.whl
+
+  # OpenAI-server parity extras (mirrors vllm-openai-base)
+  - name: Install OpenAI server extras
+    runs: |
+      set -eux
+
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        accelerate hf_transfer modelscope \
+        "bitsandbytes>=${{vars.bitsandbytes-x86-version}}" \
+        "timm>=${{vars.timm-version}}" \
+        "runai-model-streamer[s3,gcs]>=0.15.0"
+
+  # FlashInfer — mirror upstream precompiled cubin + JIT cache (no AOT, no git)
+  - name: Install FlashInfer cubin + jit-cache
+    runs: |
+      set -eux
+
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        "flashinfer-cubin==${{vars.flashinfer-cubin-version}}"
+
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        --extra-index-url "https://flashinfer.ai/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        "flashinfer-jit-cache==${{vars.flashinfer-jit-cache-version}}"
+
+  # Install build.txt into runtime for JIT compilation
+  - name: Install build-time deps into runtime (for JIT)
+    runs: |
+      set -eux
+      export UV_INDEX_STRATEGY="unsafe-best-match"
+
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        -r requirements/build.txt
+
+  - name: Prune incompatible GPU extras
+    runs: |
+      # bitsandbytes: drop non-CUDA-12 and XPU artifacts
+      # - cuda118/cuda130: incompatible CUDA versions
+      # - xpu: requires Intel oneAPI libraries (libsvml.so, libirng.so, libimf.so, libintlc.so.5, libsycl.so.8)
+      #        which are not available in our ecosystem. Unlike upstream, we don't ship XPU support.We will mention in Compat Notes
+      rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda118.so
+      rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda130.so
+      rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_xpu.so
+
+      # CuPy and its vendor backends are optional for vLLM; safest is to remove CuPy entirely:
+      # upstream also removed but it is optionally used by ray
+      # If we ship it then we have to pull in cudnn8 which is not compatible with cudnn9 we ship
+      # https://github.com/vllm-project/vllm/pull/3625
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" cupy-cuda12x
+
+      # NOTE: torchaudio 2.9 removed torio module (deprecated in 2.8, removed in 2.9).
+      # FFmpeg bindings are no longer shipped - torchaudio now uses TorchCodec.
+
+      # Remove PyPI opencv-python-headless in favor of system package (py3.12-opencv-python-headless)
+      # The PyPI wheel vendors OpenSSL 1.1 which is not FIPS compliant; our system package uses system OpenSSL
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" opencv-python-headless
+
+      # Remove PyPI pyzmq in favor of system package (py3.12-pyzmq)
+      # The PyPI wheel bundles libsodium; our system package links to system libsodium (no vendored libs)
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" pyzmq
+
+      # Remove PyPI numpy in favor of system package (py3.12-numpy-2.2)
+      # The system numpy is pulled in as a transitive dependency of py3.12-opencv-python-headless.
+      # Without this, the -dev subpackage would contain numpy headers that conflict with system numpy.
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" numpy
+
+      # Remove PyPI pygments in favor of system package (py3.12-pygments)
+      # Pygments comes from fastapi[standard] -> rich-toolkit -> rich -> pygments
+      # Without this, the main package would contain pygments files that conflict with system pygments coming from system numpy
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" pygments
+
+      # Remove PyPI setuptools in favor of system package (py3.12-setuptools)
+      # The system setuptools is pulled in via py3.12-pip -> py3.12-pip-base -> py3.12-setuptools.
+      # Without this, the main package would contain setuptools files that conflict with system setuptools.
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" setuptools
+
+      # Remove uv lockfile (world-writable, triggers linter)
+      rm -f ${{targets.contextdir}}/usr/.lock
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development files
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-compat
+    description: Auxiliary tools and helpers for vLLM (collect-env, examples)
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/vllm-workspace
+          cp vllm/collect_env.py ${{targets.contextdir}}/vllm-workspace
+
+          mkdir -p ${{targets.contextdir}}/vllm-workspace/requirements
+          cp requirements/build.txt ${{targets.contextdir}}/vllm-workspace/requirements/
+          cp requirements/kv_connectors.txt ${{targets.contextdir}}/vllm-workspace/requirements/
+
+          # We can't include ep_kernels_workspace in our package as they are being pulled up from a script
+          # tools/ep_kernels/install_python_libraries.sh, we are including that script here for user convenience
+          install -Dm755 tools/ep_kernels/install_python_libraries.sh ${{targets.contextdir}}/vllm-workspace
+
+  - name: ${{package.name}}-fips-compat
+    description: FIPS compatibility shim for vLLM - wraps hashlib.md5 for non-security usage
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Install sitecustomize.py shim that defaults usedforsecurity=False for md5
+          # This allows vLLM's non-cryptographic MD5 usage (file hashing for caching)
+          # to work under FIPS mode without compromising actual cryptographic operations
+          install -Dm644 sitecustomize.py "${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/sitecustomize.py"
+    test:
+      environment:
+        contents:
+          packages:
+            - python-${{vars.python-version}}
+      pipeline:
+        - runs: |
+            # Verify the shim is installed in site-packages
+            test -f /usr/lib/python${{vars.python-version}}/site-packages/sitecustomize.py
+
+            # Verify the shim is loaded and works
+            python${{vars.python-version}} -c "
+            import hashlib
+            # This should work without raising UnsupportedDigestmodError in FIPS mode
+            # because sitecustomize.py sets usedforsecurity=False by default
+            result = hashlib.md5(b'test')
+            print('MD5 shim working:', result.hexdigest())
+            "
+
+test:
+  environment:
+    contents:
+      packages:
+        # ldd check will fail in absence of libcuda.so, but we can add this only in test pipeline
+        # for ref https://github.com/chainguard-dev/extra-packages/pull/2890
+        - libcuda-stub-cuda-${{vars.cuda-version}}-dev
+  pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/usr/lib/python${{vars.python-version}}/site-packages/torch/lib"
+    - uses: test/tw/pip-check
+    - uses: python/import
+      with:
+        python: python${{vars.python-version}}
+        import: ${{vars.import}}
+    - runs: |
+        set -eux
+        # Please note that this will fail on CPU as upstream doesn't release CPU wheels for it
+        # https://github.com/vllm-project/vllm/issues/23096
+
+        # Run it; allow non-zero; then assert the expected failure text
+        set +e
+        python3 test-vllm-cpu-smoke.py > /tmp/vllm.log 2>&1
+        set -e
+
+        if grep -F "Device string must not be empty" /tmp/vllm.log; then
+          echo "OK: vLLM smoke hit expected CPU-only error"
+        else
+          echo "Expected pattern not found; showing log:"
+          sed -n '1,200p' /tmp/vllm.log
+          exit 1
+        fi
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - post
+    - test
+    - submission
+  github:
+    identifier: vllm-project/vllm
+    strip-prefix: v
+    use-tag: true

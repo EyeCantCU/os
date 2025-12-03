@@ -1,8 +1,8 @@
 #nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
 package:
   name: tritonserver-cuda-13.0
-  version: "2.62.0"
-  epoch: 0
+  version: "2.63.0"
+  epoch: 2
   description: NVIDIA Triton Inference Server with CUDA 13 support
   copyright:
     - license: BSD-3-Clause
@@ -32,8 +32,10 @@ vars:
   build-dir: /home/build/tritonservver/build
   install-dir: /tmp/tritonbuild/tritonserver/install
   cudnn-version: 9
-  python-version: 3.13
-  gcc-version: 14
+  python-version: 3.12
+  # We ensure the commit of the tag aligns with the commit of the release branch
+  # This will need to be bumped every minor release
+  triton-release: 25.11
 
 var-transforms:
   - from: ${{package.name}}
@@ -51,45 +53,35 @@ environment:
       - DCGM-cuda-${{vars.cuda-version}}-dev
       - abseil-cpp-dev
       - bash
-      - boost
       - boost-dev
       - busybox
-      - c-ares
       - c-ares-dev
-      - ca-certificates-bundle
       - cmake-3
+      - crane
       - crc32c-dev
-      - cuda-toolkit-${{vars.cuda-version}}
       - cuda-toolkit-${{vars.cuda-version}}-dev
       - curl-dev
       - file
-      - gcc-${{vars.gcc-version}}-default
       - gperf
       - icu-dev
+      - jq
       - libb64-1.2-dev
       - libcurl-openssl4
       - numactl-dev
-      - nvidia-cuda-cccl-${{vars.cuda-version}}
-      - nvidia-cuda-cudart-${{vars.cuda-version}}
-      - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
-      - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
-      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
+      - nvcc-${{vars.cuda-version}}-gcc-default
       - nvidia-cudnn-${{vars.cudnn-version}}-cuda-${{vars.cuda-major-version}}-dev
-      - nvidia-driver
       - nvidia-nccl-cuda-${{vars.cuda-version}}
       - openssl-dev
       - prometheus-cpp-dev
       - py${{vars.python-version}}-build-base-dev
       - py${{vars.python-version}}-requests
       - python-${{vars.python-version}}
-      - rapidjson
       - rapidjson-dev
       - re2-dev
-      - triton-inference-server-backend
-      - triton-inference-server-common
-      - triton-inference-server-core
-      - triton-inference-server-third-party
-      - zlib
+      - triton-inference-server-backend=${{vars.triton-release}}
+      - triton-inference-server-common=${{vars.triton-release}}
+      - triton-inference-server-core=${{vars.triton-release}}
+      - triton-inference-server-third-party=${{vars.triton-release}}
       - zlib-dev
   environment:
     CXXFLAGS: -I/usr/include/datacenter-gpu-manager-4 -Wno-maybe-uninitialized
@@ -100,10 +92,75 @@ environment:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 76eeeec3a5523b0e12b0d3248d06fe62b3f1787c
+      expected-commit: f30b53f554bfcf5d4792b744db9292eec695e5f9
       repository: https://github.com/triton-inference-server/server
       tag: v${{package.version}}
       destination: server
+
+  - name: Check Python version
+    working-directory: server
+    runs: |
+      # We want to ensure that the version of Python we use with our packages
+      # aligns with the version used by NVIDIA in the upstream images. We can
+      # do that by parsing the Python version in the build script
+      package_python_version="${{vars.python-version}}"
+      image_python_version=$(grep '^ARG PYVER=' build.py | awk -F '=' '{print $2}')
+
+      if [ "$package_python_version" != "$image_python_version" ]; then
+        echo "Please update the Python version!"
+        echo "Package Python version: $package_python_version"
+        echo "Image Python version: $image_python_version"
+        echo "Tritonserver r${{vars.triton-release}} uses Python $image_python_version."
+        exit 1
+      fi
+
+  - name: Check Tritonserver release
+    working-directory: server
+    runs: |
+      # This compares the commit of the tag we checkout with git-checkout
+      # to the commit of the Tritonserver release branch. We have this check
+      # in place to ensure that we do not publish an image built against
+      # outdated Tritonserver sources. If the check fails, we bail.
+      #
+      # If you are hitting this, you likely need to update Tritonserver sources
+      # for the new monthly release and bump the triton-release variable above.
+      triton_release="r${{vars.triton-release}}"
+
+      git fetch origin $triton_release
+
+      expected_commit="$(git rev-parse HEAD)"
+      triton_release_commit="$(git rev-parse FETCH_HEAD)"
+
+      if [ "$expected_commit" != "$triton_release_commit" ]; then
+        echo "The Tritonserver release branch has drifted from the tracked Tritonserver tag!"
+        echo "Expected Tritonserver release commit: $expected_commit"
+        echo "Found Tritonserver release commit: $triton_release_commit"
+        echo "Please update the triton-release variable inline with the current Tritonserver release."
+        exit 1
+      fi
+
+  - name: Check CUDA version
+    runs: |
+      # If the version of CUDA doesn't align with the version included in the Tritonserver
+      # release, hold the version back. Tritonserver releases ship with specific versions
+      # of CUDA, and we want to align with the version shipped in the upstream image
+      package_cuda_version="${{vars.cuda-version}}"
+      image_cuda_version=$(\
+        crane config nvcr.io/nvidia/tritonserver:${{vars.triton-release}}-py3 \
+          | jq -r '.config.Env[]
+          | select(startswith("CUDA_VERSION="))
+          | split("=")[1] # Split away CUDA version
+          | split(".")[:2] # Split major and minor version
+          | join(".")
+      ')
+
+      if [ "$package_cuda_version" != "$image_cuda_version" ]; then
+        echo "Please update the CUDA version!"
+        echo "Package CUDA version: $package_cuda_version"
+        echo "Image CUDA version: $image_cuda_version"
+        echo "Tritonserver r${{vars.triton-release}} uses CUDA $image_cuda_version."
+        exit 1
+      fi
 
   - runs: |
       mkdir -p "${{vars.build-dir}}"
