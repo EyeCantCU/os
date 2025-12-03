@@ -1,0 +1,226 @@
+From 5a028df8f252dbe311c9a71f62dbde3b3a372973 Mon Sep 17 00:00:00 2001
+From: Amelia Crate <amelia.crate@chainguard.dev>
+Date: Thu, 31 Jul 2025 16:34:55 -0700
+Subject: [PATCH] random: use jitterentropy
+
+Initialize a jitterentropy_rng instance via kcapi, use this for getrandom and /dev/u?random calls.
+In FIPS mode, panic if this fails. In non-FIPS mode, fallback to standard behavior.
+---
+ drivers/char/random.c       | 152 ++++++++++++++++++++++++++++++++++++
+ include/uapi/linux/random.h |   2 +
+ 2 files changed, 154 insertions(+)
+
+diff --git a/drivers/char/random.c b/drivers/char/random.c
+index b8b24b6ed3fe4..1e887b0f1ea70 100644
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -67,6 +67,10 @@
+ #include <asm/irq_regs.h>
+ #include <asm/io.h>
+ 
++#include <linux/fips.h>
++#include <crypto/rng.h>
++#include <crypto/hash.h>
++
+ /*********************************************************************
+  *
+  * Initialization and readiness waiting.
+@@ -101,6 +105,59 @@ static int ratelimit_disable __read_mostly =
+ module_param_named(ratelimit_disable, ratelimit_disable, int, 0644);
+ MODULE_PARM_DESC(ratelimit_disable, "Disable random ratelimit suppression");
+ 
++/*
++ * Jitterentropy RNG globals.
++ */
++static struct crypto_rng *jent_rng;
++static bool use_jitterentropy = false;
++static int __init parse_use_jitterentropy(char *arg)
++{
++	return kstrtobool(arg, &use_jitterentropy);
++}
++early_param("random.use_jitterentropy", parse_use_jitterentropy);
++
++/*
++ * Initialize jitterentropy RNG using crypto API.
++ */
++static int __init random_jent_init(void)
++{
++	if (!(fips_enabled || use_jitterentropy)) {
++		return 0;
++	}
++	int ret = 0;
++	struct crypto_rng *tmp;
++	/* Allocate jitterentropy */
++	tmp = crypto_alloc_rng("jitterentropy_rng", 0, 0);
++	if (IS_ERR(tmp)) {
++		if (fips_enabled)
++			panic("random: Cannot allocate jitterentropy_rng in FIPS mode: %ld\n", PTR_ERR(tmp));
++		pr_err("random: cannot allocate jitterentropy_rng: %ld\n", PTR_ERR(tmp));
++		return PTR_ERR(tmp);
++	}
++
++	/* Seed it */
++	ret = crypto_rng_reset(tmp, NULL, crypto_rng_seedsize(tmp));
++	if (ret) {
++    		if (fips_enabled)
++			panic("random: cannot reset jitterentropy_rng in FIPS mode: %d\n", ret);
++		pr_err("random: cannot allocate jitterentropy_rng: %d\n", ret);
++		return ret;
++	}
++
++	smp_store_mb(jent_rng, tmp);
++	printk(KERN_INFO "random: jitterentropy RNG is ready\n");
++	return 0;
++}
++/*
++ * Use the latest initcall to ensure built-in crypto is available.
++ */
++late_initcall_sync(random_jent_init);
++
++/*
++ * Read functions for urandom and getrandom.
++ */
++static ssize_t jent_urandom_read_iter(struct iov_iter *);
++int jent_urandom_open(struct inode *inode, struct file *file);
+ /*
+  * Returns whether or not the input pool has been seeded and thus guaranteed
+  * to supply cryptographically secure random numbers. This applies to: the
+@@ -1392,6 +1449,28 @@ SYSCALL_DEFINE3(getrandom, char __user *, ubuf, size_t, len, unsigned int, flags
+ 	struct iov_iter iter;
+ 	int ret;
+ 
++	/*
++	 * Use jitterentropy for random & urandom requests.
++	 */
++	if (jent_rng) {
++		if (flags & GRND_RESEED) {
++			pr_debug("random: reseeding jitterentropy during getrandom().\n");
++			ret = crypto_rng_reset(jent_rng, NULL, crypto_rng_seedsize(jent_rng));
++			if (ret) {
++    				if (fips_enabled)
++					panic("random: jitterentropy failed to reseed during getrandom() in FIPS mode\n");
++				pr_err("random: jitterentropy failed to reseed during getrandom()\n");
++			}
++		}
++        	ret = import_ubuf(READ, ubuf, len, &iter);
++        	if (unlikely(ret))
++			return ret;
++		return jent_urandom_read_iter(&iter);
++	}
++	if (fips_enabled)
++		panic("random: jitterentropy uninitialized in FIPS mode\n");
++	pr_debug("random: jitterentropy uninitialized! crng fallback\n");
++
+ 	if (flags & ~(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE))
+ 		return -EINVAL;
+ 
+@@ -1455,9 +1534,81 @@ static ssize_t random_write_iter(struct kiocb *kiocb, struct iov_iter *iter)
+ 	return write_pool_user(iter);
+ }
+ 
++static ssize_t jent_urandom_read_iter(struct iov_iter *iter)
++{
++	int err = 0;
++	size_t nbytes;
++	ssize_t copied;
++	ssize_t ret = 0;
++	unsigned int len;
++	u8 stack_buf[64];
++	u8 *ptr = stack_buf;
++
++	nbytes = iov_iter_count(iter);
++	if (unlikely(!nbytes))
++		return 0;
++
++	/*
++	 * Use a buffer on the stack for small requests or get a page
++	 * otherwise.
++	 */
++	if (nbytes > sizeof(stack_buf)) {
++		ptr = (u8 *) __get_free_page(GFP_KERNEL);
++		if (!ptr) {
++			return -ENOMEM;
++		}
++	}
++
++	while ((nbytes - ret) > 0) {
++		len = min_t(unsigned int, nbytes - ret, PAGE_SIZE);
++
++		err = crypto_rng_get_bytes(jent_rng, ptr, len);
++		if (err < 0) {
++			ret = err;
++			break;
++		}
++
++		copied = copy_to_iter(ptr, len, iter);
++		if (copied != len) {
++			ret = -EFAULT;
++			break;
++		}
++
++		ret += len;
++	}
++
++	/* Clear the temporary buffer. */
++	len = min_t(unsigned int, nbytes, PAGE_SIZE);
++	memzero_explicit(ptr, len);
++
++	if (ptr != stack_buf)
++		free_page((unsigned long) ptr);
++
++	return ret;
++}
++
++int jent_urandom_open(struct inode *inode, struct file *file)
++{
++	int ret = 0;
++	if (jent_rng && (file->f_flags & O_TRUNC)) {
++		pr_debug("random: resetting jitterentropy during open().\n");
++		ret = crypto_rng_reset(jent_rng, NULL, crypto_rng_seedsize(jent_rng));
++		if (fips_enabled && ret)
++			panic("random: failed to reset jitterentropy_rng in FIPS mode: %d\n", ret);
++    		return ret;
++	}
++	return ret;
++}
++
+ static ssize_t urandom_read_iter(struct kiocb *kiocb, struct iov_iter *iter)
+ {
+ 	static int maxwarn = 10;
++	if (jent_rng) {
++		return jent_urandom_read_iter(iter);
++	}
++	if (fips_enabled)
++		panic("random: jitterentropy uninitialized in FIPS mode\n");
++	pr_debug("random: jitterentropy uninitialized! crng fallback\n");
+ 
+ 	/*
+ 	 * Opportunistically attempt to initialize the RNG on platforms that
+@@ -1575,6 +1726,7 @@ const struct file_operations random_fops = {
+ };
+ 
+ const struct file_operations urandom_fops = {
++	.open = jent_urandom_open,
+ 	.read_iter = urandom_read_iter,
+ 	.write_iter = random_write_iter,
+ 	.unlocked_ioctl = random_ioctl,
+diff --git a/include/uapi/linux/random.h b/include/uapi/linux/random.h
+index 1dd047ec98a12..f583bfa3ee226 100644
+--- a/include/uapi/linux/random.h
++++ b/include/uapi/linux/random.h
+@@ -50,10 +50,12 @@ struct rand_pool_info {
+  * GRND_NONBLOCK	Don't block and return EAGAIN instead
+  * GRND_RANDOM		No effect
+  * GRND_INSECURE	Return non-cryptographic random bytes
++ * GRND_RESEED		Reseed backing jitterentropy instance in FIPS mode.
+  */
+ #define GRND_NONBLOCK	0x0001
+ #define GRND_RANDOM	0x0002
+ #define GRND_INSECURE	0x0004
++#define GRND_RESEED	0x0020
+ 
+ /**
+  * struct vgetrandom_opaque_params - arguments for allocating memory for vgetrandom
+-- 
+2.50.1
+
