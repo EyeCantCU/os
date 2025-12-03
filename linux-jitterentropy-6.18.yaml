@@ -1,0 +1,106 @@
+package:
+  name: linux-jitterentropy-6.18
+  version: "6.18.0"
+  epoch: 0
+  description: "linux jitterentropy object files 6.18 LTS"
+  copyright:
+    - license: GPL-2.0
+
+vars:
+  objects: crypto/jitterentropy.o crypto/jitterentropy-optimized.o crypto/sha3-jitterentropy.o
+  # Make sure these objects build, but don't install them.
+  build-objects: crypto/jitterentropy-testing.o crypto/jitterentropy-shim.o crypto/jitterentropy-kcapi.o crypto/sha3-jitterentropy-kcapi.o
+  object-cmds: crypto/.jitterentropy.o.cmd crypto/.jitterentropy-optimized.o.cmd crypto/.sha3-jitterentropy.o.cmd
+  sources: crypto/jitterentropy.c crypto/jitterentropy-kcapi.c crypto/jitterentropy-testing.c crypto/jitterentropy-optimized.c crypto/sha3-jitterentropy.c crypto/sha3-jitterentropy-kcapi.c crypto/jitterentropy-shim.c
+  headers: crypto/jitterentropy.h include/crypto/sha3_jitter.h crypto/sha3_jitter.h crypto/jitterentropy-shim.h
+
+var-transforms:
+  # linux-jitterentropy-6.18
+  # selects the right config snippet
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '$1'
+    to: flavor
+  # linux-jitterentropy-6.18.X-rY
+  # as opposed to
+  # linux-jitterentropy-6.18-6.18.X-rY
+  # this is the version that shows up in
+  # uname
+  - from: ${{package.name}}
+    match: 'linux-(.*)-.*'
+    replace: '${{package.full-version}}-$1'
+    to: version-flavor
+  # Turn "6.18.0" into "6.18", but keep "6.18.51" as "6.18.51"
+  - from: ${{package.version}}
+    match: '^(\d+[.]\d+)(?:[.]0|([.][1-9]\d*))$'
+    replace: '$1$2'
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: '^(\d+\.\d+)\.\d+$'
+    replace: '$1'
+    to: mangled-kernel-major-version
+
+environment:
+  environment:
+    KBUILD_BUILD_USER: noreply
+    KBUILD_BUILD_HOST: chainguard.dev
+    KBUILD_BUILD_VERSION: Chainguard
+
+pipeline:
+  - uses: kernel/version-check
+    with:
+      moniker: longterm
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gregkh/linux
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 7d0a66e4bb9081d75c82ec4957c50034cb0ea449
+
+  - uses: patch
+    with:
+      patches: |
+        patches/${{vars.mangled-kernel-major-version}}/0001-crypto-reusable-jitterentropy.patch
+        patches/${{vars.mangled-kernel-major-version}}/0002-crypto-reusable-jitterentropy.patch
+        patches/${{vars.mangled-kernel-major-version}}/0004-crypto-reusable-jitterentropy.patch
+
+  - uses: kernel/config
+    with:
+      base: ${{vars.mangled-kernel-major-version}}
+      make-targets: hardening.config
+      flavor: ${{vars.flavor}}
+      version-flavor: ${{vars.version-flavor}}
+
+  - uses: kernel/build
+    with:
+      make-targets: REBUILD_JITTERENTROPY=1 ${{vars.objects}} ${{vars.build-objects}}
+      version-flavor: ${{vars.version-flavor}}
+
+  - runs: |
+      for i in ${{vars.objects}} ${{vars.object-cmds}} ${{vars.sources}} ${{vars.headers}}; do
+        install -Dm 0644 "$i" "${{targets.destdir}}/usr/lib/${{package.name}}/$i"
+      done
+      install -Dm 0644 "config-${{vars.flavor}}" "${{targets.destdir}}/usr/lib/${{package.name}}/config"
+
+test:
+  environment:
+    contents:
+      packages:
+        - binutils
+        - grep
+  pipeline:
+    - runs: |
+        strings /usr/lib/${{package.name}}/crypto/jitterentropy.o | grep "${{package.version}}"
+        strings /usr/lib/${{package.name}}/crypto/jitterentropy.o | grep "${{package.version}}" | grep -vE "(dirty|\+)$"
+
+update:
+  enabled: true
+  github:
+    identifier: gregkh/linux
+    use-tag: true
+    strip-prefix: v
+    tag-filter: v6.18
+  version-transform:
+    # mainline release tag x.y to kernel version x.y.0
+    - match: ^(\d+[.]\d+)$
+      replace: $1.0
