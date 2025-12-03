@@ -91,8 +91,8 @@ pipeline:
 subpackages:
   - name: ${{package.name}}-doc
     pipeline:
-      - uses: split/manpages
-    description: perl-module-name manpages
+      - uses: split/alldocs
+    description: Documentation for ${{package.name}}
     test:
       pipeline:
         - uses: test/docs
