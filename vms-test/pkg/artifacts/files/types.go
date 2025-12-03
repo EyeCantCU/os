@@ -16,6 +16,7 @@ const (
 	NestedQemuConsole
 	ComplianceHTMLReport
 	ComplianceXMLResults
+	ComplianceStigViewerXML
 	BootCtl
 	SystemdStatusStateFailed
 	SystemdListUnits
