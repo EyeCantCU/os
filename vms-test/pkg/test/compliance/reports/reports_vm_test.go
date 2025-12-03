@@ -116,9 +116,17 @@ func TestGenerateComplianceReports(t *testing.T) {
 			cmd := exec.CommandContext(ctx, "oscap", "xccdf", "eval",
 				"--profile", profile.profileName,
 				"--results", resultsFile,
-				"--stig-viewer", viewerFile,
 				"--report", reportFile,
 				ssgFile)
+			// Run stig-viewer output only on GPOS for now
+			if profile.profileName == "xccdf_org.ssgproject.content_profile_stig_gpos" {
+				cmd = exec.CommandContext(ctx, "oscap", "xccdf", "eval",
+					"--profile", profile.profileName,
+					"--results", resultsFile,
+					"--stig-viewer", viewerFile,
+					"--report", reportFile,
+					ssgFile)
+			}
 			output, err := cmd.CombinedOutput()
 			t.Logf("OpenSCAP output:\n%s", output)
 
