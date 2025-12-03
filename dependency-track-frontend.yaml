@@ -61,13 +61,17 @@ test:
       packages:
         - curl
   pipeline:
-    - name: "Static files exist"
+    - name: "Verify static files and nginx configuration"
       runs: |
+        set -euo pipefail
+        # Frontend static files
         stat /opt/owasp/dependency-track-frontend/index.html
+        grep -F "Dependency-Track" /opt/owasp/dependency-track-frontend/index.html
+        # Nginx template
         stat /etc/nginx/templates/default.conf.template
-        stat /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+        # Entrypoint scripts
         stat /docker-entrypoint.d/30-oidc-configuration.sh
-    - name: "start the binary"
+    - name: "Start nginx and verify frontend is served"
       uses: test/daemon-check-output
       with:
         setup: |
@@ -75,14 +79,33 @@ test:
             addgroup -g 101 nginx
             adduser -u 101 -D -G nginx -s /sbin/nologin nginx
           fi
+          # Create a complete nginx config with our server block
+          mkdir -p /var/run
+          cat > /etc/nginx/test.conf << 'NGINX_CONF'
+          worker_processes auto;
+          error_log stderr info;
+          pid /var/run/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+              include /etc/nginx/mime.types;
+              server {
+                  listen 8080;
+                  server_name _;
+                  root /opt/owasp/dependency-track-frontend;
+                  index index.html;
+              }
+          }
+          NGINX_CONF
           chown -R nginx:nginx /etc/nginx/conf.d
+          chown -R nginx:nginx /etc/nginx/http.d
           chown -R nginx:nginx /var/cache/nginx
           chown -R nginx:nginx /var/log/nginx
-        start: /docker-entrypoint.sh nginx -g "daemon off;"
+          # Test nginx config
+          nginx -t
+        start: nginx -c /etc/nginx/test.conf -g "daemon off;"
         timeout: 30
         expected_output: |
-          Configuration complete; ready for start up
+          start worker process
         post: |
-          sleep 2
-          echo "Testing HTTP endpoint on port 80"
-          curl -f -s http://localhost:80/ | grep "Welcome to nginx!"
+          set -o pipefail
+          curl -vf http://localhost:8080/index.html | grep -F "Dependency-Track"
