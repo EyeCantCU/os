@@ -1,0 +1,77 @@
+package:
+  name: flux-source-watcher
+  version: "2.0.3"
+  epoch: 0
+  description: Flux CD controller for advanced source composition and decomposition patterns via ArtifactGenerator CRD
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 4b88f21d64a6d587fb8d8a03b0af5306e5d8fdd7
+      repository: https://github.com/fluxcd/source-watcher
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      output: source-watcher
+      packages: ./cmd
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream"
+    pipeline:
+      - runs: |
+          # Upstream expects binary at /usr/local/bin/source-watcher
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -s ../../bin/source-watcher ${{targets.subpkgdir}}/usr/local/bin/source-watcher
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - api/
+    - -rc
+  github:
+    identifier: fluxcd/source-watcher
+    strip-prefix: v
+    tag-filter: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+    environment:
+      HEALTH_PORT: "9440"
+      METRICS_PORT: "8080"
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: source-watcher
+    - uses: test/kwok/cluster
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl apply -f https://raw.githubusercontent.com/fluxcd/source-watcher/v${{package.version}}/config/crd/bases/source.extensions.fluxcd.io_artifactgenerators.yaml
+          kubectl apply -f https://github.com/fluxcd/source-controller/releases/latest/download/source-controller.crds.yaml
+          mkdir -p /tmp/data ~/.kube
+          cp $HOME/.kwok/clusters/kwok/kubeconfig.yaml ~/.kube/config
+        start: source-watcher --storage-path=/tmp/data
+        timeout: 30
+        expected_output: |
+          storage setup for /tmp/data
+          starting manager
+        post: |
+          set -o pipefail
+          wait-for-it "localhost:${HEALTH_PORT}" -t 30
+          curl -fsS "http://localhost:${HEALTH_PORT}/healthz"
+          curl -fsS "http://localhost:${METRICS_PORT}/metrics" | grep -F -e controller_runtime
