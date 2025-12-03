@@ -1,13 +1,13 @@
 package:
-  name: loki-fips-2.9
-  version: "2.9.17"
-  epoch: 2 # GHSA-j5w8-q4qc-rx2x
+  name: loki-3.5
+  version: "3.5.8"
+  epoch: 3 # GHSA-j5w8-q4qc-rx2x
   description: Like Prometheus, but for logs.
   copyright:
     - license: AGPL-3.0-or-later
   dependencies:
     provides:
-      - loki-fips=${{package.full-version}}
+      - loki=${{package.full-version}}
 
 environment:
   contents:
@@ -15,12 +15,18 @@ environment:
       - build-base
       - busybox
       - ca-certificates-bundle
-      - go-fips-md5
+      - go
+      - ruby-${{vars.ruby-version}}
+      - ruby-${{vars.ruby-version}}-dev
+
+vars:
+  gem: fluent-plugin-grafana-loki
+  ruby-version: "3.2"
 
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: ffcd570f815ccf0588bda305659d0d4e925e4ef1
+      expected-commit: cf335437062aa68f3ba657c89012ab499dedb738
       repository: https://github.com/grafana/loki
       tag: v${{package.version}}
 
@@ -28,24 +34,11 @@ pipeline:
     with:
       deps: |-
         golang.org/x/crypto@v0.45.0
-      modroot: tools/lambda-promtail
-
-  - uses: go/bump
-    with:
-      deps: |-
-        golang.org/x/crypto@v0.45.0
-      modroot: operator
-
-  - uses: go/bump
-    with:
-      deps: |-
-        golang.org/x/crypto@v0.45.0
-
-  - uses: patch
-    with:
-      patches: Makefile.patch
 
   - uses: autoconf/make
+    with:
+      opts: |
+        UNAME_S=$(uname -s)
 
   - runs: |
       mkdir -p ${{targets.contextdir}}/usr/bin
@@ -65,12 +58,11 @@ subpackages:
           mv cmd/logcli/logcli ${{targets.contextdir}}/usr/bin/logcli
     dependencies:
       provides:
-        - logcli-fips=${{package.full-version}}
+        - logcli=${{package.full-version}}
     test:
       pipeline:
         - runs: |
             logcli --version
-        - uses: test/go-fips-check
 
   - name: ${{package.name}}-promtail
     pipeline:
@@ -82,12 +74,11 @@ subpackages:
           mv clients/cmd/promtail/promtail-local-config.yaml ${{targets.contextdir}}/etc/promtail/config.yml
     dependencies:
       provides:
-        - promtail-fips=${{package.full-version}}
+        - promtail=${{package.full-version}}
     test:
       pipeline:
         - runs: |
             promtail --version
-        - uses: test/go-fips-check
 
   - name: ${{package.name}}-loki-canary
     pipeline:
@@ -96,40 +87,45 @@ subpackages:
           mv cmd/loki-canary/loki-canary ${{targets.contextdir}}/usr/bin/loki-canary
     dependencies:
       provides:
-        - loki-canary-fips=${{package.full-version}}
+        - loki-canary=${{package.full-version}}
     test:
       pipeline:
         - runs: |
-            loki-canary --version  | grep "${{package.version}}"
-        - uses: test/go-fips-check
+            loki-canary --version
+
+  - name: ruby${{vars.ruby-version}}-${{vars.gem}}
+    pipeline:
+      - runs: |
+          # extract gem version from gemspec
+          export GEM_VERSION=$(grep "spec.version" clients/cmd/fluentd/${{vars.gem}}.gemspec | sed -n "s/.*spec.version *= *['\"]\\([^'\"]*\\)['\"].*/\\1/p")
+          gem install --install-dir="${{targets.contextdir}}/usr/lib/ruby/gems/${{vars.ruby-version}}.0" \
+            --bindir="${{targets.contextdir}}/usr/bin" \
+            --ignore-dependencies \
+            --no-document \
+            ${{vars.gem}} -v $GEM_VERSION
+      - uses: ruby/clean
+    dependencies:
+      provides:
+        - fluent-plugin-grafana-${{package.name}}=${{package.full-version}}
+      runtime:
+        - ruby${{vars.ruby-version}}-fluentd
+    test:
+      environment:
+        contents:
+          packages:
+            - ruby-${{vars.ruby-version}}
+      pipeline:
+        - runs: |
+            ruby -e "require 'fluent/plugin/out_loki'"
 
 update:
   enabled: true
   github:
     identifier: grafana/loki
     strip-prefix: v
-    tag-filter: v2.9
+    tag-filter: v3.5
 
 test:
   pipeline:
     - runs: |
-        loki --version | grep "${{package.version}}"
-    - uses: test/go-fips-check
-    - name: "Command structure tests"
-      runs: |
-        loki --help 2>&1| grep "Usage of config-file-loader"
-    - name: "Basic functionality test"
-      uses: test/daemon-check-output
-      with:
-        setup: |
-          #!/bin/sh -ex
-          mkdir -p /tmp/loki
-        start: loki --config.file=/etc/loki/local-config.yaml
-        timeout: 30
-        expected_output: |
-          server listening on addresses
-        error_strings: |
-          ERROR
-          FATAL
-          panic
-          failed to start
+        loki --version
