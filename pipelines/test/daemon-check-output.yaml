@@ -1,36 +1,160 @@
 name: Check Daemon Output
 
+description: |
+  Starts a daemon/server, waits for expected log output, optionally runs post-startup checks, then cleans up.
+
+  USE THIS PIPELINE WHEN:
+  - You need to start a server/daemon and verify it starts correctly
+  - You need to wait for specific log messages indicating readiness
+  - You want to run commands after the daemon is ready (health checks, client operations, etc.)
+  - You need automatic cleanup even if tests fail
+
+  EXAMPLES:
+
+  Example 1 - Basic daemon startup verification:
+    - uses: test/daemon-check-output
+      with:
+        start: mydaemon --config /tmp/config.yaml
+        expected_output: "Server listening on port"
+
+  Example 2 - Setup config, start daemon, verify with curl:
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/daemon-data
+          cat > /tmp/config.yaml <<EOF
+          port: 8080
+          dataDir: /tmp/daemon-data
+          EOF
+        start: mydaemon --config /tmp/config.yaml
+        expected_output: "Server started successfully"
+        post: |
+          curl -f http://localhost:8080/health
+
+  Example 3 - ZooKeeper example with client operations:
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/zk/data
+          cat > /tmp/zoo.cfg <<EOF
+          tickTime=2000
+          dataDir=/tmp/zk/data
+          clientPort=2181
+          EOF
+        start: /usr/share/java/zookeeper/bin/zkServer.sh start /tmp/zoo.cfg
+        expected_output: "binding to port"
+        post: |
+          # Test client can connect and perform operations
+          echo "create /test 'data'" | zkCli.sh -server localhost:2181
+          echo "get /test" | zkCli.sh -server localhost:2181 | grep -q 'data'
+
+  Example 4 - Wait for port without specific log message:
+    - uses: test/daemon-check-output
+      with:
+        start: myserver --port 9000
+        expected_output: "."  # Matches any output
+        post: |
+          # Use wait-for-it or netcat to verify port
+          wait-for-it localhost:9000 -t 30
+          curl http://localhost:9000/api/status
+
 needs:
   packages:
     - busybox
+    - wait-for-it
 
 inputs:
   start:
     description: |
       The command to run to start the daemon.
+      This is the command that starts your server/daemon process.
+      Example: "zookeeper-server-start /tmp/config.properties"
+      Example: "/usr/bin/redis-server --port 6379"
       WARNING: executed with a shell.
     required: true
   setup:
     description: |
-      Command to run before starting daemon.
+      Optional setup commands to run BEFORE starting the daemon.
+      Use this to create directories, generate config files, set environment variables, etc.
       Content is placed into a file and executed. If no '#!' is present,
       then '#!/bin/sh -ex' will be prepended.
+
+      Example:
+        setup: |
+          mkdir -p /tmp/myapp/data /tmp/myapp/logs
+          export MYAPP_HOME=/tmp/myapp
+          cat > /tmp/myapp/config.yaml <<EOF
+          port: 8080
+          logLevel: debug
+          EOF
+
       WARNING: The content of this field goes through shell. Avoid single quotes.
     required: false
   post:
     description: |
-      Command to run after. Handled just like setup.
+      Optional commands to run AFTER the daemon has started and expected_output is found.
+      Use this to verify the daemon is working correctly - run health checks, test client
+      connections, perform basic operations, etc.
+      Handled just like setup (gets '#!/bin/sh -ex' prepended if no shebang).
+
+      Example:
+        post: |
+          # Verify server responds to HTTP requests
+          curl -f http://localhost:8080/health || exit 1
+
+          # Test basic functionality
+          echo "ping" | nc localhost 6379 | grep -q "PONG"
     required: false
   timeout:
-    description: "Time in seconds to wait before giving up."
+    description: |
+      Maximum time in seconds to wait for expected_output to appear in daemon logs.
+      Default: 30 seconds
+
+      Example: timeout: "60"  # Wait up to 60 seconds for daemon to be ready
     default: 30
   expected_output:
-    description: "newline separated list of strings expected to be found in output."
+    description: |
+      Newline-separated list of strings (regex patterns) that must appear in the daemon's output.
+      The pipeline waits until ALL strings are found (or timeout is reached).
+
+      Common patterns:
+      - "Server listening on port" - for HTTP servers
+      - "binding to port" - for servers like ZooKeeper
+      - "ready to accept connections" - for databases
+      - "Started successfully" - generic startup message
+      - "." - matches any output (use when you don't have a specific log message)
+
+      Example (single pattern):
+        expected_output: "Server started successfully"
+
+      Example (multiple patterns - all must be found):
+        expected_output: |
+          Server listening on port 8080
+          Database connection established
+          Ready to accept requests
     required: true
   error_strings:
     description: |
-      newline separated list of strings that are considered error if found.
-      set to empty for none.
+      Newline-separated list of regex patterns that indicate errors in daemon output.
+      If any of these patterns are found, the test FAILS.
+      Set to empty string to disable error checking.
+
+      Default error patterns include:
+      - ERROR, FAIL, FATAL
+      - Common exception patterns (Java, Python, Ruby)
+      - "command not found"
+
+      Example (use defaults):
+        # Don't specify this input, defaults will be used
+
+      Example (disable error checking):
+        error_strings: ""
+
+      Example (custom error patterns):
+        error_strings: |
+          Connection refused
+          Timeout exceeded
+          Out of memory
     required: true
     default: |
       ERROR
