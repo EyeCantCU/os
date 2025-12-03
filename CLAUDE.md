@@ -474,6 +474,26 @@ echo 'create /test "data"' | zkCli.sh'
 
 The single quote after `echo` closes the opening quote after `post=`, breaking the string and causing the shell to try executing parts as commands.
 
+**Another common example - quotes inside strings:**
+```yaml
+# Bad - single quotes inside the echo string
+post: |
+  if [ "${consumed_message}" = "Hello Kafka" ]; then
+    echo "SUCCESS: Message verification passed"
+  else
+    echo "FAIL: Expected 'Hello Kafka' but got '${consumed_message}'"
+    exit 1
+  fi
+```
+
+This produces bizarre errors like:
+```
+/bin/sh: Kafka but got "
+  exit 1
+fi
+echo "Kafka functional test completed successfully": not found
+```
+
 **Solutions:**
 
 1. **Use double quotes with escaped inner quotes:**
@@ -501,8 +521,54 @@ post: |
   echo create /test data | zkCli.sh -server localhost:2181
 ```
 
+4. **Remove single quotes from message strings:**
+```yaml
+# Good - removed single quotes from error message
+post: |
+  if [ "${consumed_message}" = "Hello Kafka" ]; then
+    echo "SUCCESS: Message verification passed"
+  else
+    echo "FAIL: Expected Hello Kafka but got ${consumed_message}"
+    exit 1
+  fi
+```
+
 This limitation exists in the pipeline implementation of `pipelines/test/daemon-check-output.yaml` where it assigns:
 ```bash
 setup='${{inputs.setup}}'
 post='${{inputs.post}}'
+```
+
+**Tip:** If you see shell errors that show fragments of your script being executed as commands, check for single quotes in your `setup` or `post` content.
+
+### 15. Use `stat` instead of `test -f` for file existence checks
+When verifying files exist in tests, use `stat` instead of `test -f` or `test -x`. The `test` builtin only returns exit code 1 on failure with no error message, making it hard to diagnose failures in logs:
+
+```bash
+# Bad - silent failure, only shows exit code 1
+test -f /usr/share/java/zookeeper/conf/logback.xml
+test -x /usr/share/java/zookeeper/bin/zkServer.sh
+
+# Good - shows clear error message on failure
+stat /usr/share/java/zookeeper/conf/logback.xml
+stat /usr/share/java/zookeeper/bin/zkServer.sh
+```
+
+**Output comparison on missing files:**
+```bash
+# test -f gives no useful output
+$ test -f /foo/bar
+$ echo $?
+1
+
+# stat shows exactly what's wrong
+$ stat /foo/bar
+stat: cannot statx '/foo/bar': No such file or directory
+```
+
+For checking executability specifically, combine `stat` with a follow-up check:
+```bash
+# Verify file exists and is executable
+stat /usr/bin/myapp
+test -x /usr/bin/myapp || { echo "ERROR: /usr/bin/myapp is not executable"; exit 1; }
 ```
