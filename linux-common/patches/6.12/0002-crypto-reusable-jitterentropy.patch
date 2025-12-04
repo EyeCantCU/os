@@ -1,4 +1,4 @@
-From a2a23f5d6f6ddabf782a68fa9077a68101249a69 Mon Sep 17 00:00:00 2001
+From 563726a12e4b79e243d6cc0653db12b3896aad70 Mon Sep 17 00:00:00 2001
 From: Amelia Crate <amelia.crate@chainguard.dev>
 Date: Mon, 28 Jul 2025 16:56:42 -0700
 Subject: [PATCH 2/4] crypto: reusable jitterentropy
@@ -14,22 +14,24 @@ requires the same sha3_generic-module.c and sha3_generic-shim.c technique.
 
 Co-Authored-By: Markus Boehme <markus.boehme@chainguard.dev>
 ---
- crypto/jitterentropy-kcapi.c        | 130 +----------
+ crypto/jitterentropy-kcapi.c        | 143 ++-----------
  crypto/jitterentropy-optimized.c    | 133 ++++++++++++
  crypto/jitterentropy-shim.c         | 321 ++++++++++++++++++++++++++++
  crypto/jitterentropy-shim.h         | 104 +++++++++
  crypto/jitterentropy.c              |  17 +-
+ crypto/sha3_jitterentropy-kcapi.c   |  62 ++++++
  crypto/sha3_jitterentropy.c         | 245 +++++++++++++++++++++
- include/crypto/sha3_jitterentropy.h |  54 +++++
- 7 files changed, 877 insertions(+), 127 deletions(-)
+ include/crypto/sha3_jitterentropy.h |  60 ++++++
+ 8 files changed, 958 insertions(+), 127 deletions(-)
  create mode 100644 crypto/jitterentropy-optimized.c
  create mode 100644 crypto/jitterentropy-shim.c
  create mode 100644 crypto/jitterentropy-shim.h
+ create mode 100644 crypto/sha3_jitterentropy-kcapi.c
  create mode 100644 crypto/sha3_jitterentropy.c
  create mode 100644 include/crypto/sha3_jitterentropy.h
 
 diff --git a/crypto/jitterentropy-kcapi.c b/crypto/jitterentropy-kcapi.c
-index 1266eb790708b..fae81a7c912e3 100644
+index 1266eb790708b..01c64a66b59f0 100644
 --- a/crypto/jitterentropy-kcapi.c
 +++ b/crypto/jitterentropy-kcapi.c
 @@ -36,9 +36,6 @@
@@ -233,6 +235,31 @@ index 1266eb790708b..fae81a7c912e3 100644
  	if (ret) {
  		/* Handle permanent health test error */
  		if (fips_enabled)
+@@ -359,11 +249,24 @@ static int __init jent_mod_init(void)
+ 		pr_info("jitterentropy: Initialization failed with host not compliant with requirements: %d\n", ret);
+ 		return -EFAULT;
+ 	}
++
++#ifdef CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE
++	ret = sha3_jitterentropy_kcapi_init();
++	if (ret) {
++		jent_testing_exit();
++		crypto_unregister_rng(&jent_alg);
++		return ret;
++	}
++#endif
++
+ 	return crypto_register_rng(&jent_alg);
+ }
+ 
+ static void __exit jent_mod_exit(void)
+ {
++#ifdef CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE
++	sha3_jitterentropy_kcapi_exit();
++#endif
+ 	jent_testing_exit();
+ 	crypto_unregister_rng(&jent_alg);
+ }
 diff --git a/crypto/jitterentropy-optimized.c b/crypto/jitterentropy-optimized.c
 new file mode 100644
 index 0000000000000..ee8a6ee427130
@@ -878,6 +905,74 @@ index 0bdbaeb40bbbd..7a4b91b4192ad 100644
  	/*
  	 * If caller provides an allocated ec, reuse it which implies that the
  	 * health test entropy data is used to further still the available
+diff --git a/crypto/sha3_jitterentropy-kcapi.c b/crypto/sha3_jitterentropy-kcapi.c
+new file mode 100644
+index 0000000000000..ea55afad2d23b
+--- /dev/null
++++ b/crypto/sha3_jitterentropy-kcapi.c
+@@ -0,0 +1,62 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Cryptographic API.
++ *
++ * SHA-3 for jitterentropy test interface
++ */
++
++#include <crypto/internal/hash.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <crypto/sha3_jitterentropy.h>
++#include <linux/unaligned.h>
++
++/* Wrapper functions to bridge sha3_state direct API to crypto API */
++
++static int sha3_jitter_init(struct shash_desc *desc)
++{
++	struct sha3_state *sctx = shash_desc_ctx(desc);
++	unsigned int digest_size = crypto_shash_digestsize(desc->tfm);
++
++	return jitter_sha3_init(sctx, digest_size);
++}
++
++static int sha3_jitter_update(struct shash_desc *desc, const u8 *data,
++		       unsigned int len)
++{
++	struct sha3_state *sctx = shash_desc_ctx(desc);
++
++	return jitter_sha3_update(sctx, data, len);
++}
++
++static int sha3_jitter_final(struct shash_desc *desc, u8 *out)
++{
++	struct sha3_state *sctx = shash_desc_ctx(desc);
++	unsigned int digest_size = crypto_shash_digestsize(desc->tfm);
++
++	return jitter_sha3_final(sctx, digest_size, out);
++}
++
++static struct shash_alg sha3_jitter_algs[] = { {
++	.digestsize		= SHA3_256_DIGEST_SIZE,
++	.init			= sha3_jitter_init,
++	.update			= sha3_jitter_update,
++	.final			= sha3_jitter_final,
++	.descsize		= sizeof(struct sha3_state),
++	.base.cra_name		= "sha3-256-jitter",
++	.base.cra_driver_name	= "sha3-256-jitter",
++	.base.cra_blocksize	= SHA3_256_BLOCK_SIZE,
++	.base.cra_module	= THIS_MODULE,
++} };
++
++int sha3_jitterentropy_kcapi_init(void)
++{
++	return crypto_register_shashes(sha3_jitter_algs, ARRAY_SIZE(sha3_jitter_algs));
++}
++
++void sha3_jitterentropy_kcapi_exit(void)
++{
++	crypto_unregister_shashes(sha3_jitter_algs, ARRAY_SIZE(sha3_jitter_algs));
++}
++
 diff --git a/crypto/sha3_jitterentropy.c b/crypto/sha3_jitterentropy.c
 new file mode 100644
 index 0000000000000..a5ab6b44b9659
@@ -1131,10 +1226,10 @@ index 0000000000000..a5ab6b44b9659
 +}
 diff --git a/include/crypto/sha3_jitterentropy.h b/include/crypto/sha3_jitterentropy.h
 new file mode 100644
-index 0000000000000..cdb51594f32a6
+index 0000000000000..88d2ab02a7aea
 --- /dev/null
 +++ b/include/crypto/sha3_jitterentropy.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,60 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * Common values for SHA-3 algorithms
@@ -1188,6 +1283,12 @@ index 0000000000000..cdb51594f32a6
 +{
 +	memzero_explicit(desc, sizeof(*desc));
 +}
++
++#ifdef CONFIG_CRYPTO_JITTERENTROPY_TESTINTERFACE
++int sha3_jitterentropy_kcapi_init(void);
++void sha3_jitterentropy_kcapi_exit(void);
++#endif
++
 +#endif
 -- 
 2.50.1
