@@ -92,12 +92,13 @@ func TestGenerateComplianceReports(t *testing.T) {
 	}
 
 	profiles := []struct {
-		prettyName  string
-		profileName string
+		prettyName     string
+		profileName    string
+		withStigViewer bool
 	}{
-		{"CIS Server L1", "xccdf_org.ssgproject.content_profile_cis_server_l1"},
-		{"STIG", "xccdf_org.ssgproject.content_profile_stig"},
-		{"STIG GPOS", "xccdf_org.ssgproject.content_profile_stig_gpos"},
+		{"CIS Server L1", "xccdf_org.ssgproject.content_profile_cis_server_l1", false},
+		{"STIG", "xccdf_org.ssgproject.content_profile_stig", false},
+		{"STIG GPOS", "xccdf_org.ssgproject.content_profile_stig_gpos", true},
 	}
 
 	for _, profile := range profiles {
@@ -111,22 +112,20 @@ func TestGenerateComplianceReports(t *testing.T) {
 			viewerFile := fsName + "-stigviewer.xml"
 			reportFile := fsName + "-report.html"
 
-			// Run the scan. This needs elevated privileges, because with hardening
-			// applied some of the rules will read files inaccessible to regular users.
-			cmd := exec.CommandContext(ctx, "oscap", "xccdf", "eval",
+			argv := []string{
+				"oscap", "xccdf", "eval",
 				"--profile", profile.profileName,
 				"--results", resultsFile,
 				"--report", reportFile,
-				ssgFile)
-			// Run stig-viewer output only on GPOS for now
-			if profile.profileName == "xccdf_org.ssgproject.content_profile_stig_gpos" {
-				cmd = exec.CommandContext(ctx, "oscap", "xccdf", "eval",
-					"--profile", profile.profileName,
-					"--results", resultsFile,
-					"--stig-viewer", viewerFile,
-					"--report", reportFile,
-					ssgFile)
 			}
+			if profile.withStigViewer {
+				argv = append(argv, "--stig-viewer", viewerFile)
+			}
+			argv = append(argv, ssgFile)
+
+			// Run the scan. This needs elevated privileges, because with hardening
+			// applied some of the rules will read files inaccessible to regular users.
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 			output, err := cmd.CombinedOutput()
 			t.Logf("OpenSCAP output:\n%s", output)
 
@@ -165,8 +164,10 @@ func TestGenerateComplianceReports(t *testing.T) {
 			content, err = os.ReadFile(reportFile)
 			artifacts.File(t, files.ComplianceHTMLReport, content, err, meta)
 
-			content, err = os.ReadFile(viewerFile)
-			artifacts.File(t, files.ComplianceStigViewerXML, content, err, meta)
+			if profile.withStigViewer {
+				content, err = os.ReadFile(viewerFile)
+				artifacts.File(t, files.ComplianceStigViewerXML, content, err, meta)
+			}
 		})
 	}
 }
