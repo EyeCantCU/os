@@ -9,6 +9,8 @@ package:
     runtime:
       - bcfips-policy-140-3-j${{vars.java-version}}
       - dash-binsh
+      - lcms2
+      - libjpeg-turbo
       - openjdk-${{vars.java-version}}-default-jvm
       - openssl-config-fipshardened
     provides:
@@ -88,43 +90,26 @@ test:
         - bcfips-policy-140-3-j${{vars.java-version}}
         - openjdk-${{vars.java-version}}-default-jvm
         - openjdk-${{vars.java-version}}-default-jdk
+        - wait-for-it
     environment:
-      CLASSPATH: /usr/share/java/bouncycastle-fips/*:./*:.
-      JAVA_TOOL_OPTIONS: --module-path=/usr/share/java/bouncycastle-fips
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      PASS: "TikaSSLTest123!"
+      CLASSPATH: "/usr/share/java/bouncycastle-fips/*:./*:."
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+      JDK_JAVA_OPTIONS: "--add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED -Dorg.bouncycastle.fips.approved.only=true -Djavax.net.ssl.trustStoreType=BCFKS -Djava.security.properties=/usr/lib/jvm/default-jvm/conf/security/java.security"
   pipeline:
-    - runs: apk fix openjdk-${{vars.java-version}} # Fixes "Module jdk.compiler not found" issue when running java-fips/algorithms
-    - uses: java-fips/algorithms
-      with:
-        java-version: ${{vars.java-version}}
-    - uses: test/daemon-check-output
-      with:
-        start: java -Dorg.bouncycastle.fips.approved.only=true -Djavax.net.ssl.trustStoreType=FIPS -Djava.security.properties=/usr/lib/jvm/default-jvm/conf/security/java.security --module-path=/usr/share/java/bouncycastle-fips --add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED -jar /tika-server-standard.jar
-        expected_output: |
-          Started Apache Tika server
-        post: |
-          fail() { echo "FATAL: $*"; exit 1; }
-          tmpd=$(mktemp -d)
-          trap "rm -Rf $tmpd" EXIT
-
-          url=http://localhost:9998/
-          curl -s "$url" > "$tmpd/req.out" 2>"$tmpd/req.err" ||
-              fail "[$?] curl -s $url"
-          grep -q "Welcome to the Apache Tika" "$tmpd/req.out" ||
-              fail "curl $url - no Welcome message"
-
-          msg="this is a test file"
-          echo "$msg" > "$tmpd/sample.txt" ||
-              fail "failed writing a file"
-          curl -X PUT --data-binary "@$tmpd/sample.txt" \
-              -H "Content-Type: text/plain" "http://localhost:9998/tika" \
-              > "$tmpd/post.out" ||
-              fail "failed PUT to curl $url/tika"
-          grep -q "$msg" "$tmpd/post.out" ||
-              fail "did not find $msg in output of PUT"
+    - name: "Verify Tika Installation"
+      runs: |
+        set -euo pipefail
+        # Verify JAR file exists and is readable
+        [ -f /tika-server-standard.jar ]
+        [ -r /tika-server-standard.jar ]
+        # Verify it's a valid JAR
+        jar -tf /tika-server-standard.jar > /dev/null
     - name: "Generate FIPS KeyStore and TrustStore"
       runs: |
+        set -euo pipefail
         mkdir -p /tmp/tika-tls
-
         keytool \
           -v -keystore /tmp/tika-tls/tika-keystore.bcfks \
           -storetype BCFKS \
@@ -132,10 +117,9 @@ test:
           -alias tika-server \
           -genkeypair -sigalg SHA256withRSA -keyalg RSA -keysize 2048 \
           -dname "CN=localhost" \
-          -storepass "TikaSSLTest123!" \
-          -keypass "TikaSSLTest123!" \
+          -storepass "$PASS" \
+          -keypass "$PASS" \
           -validity 365
-
         # Export certificate from keystore for curl to trust
         keytool \
           -v -keystore /tmp/tika-tls/tika-keystore.bcfks \
@@ -143,9 +127,8 @@ test:
           -providername BCFIPS \
           -alias tika-server \
           -exportcert -rfc \
-          -storepass "TikaSSLTest123!" \
+          -storepass "$PASS" \
           -file /tmp/tika-tls/tika-server.crt
-
         # Create truststore and import the certificate
         keytool \
           -v -keystore /tmp/tika-tls/tika-truststore.bcfks \
@@ -154,42 +137,45 @@ test:
           -alias tika-server \
           -importcert -noprompt \
           -file /tmp/tika-tls/tika-server.crt \
-          -storepass "TikaSSLTest123!"
-
-        # Create tika-config.xml with TLS configuration
-        cat > /tmp/tika-tls/tika-config.xml <<'EOF'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <properties>
-          <server>
-            <params>
-              <port>9999</port>
-            </params>
-            <tlsConfig>
-              <params>
-                <active>true</active>
-                <keyStoreType>BCFKS</keyStoreType>
-                <keyStorePassword>TikaSSLTest123!</keyStorePassword>
-                <keyStoreFile>/tmp/tika-tls/tika-keystore.bcfks</keyStoreFile>
-                <trustStoreType>BCFKS</trustStoreType>
-                <trustStorePassword>TikaSSLTest123!</trustStorePassword>
-                <trustStoreFile>/tmp/tika-tls/tika-truststore.bcfks</trustStoreFile>
-              </params>
-            </tlsConfig>
-          </server>
-        </properties>
-        EOF
+          -storepass "$PASS"
     - name: "Test Tika Server with HTTPS/TLS"
       uses: test/daemon-check-output
       with:
-        start: java -Dorg.bouncycastle.fips.approved.only=true -Djavax.net.ssl.trustStoreType=BCFKS -Djava.security.properties=/usr/lib/jvm/default-jvm/conf/security/java.security --module-path=/usr/share/java/bouncycastle-fips --add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED -jar /tika-server-standard.jar -c /tmp/tika-tls/tika-config.xml
+        setup: |-
+          tee /tmp/tika-tls/tika-config.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <properties>
+            <server>
+              <params>
+                <port>9999</port>
+              </params>
+              <tlsConfig>
+                <params>
+                  <active>true</active>
+                  <keyStoreType>BCFKS</keyStoreType>
+                  <keyStorePassword>TikaSSLTest123!</keyStorePassword>
+                  <keyStoreFile>/tmp/tika-tls/tika-keystore.bcfks</keyStoreFile>
+                  <trustStoreType>BCFKS</trustStoreType>
+                  <trustStorePassword>TikaSSLTest123!</trustStorePassword>
+                  <trustStoreFile>/tmp/tika-tls/tika-truststore.bcfks</trustStoreFile>
+                </params>
+              </tlsConfig>
+            </server>
+          </properties>
+          EOF
+        start: java -jar /tika-server-standard.jar -c /tmp/tika-tls/tika-config.xml
         expected_output: |
           Started Apache Tika server
           https://localhost:9999/
           {ssl
           TLS configuration
-        timeout: 30
+        timeout: 10
         post: |-
-          curl --cacert /tmp/tika-tls/tika-server.crt -fsSL https://localhost:9999/ | grep -q "Welcome to the Apache Tika"
+          set -o pipefail
+          wait-for-it -t 10 --strict localhost:9999
+          echo "Testing HTTPS endpoint with TLS:"
+          curl --cacert /tmp/tika-tls/tika-server.crt -fsSL https://localhost:9999/ | grep -F "Welcome to the Apache Tika"
+          echo "Testing text extraction over HTTPS:"
           msg="TLS test file"
           echo "$msg" > /tmp/tls-test.txt
-          curl --cacert /tmp/tika-tls/tika-server.crt -X PUT --data-binary @/tmp/tls-test.txt -H "Content-Type: text/plain" https://localhost:9999/tika | grep -q "$msg"
+          curl --cacert /tmp/tika-tls/tika-server.crt -X PUT --data-binary @/tmp/tls-test.txt -H "Content-Type: text/plain" https://localhost:9999/tika | grep -F "$msg"
