@@ -1,0 +1,131 @@
+package:
+  name: apache-camel-karavan-devmode
+  version: "4.14.2"
+  epoch: 0
+  description: "Apache Camel Karavan a Low-code Data Integration Platform - Devmode with Camel CLI via JBang"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - git
+      - jbang
+      - maven
+      - openjdk-${{vars.JAVA_VERSION}}-jre
+
+vars:
+  JAVA_VERSION: 21
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - jbang
+      - maven
+      - openjdk-${{vars.JAVA_VERSION}}-default-jdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/camel-karavan
+      tag: ${{package.version}}
+      expected-commit: 5175973d2e326e840b547a5951e2b61d49fd897a
+
+  - name: Setup JBang and install Camel CLI
+    runs: |
+      # JBang ignores JBANG_DIR for 'app' commands and uses ~/.jbang
+      # This could be /root/.jbang (Docker runner) or /home/build/.jbang (QEMU runner)
+
+      jbang trust add --quiet https://github.com/apache/camel
+      jbang app install camel@apache/camel
+      jbang config set cache-evict never
+
+      mkdir -p "${{targets.destdir}}/usr/share/karavan/.jbang"
+
+      if [ -d "$HOME/.jbang" ]; then
+      	SOURCE_DIR="$HOME/.jbang"
+      else
+      	SOURCE_DIR="/root/.jbang"
+      fi
+      install -Dpm0755 -t "${{targets.destdir}}/usr/share/karavan/.jbang/bin/" "${SOURCE_DIR}/bin/"*
+      install -Dpm0644 -t "${{targets.destdir}}/usr/share/karavan/.jbang/" "$SOURCE_DIR/jbang.properties"
+      install -Dpm0644 -t "${{targets.destdir}}/usr/share/karavan/.jbang/" "${SOURCE_DIR}/trusted-sources.json" # required at runtime
+      cp -r "${SOURCE_DIR}/cache" "${{targets.destdir}}/usr/share/karavan/.jbang/"
+
+  - name: Create runtime directories
+    runs: |
+      mkdir -p "${{targets.destdir}}/usr/share/karavan/.m2"
+      mkdir -p "${{targets.destdir}}/usr/share/karavan/code"
+      mkdir -p "${{targets.destdir}}/usr/share/karavan/builder"
+      mkdir -p "${{targets.destdir}}/usr/share/karavan/kamelets"
+
+  - name: Create wrapper script
+    runs: |
+      mkdir -p "${{targets.destdir}}/usr/bin"
+      tee "${{targets.destdir}}/usr/bin/camel" <<'EOF'
+      #!/bin/bash
+      set -e
+      export JBANG_DIR="${JBANG_DIR:-/usr/share/karavan/.jbang}"
+      export MAVEN_CONFIG="${MAVEN_CONFIG:-/usr/share/karavan/.m2}"
+      export JBANG_REPO="$MAVEN_CONFIG"
+      export PATH="$JBANG_DIR/bin:$PATH"
+      exec jbang -Dcamel.jbang.version=${{package.version}} -Dcamel.jbang.kameletsVersion=${{package.version}} camel@apache/camel "$@"
+      EOF
+      chmod +x "${{targets.destdir}}/usr/bin/camel"
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/share/karavan "${{targets.subpkgdir}}/karavan"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
+update:
+  enabled: true
+  git: {}
+
+test:
+  environment:
+    contents:
+      packages:
+        - openjdk-${{vars.JAVA_VERSION}}-default-jdk
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.JAVA_VERSION}}-openjdk
+      JBANG_DIR: /usr/share/karavan/.jbang
+      MAVEN_CONFIG: /usr/share/karavan/.m2
+      JBANG_REPO: /usr/share/karavan/.m2
+      CODE_DIR: /usr/share/karavan/code
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: camel
+    - uses: test/tw/ver-check
+      with:
+        bins: camel
+    - name: Test Camel route execution
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p "$CODE_DIR"
+          tee "$CODE_DIR/test-route.yaml" <<'EOF'
+          - route:
+              from:
+                uri: "timer:tick?period=1000"
+                steps:
+                  - log:
+                      message: "Karavan devmode test successful!"
+          EOF
+        start: camel run --source-dir="$CODE_DIR" --console
+        timeout: 90
+        expected_output: |
+          Karavan devmode test successful!
