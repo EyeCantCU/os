@@ -1,0 +1,115 @@
+package:
+  name: dependency-track-frontend
+  version: "4.13.6"
+  epoch: 0
+  description: Dependency-Track frontend (static assets)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - curl
+      - docker-nginx
+      - jq
+      - nginx
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - nginx-package-config
+      - nodejs-20 # Use Node 20 (LTS) for webpack 4/Vue CLI compatibility; newer Node ≥21 causes ERR_OSSL_EVP_UNSUPPORTED
+      - npm
+      - openssl-provider-legacy
+  environment:
+    NODE_OPTIONS: "--openssl-legacy-provider" # Enables legacy OpenSSL provider to avoid ERR_OSSL_EVP_UNSUPPORTED
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/DependencyTrack/frontend.git
+      tag: ${{package.version}}
+      expected-commit: 74eee4a5153fd597c077f92ebdac03b8d195fd22
+
+  - runs: |
+      npm install --ignore-scripts
+      npm run build
+      mkdir -p "${{targets.destdir}}/opt/owasp/dependency-track-frontend"
+      cp -r dist/* "${{targets.destdir}}/opt/owasp/dependency-track-frontend/"
+
+      mkdir -p "${{targets.destdir}}/etc/nginx/templates"
+      install -m 0644 docker/etc/nginx/templates/default.conf.template "${{targets.destdir}}/etc/nginx/templates/default.conf.template"
+
+      mkdir -p "${{targets.destdir}}/docker-entrypoint.d"
+      install -m 0755 docker/docker-entrypoint.d/30-oidc-configuration.sh "${{targets.destdir}}/docker-entrypoint.d/30-oidc-configuration.sh"
+
+  - name: "Setup nginx runtime directories"
+    runs: |
+      # Create directories that nginx needs at runtime
+      mkdir -p "${{targets.destdir}}/etc/nginx/http.d"
+      mkdir -p "${{targets.destdir}}/var/cache/nginx"
+      mkdir -p "${{targets.destdir}}/var/log/nginx"
+      ln -sf http.d "${{targets.destdir}}/etc/nginx/conf.d"
+
+update:
+  enabled: true
+  github:
+    identifier: DependencyTrack/frontend
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+    accounts:
+      groups:
+        - groupname: nginx
+          gid: 65532
+      users:
+        - username: nginx
+          gid: 65532
+          uid: 65532
+  pipeline:
+    - name: "Verify static files and nginx configuration"
+      runs: |
+        set -euo pipefail
+        # Frontend static files
+        stat /opt/owasp/dependency-track-frontend/index.html
+        grep -F "Dependency-Track" /opt/owasp/dependency-track-frontend/index.html
+        # Nginx template
+        stat /etc/nginx/templates/default.conf.template
+        # Entrypoint scripts
+        stat /docker-entrypoint.d/30-oidc-configuration.sh
+    - name: "Start nginx and verify frontend is served"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create a complete nginx config with our server block
+          mkdir -p /var/run
+          cat > /etc/nginx/test.conf << 'NGINX_CONF'
+          worker_processes auto;
+          error_log stderr info;
+          pid /var/run/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+              include /etc/nginx/mime.types;
+              server {
+                  listen 8080;
+                  server_name _;
+                  root /opt/owasp/dependency-track-frontend;
+                  index index.html;
+              }
+          }
+          NGINX_CONF
+          chown -R nginx:nginx /etc/nginx/conf.d
+          chown -R nginx:nginx /etc/nginx/http.d
+          chown -R nginx:nginx /var/cache/nginx
+          chown -R nginx:nginx /var/log/nginx
+          # Test nginx config
+          nginx -t
+        start: nginx -c /etc/nginx/test.conf -g "daemon off;"
+        timeout: 30
+        expected_output: |
+          start worker process
+        post: |
+          set -o pipefail
+          curl -vf http://localhost:8080/index.html | grep -F "Dependency-Track"
