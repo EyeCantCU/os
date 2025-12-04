@@ -1,0 +1,160 @@
+package:
+  name: reports-server
+  version: "0.1.5"
+  epoch: 0
+  description: Reports server provides a scalable solution for storing policy reports and cluster policy reports. It moves reports out of etcd and stores them in a PostgreSQL database instance.
+  copyright:
+    - license: Apache-2.0
+  checks:
+    disabled:
+      # Upstream image uses ko to build (https://github.com/kyverno/reports-server/blob/86c4ee5169a7afd74d5e987addeafedb28580adb/Makefile#L294)
+      # which sets KO_DATA_PATH to /var/run/ko by default.
+      # Because KO_DATA_PATH is inside /var/run/ko this check needs to be disabled.
+      - tempdir
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+
+environment:
+  environment:
+    CGO_ENABLED: 0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kyverno/reports-server.git
+      tag: v${{package.version}}
+      expected-commit: fcececbcab64f423949f9680524f424862e36fcc
+
+  - name: Move migrations data to KO_DATA_PATH
+    runs: |
+      mkdir -p ${{targets.contextdir}}/var/run/ko
+      cp -R pkg/storage/db/migrations ${{targets.contextdir}}/var/run/ko/migrations
+
+  # False positives: CVE-2025-46342, CVE-2024-48921, CVE-2025-47281, GHSA-459x-q9hg-4gpq
+  # The reports-server binary vendors parts of github.com/kyverno/kyverno, but it only imports the
+  # API types (api/reports/v1, api/policyreport) and the typed client (pkg/clients/kyverno)
+  # used for listing and watching PolicyReport and ClusterPolicyReport resources.
+  # It does not include or execute Kyverno’s policy engine, admission webhook logic, PolicyException handling,
+  # or JMESPath evaluation, which are the components affected by CVE-2024-48921, CVE-2025-46342, CVE-2025-47281 and GHSA-459x-q9hg-4gpq.
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/cloudflare/circl@v1.6.1
+        github.com/docker/docker@v28.0.0
+        github.com/go-jose/go-jose/v3@v3.0.4
+        github.com/go-jose/go-jose/v4@v4.0.5
+        github.com/golang-jwt/jwt/v4@v4.5.2
+        github.com/hashicorp/go-retryablehttp@v0.7.7
+        github.com/open-policy-agent/opa@v1.4.0
+        github.com/sigstore/cosign/v2@v2.2.4
+        golang.org/x/crypto@v0.45.0
+        github.com/go-viper/mapstructure/v2@v2.4.0
+        golang.org/x/oauth2@v0.27.0
+
+  - name: Build reports-server
+    uses: go/build
+    with:
+      packages: .
+      output: reports-server
+      ldflags: -s -w -X github.com/kyverno/reports-server/pkg/version.BuildVersion=${{package.version}}
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "compatibility symlinks package for reports-server"
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /ko-app/
+          mkdir -p ${{targets.contextdir}}/ko-app
+          ln -sf /usr/bin/reports-server ${{targets.contextdir}}/ko-app/reports-server
+    test:
+      pipeline:
+        - name: Test compat directory
+          runs: |
+            test "$(readlink -fv /ko-app/reports-server)" = "/usr/bin/reports-server"
+
+update:
+  enabled: true
+  github:
+    identifier: kyverno/reports-server
+    strip-prefix: v
+
+test:
+  environment:
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
+      DB_HOST: "localhost"
+      DB_PORT: 5432
+      DB_DATABASE: reportsdb
+      DB_USER: wolfi
+      DB_PASSWORD: reports
+      PGDATA: /tmp/reportsdb
+      PGUSER: wolfi
+      KO_DATA_PATH: /var/run/ko
+    contents:
+      packages:
+        - helm
+        - postgresql-client
+        - postgresql
+        - shadow
+        - sudo-rs
+        - glibc-locales
+        - ${{package.name}}-compat
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Check reports-server runs
+      runs: |
+        reports-server --help
+        reports-server --version
+    - uses: test/kwok/cluster
+    - name: Prepare prerequisites for reports-server
+      runs: |
+        useradd $PGUSER
+        sudo -u $PGUSER initdb -D /tmp/reportsdb
+        sudo -u $PGUSER pg_ctl -D /tmp/reportsdb -l /tmp/logfile start
+        createdb reportsdb
+        psql -lqt
+        helm repo add reports-server https://kyverno.github.io/reports-server
+        helm repo update
+        helm upgrade --install reports-server reports-server/reports-server \
+        --set postgresql.enabled=false
+        kubectl wait --for=condition=available --timeout=120s deployment/reports-server -n default
+        mkdir -p /var/run/secrets/kubernetes.io/serviceaccount
+        kubectl create token reports-server > /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubectl get cm kube-root-ca.crt -n default -o jsonpath='{.data.ca\.crt}' > /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        echo default > /var/run/secrets/kubernetes.io/serviceaccount/namespace
+    - name: Test entrypoint and logs
+      uses: test/daemon-check-output
+      with:
+        start: |
+          reports-server --kubeconfig ~/.kube/config --dbsslmode=disable --dbsslrootcert="" --dbsslkey="" --dbsslcert="" \
+            --servicename=reports-server --servicens=default --storereports=true --storeephemeralreports=true --storeopenreports=true --cert-dir=/tmp --secure-port=4443 \
+            --authorization-always-allow-paths=/metrics --clustername=""
+        timeout: 5
+        expected_output: |
+          Generated self-signed cert (/tmp/apiserver.crt, /tmp/apiserver.key)
+          setting up storage, embedded-db=false, etcdconfig=&{Endpoints: Insecure:true}
+          starting postgres db
+          pinging postgres db, attempt: 1
+          successfully connected to db
+          successfully setup storage
+          performing migration...
+          checking APIServices...
+          APIService v1alpha2.wgpolicyk8s.io created successfully
+          APIService v1.reports.kyverno.io created successfully
+          APIService v1alpha1.openreports.io created successfully
+          Adding GroupVersion wgpolicyk8s.io v1alpha2 to ResourceManager
+          Adding GroupVersion openreports.io v1alpha1 to ResourceManager
+          Adding GroupVersion reports.kyverno.io v1 to ResourceManager
+          Starting RequestHeaderAuthRequestController
+          Waiting for caches to sync for RequestHeaderAuthRequestController
+          "Starting controller" name="client-ca::kube-system::extension-apiserver-authentication::client-ca-file"
+          Waiting for caches to sync for client-ca::kube-system::extension-apiserver-authentication::client-ca-file
+          "Starting controller" name="client-ca::kube-system::extension-apiserver-authentication::requestheader-client-ca-file"
+          Waiting for caches to sync for client-ca::kube-system::extension-apiserver-authentication::requestheader-client-ca-file
+          "Starting controller" name="serving-cert::/tmp/apiserver.crt::/tmp/apiserver.key"
+          "Starting DynamicServingCertificateController"
+          Caches are synced for client-ca::kube-system::extension-apiserver-authentication::requestheader-client-ca-file
+          Caches are synced for RequestHeaderAuthRequestController
+          Caches are synced for client-ca::kube-system::extension-apiserver-authentication::client-ca-file
