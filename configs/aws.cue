@@ -17,6 +17,14 @@ fips_612_full: list.Concat([
 	kernel.aws_612_fips,
 ])
 
+fips_618_full: list.Concat([
+	packages,
+	fips_agents,
+	common.ssh_key_fetcher,
+	common.apk_tools,
+	kernel.aws_618_fips,
+])
+
 // Package sets
 // Groups of packages to assemble an image with.
 
