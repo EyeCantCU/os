@@ -1,8 +1,10 @@
 package:
-  name: ceph-18
-  version: "18.2.7"
+  name: ceph-19
+  version: "19.2.3"
   description: Distributed object, block, and file storage
-  epoch: 5
+  # NOTE: previous epoch was 11 prior to introduction to this repo
+  # drop this comment if going beyond 12
+  epoch: 13
   copyright:
     - license: LGPL-2.1
   resources:
@@ -10,7 +12,6 @@ package:
     memory: 128Gi
   dependencies:
     runtime:
-      - ${{package.name}}-libs
       - blkid
       - busybox
       - chrony
@@ -18,6 +19,7 @@ package:
       - cryptsetup
       - curl
       - device-mapper
+      - grafana-grafonnet
       - iproute2
       - jq
       - libaio
@@ -31,9 +33,12 @@ package:
       - mount
       - nvme-cli
       - openssh-client
+      - openssh-keygen
       - openssl
       - parted
       - podman
+      - prometheus
+      - py${{vars.python-version}}-asyncssh
       - py${{vars.python-version}}-cherrypy
       - py${{vars.python-version}}-cryptography
       - py${{vars.python-version}}-jinja2
@@ -54,6 +59,7 @@ package:
       - python-${{vars.python-version}}
       - sgdisk
       - smartmontools
+      - socat
       - systemd
       - udev
       - umount
@@ -63,8 +69,8 @@ package:
       - ceph=${{package.full-version}}
 
 vars:
-  python-version: "3.11"
-  lua-version: "5.4"
+  python-version: 3.11
+  lua-version: 5.4
 
 environment:
   contents:
@@ -143,7 +149,8 @@ pipeline:
     with:
       repository: https://github.com/ceph/ceph.git
       tag: v${{package.version}}
-      expected-commit: 6b0e988052ec84cf2d4a54ff9bbbc5e720b621ad
+      expected-commit: c92aebb279828e9c3c1f5d24613efca272649e62
+      recurse-submodules: false
       cherry-picks: |
         squid/982edc02b2ab5c5cf49c1171db98f6b87c5956f7: py03 backport
 
@@ -155,7 +162,7 @@ pipeline:
 
   - uses: patch
     with:
-      patches: fix-osd-class-dir.patch intpatch.patch s3select.patch rgw.patch
+      patches: fix-osd-class-dir.patch wolfi-update.patch
 
   # NOTE: the upstream ceph submodule doesn't pull the version we are interested in just yet
   # so in next version you may want to check if we still need this
@@ -185,6 +192,7 @@ pipeline:
         -DWITH_MANPAGE=ON \
         -DWITH_RADOSGW_AMQP_ENDPOINT=OFF \
         -DWITH_RADOSGW_SELECT_PARQUET=ON \
+        -DWITH_RADOSGW_POSIX=OFF \
         -DWITH_RDMA=OFF \
         -DWITH_REENTRANT_STRSIGNAL=ON \
         -DWITH_SEASTAR=OFF \
@@ -193,6 +201,7 @@ pipeline:
         -DWITH_CEPHFS_SHELL=ON \
         -DWITH_SYSTEM_ARROW=ON \
         -DWITH_SYSTEM_BOOST=OFF \
+        -DWITH_SYSTEM_FMT=OFF \
         -DWITH_SYSTEM_LIBURING=ON \
         -DWITH_SYSTEM_NPM=ON \
         -DWITH_MGR_DASHBOARD_FRONTEND=ON \
@@ -201,7 +210,8 @@ pipeline:
         -DWITH_QATLIB=OFF \
         -DWITH_QATZIP=OFF \
         -DHAVE_LIBCRYPTSETUP=True \
-        -DWITH_TESTS=OFF \
+        -DWITH_TESTS=ON \
+        -DWITH_GRAFANA=ON \
         -DWITH_THREAD_SAFE_RES_QUERY=ON
 
   - runs: cmake --build output --target common-options-objs
@@ -212,7 +222,7 @@ pipeline:
 
   - runs: |
       # Drop broken mgr modules due to lack of sub-interpreter
-      # support in PyO3
+      # support in PyO3 https://github.com/PyO3/pyo3/issues/576
       rm -rf ${{targets.destdir}}/usr/share/ceph/mgr/restful
       mkdir -p ${{targets.destdir}}/etc/ceph
       mkdir -p ${{targets.destdir}}/var/log/ceph
@@ -231,8 +241,6 @@ pipeline:
 subpackages:
   - name: ${{package.name}}-dev
     dependencies:
-      runtime:
-        - ${{package.name}}-libs
       provides:
         - ceph-dev=${{package.full-version}}
     pipeline:
@@ -271,12 +279,13 @@ test:
     contents:
       packages:
         - ${{package.name}}-dev
+        - ${{package.name}}-libs
         - jq
   pipeline:
     - uses: test/tw/ldd-check
     - uses: test/tw/ver-check
       with:
-        bins: ceph cephadm ceph-fuse ceph-mds ceph-mgr ceph-mon ceph-osd radosgw radosgw-admin rbd
+        bins: ceph cephadm ceph-fuse ceph-mds ceph-mgr ceph-mon ceph-osd ceph-objectstore-tool radosgw radosgw-admin rbd
     - name: Bootstrap and validate Ceph cluster
       runs: |
         UUID=$(uuidgen)
@@ -365,7 +374,7 @@ test:
           # Startup the ceph-osd daemon
           ceph-osd --id ${OSD_ID}
         done
-        sleep 10
+
         # Check status
         ceph health | grep -q HEALTH_OK || {
           cat /var/log/ceph/*.log
@@ -400,6 +409,7 @@ test:
           OSD replication will default to the public_network
         error_strings: |
           0.0.0.0
+    - uses: test/no-docs
 
 ## Currently, version 19.2.1 is the latest active version for ceph.
 ## While 20.0.0 is available, it is still early days. Therefore, we are not updating the version to 20.0.0.
@@ -414,4 +424,4 @@ update:
     identifier: ceph/ceph
     strip-prefix: v
     use-tag: true
-    tag-filter-prefix: v18
+    tag-filter-prefix: v19
