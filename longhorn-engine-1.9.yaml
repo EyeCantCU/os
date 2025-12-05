@@ -1,0 +1,126 @@
+package:
+  name: longhorn-engine-1.9
+  version: 1.9.2
+  epoch: 0
+  description: Longhorn Engine implements a lightweight block device storage controller capable of storing the data in a number of replicas.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - longhorn-engine=${{package.full-version}}
+    runtime:
+      - cifs-utils
+      - e2fsprogs
+      - grpc-health-probe
+      - iproute2
+      - iputils
+      - jq
+      - libaio
+      - longhorn-instance-manager-1.9
+      - nfs-utils
+      - qemu-utils
+      - rancher-tgt
+      - sg3-utils
+
+environment:
+  contents:
+    packages:
+      - libqcow-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/longhorn/longhorn-engine.git
+      tag: v${{package.version}}
+      expected-commit: 6b95db1f518e8e96734560196fd349073505eb8c
+
+  - uses: go/build
+    with:
+      packages: .
+      output: longhorn
+      ldflags: |
+        -X main.Version=${{package.version}}
+        -X main.GitCommit=$(git rev-parse --short HEAD)
+        -X main.BuildDate=$(date -u ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+  - name: Install scripts
+    runs: |
+      # Install the launcher scripts from the package directory
+      install -Dm755 package/engine-manager ${{targets.contextdir}}/usr/bin/engine-manager
+      install -Dm755 package/launch-simple-file ${{targets.contextdir}}/usr/bin/launch-simple-file
+      install -Dm755 package/launch-simple-longhorn ${{targets.contextdir}}/usr/bin/launch-simple-longhorn
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    dependencies:
+      provides:
+        - longhorn-engine-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -sf /usr/bin/engine-manager ${{targets.contextdir}}/usr/local/bin/engine-manager
+          ln -sf /usr/bin/launch-simple-file ${{targets.contextdir}}/usr/local/bin/launch-simple-file
+          ln -sf /usr/bin/launch-simple-longhorn ${{targets.contextdir}}/usr/local/bin/launch-simple-longhorn
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - lsof
+        - procps
+        - util-linux
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test binary help
+      uses: test/tw/help-check
+      with:
+        bins: longhorn
+    - name: Test version
+      runs: longhorn --version | grep ${{package.version}}
+    - name: Test controller with replicas
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # /var/lib is used here since it supports both fallocate (QEMU) and fiemap (Docker), unlike /tmp breaks under QEMU (no fallocate) or /home/build breaks under Docker (no fiemap)
+          TEST_DIR=/var/lib/longhorn-test
+          mkdir -p ${TEST_DIR}/replica1 ${TEST_DIR}/replica2
+          tgtd -f > /tmp/tgtd.log 2>&1 &
+          sleep 2
+          pgrep -f tgtd
+          longhorn replica --listen 0.0.0.0:9502 --size 100M ${TEST_DIR}/replica1 > /tmp/replica1.log 2>&1 &
+          wait-for-it localhost:9502 -t 5
+          longhorn replica --listen 0.0.0.0:9503 --size 100M ${TEST_DIR}/replica2 > /tmp/replica2.log 2>&1 &
+          wait-for-it localhost:9503 -t 5
+          lsof -i :9502 | grep -F "longhorn"
+          lsof -i :9503 | grep -F "longhorn"
+        start: longhorn controller --frontend socket --listen 0.0.0.0:9501 --size 100M --current-size 100M --replica tcp://127.0.0.1:9502 --replica tcp://127.0.0.1:9503 test-volume
+        timeout: 60
+        expected_output: |
+          Listening
+        post: |
+          set -o pipefail
+          lsof -i :9501 | grep -F longhorn
+          longhorn info
+          longhorn snapshot create test-snapshot
+          longhorn snapshot ls | grep -F "test-snapshot"
+          echo "Volume operations completed successfully"
+update:
+  enabled: true
+  github:
+    identifier: longhorn/longhorn-engine
+    tag-filter-prefix: v1.9
+    strip-prefix: v
+    use-tag: true
+  ignore-regex-patterns:
+    - '.*-rc\d+$'
+    - ".*-dev-.*"
