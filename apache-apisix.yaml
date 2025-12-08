@@ -2,8 +2,11 @@
 package:
   name: apache-apisix
   version: "3.14.1"
-  epoch: 33
+  epoch: 34
   description: "The Cloud-Native API Gateway and AI Gateway"
+  resources:
+    cpu: 30
+    memory: 48Gi
   copyright:
     - license: Apache-2.0
   dependencies:
@@ -88,6 +91,12 @@ vars:
   # This checksum is retrived from the apisix-build-tools repository
   # https://github.com/api7/apisix-build-tools
   APISIX_BUILD_TOOLS_CHECKSUM: "7621ba36cad49a3ac76c02988e08759e6a1e2172"
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
 
 # apisix builds openresty from source with a several added modules:
 # https://github.com/api7/apisix-build-tools/blob/apisix/3.13.0/build-apisix-runtime.sh#L82
@@ -263,22 +272,22 @@ pipeline:
           repository: https://github.com/apache/apisix
           tag: ${{package.version}}
           expected-commit: 2f8ebf8527cdc878afe30100077c471879a5c133
-          destination: apache-apisix
+          destination: ${{package.name}}
       # Patch to update the apisix script to use our lua libraries
       - uses: patch
         working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}
         with:
           patches: ${{vars.BUILD_DIRECTORY}}/set-deps-path.patch
-      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/apache-apisix
+      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/${{package.name}}
         runs: |
           luarocks install apisix-master-0.rockspec --tree deps --only-deps
       # https://github.com/apache/apisix/blob/master/Makefile#L248-L388
       - name: Setup required apisix directories
         uses: autoconf/make-install
         with:
-          dir: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/apache-apisix
+          dir: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/${{package.name}}
       - name: Install required dependencies and move files to correct locations
-        working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/apache-apisix
+        working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/${{package.name}}
         runs: |
           install -d "${{targets.contextdir}}"/usr/local/apisix/deps/lib
           install -d "${{targets.contextdir}}"/usr/local/apisix/deps/share
@@ -292,14 +301,14 @@ pipeline:
   # https://github.com/apache/apisix/pull/12276
   - name: "Build and Install APISIX Dashboard"
     pipeline:
-      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/apache-apisix
+      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/${{package.name}}
         uses: git-checkout
         with:
           repository: https://github.com/api7/apisix-build-tools.git
           tag: "apisix/${{package.version}}"
           expected-commit: ${{vars.APISIX_BUILD_TOOLS_CHECKSUM}}
           destination: apisix-build-tools
-      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/apache-apisix
+      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/${{package.name}}
         runs: |
           ./apisix-build-tools/build-apisix-dashboard.sh .
           mv ./ui ${{targets.contextdir}}/usr/local/apisix/
@@ -307,15 +316,15 @@ pipeline:
   - uses: strip
 
 subpackages:
-  - name: "apache-apisix-compat"
-    description: "Compat package for apache-apisix"
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
     dependencies:
       runtime:
         # https://github.com/apache/apisix-docker/blob/release/apisix-3.13.0/debian/Dockerfile#L45
         - brotli-dev
         - ca-certificates-bundle
     pipeline:
-      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/apache-apisix
+      - working-directory: ${{vars.BUILD_DIRECTORY}}/openresty-${{vars.OPENRESTY_VERSION}}/${{package.name}}
         runs: |
           install -d "${{targets.contextdir}}"/usr/local/apisix/logs/
           install -d "${{targets.contextdir}}"/usr/local/openresty/bin/
@@ -327,9 +336,193 @@ subpackages:
           install docker/debian-dev/docker-entrypoint.sh "${{targets.contextdir}}"/
           install docker/utils/check_standalone_config.sh "${{targets.contextdir}}"/
 
+  - name: ${{package.name}}-iamguarded-compat
+    description: "compat package with iamguarded image"
+    dependencies:
+      runtime:
+        - luarocks
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: apisix
+          version: ${{vars.major-version}}
+      - runs: |
+          # Create iamguarded-compatible directory structure
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/bin
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/conf
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/logs
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/deps
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/ui
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/bin
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/nginx/sbin
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/bin
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luarocks/bin
+
+          # Create symlinks for iamguarded compatibility
+          ln -sf ../../../../usr/local/bin/apisix ${{targets.contextdir}}/opt/iamguarded/apisix/bin/apisix
+
+          # OpenResty binaries
+          ln -sf ../../../../usr/bin/openresty ${{targets.contextdir}}/opt/iamguarded/apisix/bin/openresty
+          ln -sf ../../../../../usr/bin/openresty ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/bin/openresty
+          ln -sf ../../../../../../usr/bin/openresty ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/nginx/sbin/nginx
+
+          # LuaJIT binaries
+          ln -sf ../../../../../../usr/bin/luajit ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/bin/luajit
+
+          # LuaRocks binaries
+          ln -sf ../../../../../../usr/bin/luarocks ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luarocks/bin/luarocks
+
+          # Configuration, dependencies, and UI
+          ln -sf ../../../../usr/local/apisix/conf ${{targets.contextdir}}/opt/iamguarded/apisix/conf
+          ln -sf ../../../../usr/local/apisix/deps ${{targets.contextdir}}/opt/iamguarded/apisix/deps
+          ln -sf ../../../../usr/local/apisix/ui ${{targets.contextdir}}/opt/iamguarded/apisix/ui
+
+          # Log directory symlinks
+          ln -sf ../../../../dev/stdout ${{targets.contextdir}}/opt/iamguarded/apisix/logs/access.log
+          ln -sf ../../../../dev/stderr ${{targets.contextdir}}/opt/iamguarded/apisix/logs/error.log
+      - uses: iamguarded/finalize-compat
+        with:
+          package: apisix
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - curl
+            - etcd
+            - jq
+            - nodejs
+            - yq
+        environment:
+          PROXY_URL: "http://127.0.0.1:19080"
+          ADMIN_URL: "http://127.0.0.1:19180"
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: iamguarded/test-compat
+          with:
+            package: apisix
+            version: ${{vars.major-version}}
+        - name: "Test iamguarded compatibility paths"
+          runs: |
+            set -euo pipefail
+            # Test that iamguarded paths exist and work
+            stat /opt/iamguarded/apisix/bin/apisix \
+                 /opt/iamguarded/apisix/bin/openresty \
+                 /opt/iamguarded/apisix/openresty/bin/openresty \
+                 /opt/iamguarded/apisix/openresty/nginx/sbin/nginx \
+                 /opt/iamguarded/apisix/openresty/luajit/bin/luajit \
+                 /opt/iamguarded/apisix/openresty/luarocks/bin/luarocks \
+                 /opt/iamguarded/apisix/conf \
+                 /opt/iamguarded/apisix/deps \
+                 /opt/iamguarded/apisix/ui
+
+            # Test apisix via iamguarded path
+            /opt/iamguarded/apisix/bin/apisix test | grep -F "configuration test is successful"
+        - uses: test/tw/ver-check
+          with:
+            bins: /opt/iamguarded/apisix/bin/apisix
+            version-flag: version
+        - name: "Test functional apisix via iamguarded paths"
+          runs: |
+            nohup etcd >/dev/null 2>&1 &
+            curl --fail --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 http://127.0.0.1:2379/health
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              rm -f /usr/local/apisix/logs/worker_events.sock
+
+              # Use different ports and etcd prefix to avoid conflicts with main test (docker/bubblewrap runners)
+              yq e -i ".apisix.node_listen = 19080" /usr/local/apisix/conf/config.yaml
+              yq e -i ".deployment.admin.admin_listen.port = 19180" /usr/local/apisix/conf/config.yaml
+              yq e -i ".deployment.etcd.prefix = \"/apisix-iamguarded\"" /usr/local/apisix/conf/config.yaml
+            start: /opt/iamguarded/apisix/bin/apisix start
+            expected_output: "trying to initialize the data of etcd"
+            error_strings: |
+              "all etcd nodes are unavailable"
+            timeout: 120
+        - name: "Test API endpoints via iamguarded setup"
+          runs: |
+            ADMIN_KEY=$(yq e -r '.deployment.admin.admin_key[] | .key' /usr/local/apisix/conf/config.yaml)
+            curl --fail -H "X-API-KEY: ${ADMIN_KEY}" "${ADMIN_URL}/apisix/admin/routes"
+
+            payload=$(cat <<EOF
+            {
+              "uri": "/hello",
+              "plugins": {
+                "response-rewrite": {
+                  "body": "hello world",
+                  "status_code": 200
+                }
+              }
+            }
+            EOF
+            )
+
+            curl --fail -X PUT -H "X-API-KEY: ${ADMIN_KEY}" "${ADMIN_URL}/apisix/admin/routes/100" -d "$payload"
+
+            HTTP_CODE=$(curl --fail -s --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 -o /dev/null -w "%{http_code}" "${PROXY_URL}/hello")
+            BODY=$(curl --fail -s  "${PROXY_URL}/hello")
+
+            if [[ "$HTTP_CODE" -ne 200 || "$BODY" != "hello world" ]]; then
+              echo "ERROR: Expected 200 and body 'hello world', got code=$HTTP_CODE, body=$BODY"
+              exit 1
+            fi
+            curl --fail -s -H "X-API-KEY: ${ADMIN_KEY}" "${ADMIN_URL}/apisix/admin/routes" | jq .total | grep 1
+        - name: "Test key-auth plugin"
+          runs: |
+            # Start a simple nodejs webserver
+            cat <<'EOF' > server.js
+            const http = require('http');
+            http.createServer((req, res) => {
+              if (req.url === '/get') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ secure: 'yes' }));
+              } else {
+                res.writeHead(404);
+                res.end();
+              }
+            }).listen(8001, () => console.log('Listening on http://0.0.0.0:8001'));
+            EOF
+            nohup node server.js &
+            curl --fail --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 http://127.0.0.1:8001/get
+            # Get the API key
+            ADMIN_KEY=$(yq e -r '.deployment.admin.admin_key[] | .key' /usr/local/apisix/conf/config.yaml)
+            # Create consumer with key-auth plugin
+            consumer_payload=$(cat <<EOF
+            { "username": "test-consumer", "plugins": {"key-auth": {"key": "consumer-key"}}}
+            EOF
+            )
+            curl --fail -s -H "Content-Type: application/json" -H "X-API-KEY: ${ADMIN_KEY}" -X PUT "${ADMIN_URL}/apisix/admin/consumers/test-consumer" -d "$consumer_payload" | jq
+            # Create route with key-auth plugin and mock upstream
+            ROUTE_KA=101
+            route_payload=$(cat <<EOF
+            {
+              "uri": "/secure",
+              "plugins": {"key-auth": {}, "proxy-rewrite": {"uri": "/get"}},
+              "upstream": {"type": "roundrobin", "nodes": {"127.0.0.1:8001": 1}, "scheme": "http"}
+            }
+            EOF
+            )
+            curl --fail -s -H "Content-Type: application/json" -H "X-API-KEY: ${ADMIN_KEY}" -X PUT "${ADMIN_URL}/apisix/admin/routes/${ROUTE_KA}" -d "$route_payload" | jq
+            # Test without key
+            CODE_NO_KEY=$(curl -s --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 -o /dev/null -w "%{http_code}" "${PROXY_URL}/secure")
+            if [[ "$CODE_NO_KEY" -ne 401 ]]; then
+              echo "ERROR: Expected 401 without key, got $CODE_NO_KEY"
+              exit 1
+            fi
+            # Test with key - should get 200 (proxied to upstream)
+            CODE_KEY=$(curl --fail -s -o /dev/null -w "%{http_code}" -H "apikey: consumer-key" "${PROXY_URL}/secure")
+            if [[ "$CODE_KEY" -ne 200 ]]; then
+              echo "ERROR: Expected 200 with key, got $CODE_KEY"
+              exit 1
+            fi
+            pkill etcd
+            pkill node
+
 update:
   enabled: true
-  # NOTE: we tried with this not being manual, and because package complexity, current automation landes multiple epoch-only updates per day
+  # NOTE: we tried with this not being manual, and because package complexity, current automation lands multiple epoch-only updates per day
   manual: true
   exclude-reason: "This package requires manual updates due to its complexity and dependencies on specific versions of other software."
   github:
@@ -363,6 +556,7 @@ test:
         expected_output: "trying to initialize the data of etcd"
         error_strings: |
           "all etcd nodes are unavailable"
+        timeout: 120
     - name: "Test routes endpoint"
       runs: |
         ADMIN_KEY=$(yq e -r '.deployment.admin.admin_key[] | .key' /usr/local/apisix/conf/config.yaml)
