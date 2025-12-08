@@ -1,7 +1,7 @@
 package:
   name: nvidia-cuda-compat-12.9
   version: "575.57.08"
-  epoch: 1
+  epoch: 2
   description: CUDA Runtime (cudart)
   copyright:
     - license: PROPRIETARY
@@ -16,31 +16,49 @@ environment:
     packages:
       - busybox
 
+vars:
+  nvidia-arch: x86_64
+  deb-arch: amd64
+  ubuntu-version: ubuntu2404
+  deb-sha256: d6571727935e52731a415e22df4d0f0a8717f35c9937d4c4a9fe286297dceaab
+
 var-transforms:
   - from: ${{package.name}}
     match: '.*-(\d+\.\d+).*'
     replace: '$1'
     to: cuda-version
+  - from: ${{package.name}}
+    match: '.*-(\d+)\.(\d+).*'
+    replace: '$1-$2'
+    to: cuda-version-deb
 
 pipeline:
   - uses: fetch
     with:
-      uri: "https://developer.download.nvidia.com/compute/cuda/redist/nvidia_driver/linux-x86_64/nvidia_driver-linux-x86_64-${{package.version}}-archive.tar.xz"
+      uri: "https://developer.download.nvidia.com/compute/cuda/redist/nvidia_driver/linux-${{vars.nvidia-arch}}/nvidia_driver-linux-${{vars.nvidia-arch}}-${{package.version}}-archive.tar.xz"
       expected-sha256: "27ddfabde120a107527cbf88a6c96d1f81ee5c977462ce1a793051a3e678f552"
       timeout: 30
 
   - runs: |
       mkdir -p ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/compat
       cd lib
-      ln -s libcuda.so.${{package.version}} libcuda.so.1
-      ln -s libcuda.so.1 libcuda.so
-      ln -s libcudadebugger.so.${{package.version}} libcudadebugger.so.1
-      ln -s libcudadebugger.so.1 libcudadebugger.so
-      ln -s libnvidia-nvvm.so.${{package.version}} libnvidia.so.4
-      ln -s libnvidia-nvvm.so.${{package.version}} libnvidia.so
-      # libnvidia-pkcs11 for old openssl
-      for lib in libcuda libcudadebugger libnvidia-nvvm libnvidia-pkcs11-openssl3 libnvidia-ptxjitcompiler ; do
-         mv ${lib}.so* ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/compat
+
+      # Libraries shipped in NVIDIA's cuda-compat deb package
+      for lib in \
+        libcuda \
+        libcudadebugger \
+        libnvidia-gpucomp \
+        libnvidia-nvvm \
+        libnvidia-nvvm70 \
+        libnvidia-pkcs11-openssl3 \
+        libnvidia-ptxjitcompiler
+      do
+        mv ${lib}.so* ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/compat
+      done
+
+      # Use ldconfig to create symlinks based on SONAME instead of hardcoding ABI numbers
+      for so in ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/compat/*.so.*.*; do
+        ldconfig -l "$so"
       done
 
 update:
@@ -48,5 +66,36 @@ update:
   enabled: false
 
 test:
+  environment:
+    contents:
+      packages:
+        - dpkg
   pipeline:
     - uses: test/tw/ldd-check
+    - uses: fetch
+      with:
+        uri: "https://developer.download.nvidia.com/compute/cuda/repos/${{vars.ubuntu-version}}/${{vars.nvidia-arch}}/cuda-compat-${{vars.cuda-version-deb}}_${{package.version}}-0ubuntu1_${{vars.deb-arch}}.deb"
+        expected-sha256: ${{vars.deb-sha256}}
+        extract: false
+    - name: "Verify libraries match NVIDIA's cuda-compat deb package"
+      runs: |
+        # Extract deb contents
+        dpkg-deb -x cuda-compat-${{vars.cuda-version-deb}}_${{package.version}}-0ubuntu1_${{vars.deb-arch}}.deb deb-contents
+
+        # Get library base names from deb (e.g., libcuda from libcuda.so.575.57.08)
+        deb_libs=$(ls deb-contents/usr/local/cuda-${{vars.cuda-version}}/compat/*.so.* 2>/dev/null | \
+          xargs -n1 basename | sed 's/\.so\..*$//' | sort -u)
+
+        # Get library base names from our package
+        our_libs=$(ls /usr/local/cuda-${{vars.cuda-version}}/compat/*.so.* 2>/dev/null | \
+          xargs -n1 basename | sed 's/\.so\..*$//' | sort -u)
+
+        # Compare
+        if [ "$deb_libs" != "$our_libs" ]; then
+          echo "ERROR: Library mismatch with upstream deb package" >&2
+          echo "Expected (from deb): $deb_libs" >&2
+          echo "Got (our package): $our_libs" >&2
+          exit 1
+        fi
+
+        echo "SUCCESS: Libraries match NVIDIA's cuda-compat deb package"
