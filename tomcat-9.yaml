@@ -1,7 +1,7 @@
 package:
   name: tomcat-9
   version: "9.0.113"
-  epoch: 0
+  epoch: 1
   description: Apache Tomcat Web Server
   copyright:
     - license: Apache-2.0
@@ -12,26 +12,22 @@ package:
 data:
   - name: openjdk-versions
     items:
-      21: "openjdk-21"
-      17: "openjdk-17"
-      11: "openjdk-11"
-      8: "openjdk-8"
+      21:
+      17:
+      11:
+      8:
+
+vars:
+  # This is the version of OpenJDK actually used for building
+  target-jdk-version: 17
 
 environment:
   contents:
     packages:
       - ant
-      - build-base
       - busybox
-      - ca-certificates-bundle
-      - curl
-      - openjdk-11
-      - openjdk-17
-      # Only 8 and 17 are used during the build process
-      # 11 and 21 are included for tests
-      - openjdk-21
+      - openjdk-${{vars.target-jdk-version}}
       - openjdk-8
-      - tomcat-native
 
 pipeline:
   - uses: git-checkout
@@ -41,7 +37,7 @@ pipeline:
       expected-commit: 1da89d3d01aece456d622548d92055a60ff19c37
 
   - runs: |
-      cat <<EOF > build.properties
+      tee build.properties <<EOF
       skip.installer=true
       base.path=$PWD
       compile.debug=false
@@ -49,36 +45,29 @@ pipeline:
 
 subpackages:
   - range: openjdk-versions
-    name: tomcat-9-${{range.value}}
+    name: ${{package.name}}-openjdk-${{range.key}}
     dependencies:
       runtime:
-        - ${{range.value}}-default-jvm
+        - openjdk-${{range.key}}-default-jvm
         - tomcat-native
     pipeline:
       - runs: |
           if [[ "${{range.key}}" == "8" ]]; then
             export JAVA_HOME="/usr/lib/jvm/java-1.8-openjdk"
           else
-            export JAVA_HOME="/usr/lib/jvm/java-17-openjdk"
+            export JAVA_HOME="/usr/lib/jvm/java-${{vars.target-jdk-version}}-openjdk"
           fi
 
           ant -Dskip.build.java.version=true
 
-          mkdir -p ${{targets.contextdir}}/usr/share/tomcat
-          cp LICENSE ${{targets.contextdir}}/usr/share/tomcat/
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/tomcat/" LICENSE
+          install -Dpm0755 -t "${{targets.subpkgdir}}/usr/share/tomcat/bin/" output/build/bin/*
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/tomcat/conf/" output/build/conf/*
+          install -Dpm0644 -t "${{targets.subpkgdir}}/usr/share/tomcat/lib/" output/build/lib/*
 
-          mkdir -p ${{targets.contextdir}}/usr/share/tomcat/bin
-          cp output/build/bin/* ${{targets.contextdir}}/usr/share/tomcat/bin
-
-          mkdir -p ${{targets.contextdir}}/usr/share/tomcat/conf
-          cp output/build/conf/* ${{targets.contextdir}}/usr/share/tomcat/conf
-
-          mkdir -p ${{targets.contextdir}}/usr/share/tomcat/lib
-          cp output/build/lib/* ${{targets.contextdir}}/usr/share/tomcat/lib
-
-          mkdir -p ${{targets.contextdir}}/usr/share/tomcat/logs
-          mkdir -p ${{targets.contextdir}}/usr/share/tomcat/temp
-          mkdir -p ${{targets.contextdir}}/usr/share/tomcat/webapps
+          install -d ${{targets.subpkgdir}}/usr/share/tomcat/logs \
+            ${{targets.subpkgdir}}/usr/share/tomcat/temp \
+            ${{targets.subpkgdir}}/usr/share/tomcat/webapps
 
           # This includes the manager and host-manager apps.
           # The apps are not directly usable without copying into the webapps directory.
@@ -91,27 +80,19 @@ subpackages:
         contents:
           packages:
             - curl
+            - wait-for-it
       pipeline:
-        - name: Verify Tomcat installation
-          runs: |
-            if [[ ! -d "/usr/share/tomcat" ]]; then
-              echo "Tomcat directory not found!"
-              exit 1
-            fi
-            echo "Tomcat installation verified."
-        - name: Check Tomcat version
-          runs: |
-            sh -c "/usr/share/tomcat/bin/version.sh" | grep "Server version: Apache Tomcat/${{package.version}}" || {
-              echo "Tomcat version mismatch!"
-              exit 1
-            }
-            echo "Tomcat version verified."
+        - uses: test/tw/ver-check
+          with:
+            bins: /usr/share/tomcat/bin/version.sh
+            version-flag: " "
+            version: "Server version: Apache Tomcat/${{package.version}}"
         - name: Test Tomcat catalina.sh with OpenJDK ${{range.key}}
+          environment:
+            LD_LIBRARY_PATH: /usr/lib/tomcat-native
           uses: test/daemon-check-output
           with:
-            setup: |
-              #!/bin/sh -ex
-              cp /usr/share/tomcat/webapps.dist/docs/appdev/sample/sample.war /usr/share/tomcat/webapps/
+            setup: cp /usr/share/tomcat/webapps.dist/docs/appdev/sample/sample.war /usr/share/tomcat/webapps/
             start: |
               sh -c "
                 if [[ "${{range.key}}" == "8" ]]; then
@@ -122,59 +103,37 @@ subpackages:
                 export LD_LIBRARY_PATH=/usr/lib/tomcat-native
                 /usr/share/tomcat/bin/catalina.sh run
               "
-            timeout: 30
             expected_output: |
               Tomcat/${{package.version}}
               JVM.Version
               Deploying.*sample.war
               Server startup in
             post: |
-              #!/bin/sh -e
-              url=http://localhost:8080/sample/
-              echo "testing $url"
-              response=$(curl -s "$url") || {
-                echo "curl $url failed $?"
-                exit 1
-              }
-              expected="Sample.*Hello.*World.*Application"
-              echo "$response" | grep -q "$expected" || {
-                echo "response from $url did not contain \"$expected\""
-                echo "response: $response"
-                exit 1
-              }
-              echo "found \"$expected\" in output of curl $url"
+              wait-for-it localhost:8080
+              curl "http://localhost:8080/sample/" | grep -F -e "Sample \"Hello, World\" Application"
         - name: Test Tomcat startup.sh with OpenJDK ${{range.key}}
-          runs: |
-            if [[ "${{range.key}}" == "8" ]]; then
-              export JAVA_HOME=/usr/lib/jvm/java-1.8-openjdk
-            else
-              export JAVA_HOME=/usr/lib/jvm/java-${{range.key}}-openjdk
-            fi
-
-            export CATALINA_HOME="/usr/share/tomcat"
-            export CATALINA_BASE="/usr/share/tomcat"
-            export LD_LIBRARY_PATH="/usr/lib/tomcat-native"
-
-            /usr/share/tomcat/bin/startup.sh
-            sleep 5
-
-            curl --silent --retry 3 --retry-connrefused http://localhost:8080/ | grep "Apache Tomcat" || {
-              echo "Tomcat did not start correctly on JDK ${{range.key}}"
-              exit 1
-            }
-
-            /usr/share/tomcat/bin/shutdown.sh
-            sleep 3
-        - name: Deploy test application
-          runs: |
-            cp /usr/share/tomcat/webapps.dist/docs/appdev/sample/sample.war /usr/share/tomcat/webapps/
-            /usr/share/tomcat/bin/startup.sh
-            sleep 5
-            curl --silent --retry 3 --retry-connrefused http://localhost:8080/sample/ | grep "This is the home page for a sample application" || {
-              echo "Test application deployment failed!"
-              exit 1
-            }
-            /usr/share/tomcat/bin/shutdown.sh
+          environment:
+            CATALINA_HOME: /usr/share/tomcat
+            CATALINA_BASE: /usr/share/tomcat
+            LD_LIBRARY_PATH: /usr/lib/tomcat-native
+            JAVA_HOME: /usr/lib/jvm/java-${{range.key}}-openjdk
+          uses: test/daemon-check-output
+          with:
+            start: |
+              sh -c "
+                if [[ "${{range.key}}" == "8" ]]; then
+                  export JAVA_HOME=/usr/lib/jvm/java-1.8-openjdk
+                else
+                  export JAVA_HOME=/usr/lib/jvm/java-${{range.key}}-openjdk
+                fi
+                export LD_LIBRARY_PATH=/usr/lib/tomcat-native
+                /usr/share/tomcat/bin/startup.sh
+              "
+            expected_output: |
+              Tomcat started.
+            post: |
+              wait-for-it localhost:8080
+              curl "http://localhost:8080/" | grep -F -e "Apache Tomcat"
 
 update:
   enabled: true
@@ -185,7 +144,6 @@ update:
     use-tag: true
     tag-filter: 9.
 
-# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
 test:
   pipeline:
     - uses: test/emptypackage
