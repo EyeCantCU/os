@@ -32,7 +32,7 @@ packages: [
 	"zstd",
 ]
 
-art: images: aws_atsec_jitterentropy_fips_full: {
+art: images: aws_atsec_612_jitterentropy_fips_full: {
 	metadata: fips: true
-	pkgs: list.Concat([packages, aws.fips_full])
+	pkgs: list.Concat([packages, aws.fips_612_full])
 }
