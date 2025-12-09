@@ -9,12 +9,20 @@ import (
 
 // Image sets
 // Groups of packages assembled into a functional image flavor.
-fips_full: list.Concat([
+fips_612_full: list.Concat([
 	packages,
 	fips_agents,
 	common.ssh_key_fetcher,
 	common.apk_tools,
-	kernel.aws_fips,
+	kernel.aws_612_fips,
+])
+
+fips_618_full: list.Concat([
+	packages,
+	fips_agents,
+	common.ssh_key_fetcher,
+	common.apk_tools,
+	kernel.aws_618_fips,
 ])
 
 // Package sets

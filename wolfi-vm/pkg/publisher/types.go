@@ -32,7 +32,7 @@ const (
 	MediaTypeVMApkoSbom = "application/spdx+json"
 
 	// Custom media types for VM disk artifacts
-	MediaTypeVMDiskRaw    = "application/vnd.chainguard.vm.disk.raw.tgz.v1+gzip"
+	MediaTypeVMDiskRaw    = "application/vnd.chainguard.vm.disk.raw.v1+gzip"
 	MediaTypeVMDiskQcow2  = "application/vnd.chainguard.vm.disk.qcow2.v1+gzip"
 	MediaTypeVMDiskVmdk   = "application/vnd.chainguard.vm.disk.vmdk.v1+gzip"
 	MediaTypeVMDiskVhd    = "application/vnd.chainguard.vm.disk.vhd.v1+gzip"
@@ -49,7 +49,7 @@ const (
 type ImageWithMetadata struct {
 	Image        v1.Image
 	Arch         types.Architecture
-	ArtifactType string // e.g., "apko.v1", "disk.raw.tgz.v1", "disk.qcow2.v1", "sbom.v1", "secureboot.v1"
+	ArtifactType string // e.g., "apko.v1", "disk.raw.v1", "disk.qcow2.v1", "sbom.v1", "secureboot.v1"
 }
 
 // PublishOptions contains optional parameters for publishing VM artifacts

@@ -1,0 +1,222 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: livegrep
+  version: 0_git20250814
+  epoch: 0
+  description: Fast, indexed regex search over large codebases
+  copyright:
+    - license: BSD-2-Clause
+  resources:
+    cpu: 16
+    memory: 32Gi
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bazel-7
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang-18
+      - cmake
+      - git
+      - gnutar # GNU tar required for Bazel aspect_rules_js npm package extraction
+      - libtool
+      - lld-18
+      - llvm-18-dev
+      - openjdk-21-default-jdk
+      - python3-dev
+      - samurai
+      - wolfi-baselayout
+  environment:
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+    # Build using clang to avoid GCC 15 / abseil-cpp compatibility issues
+    CC: clang
+    CXX: clang++
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/livegrep/livegrep
+      branch: main
+      expected-commit: 84f1eb0de5bd0396b18ce476d46f32b520d3e071
+      destination: livegrep
+
+  - runs: |
+      mkdir -p .cache/bazel/_bazel_root
+
+      cd livegrep
+
+      # Setup clang toolchain
+      ../bazel/setup_clang.sh /usr || true
+
+      # Create symlink for llvm-ar
+      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-18
+
+      bazel build --verbose_failures -c opt //src/tools:codesearch
+
+      # Install codesearch binary
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      mv bazel-bin/src/tools/codesearch ${{targets.destdir}}/usr/bin/codesearch
+
+      # Clean up bazel cache
+      rm -rf ../.cache/bazel/_bazel_root
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-frontend
+    description: Web frontend for livegrep code search
+    dependencies:
+      runtime:
+        - ${{package.name}}=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p .cache/bazel/_bazel_root
+
+          cd livegrep
+
+          bazel build --verbose_failures -c opt //cmd/livegrep
+
+          # Install livegrep binary
+          mkdir -p ${{targets.subpkgdir}}/usr/bin/
+          mv bazel-bin/cmd/livegrep/livegrep_/livegrep ${{targets.subpkgdir}}/usr/bin/livegrep
+
+          # Install web assets
+          mkdir -p ${{targets.subpkgdir}}/usr/share/livegrep
+          cp -r web ${{targets.subpkgdir}}/usr/share/livegrep/
+
+          # Clean up bazel cache
+          rm -rf ../.cache/bazel/_bazel_root
+      - uses: strip
+    test:
+      pipeline:
+        - name: "Verify frontend binary"
+          runs: |
+            set -euo pipefail
+            # livegrep --help exits with status 1, so just verify binary exists
+            test -x "$(which livegrep)"
+
+  - name: ${{package.name}}-github-reindex
+    description: GitHub repository indexing helper for livegrep
+    dependencies:
+      runtime:
+        - ${{package.name}}=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p .cache/bazel/_bazel_root
+
+          cd livegrep
+
+          bazel build --verbose_failures -c opt //cmd/livegrep-github-reindex
+
+          # Install binary
+          mkdir -p ${{targets.subpkgdir}}/usr/bin/
+          mv bazel-bin/cmd/livegrep-github-reindex/livegrep-github-reindex_/livegrep-github-reindex ${{targets.subpkgdir}}/usr/bin/livegrep-github-reindex
+
+          # Clean up bazel cache
+          rm -rf ../.cache/bazel/_bazel_root
+      - uses: strip
+    test:
+      pipeline:
+        - name: "Verify github-reindex binary"
+          runs: |
+            set -euo pipefail
+            # livegrep-github-reindex --help exits with status 1, so just verify binary exists
+            test -x "$(which livegrep-github-reindex)"
+
+  - name: ${{package.name}}-compat
+    description: Compatibility package for upstream livegrep container images
+    dependencies:
+      runtime:
+        - ${{package.name}}=${{package.full-version}}
+        - ${{package.name}}-frontend=${{package.full-version}}
+    pipeline:
+      - runs: |
+          # Create symlinks matching upstream container paths
+          mkdir -p ${{targets.subpkgdir}}/livegrep/bin
+          ln -sf /usr/bin/codesearch ${{targets.subpkgdir}}/livegrep/bin/codesearch
+          ln -sf /usr/bin/livegrep ${{targets.subpkgdir}}/livegrep/bin/livegrep
+
+          # Link web assets
+          mkdir -p ${{targets.subpkgdir}}/livegrep
+          ln -sf /usr/share/livegrep/web ${{targets.subpkgdir}}/livegrep/web
+    test:
+      pipeline:
+        - name: "Verify compat symlinks"
+          runs: |
+            set -euo pipefail
+            # Check that symlinks exist and point to correct locations
+            test -L /livegrep/bin/codesearch
+            test -L /livegrep/bin/livegrep
+            test -L /livegrep/web
+            # Verify symlinks are executable (--help exits with status 1)
+            test -x /livegrep/bin/codesearch
+            test -x /livegrep/bin/livegrep
+
+test:
+  environment:
+    environment:
+      TEST_DIR: /tmp/livegrep-test
+      INDEX_FILE: /tmp/livegrep-test/index.idx
+      CONFIG_FILE: /tmp/livegrep-test/index.json
+    contents:
+      packages:
+        - bash
+        - curl
+        - jq
+        - netcat-openbsd
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: codesearch
+    - uses: test/tw/ldd-check
+    - name: "Test codesearch indexing and search"
+      runs: |
+        set -euo pipefail
+
+        # Create a test repository with some code
+        mkdir -p "${TEST_DIR}/test-repo"
+        tee "${TEST_DIR}/test-repo/test.go" << 'EOF'
+        package main
+
+        import "fmt"
+
+        func main() {
+            fmt.Println("Hello from livegrep test")
+        }
+        EOF
+
+        tee "${TEST_DIR}/test-repo/README.md" << 'EOF'
+        # Test Repository
+        This is a test repository for livegrep indexing.
+        EOF
+
+        # Create index configuration
+        tee "${CONFIG_FILE}" << 'EOF'
+        {
+          "name": "test",
+          "fs_paths": [
+            {
+              "name": "test-repo",
+              "path": "/tmp/livegrep-test/test-repo"
+            }
+          ]
+        }
+        EOF
+
+        # Build index - will fail automatically with set -e if unsuccessful
+        codesearch -index_only -dump_index "${INDEX_FILE}" "${CONFIG_FILE}"
+
+        # Verify index file was created
+        test -f "${INDEX_FILE}"
+
+        echo "Index successfully created"
+
+update:
+  enabled: true
+  git: {}
+  schedule:
+    period: weekly
+    reason: Upstream does not maintain tags or releases

@@ -69,7 +69,7 @@ func (p *Publisher) createImages(ctx context.Context, artifacts *Artifacts) ([]I
 		artifactType string
 		name         string
 	}{
-		{artifacts.DiskRaw, MediaTypeVMDiskRaw, "disk.raw.tgz.v1", "disk.raw.tgz"},
+		{artifacts.DiskRaw, MediaTypeVMDiskRaw, "disk.raw.v1", "disk.raw"},
 		{artifacts.DiskQcow2, MediaTypeVMDiskQcow2, "disk.qcow2.v1", "disk.qcow2"},
 		{artifacts.DiskVmdk, MediaTypeVMDiskVmdk, "disk.vmdk.v1", "disk.vmdk"},
 		{artifacts.DiskVhd, MediaTypeVMDiskVhd, "disk.vhd.v1", "disk.vhd"},

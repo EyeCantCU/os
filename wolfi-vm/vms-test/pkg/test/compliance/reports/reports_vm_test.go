@@ -92,11 +92,13 @@ func TestGenerateComplianceReports(t *testing.T) {
 	}
 
 	profiles := []struct {
-		prettyName  string
-		profileName string
+		prettyName     string
+		profileName    string
+		withStigViewer bool
 	}{
-		{"CIS Server L1", "xccdf_org.ssgproject.content_profile_cis_server_l1"},
-		{"STIG", "xccdf_org.ssgproject.content_profile_stig"},
+		{"CIS Server L1", "xccdf_org.ssgproject.content_profile_cis_server_l1", false},
+		{"STIG", "xccdf_org.ssgproject.content_profile_stig", false},
+		{"STIG GPOS", "xccdf_org.ssgproject.content_profile_stig_gpos", true},
 	}
 
 	for _, profile := range profiles {
@@ -107,15 +109,23 @@ func TestGenerateComplianceReports(t *testing.T) {
 			// Filesystem-friendly name, e.g. "cis-server-l1"
 			fsName := strings.ToLower(strings.ReplaceAll(profile.prettyName, " ", "-"))
 			resultsFile := fsName + "-results.xml"
+			viewerFile := fsName + "-stigviewer.xml"
 			reportFile := fsName + "-report.html"
 
-			// Run the scan. This needs elevated privileges, because with hardening
-			// applied some of the rules will read files inaccessible to regular users.
-			cmd := exec.CommandContext(ctx, "oscap", "xccdf", "eval",
+			argv := []string{
+				"oscap", "xccdf", "eval",
 				"--profile", profile.profileName,
 				"--results", resultsFile,
 				"--report", reportFile,
-				ssgFile)
+			}
+			if profile.withStigViewer {
+				argv = append(argv, "--stig-viewer", viewerFile)
+			}
+			argv = append(argv, ssgFile)
+
+			// Run the scan. This needs elevated privileges, because with hardening
+			// applied some of the rules will read files inaccessible to regular users.
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 			output, err := cmd.CombinedOutput()
 			t.Logf("OpenSCAP output:\n%s", output)
 
@@ -153,6 +163,11 @@ func TestGenerateComplianceReports(t *testing.T) {
 
 			content, err = os.ReadFile(reportFile)
 			artifacts.File(t, files.ComplianceHTMLReport, content, err, meta)
+
+			if profile.withStigViewer {
+				content, err = os.ReadFile(viewerFile)
+				artifacts.File(t, files.ComplianceStigViewerXML, content, err, meta)
+			}
 		})
 	}
 }

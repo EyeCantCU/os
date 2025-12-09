@@ -98,8 +98,8 @@ Tags (each pointing to a separate multi-arch index):
   gcp-20241103-1234         → gcp timestamped
 
 Each multi-arch index contains:
-  - x86_64 sub-index → apko tar, disk.raw.tgz, disk.qcow2, disk.vmdk, disk.vhd, SBOMs
-  - aarch64 sub-index → apko tar, disk.raw.tgz, disk.qcow2, disk.vmdk, disk.vhd, SBOMs
+  - x86_64 sub-index → apko tar, disk.raw, disk.qcow2, disk.vmdk, disk.vhd, SBOMs
+  - aarch64 sub-index → apko tar, disk.raw, disk.qcow2, disk.vmdk, disk.vhd, SBOMs
 ```
 
 #### Publishing Commands
@@ -284,7 +284,7 @@ Publishing requires a `publish.yaml` config file that defines the OCI image name
 **The publish.yaml config specifies:**
 - `image`: The OCI image name (e.g., `python` becomes `cgr.dev/chainguard-vms/python`)
 - `tags`: List of base tag names (each expands to 2 variants: `tag-TIMESTAMP` and `tag-latest`)
-- `disk_formats`: **Required** list specifying which disk formats to publish (e.g., `[vhd]`, `[qcow2]`, `[raw.tgz, vmdk]`)
+- `disk_formats`: **Required** list specifying which disk formats to publish (e.g., `[vhd]`, `[qcow2]`, `[raw, vmdk]`)
 
 **Example publish.yaml:**
 ```yaml
