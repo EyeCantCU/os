@@ -133,7 +133,6 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 		"-drive", "if=pflash,format=raw,unit=0,file=" + ovmf + ",readonly=on",
 		"-drive", "if=pflash,format=raw,unit=1,file=" + varsPath,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
-		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()),
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
 		"-netdev", "user,id=id1," + getHostFwd(),
@@ -150,6 +149,7 @@ func generateArmCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 			}...)
 		}
 	case "linux":
+		cmd = append(cmd, "-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()))
 		if CanUseKVM() &&
 			types.ParseArchitecture(arch).ToAPK() == types.ParseArchitecture(runtime.GOARCH).ToAPK() {
 			return append(cmd, []string{
@@ -188,12 +188,16 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 		"-drive", "if=pflash,format=raw,unit=0,file=" + ovmf + ",readonly=on",
 		"-drive", "if=pflash,format=raw,unit=1,file=" + varsPath,
 		"-blockdev", "driver=raw,node-name=disk-debug.raw,file.driver=file,file.filename=" + efiDisk,
-		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()),
 		"-device", "virtio-blk-pci,drive=disk-debug.raw,serial=boot-disk,discard=true",
 		"-device", "virtio-net-pci,netdev=id1",
 		"-netdev", "user,id=id1," + getHostFwd(),
 		"-serial", "unix:" + socketPath + ",wait=off,server=on",
 	}...)
+
+	if runtime.GOOS == "linux" {
+		cmd = append(cmd, "-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", randomCID()))
+	}
+
 	// on linux, with kvm and if arches match, let's use acceleration
 	if runtime.GOOS == "linux" &&
 		CanUseKVM() &&
@@ -202,6 +206,7 @@ func generateAmdCommand(arch, efiDisk, ovmf, socketPath, varsPath string) []stri
 	} else {
 		cmd = append(cmd, []string{"-cpu", "Haswell-v4", "-accel", "tcg"}...)
 	}
+
 	return cmd
 }
 

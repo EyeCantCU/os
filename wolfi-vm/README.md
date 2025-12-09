@@ -268,7 +268,7 @@ Top-Level OCI Image Index (tagged :latest)
 ├── Platform: amd64/linux → Sub-Index
 │   └── Sub-Index for x86_64
 │       ├── Image: apko rootfs (artifact.type=apko.v1)
-│       ├── Image: disk.raw.tgz (artifact.type=disk.raw.tgz.v1)
+│       ├── Image: disk.raw (artifact.type=disk.raw.v1)
 │       ├── Image: disk.qcow2 (artifact.type=disk.qcow2.v1)
 │       ├── Image: disk.vmdk (artifact.type=disk.vmdk.v1)
 │       ├── Image: disk.vhd (artifact.type=disk.vhd.v1)
@@ -288,7 +288,7 @@ Top-Level OCI Image Index (tagged :latest)
 
 **Artifact Type Images**:
 - `apko.v1` - Apko rootfs tarball (`application/vnd.oci.image.layer.v1.tar+gzip`)
-- `disk.raw.tgz.v1` - Raw disk image in tarball (`application/vnd.chainguard.vm.disk.raw.tgz.v1+gzip`)
+- `disk.raw.v1` - Raw disk image in tarball (`application/vnd.chainguard.vm.disk.raw.v1+gzip`)
 - `disk.qcow2.v1` - QEMU qcow2 format (`application/vnd.chainguard.vm.disk.qcow2.v1+gzip`)
 - `disk.vmdk.v1` - VMware VMDK format (`application/vnd.chainguard.vm.disk.vmdk.v1+gzip`)
 - `disk.vhd.v1` - Azure VHD/VPC format (`application/vnd.chainguard.vm.disk.vhd.v1+gzip`)

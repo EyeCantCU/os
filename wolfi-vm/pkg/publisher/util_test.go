@@ -47,7 +47,7 @@ func TestIsSecureBootFile(t *testing.T) {
 		{filename: "KEK.esl", want: true},
 
 		// Should not match
-		{filename: "disk.raw.tgz.v1", want: false},
+		{filename: "disk.raw.v1", want: false},
 		{filename: "disk.qcow2.v1", want: false},
 		{filename: "regular.txt", want: false},
 		{filename: "apko.tar.gz", want: false},
@@ -83,8 +83,8 @@ func TestCopyICWithArtifactType(t *testing.T) {
 			base: types.ImageConfiguration{
 				Annotations: map[string]string{},
 			},
-			artifactType: "disk.raw.tgz.v1",
-			wantType:     "disk.raw.tgz.v1",
+			artifactType: "disk.raw.v1",
+			wantType:     "disk.raw.v1",
 		},
 		{
 			name: "config with existing annotations",

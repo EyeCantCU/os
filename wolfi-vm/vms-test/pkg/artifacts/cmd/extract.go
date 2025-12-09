@@ -66,6 +66,16 @@ func extractArtifacts(resultsDir, outputDir string) error {
 
 	// Process each artifact file
 	for _, artifactFile := range matches {
+
+		info, err := os.Stat(artifactFile)
+		if err != nil {
+			return fmt.Errorf("failed to stat %s: %w", artifactFile, err)
+		}
+		if info.Size() == 0 {
+			fmt.Printf("emptty %s: ignoring\n", artifactFile)
+			continue
+		}
+
 		metrics, files, err := processArtifactFile(artifactFile, outputDir)
 		if err != nil {
 			return fmt.Errorf("failed to process %s: %w", artifactFile, err)

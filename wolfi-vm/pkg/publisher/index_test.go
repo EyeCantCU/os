@@ -119,7 +119,7 @@ func TestCreateDescriptor(t *testing.T) {
 			mediaType: ggcrtypes.OCIImageIndex,
 			arch:      types.ParseArchitecture("x86_64"),
 			annotations: map[string]string{
-				AnnotationArtifactType: "disk.raw.tgz.v1",
+				AnnotationArtifactType: "disk.raw.v1",
 				"custom.annotation":    "value",
 			},
 			wantArch:   "amd64",
@@ -414,7 +414,7 @@ func TestStaticIndex_Image(t *testing.T) {
 		{
 			name: "image found - first image",
 			images: []ImageWithMetadata{
-				{Image: img1, ArtifactType: "disk.raw.tgz.v1"},
+				{Image: img1, ArtifactType: "disk.raw.v1"},
 				{Image: img2, ArtifactType: "disk.qcow2.v1"},
 			},
 			lookupHash: digest1,
@@ -424,7 +424,7 @@ func TestStaticIndex_Image(t *testing.T) {
 		{
 			name: "image found - second image",
 			images: []ImageWithMetadata{
-				{Image: img1, ArtifactType: "disk.raw.tgz.v1"},
+				{Image: img1, ArtifactType: "disk.raw.v1"},
 				{Image: img2, ArtifactType: "disk.qcow2.v1"},
 			},
 			lookupHash: digest2,
@@ -434,7 +434,7 @@ func TestStaticIndex_Image(t *testing.T) {
 		{
 			name: "image not found",
 			images: []ImageWithMetadata{
-				{Image: img1, ArtifactType: "disk.raw.tgz.v1"},
+				{Image: img1, ArtifactType: "disk.raw.v1"},
 				{Image: img2, ArtifactType: "disk.qcow2.v1"},
 			},
 			lookupHash: digest3,

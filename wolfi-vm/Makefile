@@ -289,9 +289,15 @@ builder/kernel-%: apkoaas
 
 ARCHES = aarch64 x86_64
 PUBLISH_TARGET ?= dev
-COMMIT ?= $(shell git rev-parse HEAD || echo no-git)
-PREFIX ?= $(shell id -un)
-BUILD_TIMESTAMP ?= $(shell date -u "+%Y%m%d-%H%M")
+ifeq ($(origin COMMIT),undefined)
+COMMIT != git rev-parse HEAD || echo no-git
+endif
+ifeq ($(origin PREFIX),undefined)
+PREFIX != id -un
+endif
+ifeq ($(origin BUILD_TIMESTAMP),undefined)
+BUILD_TIMESTAMP != date -u "+%Y%m%d-%H%M"
+endif
 AZVERSION ?= $(shell BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)"; echo "$${BUILD_TIMESTAMP%-*}.$${BUILD_TIMESTAMP$(HASH)*-}.0")
 AZTAGS += env=$(PUBLISH_TARGET),commit=$(COMMIT)
 GCPLABELS = env=$(PUBLISH_TARGET),commit=$(COMMIT)
@@ -374,9 +380,9 @@ $(foreach name,$(disks_aws),aws-image-create-$(name)): aws-image-create-%: $(ARC
 $(foreach name,$(disks_aws),aws-image-share-$(name)): aws-image-share-%: $(ARCH_OUT_D)/awspub/share/%.json
 $(foreach name,$(disks_aws),aws-image-publish-$(name)): aws-image-publish-%: $(ARCH_OUT_D)/awspub/publish/%.output
 
-aws-publish: $(foreach name,$(disks_aws),aws-publish-$(name))
-aws-create: $(foreach name,$(disks_aws),aws-create-$(name))
-aws-share: $(foreach name,$(disks_aws),aws-share-$(name))
+aws-publish: $(foreach name,$(disks_aws),aws-image-publish-$(name))
+aws-create: $(foreach name,$(disks_aws),aws-image-create-$(name))
+aws-share: $(foreach name,$(disks_aws),aws-image-share-$(name))
 aws-publish-aws-ecs: $(foreach name,$(group_aws_ecs),aws-image-publish-$(name))
 aws-publish-aws-eks: $(foreach name,$(group_aws_eks),aws-image-publish-$(name))
 aws-publish-aws-main: $(foreach name,$(group_aws_main),aws-image-publish-$(name))
@@ -637,6 +643,9 @@ show-vars:
 	@echo BUILDER_KERNEL=$(BUILDER_KERNEL)
 	@echo BUILDER_INITRD=$(BUILDER_INITRD)
 	@echo ALL_DISKS=$(ALL_DISKS)
+	@echo COMMIT=$(COMMIT)
+	@echo PREFIX=$(PREFIX)
+	@echo BUILD_TIMESTAMP=$(BUILD_TIMESTAMP)
 	@echo names=$(names)
 
 .PRECIOUS: $(foreach bname,disk.raw disk-debug.raw disk.vmdk disk-flat.vmdk disk.qcow2 disk.vhd image.tar initramfs.cpio,$(ARCH_OUT_D)/%/$(bname))
