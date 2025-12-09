@@ -12,15 +12,15 @@ import (
 const (
 	customerAPKQuery = `
 SELECT DISTINCT
-  REGEXP_REPLACE(p.body.package, r'^(x86_64|aarch64)-', '') AS trimmed_package
+  REGEXP_REPLACE(p.body.package, r'^(x86_64|aarch64)-', '') AS package_name
 FROM
-  ` + "`prod-enforce-fabc.cloudevents_enforce_prod_rec.dev_chainguard_apk_pull_v1`" + ` as p
+  cloudevents_enforce_prod_rec.dev_chainguard_apk_pull_v1 as p
 WHERE
   p.body.proxy_uidp IS NOT NULL
   AND DATE(_PARTITIONTIME) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
   AND p.body.when >= DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 90 DAY)
 ORDER BY
-  trimmed_package
+  package_name
 `
 )
 
@@ -46,7 +46,7 @@ func fetchCustomerAPKsFromBigQuery(ctx context.Context) (map[string]bool, error)
 	// Parse results
 	customerAPKs := make(map[string]bool)
 	var row struct {
-		TrimmedPackage string `bigquery:"trimmed_package"`
+		PackageName string `bigquery:"package_name"`
 	}
 
 	for {
@@ -58,8 +58,8 @@ func fetchCustomerAPKsFromBigQuery(ctx context.Context) (map[string]bool, error)
 			return nil, fmt.Errorf("reading query results: %w", err)
 		}
 
-		if row.TrimmedPackage != "" {
-			customerAPKs[row.TrimmedPackage] = true
+		if row.PackageName != "" {
+			customerAPKs[row.PackageName] = true
 		}
 	}
 
