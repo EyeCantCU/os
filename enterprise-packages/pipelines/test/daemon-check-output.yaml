@@ -14,7 +14,7 @@ description: |
   Example 1 - Basic daemon startup verification:
     - uses: test/daemon-check-output
       with:
-        start: mydaemon --config /tmp/config.yaml
+        start: /use/bin/foo/mydaemon --config /tmp/config.yaml
         expected_output: "Server listening on port"
 
   Example 2 - Setup config, start daemon, verify with curl:
@@ -26,7 +26,7 @@ description: |
           port: 8080
           dataDir: /tmp/daemon-data
           EOF
-        start: mydaemon --config /tmp/config.yaml
+        start: /use/bin/foo/mydaemon --config /tmp/config.yaml
         expected_output: "Server started successfully"
         post: |
           curl -f http://localhost:8080/health
@@ -58,6 +58,14 @@ description: |
           wait-for-it localhost:9000 -t 30
           curl http://localhost:9000/api/status
 
+  DEPENDENCIES:
+     CRITICAL - Daemon Dependencies:
+     - Each test/daemon-check-output step is ISOLATED - daemons stop after the step completes
+     - If service A depends on service B running:
+       CORRECT: Start B in A's setup script
+       WRONG: Create separate test step for B (it will stop before A runs)
+     - Example: Kafka needs ZooKeeper → start ZooKeeper in Kafka test's setup script
+
 needs:
   packages:
     - busybox
@@ -68,8 +76,16 @@ inputs:
     description: |
       The command to run to start the daemon.
       This is the command that starts your server/daemon process.
-      Example: "zookeeper-server-start /tmp/config.properties"
-      Example: "/usr/bin/redis-server --port 6379"
+
+      IMPORTANT: Use absolute paths, NOT cd && command patterns.
+      CORRECT: "/usr/lib/kafka/bin/kafka-server-start.sh /usr/lib/kafka/config/server.properties"
+      WRONG: "cd /usr/lib/kafka && bin/kafka-server-start.sh config/server.properties"
+
+      More examples:
+      - "/usr/share/java/zookeeper/bin/zkServer.sh start /tmp/zoo.cfg"
+      - "/usr/bin/redis-server --port 6379"
+      - "nginx -c /etc/nginx/nginx.conf"
+
       WARNING: executed with a shell.
     required: true
   setup:
@@ -78,6 +94,10 @@ inputs:
       Use this to create directories, generate config files, set environment variables, etc.
       Content is placed into a file and executed. If no '#!' is present,
       then '#!/bin/sh -ex' will be prepended.
+
+      IMPORTANT: wait-for-it is pre-installed and available for use.
+      USE: "wait-for-it localhost:2181 -t 30" to wait for port availability
+      AVOID: Custom for loops with sleep and grep - use wait-for-it instead
 
       Example:
         setup: |
@@ -88,6 +108,13 @@ inputs:
           logLevel: debug
           EOF
 
+      Example with dependency daemon:
+        setup: |
+          # Start ZooKeeper for Kafka to use
+          /usr/share/java/zookeeper/bin/zkServer.sh start /tmp/zoo.cfg > /tmp/zk.log 2>&1 &
+          # Wait for ZooKeeper to be ready on port 2181
+          wait-for-it localhost:2181 -t 30
+
       WARNING: The content of this field goes through shell. Avoid single quotes.
     required: false
   post:
@@ -97,6 +124,9 @@ inputs:
       connections, perform basic operations, etc.
       Handled just like setup (gets '#!/bin/sh -ex' prepended if no shebang).
 
+      IMPORTANT: wait-for-it is pre-installed and available.
+      Use it to wait for ports if you need to verify connectivity before running tests.
+
       Example:
         post: |
           # Verify server responds to HTTP requests
@@ -104,6 +134,13 @@ inputs:
 
           # Test basic functionality
           echo "ping" | nc localhost 6379 | grep -q "PONG"
+
+      Example with port wait:
+        post: |
+          # Wait for service to be fully ready on port
+          wait-for-it localhost:9092 -t 30
+          # Now test functionality
+          /usr/lib/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
     required: false
   timeout:
     description: |
