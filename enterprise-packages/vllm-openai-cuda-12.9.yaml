@@ -1,7 +1,8 @@
+#nolint:valid-pipeline-git-checkout-tag
 package:
   name: vllm-openai-cuda-12.9
-  version: 0.11.2
-  epoch: 2
+  version: 0.12.0
+  epoch: 0
   description: A high-throughput and memory-efficient inference and serving engine for LLMs
   target-architecture:
     - x86_64
@@ -45,6 +46,7 @@ package:
       - nvidia-libnvjitlink-${{vars.cuda-version}} # libnvJitLink.so.12
       # NCCL (from PyTorch libtorch_cuda.so)
       - nvidia-nccl-cuda-${{vars.cuda-version}} # libnccl.so.2
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev # nccl.h header for JIT compilation (pynccl_allocator.py)
       - openmpi-cuda-${{vars.cuda-version}} # provides so:libmpi.so.40
       - openpmix # provides so:libpmix.so.2
       - py${{vars.python-version}}-opencv-python-headless # use system OpenCV instead of PyPI wheel to avoid vendored OpenSSL, needed for FIPS
@@ -72,8 +74,8 @@ vars:
   cudnn-major-version: 9
   import: vllm
   pypi-package: vllm
-  flashinfer-cubin-version: "0.5.2"
-  flashinfer-jit-cache-version: "0.5.2"
+  flashinfer-cubin-version: "0.5.3"
+  flashinfer-jit-cache-version: "0.5.3"
   install-kv-connectors: "false" # toggle to true to match upstream kv connectors layer
   # For support of open-ai server, we also fix bitsandbytes version as per upstream and they are different for different archs
   # It is critical for vllm-openai so please change when upstream changes
@@ -81,6 +83,8 @@ vars:
   bitsandbytes-x86-version: "0.46.1"
   timm-version: "1.0.17"
   python-version: 3.12
+  # DeepGEMM commit from upstream vLLM 0.12.0 tools/install_deepgemm.sh
+  deepgemm-commit: "594953acce41793ae00a1233eb516044d604bcb6"
 
 var-transforms:
   - from: ${{package.name}}
@@ -137,7 +141,7 @@ pipeline:
     with:
       repository: https://github.com/vllm-project/vllm.git
       tag: v${{package.version}}
-      expected-commit: 275de34170654274616082721348b7edd9741d32
+      expected-commit: 4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e
 
   - runs: ccache -F 0 -M 0
 
@@ -206,6 +210,18 @@ pipeline:
         exit 1
       fi
 
+      # DeepGEMM commit check (from tools/install_deepgemm.sh)
+      MELANGE_DEEPGEMM="${{vars.deepgemm-commit}}"
+      DEEPGEMM_SCRIPT="tools/install_deepgemm.sh"
+      echo "Checking DeepGEMM commit in $DEEPGEMM_SCRIPT:"
+      grep -n "DEEPGEMM_GIT_REF=" "$DEEPGEMM_SCRIPT" | head -1
+      if grep -Fq "${MELANGE_DEEPGEMM}" "$DEEPGEMM_SCRIPT"; then
+        echo "DeepGEMM -> commit ${MELANGE_DEEPGEMM} found"
+      else
+        echo "DeepGEMM drift (expected commit ${MELANGE_DEEPGEMM} not found in $DEEPGEMM_SCRIPT)"
+        exit 1
+      fi
+
       echo "No drift detected."
 
   - name: Install build CUDA dependencies for vLLM wheel
@@ -269,6 +285,31 @@ pipeline:
         --extra-index-url "https://flashinfer.ai/whl/cu${{vars.pytorch-cuda-suffix}}" \
         "flashinfer-jit-cache==${{vars.flashinfer-jit-cache-version}}"
 
+  # DeepGEMM — FP8 GEMM kernels for Hopper/Blackwell (SM 9.0a/10.0a)
+  # Provides ~5.5% throughput improvement, enabled by default in vLLM 0.11+
+  # Upstream pins by commit (not tag), so we use branch+expected-commit with nolint
+  - uses: git-checkout
+    with:
+      repository: https://github.com/deepseek-ai/DeepGEMM.git
+      branch: main
+      expected-commit: ${{vars.deepgemm-commit}}
+      recurse-submodules: true
+      destination: deepgemm
+
+  - name: Build and install DeepGEMM
+    working-directory: deepgemm
+    runs: |
+      set -eux
+
+      # Build for Hopper (9.0a) and Blackwell (10.0a) only - matches upstream
+      export TORCH_CUDA_ARCH_LIST="9.0a 10.0a"
+
+      python3 setup.py bdist_wheel --dist-dir dist
+
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        dist/*.whl
+
   # Install build.txt into runtime for JIT compilation
   - name: Install build-time deps into runtime (for JIT)
     runs: |
@@ -295,9 +336,6 @@ pipeline:
       # If we ship it then we have to pull in cudnn8 which is not compatible with cudnn9 we ship
       # https://github.com/vllm-project/vllm/pull/3625
       uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" cupy-cuda12x
-
-      # NOTE: torchaudio 2.9 removed torio module (deprecated in 2.8, removed in 2.9).
-      # FFmpeg bindings are no longer shipped - torchaudio now uses TorchCodec.
 
       # Remove PyPI opencv-python-headless in favor of system package (py3.12-opencv-python-headless)
       # The PyPI wheel vendors OpenSSL 1.1 which is not FIPS compliant; our system package uses system OpenSSL
@@ -356,6 +394,8 @@ test:
         # ldd check will fail in absence of libcuda.so, but we can add this only in test pipeline
         # for ref https://github.com/chainguard-dev/extra-packages/pull/2890
         - libcuda-stub-cuda-${{vars.cuda-version}}-dev
+        # Test co-installability: if there are file conflicts between main and -dev packages as dev package is important for image
+        - ${{package.name}}-dev
   pipeline:
     - uses: test/tw/ldd-check
       with:
@@ -382,6 +422,40 @@ test:
           sed -n '1,200p' /tmp/vllm.log
           exit 1
         fi
+    # FIPS compliance: verify no vendored libcrypto, libssl, or libsodium in Python site-packages
+    # PyPI wheels often bundle these which breaks FIPS compliance
+    - name: Verify no vendored crypto libraries (FIPS compliance)
+      runs: |
+        set -euo pipefail
+        SITE_PACKAGES="/usr/lib/python${{vars.python-version}}/site-packages"
+        echo "Scanning $SITE_PACKAGES for vendored crypto libraries..."
+
+        # Find all .so files and check their dependencies
+        # libcrypto and libssl are OpenSSL components; libsodium is used by some packages
+        # Check for libraries linking to non-system crypto libs (vendored copies)
+        CRYPTO_LIBS=$(find "$SITE_PACKAGES" -name "*.so*" -type f -exec ldd {} 2>/dev/null \; | \
+                      grep -E "libcrypto|libssl|libsodium" | grep -v "=> /lib/" | grep -v "=> /usr/lib/" || :)
+
+        if [ -n "$CRYPTO_LIBS" ]; then
+          echo "ERROR: Found vendored crypto libraries in site-packages (breaks FIPS compliance):"
+          echo "$CRYPTO_LIBS"
+          echo ""
+          echo "These libraries must link to system OpenSSL/libsodium, not vendored copies."
+          echo "Check for PyPI wheels that bundle libcrypto.so, libssl.so, or libsodium.so"
+          exit 1
+        fi
+
+        # Also check for embedded crypto .so files (some wheels embed them directly)
+        EMBEDDED_CRYPTO=$(find "$SITE_PACKAGES" -type f \( -name "*libcrypto*" -o -name "*libssl*" -o -name "*libsodium*" \) \
+                          ! -path "*__pycache__*" || :)
+
+        if [ -n "$EMBEDDED_CRYPTO" ]; then
+          echo "ERROR: Found embedded crypto library files in site-packages (breaks FIPS compliance):"
+          echo "$EMBEDDED_CRYPTO"
+          exit 1
+        fi
+
+        echo "OK: No vendored crypto libraries found - FIPS compliance check passed"
 
 update:
   enabled: true
