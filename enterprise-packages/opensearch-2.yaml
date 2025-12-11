@@ -5,7 +5,7 @@
 package:
   name: opensearch-2
   version: "2.19.4"
-  epoch: 0
+  epoch: 1
   description: Open source distributed and RESTful search engine.
   copyright:
     - license: Apache-2.0
@@ -24,13 +24,25 @@ environment:
   contents:
     packages:
       - bash
+      - build-base # Required for k-nn JNI native compilation
       - busybox
       - ca-certificates-bundle
+      - cmake-3
       - curl
+      - gcc-14 # Required for k-nn AVX512_SPR support (needs GCC >= 12.4)
+      - gcc-14-default
+      - gfortran # Required for k-nn Faiss BLAS/LAPACK
+      - git # Required for k-nn submodule fetching (nmslib, faiss)
       - gradle<8.12
+      - libgomp # Required for k-nn Faiss OpenMP support
+      - liblapack
+      - liblapacke
+      - openblas # Required for k-nn Faiss BLAS support
+      - openblas-dev
       - openjdk-17-default-jdk
       - patch
       - unzip
+      - zlib-dev # Required for k-nn native compilation
   environment:
     JAVA_HOME: /usr/lib/jvm/java-17-openjdk
     LANG: "en_US.UTF-8"
@@ -65,6 +77,7 @@ data:
   - name: external-plugins
     items:
       # plugin_name: cve patch list
+      k-nn: ""
       alerting: ""
       anomaly-detection: ""
       asynchronous-search: ""
@@ -73,7 +86,6 @@ data:
       geospatial: ""
       index-management: ""
       job-scheduler: ""
-      k-nn: ""
       ml-commons: ""
       neural-search: ""
       notifications: ""
@@ -184,7 +196,80 @@ subpackages:
           fi
 
           echo "org.gradle.daemon=false" >> gradle.properties
-          ./gradlew clean assemble -Dbuild.snapshot="false" -Dbuild.version_qualifier="" -Dopensearch.version="${{package.version}}" -x check -x integTest -x javadoc -PfailOnJavadocWarning=false --stacktrace
+
+          # k-nn plugin requires multiple gradle runs for JNI libs, then assemble
+          # https://github.com/opensearch-project/k-NN/blob/2.19.4.0/scripts/build.sh#L103-L133
+          # this plugin needs to treat differently to copy JNI native libraries after build
+          # and needs to set git user config to apply some patches
+          # https://github.com/opensearch-project/k-NN/tree/main/jni/patches
+          if [ "${{range.key}}" = "k-nn" ]; then
+            # Build the Java plugin (assemble)
+            ./gradlew build \
+            --no-daemon \
+            --refresh-dependencies \
+            -Dbuild.snapshot="false" \
+            -Dbuild.version_qualifier="" \
+            -Dopensearch.version="${{package.version}}" \
+            -x check \
+            -x integTest \
+            -x test \
+            -x javadoc \
+            -PfailOnJavadocWarning=false \
+            --stacktrace
+
+
+            # Disable static BLAS linking and use OpenBLAS
+            sed -i 's/set(BLA_STATIC ON)/set(BLA_VENDOR OpenBLAS)\nset(BLA_STATIC OFF)/' ./jni/cmake/init-faiss.cmake
+
+            # Build Faiss base library (opensearchknn_faiss and opensearchknn_common)
+            # This also runs cmake which fetches submodules and applies patches
+            ./gradlew :buildJniLib -Davx512.enabled=false -Davx512_spr.enabled=false -Davx2.enabled=false -Dbuild.lib.commit_patches=false -Dnproc.count=4 --stacktrace
+
+            # Clear CMake cache before building nmslib
+            rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+            # Set NMSLIB_SIMD_FLAGS based on architecture
+            if [ "${{build.arch}}" = "x86_64" ]; then
+              NMSLIB_SIMD_FLAGS="x86-64"
+            else
+              NMSLIB_SIMD_FLAGS="armv8-a"
+            fi
+
+            # Build Nmslib library (separate task in 2.19.x)
+            ./gradlew :buildNmslib -Dnmslib_simd_flags=$NMSLIB_SIMD_FLAGS -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+
+            # AVX variants only for x86_64
+            if [ "${{build.arch}}" = "x86_64" ]; then
+              # Clear CMake cache before building Faiss AVX2
+              rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+              # Build Faiss with AVX2
+              ./gradlew :buildJniLib -Davx2.enabled=true -Davx512.enabled=false -Davx512_spr.enabled=false -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+
+              # Clear CMake cache before building Faiss AVX512
+              rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+              # Build Faiss with AVX512
+              ./gradlew :buildJniLib -Davx512.enabled=true -Davx512_spr.enabled=false -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+
+              # Clear CMake cache before building Faiss AVX512 SPR
+              rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+              # Build Faiss with AVX512 Sapphire Rapids
+              ./gradlew :buildJniLib -Davx512_spr.enabled=true -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+            fi
+          else
+            # For other plugins, single gradle run
+            ./gradlew clean assemble \
+            -Dbuild.snapshot="false" \
+            -Dbuild.version_qualifier="" \
+            -Dopensearch.version="${{package.version}}" \
+            -x check \
+            -x integTest \
+            -x javadoc \
+            -PfailOnJavadocWarning=false \
+            --stacktrace
+          fi
 
           # useful for finding generated zip file we use to extract into the final apk
           find . -name "*.zip"
@@ -217,6 +302,9 @@ subpackages:
           case "${{range.key}}" in
               "alerting")
                   zip_dir="./alerting"
+                  ;;
+              "k-nn")
+                  zip_dir="."
                   ;;
               "ml-commons"|"sql")
                   zip_dir="./plugin"
@@ -254,7 +342,41 @@ subpackages:
 
           # Unzip the main plugin distribution
           unzip "${zip_dir}/build/distributions/${plugin_name}-${{package.version}}.${{vars.plugin_version_qualifier}}.zip" -d "${destination_base}/plugins/${plugin_name}"
+
+          # Copy k-nn JNI native libraries to the plugin lib directory
+          # https://github.com/opensearch-project/k-NN/blob/2.19.4.0/scripts/build.sh#L135-L154
+          if [ "${{range.key}}" = "k-nn" ]; then
+            mkdir -p "${destination_base}/plugins/${plugin_name}/lib"
+            # Search for all libopensearchknn .so files from root
+            echo "Searching for all libopensearchknn .so files..."
+            find / -name "libopensearchknn*.so" -type f 2>/dev/null
+            # Copy JNI libraries from jni/build/release (build output directory)
+            cp -v ./jni/release/libopensearchknn* "${destination_base}/plugins/${plugin_name}/lib/"
+            # Copy libgomp (OpenMP runtime required by Faiss)
+            cp /usr/lib/libgomp.so* "${destination_base}/plugins/${plugin_name}/lib/"
+          fi
       - uses: strip
+    test:
+      pipeline:
+        - runs: |
+            # Verify k-nn JNI native libraries are present
+            if [ "${{range.key}}" = "k-nn" ]; then
+              # Common libraries (all architectures)
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_common.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_nmslib.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_util.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libgomp.so.1
+
+              # x86_64-specific AVX variant libraries
+              if [ "${{build.arch}}" = "x86_64" ]; then
+                stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss_avx2.so
+                stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss_avx512.so
+                stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss_avx512_spr.so
+              fi
+
+              echo "All k-nn JNI native libraries verified"
+            fi
 
   - name: ${{package.name}}-entrypoint-compat
     description: "Compatibility package to ensure that the Docker entrypoint matches upstream"
