@@ -2,7 +2,7 @@ package:
   name: kafka-3.7
   # When bumping check to see if the CVE mitigation can be removed.
   version: 3.7.2
-  epoch: 47 # GHSA-7p63-w6x9-6gr7
+  epoch: 48 # GHSA-7p63-w6x9-6gr7
   description: Apache Kafka is a distributed event streaming platformm
   copyright:
     - license: Apache-2.0
@@ -70,48 +70,63 @@ test:
     contents:
       packages:
         - uuidgen
+        - wait-for-it
     environment:
+      JAVA_HOME: /usr/lib/jvm/default-jvm
       LANG: en_US.UTF-8
-      JAVA_HOME: "/usr/lib/jvm/default-jvm"
   pipeline:
-    - runs: |
-        cd /usr/lib/kafka
+    - uses: test/daemon-check-output
+      with:
+        expected_output: started (kafka.server.KafkaServer)
+        post: |
+          #!/bin/sh
+          set -e
 
-        # Start ZooKeeper
-        bin/zookeeper-server-start.sh config/zookeeper.properties &
-        ZK_PID=$!
+          # Wait for Kafka to be fully ready
+          wait-for-it localhost:9092 -t 30
 
-        # Start Kafka
-        bin/kafka-server-start.sh config/server.properties &
-        KAFKA_PID=$!
-        sleep 5
+          # Generate unique topic name
+          TOPIC_NAME="test-topic-$(uuidgen)"
 
-        TOPIC_NAME="test-topic-$(uuidgen)"
-        PARTITIONS=1
-        REPLICATION_FACTOR=1
+          # Create a Kafka topic
+          /usr/lib/kafka/bin/kafka-topics.sh --create --topic "${TOPIC_NAME}" --partitions 1 --replication-factor 1 --if-not-exists --bootstrap-server localhost:9092
 
-        # Create a Kafka topic
-        bin/kafka-topics.sh --create --topic "${TOPIC_NAME}" --partitions "${PARTITIONS}" --replication-factor "${REPLICATION_FACTOR}" --if-not-exists --bootstrap-server localhost:9092
+          # Produce a test message
+          echo "Hello Kafka" | /usr/lib/kafka/bin/kafka-console-producer.sh --broker-list localhost:9092 --topic "${TOPIC_NAME}"
 
-        # Produce a test message
-        echo "Hello Kafka" | bin/kafka-console-producer.sh --broker-list localhost:9092 --topic "${TOPIC_NAME}"
+          # Consume the message
+          consumed_message=$(timeout 10 /usr/lib/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}" --from-beginning --max-messages 1)
 
-        # Consume the message
-        consumed_message=$(timeout 10 bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic "${TOPIC_NAME}" --from-beginning --max-messages 1)
+          # Verify the message
+          if [ "${consumed_message}" = "Hello Kafka" ]; then
+            echo "SUCCESS: Message verification passed"
+          else
+            echo "FAIL: Expected Hello Kafka but got ${consumed_message}"
+            exit 1
+          fi
 
-        # Verify the message
-        if [[ "${consumed_message}" == "Hello Kafka" ]]; then
-          echo "Successfully produced and consumed a test message."
-        else
-          echo "Failed to verify the consumed message."
-        fi
+          # Clean up the test topic
+          /usr/lib/kafka/bin/kafka-topics.sh --delete --topic "${TOPIC_NAME}" --bootstrap-server localhost:9092
 
-        # Clean up the test topic
-        bin/kafka-topics.sh --delete --topic "${TOPIC_NAME}" --bootstrap-server localhost:9092
+          echo "Kafka functional test completed successfully"
+        setup: |
+          #!/bin/sh
+          set -e
 
-        # Kill Kafka and ZooKeeper
-        kill "${KAFKA_PID}"
-        kill "${ZK_PID}"
+          # Start ZooKeeper (Kafka dependency)
+          mkdir -p /tmp/zookeeper
+          cat > /tmp/zookeeper.properties <<EOF
+          dataDir=/tmp/zookeeper
+          clientPort=2181
+          maxClientCnxns=0
+          admin.enableServer=false
+          EOF
+
+          /usr/lib/kafka/bin/zookeeper-server-start.sh /tmp/zookeeper.properties > /tmp/zk.log 2>&1 &
+          echo "ZooKeeper started, waiting for port 2181..."
+          wait-for-it localhost:2181 -t 60
+        start: /usr/lib/kafka/bin/kafka-server-start.sh /usr/lib/kafka/config/server.properties
+        timeout: "60"
 
 update:
   enabled: true
