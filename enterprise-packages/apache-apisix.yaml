@@ -2,7 +2,7 @@
 package:
   name: apache-apisix
   version: "3.14.1"
-  epoch: 34
+  epoch: 35
   description: "The Cloud-Native API Gateway and AI Gateway"
   resources:
     cpu: 30
@@ -11,23 +11,20 @@ package:
     - license: Apache-2.0
   dependencies:
     runtime:
-      # https://github.com/apache/apisix/blob/master/docker/debian-dev/docker-entrypoint.sh
+      # The apisix "binary" is actually a bash script wrapper around openresty
       - bash
       - bash-binsh
-      # base64 is required at runtime
+      - ca-certificates
       - coreutils
       - gawk
-      - gd
-      - geoip
       - grep
-      - libgcc
       - libwasmtime
-      - libxslt
       - luajit
       - openssl
-      - pcre
-      - perl
-      - zlib
+  checks:
+    disabled:
+      # Disabled until merged-varrun is done.
+      - tempdir
 
 environment:
   contents:
@@ -198,8 +195,8 @@ pipeline:
             --add-module=../apisix-nginx-module/src/stream \
             --build=${{host.triplet.gnu}} \
             --with-pcre \
-            --with-cc-opt='-DNGX_LUA_ABORT_AT_PANIC -I/usr/include' \
-            --with-ld-opt='-L/usr/lib -Wl,-rpath,/usr/lib' \
+            --with-cc-opt='-O2 -DAPISIX_RUNTIME_VER=${{vars.NGX_MULTI_UPSTREAM_VERSION}} -DNGX_LUA_ABORT_AT_PANIC -I/usr/include' \
+            --with-ld-opt='-Wl,-rpath,/usr/local/openresty/luajit/lib -Wl,-rpath,/usr/local/openresty/wasmtime-c-api/lib -L/usr/lib -Wl,-rpath,/usr/lib' \
             --with-poll_module \
             --with-pcre-jit \
             --without-http_rds_json_module \
@@ -210,6 +207,7 @@ pipeline:
             --with-stream_ssl_preread_module \
             --with-http_v2_module \
             --with-http_v3_module \
+            --with-http_ssl_module \
             --without-mail_pop3_module \
             --without-mail_imap_module \
             --without-mail_smtp_module \
@@ -340,7 +338,11 @@ subpackages:
     description: "compat package with iamguarded image"
     dependencies:
       runtime:
-        - luarocks
+        # Additional dependencies for iamguarded compatibility
+        - curl
+        - perl-dev
+        - perl-utils
+        - procps
     pipeline:
       - uses: iamguarded/build-compat
         with:
@@ -356,7 +358,6 @@ subpackages:
           mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/bin
           mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/nginx/sbin
           mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/bin
-          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luarocks/bin
 
           # Create symlinks for iamguarded compatibility
           ln -sf ../../../../usr/local/bin/apisix ${{targets.contextdir}}/opt/iamguarded/apisix/bin/apisix
@@ -368,9 +369,6 @@ subpackages:
 
           # LuaJIT binaries
           ln -sf ../../../../../../usr/bin/luajit ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/bin/luajit
-
-          # LuaRocks binaries
-          ln -sf ../../../../../../usr/bin/luarocks ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luarocks/bin/luarocks
 
           # Configuration, dependencies, and UI
           ln -sf ../../../../usr/local/apisix/conf ${{targets.contextdir}}/opt/iamguarded/apisix/conf
@@ -389,7 +387,6 @@ subpackages:
         contents:
           packages:
             - ${{package.name}}
-            - curl
             - etcd
             - jq
             - nodejs
@@ -412,7 +409,6 @@ subpackages:
                  /opt/iamguarded/apisix/openresty/bin/openresty \
                  /opt/iamguarded/apisix/openresty/nginx/sbin/nginx \
                  /opt/iamguarded/apisix/openresty/luajit/bin/luajit \
-                 /opt/iamguarded/apisix/openresty/luarocks/bin/luarocks \
                  /opt/iamguarded/apisix/conf \
                  /opt/iamguarded/apisix/deps \
                  /opt/iamguarded/apisix/ui
@@ -485,6 +481,7 @@ subpackages:
             }).listen(8001, () => console.log('Listening on http://0.0.0.0:8001'));
             EOF
             nohup node server.js &
+            NODE_PID=$!
             curl --fail --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 http://127.0.0.1:8001/get
             # Get the API key
             ADMIN_KEY=$(yq e -r '.deployment.admin.admin_key[] | .key' /usr/local/apisix/conf/config.yaml)
@@ -517,8 +514,8 @@ subpackages:
               echo "ERROR: Expected 200 with key, got $CODE_KEY"
               exit 1
             fi
-            pkill etcd
-            pkill node
+
+            kill -9 $NODE_PID
 
 update:
   enabled: true
@@ -533,11 +530,11 @@ test:
   environment:
     contents:
       packages:
-        - etcd
         - curl
-        - yq
+        - etcd
         - jq
         - nodejs
+        - yq
     environment:
       PROXY_URL: "http://127.0.0.1:9080"
       ADMIN_URL: "http://127.0.0.1:9180"
@@ -597,6 +594,7 @@ test:
         }).listen(8000, () => console.log('Listening on http://0.0.0.0:8000'));
         EOF
         nohup node server.js &
+        NODE_PID=$!
         curl --fail --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 http://127.0.0.1:8000/get
         # Get the API key
         ADMIN_KEY=$(yq e -r '.deployment.admin.admin_key[] | .key' /usr/local/apisix/conf/config.yaml)
@@ -629,5 +627,5 @@ test:
           echo "ERROR: Expected 200 with key, got $CODE_KEY"
           exit 1
         fi
-        pkill etcd
-        pkill node
+
+        kill -9 $NODE_PID
