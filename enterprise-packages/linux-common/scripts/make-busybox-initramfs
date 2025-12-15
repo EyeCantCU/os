@@ -1,0 +1,266 @@
+#!/bin/bash
+set -o pipefail
+
+stderr() {
+  echo "$@" >&2
+}
+
+rq() {
+    local rc="" out=""
+    out=$("$@" 2>&1) && return 0
+    rc=$?
+    stderr "failed [$rc]: $*"
+    printf "%s\n" "$out" | sed -e 's,^,> ,' 1>&2
+    return "$rc"
+}
+
+# copy_binary_with_deps $binary $root_dir $target dir
+# Copy a binary and ldd indicated dependencies to $target_dir, relative to $root_dir
+copy_binary_with_deps() {
+  local rootd="$1" binary="$2" target_dir="$3"
+
+  if [ ! -f "$binary" ]; then
+    stderr "binary not found: $binary"
+    return 1
+  fi
+
+  local ok=true
+
+  mkdir -p "$rootd/$target_dir"
+  rq cp "$binary" "$rootd/$target_dir/" || return $?
+
+  ldd "$binary" 2>/dev/null | while read -r line; do
+    if echo "$line" | grep -q "=>"; then
+      # Format: "libname.so => /path/to/lib (0x...)"
+      # shellcheck disable=SC2001
+      lib_path=$(echo "$line" | sed 's/.*=> \([^ ]*\).*/\1/')
+    elif echo "$line" | grep -q "^[[:space:]]*/"; then
+      # Format: "/lib64/ld-linux-x86-64.so.2 (0x...)"
+      lib_path=$(echo "$line" | awk '{print $1}')
+    else
+      continue
+    fi
+
+    if [ ! -f "$lib_path" ]; then
+      stderr "missing $lib_path dependency of $binary"
+      ok=false
+    fi
+
+    lib_dir=$(dirname "$lib_path")
+    mkdir -p "$rootd/$lib_dir"
+
+    rq cp "$lib_path" "$rootd/$lib_dir/" || return $?
+  done
+
+  [ $ok = true ] || return 1
+}
+
+# make_baselayout root_dir
+# Make the baselayout of the filesystem in root_dir
+make_baselayout() {
+  local rootd="$1"
+  rq mkdir -p "$rootd"/usr/bin || return $?
+  rq ln -s usr/bin "$rootd"/bin || return $?
+  rq ln -s usr/bin "$rootd"/sbin || return $?
+  rq ln -s bin "$rootd"/usr/sbin || return $?
+  rq mkdir -p "$rootd"/usr/lib || return $?
+  rq ln -s usr/lib "$rootd"/lib64 || return $?
+  rq ln -s usr/lib "$rootd"/lib || return $?
+  rq ln -s lib "$rootd"/usr/lib64 || return $?
+  rq mkdir -p "$rootd"/proc || return $?
+  rq mkdir -p "$rootd"/sys || return $?
+  rq mkdir -p "$rootd"/dev || return $?
+  rq mkdir -p "$rootd"/tmp || return $?
+}
+
+# copy_default_deps root_dir
+# Copy default dependencies (busybox) to root_dir.
+copy_default_deps() {
+  local rootd="$1"
+  copy_binary_with_deps "$rootd" /usr/bin/busybox usr/bin || return $?
+  rq /usr/bin/busybox --install -s "$rootd"/usr/bin || return $?
+}
+
+# add_modules root_dir kversion
+# Add modules to root_dir. kversion may be empty, in which case
+# all modules will be added
+add_modules() {
+  local rootd="$1" kver="$2"
+  rq mkdir -p "$rootd"/usr/lib/modules/ || return $?
+  if [ -z "$kver" ]; then
+    rq cp -r /usr/lib/modules/* "$rootd"/usr/lib/modules/ || return $?
+  else
+    [ -d /usr/lib/modules/"$kver" ] || { stderr "$kver has no modules!"; return 1; }
+    rq cp -r /usr/lib/modules/"$kver" "$rootd"/usr/lib/modules/ || return $?
+  fi
+  copy_binary_with_deps "$rootd" /usr/bin/kmod usr/bin
+  for i in depmod insmod lsmod modinfo modprobe rmmod; do
+    rq ln -s kmod "$rootd"/usr/bin/"$i" || return $?
+  done
+}
+
+# finalize root_dir
+# finalize the initrd in root_dir (run depmod)
+finalize() {
+  local rootd="$1"
+  [ -d "$rootd"/usr/lib/modules/ ] || return 0
+  for kdir in "$rootd"/usr/lib/modules/*; do
+      kver=$(basename "$kdir")
+      rq depmod -b "$rootd" -m "usr/lib/modules" "$kver" || return $?
+  done
+}
+
+# make_image root_dir out
+# make root_dir into a gzipped initrd at out
+make_image() {
+  local rootd="$1" out="$2"
+  local tmp_f lwd="$PWD"
+  tmp_f=$(mktemp)
+  cd "$rootd" || { rm -f "$tmp_f"; return 1; }
+  find . | cpio -o -H newc | gzip > "$tmp_f" || {
+    stderr "could not make initrd image"
+    rm -f "$tmp_f"
+    return 1
+  }
+  cd "$lwd" || { rm -f "$tmp_f"; return 1; }
+  rq mv "$tmp_f" "$out"
+}
+
+# make_init root_dir script args
+# Make init script in root_dir which sets up the system, runs specified script
+# and shuts down.
+make_init() {
+  local rootd="$1" script="$2"
+  shift 2
+  copy_binary_with_deps "$rootd" "$script" "usr/bin"
+  cat > "$rootd"/init << 'EOF' || return $?
+#!/usr/bin/sh
+echo "Mounting filesystems."
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+EOF
+
+  {
+    printf '%s ' "$(basename "$script")"
+    [[ $# -gt 0 ]] && printf '%q ' "$@"
+    echo
+  } >> "$rootd"/init || return $?
+
+  cat >> "$rootd"/init << 'EOF' || return $?
+echo s > /proc/sysrq-trigger
+echo o > /proc/sysrq-trigger
+sleep 5
+EOF
+
+  chmod +x "$rootd"/init
+}
+
+Usage() {
+  cat <<EOF
+Usage: ${0##*/} [ options ] subcommand
+
+  Build a busybox-based initramfs
+
+  subcommands:
+
+    make-root ROOT_DIR
+      make root filesystem including baselayout and default dependencies
+
+    add-binary ROOT_DIR PATH/TO/BINARY
+      add a binary and its dependencies to the initramfs
+
+    add-modules KVERSION
+      add kernel modules and cli tools to the initramfs
+      if KVERSION is unspecified, add all modules
+
+    make-init ROOT_DIR PATH/TO/SCRIPT ARGS(optional)
+      add an init script to the initramfs, execute the script once the system is set up
+
+    make-image ROOT_DIR OUT
+      finalize the initrd, compress to an image, and write to OUT
+
+    options:
+
+      -h | --help           show usage
+EOF
+}
+
+main() {
+  local short_opts="h"
+  local long_opts="help"
+  local getopt_out=""
+  # shellcheck disable=SC2015
+  getopt_out=$(getopt --name "${0##*/}" \
+      --options "${short_opts}" --long "${long_opts}" -- "$@") &&
+      eval set -- "${getopt_out}" ||
+      { Usage 1>&2; return 1; }
+
+  while [ $# -ne 0 ]; do
+      { cur="$1"; _next="$2"; }
+      case "$cur" in
+          -h|--help) Usage ; exit 0;;
+          --) shift; break;;
+      esac
+      shift;
+  done
+
+  if [ $# -lt 1 ]; then
+      Usage 1>&2
+      stderr "Expected at least 1 argument (subcommand)"
+      return 1
+  fi
+
+  local subcommand="$1"
+  shift
+
+  case "$subcommand" in
+      make-root)
+          if [ $# -ne 1 ]; then
+              stderr "make-root requires exactly 1 argument: ROOT_DIR"
+              return 1
+          fi
+          make_baselayout "$@" || return $?
+          copy_default_deps "$@"
+          ;;
+      add-binary)
+          if [ $# -ne 2 ]; then
+              stderr "add-binary requires exactly 2 arguments: ROOT_DIR PATH/TO/BINARY"
+              return 1
+          fi
+          copy_binary_with_deps "$@" "usr/bin"
+          ;;
+      add-modules)
+          if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+              stderr "add-modules requires 2 arguments: ROOT_DIR KVERSION (optional)"
+              return 1
+          fi
+          add_modules "$@"
+          ;;
+      make-init)
+          if [ $# -lt 2 ]; then
+              stderr "make-init requires 3 arguments: ROOT_DIR PATH/TO/SCRIPT ARGS (optional)"
+              return 1
+          fi
+          make_init "$@"
+          ;;
+      make-image)
+          if [ $# -ne 2 ]; then
+              stderr "make-image requires exactly 2 arguments: ROOT_DIR OUT"
+              return 1
+          fi
+          local root_dir="$1"
+          local out="$2"
+          shift 2
+          finalize "$root_dir" || return $?
+          make_image "$root_dir" "$out"
+          ;;
+      *)
+          stderr "Unknown subcommand: $subcommand"
+          Usage 1>&2
+          return 1
+          ;;
+  esac
+}
+
+main "$@"
