@@ -1,0 +1,106 @@
+package:
+  name: emqx-exporter-fips
+  version: "0.2.11"
+  epoch: 0
+  description: The emqx-exporter is a package designed to expose partial metrics that are not included in the EMQX Prometheus API.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - merged-usrsbin
+      - wolfi-baselayout
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/emqx/emqx-exporter.git
+      tag: ${{package.version}}
+      expected-commit: b6c6bc011f75dac75a65011c440dc030691d6f55
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/eclipse/paho.mqtt.golang@v1.5.1
+        golang.org/x/crypto@v0.45.0
+        golang.org/x/oauth2@v0.27.0
+        google.golang.org/protobuf@v1.33.0
+
+  - name: Build emqx-exporter
+    uses: go/build
+    with:
+      packages: .
+      output: emqx-exporter
+      go-package: go-fips
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "compatibility symlinks package for emqx-exporter"
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /usr/local/emqx-exporter/bin and copy example config to match the upstream image
+          mkdir -p ${{targets.contextdir}}/usr/local/emqx-exporter/bin
+          ln -sf /usr/bin/emqx-exporter ${{targets.contextdir}}/usr/local/emqx-exporter/bin/emqx-exporter
+          cp config/example/config.yaml ${{targets.contextdir}}/usr/local/emqx-exporter/bin/config.yaml
+    test:
+      pipeline:
+        - name: Test compat directory
+          runs: |
+            test "$(readlink -fv /usr/local/emqx-exporter/bin/emqx-exporter)" = "/usr/bin/emqx-exporter"
+
+update:
+  enabled: true
+  github:
+    identifier: emqx/emqx-exporter
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - curl
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Check emqx-exporter runs
+      runs: |
+        emqx-exporter --help
+        emqx-exporter --version
+    - name: Test entrypoint and logs
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          cat > /tmp/config.yaml << 'EOF'
+          metrics:
+              api_key: some_api_key
+              api_secret: some_api_secret
+              target: 127.0.0.1:18083
+              scheme: http
+          probes:
+              - target: 127.0.0.1:1883
+                scheme: tcp
+                client_id: emqx-exporter-probe-27e42319eec6-0
+                topic: emqx-exporter-probe/27e42319eec6/0
+                keep_alive: 30
+                ping_timeout: 10
+                connect_timeout: 30
+          EOF
+        start: |
+          emqx-exporter --config.file=/tmp/config.yaml
+        timeout: 5
+        expected_output: |
+          Starting emqx-exporter
+          Build context
+          Loaded config file
+          Enabled collectors
+          collector=authentication
+          collector=authorization
+          collector=cluster
+          collector=license
+          collector=messages
+          collector=rule
+          Including metrics about the exporter itself
+          Listening on
+          TLS is disabled
+        post: |
+          curl http://localhost:8085/metrics | grep 'emqx_cluster_status'
+          curl http://localhost:8085/config > /tmp/emqx_exporter_config.yaml
+          diff /tmp/emqx_exporter_config.yaml /tmp/config.yaml
