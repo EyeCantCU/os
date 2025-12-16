@@ -1,0 +1,132 @@
+package:
+  name: monit
+  version: 5.35.2
+  epoch: 0
+  description: Managing and monitoring on a UNIX system
+  copyright:
+    - license: AGPL-3.0-or-later
+
+environment:
+  contents:
+    packages:
+      - bison
+      - build-base
+      - flex-dev
+      - libtool
+      - linux-pam-dev
+      - openssl-dev
+      - pkgconf-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://bitbucket.org/tildeslash/monit.git
+      tag: release-${{package.version}}
+      expected-commit: 0245e2d222bc75f572b96d26ca1e0bd07cb6dd33
+
+  - runs: |
+      autoreconf -fi -I m4 -I config
+
+  - uses: autoconf/configure
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: dev library for ${{package.name}}
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-doc
+    pipeline:
+      - uses: split/alldocs
+    description: ${{package.name}} manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+test:
+  environment:
+    environment:
+      MONIT_PORT: "2812"
+  pipeline:
+    - uses: test/tw/ver-check
+      with:
+        bins: monit
+    - uses: test/tw/help-check
+      with:
+        bins: monit
+    - runs: |
+        set -euo pipefail
+        echo "test content" > /tmp/monit_test_file
+        tee /tmp/monitrc << 'EOF'
+        set daemon 10
+        set httpd port 2812 and
+            use address localhost
+            allow localhost
+
+        check system localhost
+            if loadavg (1min) > 4 then alert
+            if memory usage > 75% then alert
+            if cpu usage > 95% for 10 cycles then alert
+
+        check file test_file with path /tmp/monit_test_file
+            if does not exist then alert
+            if changed checksum then alert
+
+        check filesystem rootfs with path /
+            if space usage > 90% then alert
+
+        check directory test_dir with path /tmp
+            if does not exist then alert
+        EOF
+
+        chmod 600 /tmp/monitrc
+
+        # Validate the configuration syntax
+        monit -c /tmp/monitrc -t
+    - uses: test/daemon-check-output
+      with:
+        setup: |-
+          chmod 600 /tmp/monitrc
+        start: monit -c /tmp/monitrc -I
+        timeout: 30
+        expected_output: |
+          Starting Monit
+          started
+        post: |-
+          set -o pipefail
+
+          # Wait for HTTP interface to be ready
+          wait-for-it -t 30 localhost:${MONIT_PORT}
+
+          # Test that all configured services are being monitored
+          monit -c /tmp/monitrc status | grep -F "localhost"
+          monit -c /tmp/monitrc status | grep -F "test_file"
+          monit -c /tmp/monitrc status | grep -F "rootfs"
+          monit -c /tmp/monitrc status | grep -F "test_dir"
+          monit -c /tmp/monitrc summary
+
+          netstat -ln | grep -F ":${MONIT_PORT}"
+
+          monit -c /tmp/monitrc unmonitor test_file
+
+update:
+  enabled: true
+  version-transform:
+    - match: "-"
+      replace: "."
+  git:
+    strip-prefix: release-
+    tag-filter-prefix: release-
