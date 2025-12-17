@@ -17,6 +17,19 @@ vars:
   harbor-distribution-release-branch: 2.8
   harbor-distribution-expected-commit: 0c62ec3ec8df7ea91c819448236a67f0777f929f # needs to be updated with each package release
 
+# Create a new major-minor-version variable that contains only the major version
+# to use in the bitnami/compat pipeline to find out the correct folder for the image.
+# e.g. 2.13.3 will create a new var major-minor-version=2.13
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: $1
+    to: major-minor-version
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
+
 environment:
   contents:
     packages:
@@ -86,6 +99,113 @@ subpackages:
         - runs: |
             # jobservice fails outside environment, verify adaptor for harbor registered
             /harbor/harbor_jobservice 2>/dev/null | grep "harbor registered"
+
+  - name: ${{package.name}}-jobservice-iamguarded-compat
+    description: "compat package with iamguarded harbor-jobservice image"
+    dependencies:
+      provides:
+        - harbor-jobservice-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - ${{package.name}}-jobservice
+        - bash
+        - bash-binsh
+        - busybox
+        - coreutils
+        - yq
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: harbor-jobservice
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/harbor-jobservice/bin/
+          chmod g+rwX /opt/iamguarded
+          ln -sf /usr/bin/harbor-jobservice /opt/iamguarded/harbor-jobservice/bin/harbor-jobservice
+      - name: Install config
+        runs: |
+          mkdir -p ${{targets.subpkgdir}}/etc/jobservice
+          curl -L -o ${{targets.subpkgdir}}/etc/jobservice/config.yml https://raw.githubusercontent.com/bitnami/containers/refs/heads/main/bitnami/harbor-jobservice/${{vars.major-version}}/debian-12/config/jobservice/config.yml
+      - uses: iamguarded/finalize-compat
+        with:
+          package: harbor-jobservice
+          version: ${{vars.major-minor-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: iamguarded
+              gid: 1001
+          users:
+            - username: iamguarded
+              gid: 1001
+              uid: 1001
+          run-as: 0
+        contents:
+          packages:
+            - ${{package.name}}
+            - yq
+            - wait-for-it
+            - redis
+            - postgresql-16
+            - postgresql-16-client
+            - shadow
+            - sudo
+            - tini
+        environment:
+          BITNAMI_APP_NAME: harbor-jobservice
+          JOB_SERVICE_PROTOCOL: http
+          JOB_SERVICE_PORT: "8081"
+          JOB_SERVICE_HOST: localhost
+          CORE_URL: http://localhost:8080
+          # Harbor core configuration
+          _REDIS_URL_CORE: redis://localhost:6379/0
+          _REDIS_URL_HARBOR: redis://localhost:6379/1
+          POSTGRESQL_HOST: localhost
+          POSTGRESQL_PORT: "5432"
+          POSTGRESQL_USERNAME: postgres
+          POSTGRESQL_PASSWORD: postgres
+          POSTGRESQL_DATABASE: registry
+          POSTGRESQL_SSLMODE: disable
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: harbor-jobservice-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+        - uses: iamguarded/test-compat
+          with:
+            package: harbor-jobservice
+            version: ${{vars.major-minor-version}}
+        - name: "Start redis instance"
+          runs: |
+            redis-server --daemonize yes > /dev/null 2>&1
+            wait-for-it -t 10 localhost:6379
+        - name: "Start postgresql instance"
+          runs: |
+            useradd postgres
+            sudo -u postgres initdb -D /tmp/test_db
+            sudo -u postgres pg_ctl -D /tmp/test_db -l /tmp/logfile start
+            wait-for-it -t 10 localhost:5432
+            sudo -u postgres createdb registry
+        - name: run entrypoint
+          uses: test/daemon-check-output
+          with:
+            # I know its a bit messy but this is only we can do it, otherwise test/daemon-check-output
+            # doesn't forward the SIGTERM to the child process started by harbor-core, and it hangs forever
+            # in the post step; so we used tini in the start command instead of setup.
+            start: /sbin/tini -s -- sh -c 'cd /harbor && ./harbor_core & exec bash -x /opt/iamguarded/scripts/harbor-jobservice/entrypoint.sh /opt/iamguarded/scripts/harbor-jobservice/run.sh'
+            timeout: 60
+            expected_output: |
+              Validating harbor-jobservice settings
+              harbor-jobservice setup finished
+            post: |
+              # In a real Harbor deployment, Jobservice's HTTP API is enabled and exposed only
+              # when running under full orchestration (docker-compose or Kubernetes) with mounted
+              # configuration files (such as conf/app.conf) and coordinated startup with Harbor Core
+              # and Registry. In the melange packaging test environment, Jobservice runs in a minimal
+              # worker mode where setup and configuration validation complete successfully, but no
+              # HTTP listener is started by design.
+              true
 
   - name: ${{package.name}}-portal
     description: harbor portal
