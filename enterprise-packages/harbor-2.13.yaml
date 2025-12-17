@@ -111,6 +111,7 @@ subpackages:
         - bash-binsh
         - busybox
         - coreutils
+        - curl
         - yq
     pipeline:
       - uses: iamguarded/build-compat
@@ -485,6 +486,111 @@ subpackages:
               set -o pipefail
               wait-for-it localhost:5000 -t 10
               curl -fsSL -I localhost:5000 | grep -q "HTTP/1.1 200"
+  
+  - name: ${{package.name}}-exporter-iamguarded-compat
+    description: "compat package with iamguarded harbor-exporter image"
+    dependencies:
+      provides:
+        - harbor-exporter-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - ${{package.name}}-exporter
+        - bash
+        - bash-binsh
+        - busybox
+        - coreutils
+        - curl
+        - yq
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: harbor-exporter
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/harbor-exporter/bin/
+          chmod g+rwX /opt/iamguarded
+          ln -sf /usr/bin/harbor-exporter /opt/iamguarded/harbor-exporter/bin/harbor-exporter
+      - uses: iamguarded/finalize-compat
+        with:
+          package: harbor-exporter
+          version: ${{vars.major-minor-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: harbor
+              gid: 1001
+          users:
+            - username: harbor
+              gid: 1001
+              uid: 1001
+          run-as: 0
+        contents:
+          packages:
+            - ${{package.name}}
+            - wait-for-it
+            - shadow
+            - sudo
+            - redis
+            - postgresql-16
+            - postgresql-16-client
+            - prometheus
+        environment:
+          BITNAMI_APP_NAME: harbor-exporter
+          HARBOR_DATABASE_DBNAME: registry
+          HARBOR_DATABASE_HOST: 127.0.0.1
+          HARBOR_DATABASE_PORT: "5432"
+          HARBOR_DATABASE_USERNAME: postgres
+          HARBOR_DATABASE_SSLMODE: disable
+          HARBOR_REDIS_URL: redis://127.0.0.1:6379/0
+          HARBOR_SERVICE_HOST: 127.0.0.1
+          HARBOR_SERVICE_PORT: "8080"
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: harbor-exporter-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+        - uses: iamguarded/test-compat
+          with:
+            package: harbor-exporter
+            version: ${{vars.major-minor-version}}
+        - name: "Start redis instance"
+          runs: |
+            redis-server --daemonize yes > /dev/null 2>&1
+            wait-for-it -t 10 localhost:6379
+        - name: "Start postgresql instance"
+          runs: |
+            id -u postgres >/dev/null 2>&1 || useradd postgres
+            sudo -u postgres initdb -D /tmp/test_db
+            sudo -u postgres pg_ctl -D /tmp/test_db -l /tmp/logfile \
+              -o "-c listen_addresses=127.0.0.1" start
+            wait-for-it -t 10 127.0.0.1:5432
+            sudo -u postgres createdb -h 127.0.0.1 -p 5432 registry
+        - name: run entrypoint
+          uses: test/daemon-check-output
+          with:
+            start: bash -x /opt/iamguarded/scripts/harbor-exporter/entrypoint.sh /opt/iamguarded/scripts/harbor-exporter/run.sh
+            timeout: 60
+            # When we do call :9090, exporter throws some logs like:
+            # "[ERROR] DB failure" those errors are expected as we don't
+            # have real Harbor running with database fully populated. So
+            # exclude the ERROR strings from the default error_strings list.
+            error_strings: |
+              FAIL
+              FATAL
+              Traceback.*most.recent.call
+              Exception in thread
+              java.lang.NullPointerException
+              java.lang.RuntimeException
+              Gem::MissingSpecError
+              command not found
+            expected_output: |
+              Register database completed
+              Starting harbor_exporter with port
+            post: |
+              set -euo pipefail
+              wait-for-it -t 10 localhost:9090
+              curl -sf http://localhost:9090/metrics | grep -iqF "harbor_statistics"
 
   - name: ${{package.name}}-trivy-adapter
     description: Use Trivy as a plug-in vulnerability scanner in the Harbor registry
