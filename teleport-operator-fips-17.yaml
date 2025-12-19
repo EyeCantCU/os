@@ -1,0 +1,204 @@
+package:
+  name: teleport-operator-fips-17
+  version: "17.7.12"
+  epoch: 0
+  description: "Kubernetes operator for managing Teleport resources"
+  copyright:
+    - license: AGPL-3.0-only
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+    provides:
+      - teleport-operator-fips=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gravitational/teleport
+      expected-commit: 99b3820f8f9ffe166db5713c65300c9f23625219
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      packages: ./integrations/operator
+      output: teleport-operator
+      tags: kustomize_disable_go_plugin_support
+      go-package: go-fips
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binary in the location expected by upstream"
+    pipeline:
+      - runs: |
+          # Upstream expects binary at /teleport-operator (root level)
+          # Use relative symlink: from / to usr/bin/teleport-operator
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -s usr/bin/teleport-operator "${{targets.subpkgdir}}/teleport-operator"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - ".*alpha.*"
+    - ".*beta.*"
+    - ".*dev.*"
+    - ".*rc.*"
+    - ".*gus.*"
+    - ".*wasm.*"
+    - ".*fred.*"
+    - ".*rhammonds.*"
+    - ".*ldapbind.*"
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v17.
+
+test:
+  environment:
+    contents:
+      packages:
+        - teleport-17
+        - wait-for-it
+        - curl
+    environment:
+      METRICS_PORT: "8080"
+      HEALTH_PORT: "8081"
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: teleport-operator
+    - name: "Verify binary and expected flags"
+      runs: |
+        set -euo pipefail
+        test -x /usr/bin/teleport-operator
+        teleport-operator --help 2>&1 | grep -F "namespace"
+        teleport-operator --help 2>&1 | grep -F "metrics-bind-address"
+        teleport-operator --help 2>&1 | grep -F "health-probe-bind-address"
+    - uses: test/kwok/cluster
+    - name: "Functional test with live Teleport auth server"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          set -euo pipefail
+
+          # Create directories for Teleport
+          mkdir -p /tmp/teleport /var/lib/teleport
+
+          # Create Teleport auth server config
+          tee /tmp/teleport-auth.yaml << 'EOF'
+          version: v3
+          teleport:
+            data_dir: /tmp/teleport
+            log:
+              output: stderr
+              severity: INFO
+          auth_service:
+            enabled: "yes"
+            cluster_name: "test-cluster"
+            listen_addr: 127.0.0.1:3025
+          proxy_service:
+            enabled: "no"
+          ssh_service:
+            enabled: "no"
+          EOF
+
+          # Initialize Teleport with static UUID
+          echo "00000000-0000-0000-0000-000000000000" > /var/lib/teleport/host_uuid
+          chmod 644 /var/lib/teleport/host_uuid
+
+          # Start Teleport auth server in background
+          teleport start --config=/tmp/teleport-auth.yaml --roles=auth &
+          TELEPORT_PID=$!
+          echo $TELEPORT_PID > /tmp/teleport.pid
+
+          # Wait for auth server to be ready
+          wait-for-it 127.0.0.1:3025 -t 60
+
+          # Give auth server time to fully initialize
+          sleep 5
+
+          # Create all Teleport resources in one file (role, bot, token)
+          # Using tctl create -f directly instead of tctl bots add to avoid proxy requirement
+          tee /tmp/teleport-resources.yaml << 'EOF'
+          kind: role
+          metadata:
+            name: operator
+          spec:
+            allow:
+              rules:
+                - resources: [role, user]
+                  verbs: [list, create, read, update, delete]
+            deny: {}
+          version: v7
+          ---
+          kind: bot
+          version: v1
+          metadata:
+            name: operator
+          spec:
+            roles:
+              - operator
+          ---
+          kind: token
+          version: v2
+          metadata:
+            name: operator-bot-token
+          spec:
+            roles:
+              - Bot
+            bot_name: operator
+            join_method: token
+          EOF
+          tctl --config=/tmp/teleport-auth.yaml create -f /tmp/teleport-resources.yaml
+
+          # Set up kubeconfig for operator
+          mkdir -p ~/.kube
+          cp $HOME/.kwok/clusters/kwok/kubeconfig.yaml ~/.kube/config
+
+          # Install the TeleportRole CRD (minimal CRD for testing)
+          kubectl apply -f https://raw.githubusercontent.com/gravitational/teleport/v${{package.version}}/integrations/operator/config/crd/bases/resources.teleport.dev_roles.yaml
+          sleep 2
+        start: |
+          teleport-operator \
+            -auth-server 127.0.0.1:3025 \
+            -join-method token \
+            -token operator-bot-token \
+            -insecure \
+            -namespace default \
+            -metrics-bind-address ":${METRICS_PORT}" \
+            -health-probe-bind-address ":${HEALTH_PORT}"
+        timeout: 90
+        expected_output: |
+          starting manager
+        # Override error_strings to avoid false positives from controller-runtime
+        # CRD warnings. The operator logs ERROR level when CRDs are missing, which
+        # is expected since we only install the TeleportRole CRD for testing.
+        error_strings: |
+          FATAL
+          panic:
+          Traceback.*most.recent.call
+          Exception in thread
+          command not found
+          unable to build tbot
+          tbot preflight checks failed
+        post: |
+          set -o pipefail
+          wait-for-it "localhost:${HEALTH_PORT}" -t 30
+          curl -fsS "http://localhost:${HEALTH_PORT}/healthz"
+          curl -fsS "http://localhost:${METRICS_PORT}/metrics" | grep -F "controller_runtime"
+
+          # Cleanup Teleport
+          if [ -f /tmp/teleport.pid ]; then
+            kill $(cat /tmp/teleport.pid) 2>/dev/null || true
+          fi
