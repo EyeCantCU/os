@@ -111,7 +111,7 @@ Structure your review as follows:
 
 ## Cleanup
 
-After completing the review, ask the user to confirm and them cleanup the temporary directory. Allow the user to cleanup the temporary directory with the keyword "cleanup." Use this command to clean up the directory:
+After completing the review, ask the user to confirm and then cleanup the temporary directory. Allow the user to cleanup the temporary directory with the keyword "cleanup." Use this command to clean up the directory:
 ```bash
 ./.claude/skills/pr-review/scripts/pr-review-functions.sh cleanup_temp_dir "$TEMP_DIR"
 ```
