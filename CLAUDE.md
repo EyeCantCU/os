@@ -226,13 +226,13 @@ echo "$RESPONSE" | jq -e '.keys | length > 0'
 ### 5. Use test pipelines
 Use specialized test pipelines for different package types to ensure proper validation:
 
-**`test/docs`** - For documentation subpackages:
+**`test/tw/docs`** - For documentation subpackages:
 ```yaml
 subpackages:
   - name: ${{package.name}}-doc
     test:
       pipeline:
-        - uses: test/docs
+        - uses: test/tw/docs
 ```
 Validates that doc packages contain readable documentation (man pages, info pages, or text files) and aren't empty.
 
@@ -285,6 +285,14 @@ test:
     - uses: test/tw/ldd-check
 ```
 Checks that all binaries have their library dependencies satisfied and no missing shared objects.
+
+**`test/tw/debugpackage`** - For packages providing debug symbols:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/debugpackage
+```
+Check that the package structure matches debug package requirements and contains appropriate debug information files.
 
 ### 6. Functional testing patterns
 Tests should validate actual functionality, not just version/help output. For examples of comprehensive functional tests, see packages like:
