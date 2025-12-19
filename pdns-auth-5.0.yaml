@@ -1,0 +1,466 @@
+package:
+  name: pdns-auth-5.0
+  version: "5.0.2"
+  epoch: 4
+  description: PowerDNS Authoritative Server
+  copyright:
+    - license: GPL-2.0-or-later
+    - license: LicenseRef-notice
+      license-path: NOTICE
+  resources:
+    cpu: 8
+    memory: 16Gi
+  dependencies:
+    provides:
+      - pdns-auth=${{package.full-version}}
+
+vars:
+  python-version: 3.12 # Pinning 3.12 due to imghdr. See: https://peps.python.org/pep-0594/#imghdr
+  lua-version: 5.3 # Pinning latest lua version to pass cmake
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*-(\d+\.\d+)$'
+    replace: '$1'
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - bison
+      - boost-dev
+      - build-base
+      - curl
+      - curl-dev
+      - flex
+      - gcc-14-default # Fixes "uint64_t" incompatibility issues
+      - krb5-dev
+      - libtool
+      - lmdb-dev
+      - lua${{vars.lua-version}}-dev
+      - mariadb-connector-c-dev
+      - mariadb-dev
+      - openldap-dev
+      - openssl-dev
+      - pkgconf-dev
+      - postgresql-dev
+      - py${{vars.python-version}}-virtualenv
+      - python-${{vars.python-version}}
+      - ragel
+      - sqlite
+      - systemd-dev
+      - systemd-systemctl
+      - tinycdb-dev
+      - unixodbc-dev
+      - yaml-cpp-dev
+      - zeromq-dev
+
+data:
+  - name: backends
+    items:
+      bind: bind
+      geoip: geoip
+      # gmysql: gmysql needs to explicitly request mariadb-connector-c as a dependency or we will pull in the entirety of mariadb
+      godbc: godbc
+      gpgsql: gpgsql
+      # gsqlite3: gsqlite3 needs to explicitly request sqlite3 as a dependency
+      ldap: ldap
+      lmdb: lmdb
+      lua2: lua2
+      pipe: pipe
+      remote: remote
+      tinydns: tinydns
+
+  - name: tools
+    items:
+      calidns: calidns
+      dnsbulktest: dnsbulktest
+      dnsgram: dnsgram
+      dnspcap2calidns: dnspcap2calidns
+      dnspcap2protobuf: dnspcap2protobuf
+      dnsreplay: dnsreplay
+      dnsscan: dnsscan
+      dnsscope: dnsscope
+      dnstcpbench: dnstcpbench
+      dnswasher: dnswasher
+      dumresp: dumresp
+      ixplore: ixplore
+      nproxy: nproxy
+      nsec3dig: nsec3dig
+      pdns_notify: pdns_notify
+      saxfr: saxfr
+      sdig: sdig
+      stubquery: stubquery
+      zone2json: zone2json
+      zone2ldap: zone2ldap
+      zone2sql: zone2sql
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/PowerDNS/pdns
+      expected-commit: 5b613a5f33e5d808b7590f0f846356c4d3302d03
+      tag: auth-${{package.version}}
+
+  - name: adds versioning information
+    runs: BUILDER_VERSION=${{package.version}} BUILDER_MODULES=recursor autoreconf -vfi
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --sbindir=/usr/bin \
+        --with-modules="" \
+        --with-dynmodules="bind geoip ldap lmdb lua2 gmysql godbc pipe gpgsql remote gsqlite3 tinydns" \
+        --enable-tools \
+        --enable-unit-tests \
+        --enable-systemd \
+        --disable-static \
+        --enable-remotebackend-zeromq \
+        --with-libcrypto=/usr \
+        --enable-ixfrdist \
+        --enable-reproducible
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - runs: PDNS_TEST_NO_IPV6=$(arch | sed "s/x86_64/0/ ; s/aarch64/1/")1 make check # aarch64 has issues with IPv6 tests on the CI, no error logs available
+
+  - name: Create necessary directories
+    runs: |
+      mkdir -p ${{targets.contextdir}}/etc/powerdns/pdns.d
+      mkdir -p ${{targets.contextdir}}/var/run/pdns/
+      mkdir -p ${{targets.contextdir}}/var/lib/powerdns
+
+  - name: add conf files
+    runs: |
+      sqlite3 ${{targets.contextdir}}/var/lib/powerdns/pdns.sqlite3 < modules/gsqlite3backend/schema.sqlite3.sql
+      install -Dm644 dockerdata/pdns.conf ${{targets.contextdir}}/etc/powerdns/pdns.conf
+      install -Dm644 pdns/ixfrdist.example.yml ${{targets.contextdir}}/etc/powerdns/ixfrdist.example.yml
+
+  - uses: strip
+
+subpackages:
+  - range: backends
+    name: pdns-auth-backend-${{range.key}}-${{vars.major-minor-version}}
+    description: PowerDNS ${{range.key}} backend
+    dependencies:
+      provides:
+        - pdns-auth-backend-${{range.key}}=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/pdns
+          mv ${{targets.destdir}}/usr/lib/pdns/lib${{range.key}}backend.so ${{targets.contextdir}}/usr/lib/pdns/lib${{range.key}}backend.so
+    test:
+      pipeline:
+        # gmysql backend needs libmariadb.so.3 on the runtime, which we can't provide runtime deps conditionally when using ranges.
+        # Apko would resolve it when building anyway, so we skip the ldd check only for the gmysql backend.
+        - uses: test/tw/ldd-check
+
+  - name: pdns-auth-backend-gmysql-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - pdns-auth-backend-gmysql=${{package.full-version}}
+      runtime:
+        - mariadb-connector-c
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/pdns
+          mv ${{targets.destdir}}/usr/lib/pdns/libgmysqlbackend.so ${{targets.contextdir}}/usr/lib/pdns/libgmysqlbackend.so
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: pdns-auth-backend-gsqlite3-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - pdns-auth-backend-gsqlite3=${{package.full-version}}
+      runtime:
+        - sqlite
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib/pdns
+          mv ${{targets.destdir}}/usr/lib/pdns/libgsqlite3backend.so ${{targets.contextdir}}/usr/lib/pdns/libgsqlite3backend.so
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - range: tools
+    name: pdns-auth-tool-${{range.key}}-${{vars.major-minor-version}}
+    description: PowerDNS ${{range.key}} tool
+    dependencies:
+      provides:
+        - pdns-auth-tool-${{range.key}}=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv ${{targets.destdir}}/usr/bin/${{range.key}} ${{targets.contextdir}}/usr/bin/${{range.key}}
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - if: '"${{range.key}}" != "saxfr"'
+          uses: test/tw/help-check
+          with:
+            bins: ${{range.key}}
+        - if: '"${{range.key}}" != "saxfr"'
+          uses: test/tw/ver-check
+          with:
+            bins: ${{range.key}}
+        # saxfr is a special case, it requires IP-address, port, zone to run and does not have a --help option.
+        # So we handle it separately.
+        - if: '"${{range.key}}" == "saxfr"'
+          runs: saxfr 127.0.0.1 53 example.com
+
+  - name: pdns-auth-backends-all-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - pdns-auth-backends-all=${{package.full-version}}
+      runtime:
+        - pdns-auth-backend-bind-${{vars.major-minor-version}}
+        - pdns-auth-backend-geoip-${{vars.major-minor-version}}
+        - pdns-auth-backend-godbc-${{vars.major-minor-version}}
+        - pdns-auth-backend-gmysql-${{vars.major-minor-version}}
+        - pdns-auth-backend-gpgsql-${{vars.major-minor-version}}
+        - pdns-auth-backend-gsqlite3-${{vars.major-minor-version}}
+        - pdns-auth-backend-ldap-${{vars.major-minor-version}}
+        - pdns-auth-backend-lmdb-${{vars.major-minor-version}}
+        - pdns-auth-backend-lua2-${{vars.major-minor-version}}
+        - pdns-auth-backend-pipe-${{vars.major-minor-version}}
+        - pdns-auth-backend-remote-${{vars.major-minor-version}}
+        - pdns-auth-backend-tinydns-${{vars.major-minor-version}}
+    pipeline:
+      - runs: mkdir -p ${{targets.contextdir}}
+    description: Virtual package that installs all PowerDNS backends
+    test:
+      pipeline:
+        - uses: test/emptypackage
+
+  - name: pdns-auth-backends-nosodium-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - pdns-auth-backends-nosodium=${{package.full-version}}
+      runtime:
+        - pdns-auth-backend-bind-${{vars.major-minor-version}}
+        - pdns-auth-backend-geoip-${{vars.major-minor-version}}
+        - pdns-auth-backend-godbc-${{vars.major-minor-version}}
+        - pdns-auth-backend-gmysql-${{vars.major-minor-version}}
+        - pdns-auth-backend-gpgsql-${{vars.major-minor-version}}
+        - pdns-auth-backend-gsqlite3-${{vars.major-minor-version}}
+        - pdns-auth-backend-ldap-${{vars.major-minor-version}}
+        - pdns-auth-backend-lmdb-${{vars.major-minor-version}}
+        - pdns-auth-backend-lua2-${{vars.major-minor-version}}
+        - pdns-auth-backend-pipe-${{vars.major-minor-version}}
+        - pdns-auth-backend-tinydns-${{vars.major-minor-version}}
+    pipeline:
+      - runs: mkdir -p ${{targets.contextdir}}
+    description: Virtual package that installs all PowerDNS backends without libsodium dependency (remote)
+    test:
+      pipeline:
+        - uses: test/emptypackage
+
+  - name: pdns-auth-tools-all-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - pdns-auth-tools-all=${{package.full-version}}
+      runtime:
+        - pdns-auth-tool-calidns-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsbulktest-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsgram-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnspcap2calidns-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnspcap2protobuf-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsreplay-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsscan-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsscope-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnstcpbench-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnswasher-${{vars.major-minor-version}}
+        - pdns-auth-tool-dumresp-${{vars.major-minor-version}}
+        - pdns-auth-tool-ixplore-${{vars.major-minor-version}}
+        - pdns-auth-tool-nproxy-${{vars.major-minor-version}}
+        - pdns-auth-tool-nsec3dig-${{vars.major-minor-version}}
+        - pdns-auth-tool-pdns_notify-${{vars.major-minor-version}}
+        - pdns-auth-tool-saxfr-${{vars.major-minor-version}}
+        - pdns-auth-tool-sdig-${{vars.major-minor-version}}
+        - pdns-auth-tool-stubquery-${{vars.major-minor-version}}
+        - pdns-auth-tool-zone2ldap-${{vars.major-minor-version}}
+        - pdns-auth-tool-zone2json-${{vars.major-minor-version}}
+        - pdns-auth-tool-zone2sql-${{vars.major-minor-version}}
+    pipeline:
+      - runs: mkdir -p ${{targets.contextdir}}
+    description: Virtual package that installs all PowerDNS tools
+    test:
+      pipeline:
+        - uses: test/emptypackage
+
+  - name: pdns-auth-tools-nosodium-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - pdns-auth-tools-nosodium=${{package.full-version}}
+      runtime:
+        - pdns-auth-tool-calidns-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsbulktest-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsgram-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnspcap2calidns-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnspcap2protobuf-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsreplay-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsscan-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnsscope-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnstcpbench-${{vars.major-minor-version}}
+        - pdns-auth-tool-dnswasher-${{vars.major-minor-version}}
+        - pdns-auth-tool-dumresp-${{vars.major-minor-version}}
+        - pdns-auth-tool-ixplore-${{vars.major-minor-version}}
+        - pdns-auth-tool-nproxy-${{vars.major-minor-version}}
+        - pdns-auth-tool-nsec3dig-${{vars.major-minor-version}}
+        - pdns-auth-tool-pdns_notify-${{vars.major-minor-version}}
+        - pdns-auth-tool-saxfr-${{vars.major-minor-version}}
+        - pdns-auth-tool-stubquery-${{vars.major-minor-version}}
+        - pdns-auth-tool-zone2ldap-${{vars.major-minor-version}}
+        - pdns-auth-tool-zone2json-${{vars.major-minor-version}}
+        - pdns-auth-tool-zone2sql-${{vars.major-minor-version}}
+    pipeline:
+      - runs: mkdir -p ${{targets.contextdir}}
+    description: Virtual package that installs all PowerDNS tools without libsodium dependency (sdig)
+    test:
+      pipeline:
+        - uses: test/emptypackage
+
+  - name: pdns-auth-doc-${{vars.major-minor-version}}
+    description: PDNS Authoritative server docs
+    dependencies:
+      provides:
+        - pdns-auth-doc=${{package.full-version}}
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - name: pdns-auth-compat-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - pdns-auth-compat=${{package.full-version}}
+      runtime:
+        - coreutils # For env -S support
+        - python-3 # Using a different version of python because upstream uses latest
+        - py3-jinja2 # Using a different version of python because upstream uses latest
+        - tini
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/sbin
+          ln -sf /usr/bin/pdns_server ${{targets.contextdir}}/usr/local/sbin/pdns_server
+          install -m 0755 dockerdata/startup.py ${{targets.contextdir}}/usr/local/sbin/pdns_server-startup
+
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -sf /usr/bin/pdns_notify ${{targets.contextdir}}/usr/local/bin/pdns_notify
+          ln -sf /usr/bin/pdns_control ${{targets.contextdir}}/usr/local/bin/pdns_control
+          ln -sf /usr/bin/pdnsutil ${{targets.contextdir}}/usr/local/bin/pdnsutil
+
+          mkdir -p ${{targets.contextdir}}/etc
+          ln -sf /etc/powerdns/pdns.conf ${{targets.contextdir}}/etc/pdns.conf
+
+  - name: pdns-auth-nosodium-${{vars.major-minor-version}}
+    description: PowerDNS Authoritative Server main package
+    dependencies:
+      provides:
+        - pdns-auth-nosodium=${{package.full-version}}
+    pipeline:
+      - uses: autoconf/configure
+        with:
+          opts: |
+            --sbindir=/usr/bin \
+            --with-modules="" \
+            --with-dynmodules="bind geoip ldap lmdb lua2 gmysql godbc pipe gpgsql remote gsqlite3 tinydns" \
+            --enable-unit-tests \
+            --enable-systemd \
+            --disable-static \
+            --with-libcrypto=/usr \
+            --enable-ixfrdist \
+            --enable-reproducible \
+            --with-libsodium=no \
+            --with-gnutls=no
+      - uses: autoconf/make
+      - name: only install our binaries
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          install -Dm755 ./pdns/pdns_control ${{targets.contextdir}}/usr/bin/pdns_control
+          install -Dm755 ./pdns/pdns_server ${{targets.contextdir}}/usr/bin/pdns_server
+          install -Dm755 ./pdns/pdnsutil ${{targets.contextdir}}/usr/bin/pdnsutil
+      - runs: PDNS_TEST_NO_IPV6=$(arch | sed "s/x86_64/0/ ; s/aarch64/1/")1 make check # aarch64 has issues with IPv6 tests on the CI, no error logs available
+      - name: Create necessary directories
+        runs: |
+          mkdir -p ${{targets.contextdir}}/etc/powerdns/pdns.d
+          mkdir -p ${{targets.contextdir}}/var/run/pdns/
+          mkdir -p ${{targets.contextdir}}/var/lib/powerdns
+      - name: add sqlite3 database file
+        runs: |
+          sqlite3 ${{targets.contextdir}}/var/lib/powerdns/pdns.sqlite3 < modules/gsqlite3backend/schema.sqlite3.sql
+          install -Dm644 dockerdata/pdns.conf ${{targets.contextdir}}/etc/powerdns/pdns.conf
+          install -Dm644 pdns/ixfrdist.example.yml ${{targets.contextdir}}/etc/powerdns/ixfrdist.example.yml
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - posix-libc-utils
+      pipeline:
+        - runs: |
+            set -euo pipefail
+            # Check that pdns binary does not link to libsodium or gnutls
+            if ldd /usr/bin/pdns_control | grep -E "(libsodium|libgnutls)"; then
+              echo "ERROR: pdns-nosodium should not link to libsodium or gnutls libraries"
+              exit 1
+            fi
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -alpha
+    - -beta
+    - -rc
+  github:
+    identifier: PowerDNS/pdns
+    strip-prefix: auth-
+    tag-filter: auth-5.0
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - bind-tools
+        - curl
+        - wait-for-it
+        - pdns-auth-backends-all-${{vars.major-minor-version}}
+        - pdns-auth-tools-all-${{vars.major-minor-version}}
+    accounts:
+      groups:
+        - groupname: pdns
+          gid: 953
+      users:
+        - username: pdns
+          gid: 953
+          uid: 953
+      run-as: 0 # To bind :53 on the CI
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: pdns_control pdns_notify pdns_server pdnsutil
+    - name: "start daemon on localhost"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          curl -fsSL https://raw.githubusercontent.com/PowerDNS/pdns/refs/tags/auth-${{package.version}}/dockerdata/pdns.conf -o /etc/pdns.conf
+          pdnsutil create-zone example.com ns1.example.com
+          # require NAME to be absolute, ref: https://github.com/PowerDNS/pdns/pull/14984
+          pdnsutil add-record example.com ns1.example.com A 127.0.0.1
+        start: "pdns_server"
+        timeout: 30
+        expected_output: |
+          Listening on controlsocket
+          UDP server bound
+          TCP server bound
+          Done launching threads, ready to distribute questions
+        post: |
+          wait-for-it -t 5 --strict localhost:53
+          dig @127.0.0.1 -p 53 example.com SOA +norecurse | grep -F -e "NOERROR"
+          sdig 127.0.0.1 53 example.com SOA | grep -F -e "No Error"

@@ -1,0 +1,90 @@
+From a0335530d6d53b92962c284f20c0fb8dbbeb9f42 Mon Sep 17 00:00:00 2001
+From: Markus Boehme <markus.boehme@chainguard.dev>
+Date: Tue, 2 Dec 2025 16:12:06 +0100
+Subject: [PATCH] oslogin, init, dbus: dontaudit oslogin attempts to call meta
+ data server
+
+The GoogleComputePlatform/guest-oslogin project provides a couple glibc
+NSS modules to query users and groups from the meta data service, and
+cache them in a local file. The meta data service is a host-local HTTP
+server provided by GCP that runs outside a GCP instance.
+
+Since NSS modules run in the context of whatever process is querying
+user or group information, proper functioning without the cache would
+require to grant any process needing to look up users permission to
+establish network connections to port 80. Under the principle of least
+privilege this is undesirable.
+
+Instead, lean on the cache entirely, explicitly deny access to port 80
+for the init_t and system_dbusd_t types (the only ones seen being denied
+on an attempted boot + login), and mark denials as dontaudit. As @xnox
+pointed out, this should not inhibit normal operation since legitimate
+users are already going to be cached. It is the lookup of users/groups
+not existing in the meta data server (and hence not in the cache) that
+will cause lookups. Denying those will not affect the outcome.
+
+Ideally, these changes would live as patches to the google-compute-
+engine-oslogin package as the source of the oslogin policy. However, at
+the time of writing, we produce an amalgamation build of this base
+policy and various third-party policies, for which it would be clunky to
+maintain separate downstream patches.
+
+Signed-off-by: Markus Boehme <markus.boehme@chainguard.dev>
+---
+ policy/modules/contrib/dbus.te | 7 +++++++
+ policy/modules/system/init.te  | 7 +++++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/policy/modules/contrib/dbus.te b/policy/modules/contrib/dbus.te
+index 4d7a7e23f..d905d37ae 100644
+--- a/policy/modules/contrib/dbus.te
++++ b/policy/modules/contrib/dbus.te
+@@ -2,6 +2,7 @@ policy_module(dbus, 1.19.0)
+ 
+ gen_require(`
+ 	class dbus all_dbus_perms;
++	type http_port_t;
+ ')
+ 
+ ##############################
+@@ -174,6 +175,12 @@ userdom_dontaudit_search_user_home_dirs(system_dbusd_t)
+ userdom_home_reader(system_dbusd_t)
+ userdom_manage_tmp_dirs(system_dbusd_t)
+ 
++# GoogleCloudPlatform/guest-oslogin provides an NSS module that attempts to
++# call the meta data server. There is a peridoically refreshed cache of allowed
++# logins, but querying non-existent users/groups will always call the meta data
++# server. Ignore with impunity.
++dontaudit system_dbusd_t http_port_t:tcp_socket { name_connect };
++
+ optional_policy(`
+ 	bind_domtrans(system_dbusd_t)
+ ')
+diff --git a/policy/modules/system/init.te b/policy/modules/system/init.te
+index 5ba64610e..186e8b650 100644
+--- a/policy/modules/system/init.te
++++ b/policy/modules/system/init.te
+@@ -2,6 +2,7 @@ policy_module(init, 1.20.1)
+ 
+ gen_require(`
+ 	class passwd rootok;
++	type http_port_t;
+ ')
+ 
+ ########################################
+@@ -1383,6 +1384,12 @@ ifdef(`distro_suse',`
+ 	')
+ ')
+ 
++# GoogleCloudPlatform/guest-oslogin provides an NSS module that attempts to
++# call the meta data server. There is a peridoically refreshed cache of allowed
++# logins, but querying non-existent users/groups will always call the meta data
++# server. Ignore with impunity.
++dontaudit init_t http_port_t:tcp_socket { name_connect };
++
+ domain_dontaudit_use_interactive_fds(daemon)
+ 
+ init_use_notify(daemon)
+-- 
+2.51.2
+

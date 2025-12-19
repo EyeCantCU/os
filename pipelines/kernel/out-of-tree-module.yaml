@@ -1,0 +1,96 @@
+name: Build and install an out of tree kernel module
+
+needs:
+  packages:
+    - bison
+    - build-base
+    - busybox
+    - ca-certificates-bundle
+    - coreutils
+    - diffutils
+    - elfutils
+    - elfutils-dev
+    - findutils
+    - flex
+    - gawk
+    - gmp
+    - gmp-dev
+    - gnutar
+    - kmod
+    - mpc
+    - mpc-dev
+    - mpfr
+    - mpfr-dev
+    - openssl
+    - openssl-dev
+    - pahole
+    - pahole-dev
+    - perl
+    - python3
+    - wolfi-base
+    - zstd
+
+inputs:
+  headers:
+    description: The kernel headers directory, or partial version flavor to use.
+    required: false
+  chdir:
+    description: Change directory to the kernel headers directory before building
+    default: true
+    required: false
+  clean:
+    description: |
+      Run `make clean` after installing.
+      For dealing with build systems which do not detect and rebuild when changing headers.
+    default: false
+    required: false
+  keyname:
+    description: Filename for installed pubkey from generated keypair
+    default: ${{package.name}}.x509
+    required: false
+
+pipeline:
+  - runs: |
+      kdir="${{inputs.headers}}"
+      if [ "$kdir" = "" ]; then
+        kdir=$(find /usr/lib/modules -name build -print -quit)
+      elif [ ! -d "$kdir" ]; then
+        kdir=$(find /usr/lib/modules/ -name *"$kdir"* -print -quit)
+        [ -z "$kdir" ] && { echo "could not find headers matching ${{inputs.headers}}"; exit 1; }
+        kdir="$kdir"/build
+      fi
+
+      export KERNEL_UNAME=$(basename $(dirname "$kdir"))
+
+      # Mostly copied from certs/Makefile. `make modules modules_install` doesn't pull in
+      # a depenendcy that makes new certs, and there's no simple edit to make it
+      # do so.
+      hash=$(cd "$kdir" && scripts/config -s MODULE_SIG_HASH)
+      [ -z "$hash" ] && { echo "Can't find what hash to use for signing key! Is MODULE_SIG_HASH set?"; exit 1; }
+      ecdsa_args=""
+      [ "$(cd $kdir && scripts/config -s MODULE_SIG_KEY_TYPE_ECDSA)" = "y" ] && ecdsa_args=" -newkey ec -pkeyopt ec_paramgen_curve:secp384r1"
+      openssl req -new -nodes -utf8 -"$hash" -days 36500 \
+          -batch -x509 -config "$kdir"/certs/x509.genkey \
+          -outform PEM -out "$kdir"/certs/cert.pem -keyform PEM -keyout "$kdir"/certs/key.pem $ecdsa_args
+
+      cat "$kdir"/certs/key.pem "$kdir"/certs/cert.pem > "$kdir"/certs/signing_key.pem
+      openssl x509 -in "$kdir"/certs/cert.pem -outform DER -out "$kdir"/certs/signing_key.x509
+      rm "$kdir"/certs/key.pem "$kdir"/certs/cert.pem
+
+      chdir_args=""
+      if [ "${{inputs.chdir}}" = "true" ]; then
+        chdir_args="-C '$kdir'"
+      fi
+      make $chdir_args M="$PWD" -j$(nproc) modules
+      # Keep this more or less in sync with the modules.yaml pipeline
+      make $chdir_args M="$PWD" INSTALL_MOD_DIR=extra \
+        INSTALL_MOD_PATH="${{targets.contextdir}}/usr" INSTALL_MOD_STRIP=1 ZSTD="zstd -19" modules_install
+
+      # Drop depmod generated files, we'll generate them again at image build time.
+      find "${{targets.contextdir}}"/usr/lib/modules/ -name 'modules.*' -delete
+
+      install -Dm 0444 "$kdir"/certs/signing_key.x509 "${{targets.contextdir}}"/usr/lib/modules/"$KERNEL_UNAME"/certs/"${{inputs.keyname}}"
+
+      if [ "${{inputs.clean}}" = "true" ]; then
+        make $chdir_args clean
+      fi

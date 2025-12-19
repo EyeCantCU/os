@@ -454,3 +454,35 @@ Benefits of using `tee`:
 - Maintains the same functionality as `cat >` while improving observability
 
 **Note:** `tee` writes to both the file and stdout by default. This is desired behavior for test visibility.
+
+### 14. Use `stat` instead of `test -f` for file existence checks
+When verifying files exist in tests, use `stat` instead of `test -f` or `test -x`. The `test` builtin only returns exit code 1 on failure with no error message, making it hard to diagnose failures in logs:
+
+```bash
+# Bad - silent failure, only shows exit code 1
+test -f /usr/share/java/zookeeper/conf/logback.xml
+test -x /usr/share/java/zookeeper/bin/zkServer.sh
+
+# Good - shows clear error message on failure
+stat /usr/share/java/zookeeper/conf/logback.xml
+stat /usr/share/java/zookeeper/bin/zkServer.sh
+```
+
+**Output comparison on missing files:**
+```bash
+# test -f gives no useful output
+$ test -f /foo/bar
+$ echo $?
+1
+
+# stat shows exactly what's wrong
+$ stat /foo/bar
+stat: cannot statx '/foo/bar': No such file or directory
+```
+
+For checking executability specifically, combine `stat` with a follow-up check:
+```bash
+# Verify file exists and is executable
+stat /usr/bin/myapp
+test -x /usr/bin/myapp || { echo "ERROR: /usr/bin/myapp is not executable"; exit 1; }
+```

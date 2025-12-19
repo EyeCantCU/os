@@ -1,0 +1,200 @@
+package:
+  name: DCGM-cuda-13.1
+  version: "4.4.2"
+  epoch: 0
+  description: "NVIDIA Data Center GPU Manager"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    # TODO(@EyeCantCU): Convert everything using DCGM provider to a proper CUDA stream
+    # We set provider priority because multiple CUDA streams could be at the same
+    # version. We want anything dependent on the generic DCGM provider to retrieve
+    # DCGM with the latest version of CUDA (otherwise, we'll end up with a bunch of
+    # packages across different streams that also provide DCGM with the same prio)
+    provider-priority: '${{vars.cuda-priority}}'
+    provides:
+      - DCGM=${{package.full-version}}
+    runtime:
+      - fmt~10
+      - ld-linux # so:ld-linux-x86-64.so.2 and so:ld-linux-aarch64.so.1=1
+      - libboost-filesystem
+      # DCGM upstream tries to build with CUDA 11, 12, and 13
+      # at the same time, build against a single version for now.
+      # We may be asked to support a wider range of architectures in
+      # the future, and to do that, we will need to build DCGM against
+      # all supported versions of CUDA
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-dcgm-libdcgmmoduleprofiling
+      - so:libc.so.6
+      - so:libdl.so.2
+      - so:libgcc_s.so.1
+      - so:libm.so.6
+      - so:libpthread.so.0
+      - so:librt.so.1
+      - so:libstdc++.so.6
+      - so:libyaml-cpp.so.0.8
+  options:
+    no-depends: true
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{vars.cuda-version}}
+    match: (\d+)\.\d+
+    replace: $1
+    to: cuda-major-version
+  - from: ${{vars.cuda-version}}
+    match: (\d+)\.(\d+)
+    replace: '$1$2'
+    to: cuda-priority
+
+environment:
+  contents:
+    packages:
+      - Catch2-2.13-dev
+      - Catch2-2.13-static
+      - bash
+      - boost-dev
+      - boost-static
+      - build-base
+      - busybox
+      - cmake
+      - coreutils
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - fmt-dev~10
+      - git-lfs
+      - jsoncpp-dev
+      - jsoncpp-static
+      - libevent-dev
+      - libevent-static
+      - nvcc-${{vars.cuda-version}}-gcc-default
+      - nvidia-cuda-culibos-${{vars.cuda-version}}-dev
+      - plog-dev
+      - plog-static
+      - tclap
+      - yaml-cpp-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NVIDIA/DCGM
+      expected-commit: f0ec2156c5c0257e4644d70c853eb1e7bc90994a
+      tag: v${{package.version}}
+
+  - uses: patch
+    with:
+      patches: |
+        coinstallability-workaround.patch
+        fix-build-update-boost-api.patch
+        fix-build-boost-process-v1.patch
+        fix-build-dont-link-against-boost-system.patch
+        fix-gettid.patch
+        fix-gpucounts.patch
+        fix-link-ordering.patch
+        fix-member-name.patch
+        include-headers.patch
+        wno-error.patch
+
+  - runs: |
+      git lfs install
+      git lfs pull
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -UDCGM_LIB_INSTALL_PREFIX \
+        -UDCGM_PACKAGING \
+        -UDCGM_PACKAGING_ENGINE \
+        -DBUILD_TESTING=OFF \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_CXX_STANDARD=20 \
+        -DCMAKE_CUDA_VERSIONS=${{vars.cuda-version}}
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - runs: |
+      # Remove pre-built binaries (native and foreign arch)
+      find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_64bit' -delete
+      find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_aarch64' -delete
+      find ${{targets.destdir}}/usr/share/dcgm_tests -type f -executable -name '*_ppc64le' -delete
+      mv ${{targets.destdir}}/usr/sbin/* ${{targets.destdir}}/usr/bin/
+      rmdir ${{targets.destdir}}/usr/sbin/
+
+  - name: Remove older CUDA builds, which were built against the latest CUDA
+    working-directory: ${{targets.contextdir}}
+    runs: |
+      for cuda_ver in 11 12; do
+        rm usr/bin/dcgmproftester${cuda_ver}
+        rm usr/lib/libdcgm_cublas_proxy${cuda_ver}.so*
+        rm -r usr/libexec/datacenter-gpu-manager-4/plugins/cuda${cuda_ver}
+        rm -r usr/share/dcgm_tests/apps/nvvs/plugins/cuda${cuda_ver}
+        _arch=${{build.arch}}; case $_arch in x86_64) _arch="amd64" ;; aarch64) _arch="aarch64" ;; esac
+        rm usr/share/dcgm_tests/apps/${_arch}/dcgmproftester${cuda_ver}
+        rm usr/share/dcgm_tests/apps/${_arch}/libdcgm_cublas_proxy${cuda_ver}.so*
+      done
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    pipeline:
+      - uses: split/dev
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/dcgm/sdk_samples
+          mv ${{targets.destdir}}/usr/src/datacenter-gpu-manager-4/sdk_samples/c_src ${{targets.contextdir}}/usr/local/dcgm/sdk_samples
+
+  - name: ${{package.name}}-tests
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share
+          mv ${{targets.destdir}}/usr/share/dcgm_tests ${{targets.contextdir}}/usr/share
+
+  - name: ${{package.name}}-nvvs
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/libexec
+          mv ${{targets.destdir}}/usr/libexec/datacenter-gpu-manager-4 ${{targets.contextdir}}/usr/libexec/datacenter-gpu-manager-4
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/DCGM
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        # dcgmproftester depends on cuda.so.1 which is provided by the host
+        exclude-files: |
+          /usr/bin/dcgmproftester${{vars.cuda-major-version}}
+    - uses: test/tw/ver-check
+      with:
+        bins: "dcgmi nv-hostengine"
+    - uses: test/tw/help-check
+      with:
+        bins: "dcgmi nv-hostengine"
+    - name: Run and test DCGM
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /var/run
+          touch /var/run/nvhostengine.pid
+        start: nv-hostengine --no-daemon
+        timeout: 30
+        expected_output: |
+          Started host engine version
+        post: |
+          #!/bin/sh -e
+          set -o pipefail
+          dcgmi modules --list | grep -i Success
+          dcgmi modules --list | grep -i Loaded
+          dcgmi modules --list | grep -i Core
