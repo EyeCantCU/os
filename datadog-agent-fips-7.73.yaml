@@ -27,7 +27,7 @@ capabilities:
     - CAP_SYS_ADMIN # This is needed to run unshare(1).
 
 vars:
-  python-version: "3.12"
+  python-version: "3.13"
   destd: /opt/datadog-agent
 
 var-transforms:
@@ -118,6 +118,15 @@ pipeline:
   - uses: patch
     with:
       patches: fix-7.66.0-ftbfs.patch fix-sqlite-double-registration.patch
+
+  - uses: go/bump
+    with:
+      go-version: "1.24.7" # package built w/ go-1.24 - keeps tidy at 1.24.7, otherwise go mod tidy fails
+      replaces: github.com/mholt/archiver/v3=github.com/anchore/archiver/v3@v3.5.2
+      show-diff: true
+      # GHSA-f6x5-jh6r-wrfv, GHSA-j5w8-q4qc-rx2x
+      deps: |-
+        golang.org/x/crypto@v0.45.0
 
   # Ensure that we don't run into nvidia GPU issues at runtime.
   - runs: |
@@ -234,28 +243,28 @@ pipeline:
       mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/bin
       mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib
 
-      # Create Python 3.12 directory structure to match what the subpackage will create
+      # Create Python directory structure to match what the subpackage will create
       # subpackage expects this directory structure to exist when it runs
-      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12
-      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12/site-packages
-      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12/lib-dynload
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python${{vars.python-version}}
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python${{vars.python-version}}/site-packages
+      mkdir -p ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python${{vars.python-version}}/lib-dynload
 
-      # Copy Python 3.12 standard library from system
-      if [ -d /usr/lib/python3.12 ]; then
-        cp -r /usr/lib/python3.12/* ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python3.12/
+      # Copy Python ${{vars.python-version}} standard library from system
+      if [ -d /usr/lib/python${{vars.python-version}} ]; then
+        cp -r /usr/lib/python${{vars.python-version}}/* ${{targets.contextdir}}${{vars.destd}}/embedded/lib/python${{vars.python-version}}/
       fi
 
       # Create Python binary symlinks
       cd ${{targets.contextdir}}${{vars.destd}}/embedded/bin
-      ln -sf python3.12 python3
+      ln -sf python${{vars.python-version}} python3
       ln -sf python3 python
 
       # Symlink Python libraries needed by rtloader (matching upstream structure)
-      # Note: Only libpython3.12.so.1.0 exists in /usr/lib/ - the other two don't exist
-      # We symlink to avoid library conflicts with python-3.12-base package
-      ln -sf /usr/lib/libpython3.12.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython3.12.so.1.0
-      ln -sf /usr/lib/libpython3.12.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython3.12.so
-      ln -sf /usr/lib/libpython3.12.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython3.so
+      # Note: Only libpython${{vars.python-version}}.so.1.0 exists in /usr/lib/ - the other two don't exist
+      # We symlink to avoid library conflicts with python-${{vars.python-version}}-base package
+      ln -sf /usr/lib/libpython${{vars.python-version}}.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython${{vars.python-version}}.so.1.0
+      ln -sf /usr/lib/libpython${{vars.python-version}}.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython${{vars.python-version}}.so
+      ln -sf /usr/lib/libpython${{vars.python-version}}.so.1.0 ${{targets.contextdir}}${{vars.destd}}/embedded/lib/libpython3.so
 
       # Create ld.so.conf.d entry to make embedded lib directory discoverable
       mkdir -p ${{targets.contextdir}}/etc/ld.so.conf.d
@@ -351,6 +360,12 @@ subpackages:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/bin/dist/jmx
           ln -sf "${{vars.destd}}/bin/agent/dist/jmx/jmxfetch.jar" "${{targets.contextdir}}/usr/bin/dist/jmx/jmxfetch.jar"
+    test:
+      pipeline:
+        - runs: readlink -v /usr/bin/dist/jmx/jmxfetch.jar
+        - uses: test/tw/virtualpackage
+          with:
+            virtual-pkg-name: datadog-agent-jmx-fips
 
   - name: ${{package.name}}-oci-compat
     dependencies:
@@ -396,6 +411,23 @@ subpackages:
           # Copy rather than symlink to keep the embedded tree self-contained.
           cp /usr/lib/ossl-modules/fips.so ${{targets.contextdir}}${{vars.destd}}/embedded/lib/ossl-modules/fips.so
           cp /etc/ssl/openssl.cnf ${{targets.contextdir}}${{vars.destd}}/embedded/ssl/openssl.cnf
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            dir: "/opt/entrypoints/"
+            name: "*"
+        - uses: test/tw/contains-files
+          with:
+            dir: "/opt/datadog-agent/bin/agent/dist/"
+            name: "*.py"
+        - uses: test/tw/contains-files
+          with:
+            dir: "/opt/datadog-agent/embedded/share/"
+            name: "*.o"
+        - uses: test/tw/virtualpackage
+          with:
+            virtual-pkg-name: datadog-agent-fips-oci-compat
 
   - name: ${{package.name}}-core-integrations
     dependencies:
@@ -414,7 +446,7 @@ subpackages:
             with:
               repository: https://github.com/DataDog/integrations-core
               branch: ${{vars.datadog-major-minor-x}} # 7.x.y
-              expected-commit: c2376aa55bec2cca05988e6e29101b42d833c684 # needs to be updated with each new release
+              expected-commit: 750eee16611a2be2dedaffb2fe2fee45e3802c6a # needs to be updated with each new release
           - name: Verify expected-commit is latest
             runs: |
               # Check if the expected-commit matches the latest commit on the branch
@@ -506,7 +538,7 @@ subpackages:
       pipeline:
         - uses: test/tw/contains-files
           with:
-            dir: "/opt/datadog-agent/embedded/lib/python3.12/site-packages/bcrypt/"
+            dir: "/opt/datadog-agent/embedded/lib/python${{vars.python-version}}/site-packages/bcrypt/"
             name: "*.so*"
 
   - name: datadog-cluster-agent-fips-${{vars.major-minor-version}}
@@ -741,10 +773,12 @@ test:
           && exit 1
     - name: Ensure the agent's requirements.txt for integrations is included
       runs: |
+        : "${mypath:?ERROR: mypath environment variable not set}"
         PATH=$mypath:$PATH
         ls ${{vars.destd}}/requirements-agent-release.txt
     - name: Ensure the agent integration subcommand works
       runs: |
+        : "${mypath:?ERROR: mypath environment variable not set}"
         PATH=$mypath:$PATH
         agent integration freeze >/dev/null
     - name: Ensure checks can be loaded (base)
@@ -759,6 +793,7 @@ test:
         import: datadog_checks.downloader
     - name: Execute bins
       runs: |
+        : "${mypath:?ERROR: mypath environment variable not set}"
         PATH=$mypath:$PATH
         process-agent --version
         process-agent --help
@@ -787,9 +822,11 @@ test:
           dd_url: "http://localhost:80"
           hostname: "$(hostname)"
           EOF
+
           echo placeholder > /etc/datadog-agent/auth_token
           mkcert -key-file /etc/datadog-agent/ipc_cert.priv -cert-file /etc/datadog-agent/ipc_cert.pub localhost
           cat /etc/datadog-agent/ipc_cert.pub /etc/datadog-agent/ipc_cert.priv > /etc/datadog-agent/ipc_cert.pem
+
           export DD_LOG_LEVEL=debug
           export DD_HOSTNAME_FILE=/etc/hostname
         start: /opt/datadog-agent/bin/agent/agent run
@@ -802,6 +839,7 @@ test:
           Starting Datadog Agent
     - name: Validate multicall components are correctly linked
       runs: |
+        : "${mypath:?ERROR: mypath environment variable not set}"
         PATH=$mypath:$PATH
         trace-agent version | grep trace-agent
         security-agent version | grep "Security agent"
