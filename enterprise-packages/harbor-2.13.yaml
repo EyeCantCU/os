@@ -80,6 +80,178 @@ pipeline:
   - uses: strip
 
 subpackages:
+  - name: ${{package.name}}-harbor-core-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        # Required by startup scripts
+        - bash
+        - busybox
+        - coreutils
+        - posix-libc-utils
+      provides:
+        - harbor-core-iamguarded-compat=${{package.full-version}}
+    description: "Iamguarded compat for Harbor core"
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: harbor-core
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded
+          mkdir -p /iamguarded
+          mkdir -p /opt/iamguarded/harbor-core/bin
+          mkdir -p /opt/iamguarded/harbor-core/etc/core
+
+          # Access needed during runtime
+          chmod g+rwX /opt/iamguarded
+          chmod g+rwX /iamguarded
+          ln -sf /usr/bin/harbor-core /opt/iamguarded/harbor-core/bin/harbor-core
+          ln -sf /harbor/harbor_core /opt/iamguarded/harbor-core/bin/harbor-core
+
+          # Disable some commands used in iamguarded scripts. These commands more likely fail in this since this image take non root approach
+          sed -i 's/ensure_user_exists/# ensure_user_exists/g' /opt/iamguarded/scripts/harbor-core/postunpack.sh
+          sed -i 's/chown -R "$HARBOR_CORE_DAEMON_USER" "$dir"/# chown -R "$HARBOR_CORE_DAEMON_USER" "$dir"/g' /opt/iamguarded/scripts/harbor-core/postunpack.sh
+
+          /opt/iamguarded/scripts/harbor-core/postunpack.sh
+      - uses: iamguarded/finalize-compat
+        with:
+          package: harbor-core
+          version: ${{vars.major-minor-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: harbor
+              gid: 1001
+          users:
+            - username: harbor
+              gid: 1001
+              uid: 1001
+          run-as: 0
+        contents:
+          packages:
+            - ${{package.name}}
+            - wait-for-it
+            - shadow
+            - sudo
+            - redis
+            - postgresql
+            - postgresql-client
+            - tini
+            - ini-file
+        environment:
+          BITNAMI_APP_NAME: harbor-core
+          # PostgreSQL configuration
+          HARBOR_DATABASE_DBNAME: registry
+          HARBOR_DATABASE_HOST: 127.0.0.1
+          HARBOR_DATABASE_PORT: "5432"
+          HARBOR_DATABASE_USERNAME: postgres
+          HARBOR_DATABASE_PASSWORD: postgres
+          HARBOR_DATABASE_SSLMODE: disable
+          # Redis configuration
+          _REDIS_URL_CORE: redis://127.0.0.1:6379/0
+          _REDIS_URL_REG: redis://127.0.0.1:6379/1
+          # Core service configuration
+          CORE_URL: http://127.0.0.1:8080
+          CORE_LOCAL_URL: http://127.0.0.1:8080
+          EXT_ENDPOINT: http://127.0.0.1:8080
+          PORTAL_URL: http://127.0.0.1:8080
+          REGISTRY_URL: http://127.0.0.1:5000
+          REGISTRYCTL_URL: http://127.0.0.1:8082
+          JOBSERVICE_URL: http://127.0.0.1:8081
+          TOKEN_SERVICE_URL: http://127.0.0.1:8080/service/token
+          CFG_EXPIRATION: "5"
+          CORE_SECRET: core-secret-test
+          JOBSERVICE_SECRET: jobservice-secret-test
+          # CORE_KEY is required - 16 character key for encryption
+          CORE_KEY: "0123456789abcdef"
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: harbor-core-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+        - uses: iamguarded/test-compat
+          with:
+            package: harbor-core
+            version: ${{vars.major-minor-version}}
+        - name: "Test entrypoint files"
+          runs: |
+            stat /opt/iamguarded/scripts/harbor-core/entrypoint.sh
+            stat /opt/iamguarded/scripts/harbor-core/run.sh
+        - name: "Test binaries"
+          runs: |
+            stat /opt/iamguarded/harbor-core/bin/harbor-core
+            /opt/iamguarded/harbor-core/bin/harbor-core -h
+        - name: "Start redis instance"
+          runs: |
+            redis-server --daemonize yes > /dev/null 2>&1
+            wait-for-it -t 10 127.0.0.1:6379
+        - name: "Start postgresql instance"
+          runs: |
+            id -u postgres >/dev/null 2>&1 || useradd postgres
+            sudo -u postgres initdb -D /tmp/test_db
+            sudo -u postgres pg_ctl -D /tmp/test_db -l /tmp/logfile \
+              -o "-c listen_addresses=127.0.0.1" start
+            wait-for-it -t 10 127.0.0.1:5432
+            sudo -u postgres createdb -h 127.0.0.1 -p 5432 registry
+        - name: "Setup core configuration files"
+          runs: |
+            # Create the key file at the iamguarded compat path
+            mkdir -p /opt/iamguarded/harbor-core/etc/core
+            echo -n "0123456789abcdef" > /opt/iamguarded/harbor-core/etc/core/key
+            chmod 600 /opt/iamguarded/harbor-core/etc/core/key
+
+            # Also create at /etc/core as setup.sh expects files there
+            mkdir -p /etc/core
+
+            # Create the key file
+            echo -n "0123456789abcdef" > /etc/core/key
+            chmod 600 /etc/core/key
+
+            # Create minimal app.conf for harbor-core using printf to avoid YAML parsing issues
+            printf '%s\n' \
+              "appname = Harbor" \
+              "runmode = prod" \
+              "enablegzip = true" \
+              "httpport = 8080" \
+              "" \
+              "[dev]" \
+              "httpport = 8080" \
+              "" \
+              "[prod]" \
+              "httpport = 8080" \
+              > /etc/core/app.conf
+        - name: run entrypoint
+          uses: test/daemon-check-output
+          with:
+            # Using tini to properly forward signals to the child process
+            # otherwise test/daemon-check-output doesn't forward SIGTERM and it hangs
+            start: /sbin/tini -s -- bash -x /opt/iamguarded/scripts/harbor-core/entrypoint.sh /opt/iamguarded/scripts/harbor-core/run.sh
+            timeout: 60
+            # Harbor core requires full infrastructure (registry, jobservice, etc.) to be
+            # fully functional. In test environment, we validate that the entrypoint scripts
+            # execute correctly and the service attempts to start.
+            error_strings: |
+              FAIL
+              FATAL
+              Traceback.*most.recent.call
+              Exception in thread
+              java.lang.NullPointerException
+              java.lang.RuntimeException
+              Gem::MissingSpecError
+              command not found
+            expected_output: |
+              Validating Core settings...
+              harbor-core setup finished!
+            post: |
+              # Harbor core requires the full Harbor ecosystem (registry, jobservice,
+              # portal, etc.) to respond on HTTP endpoints. In isolation, the setup
+              # and configuration validation complete successfully but HTTP endpoints
+              # may not be available without the full orchestration.
+              true
+
   - name: ${{package.name}}-jobservice
     description: harbor jobservice
     dependencies:
@@ -486,7 +658,7 @@ subpackages:
               set -o pipefail
               wait-for-it localhost:5000 -t 10
               curl -fsSL -I localhost:5000 | grep -q "HTTP/1.1 200"
-  
+
   - name: ${{package.name}}-exporter-iamguarded-compat
     description: "compat package with iamguarded harbor-exporter image"
     dependencies:
