@@ -1,6 +1,6 @@
 package:
   name: azure-functions-host
-  version: "4.1045.200"
+  version: "4.1046.100"
   epoch: 0
   description: Runtime host used by the Azure Functions service.
   target-architecture:
@@ -59,7 +59,7 @@ pipeline:
     with:
       repository: https://github.com/Azure/azure-functions-host
       tag: v${{package.version}}
-      expected-commit: ef15b0c233fa26e3039e172fff93f12f11609091
+      expected-commit: c9b95f32abaeb2f441c42464c43ce959e6afc9d8
       destination: /home/build/src
 
   - name: Download nuget.exe CLI
@@ -325,23 +325,123 @@ test:
       packages:
         - azure-functions-host-nodejs-worker
         - curl
-        - jq
+        - nodejs
+        - npm
     environment:
       ASPNETCORE_CONTENTROOT: /azure-functions-host
       FUNCTIONS_WORKER_RUNTIME: node
       HOST_VERSION: ${{package.version}}
       AzureWebJobsScriptRoot: /home/site/wwwroot
       ASPNETCORE_URLS: http://127.0.0.1:8082
+      AzureWebJobsStorage: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;"
   pipeline:
     - uses: test/tw/ldd-check
+    - name: Install Azurite globally
+      runs: |
+        npm install -g azurite
     - uses: test/daemon-check-output
       with:
+        setup: |-
+          # Start Azurite storage emulator in background
+          azurite --silent --location /tmp/azurite --blobPort 10000 --queuePort 10001 --tablePort 10002 &
+          echo "Azurite started with PID $!"
+
+          # Wait for Azurite to be ready
+          sleep 5
+
+          # Verify Azurite is responding
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:10000/)
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 600 ]; then
+            echo "Azurite is ready (HTTP $HTTP_STATUS)"
+          else
+            echo "ERROR: Azurite failed to start"
+            exit 1
+          fi
+
+          # Create minimal HTTP trigger function
+          mkdir -p /home/site/wwwroot/HttpTrigger
+
+          tee /home/site/wwwroot/host.json << 'EOF'
+          {
+            "version": "2.0"
+          }
+          EOF
+
+          tee /home/site/wwwroot/HttpTrigger/function.json << 'EOF'
+          {
+            "bindings": [
+              {
+                "authLevel": "anonymous",
+                "type": "httpTrigger",
+                "direction": "in",
+                "name": "req",
+                "methods": ["get"]
+              },
+              {
+                "type": "http",
+                "direction": "out",
+                "name": "res"
+              }
+            ]
+          }
+          EOF
+
+          tee /home/site/wwwroot/HttpTrigger/index.js << 'EOF'
+          module.exports = async function (context, req) {
+            context.log('HTTP trigger function processed a request.');
+            context.res = {
+              status: 200,
+              body: "Hello from test function!"
+            };
+          };
+          EOF
         start: "/azure-functions-host/Microsoft.Azure.WebJobs.Script.WebHost"
+        timeout: 30
         expected_output: |
           Now listening on: http://127.0.0.1:8082
           Application started
-        post: |
+        post: |-
           set -euo pipefail
-          # Test main homepage response
-          RESPONSE=$(curl -f -s http://127.0.0.1:8082)
-          echo "$RESPONSE" | grep -iq "Your Functions.*app is up and running"
+
+          # Wait for function host to fully load functions
+          echo "Waiting for function host to initialize..."
+          sleep 10
+
+          # Check status code and verify expected content
+          echo "Testing function host health..."
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" http://127.0.0.1:8082)
+
+          # Verify it's a 200 response
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Expected HTTP 200, got $HTTP_CODE"
+            echo "Response body:"
+            head -20 /tmp/response.txt
+            exit 1
+          fi
+
+          # Verify the response contains the expected message
+          if grep -Fiq "Your Azure Function App is up and running" /tmp/response.txt; then
+            echo "Azure Functions Host is healthy! (HTTP $HTTP_CODE)"
+          else
+            echo "ERROR: Response did not contain expected message"
+            echo "Response body:"
+            head -20 /tmp/response.txt
+            exit 1
+          fi
+
+          # Test the actual HTTP trigger function
+          echo ""
+          echo "Testing HTTP trigger function..."
+          FUNC_RESPONSE=$(curl -f -s http://127.0.0.1:8082/api/HttpTrigger)
+          echo "Function response: $FUNC_RESPONSE"
+
+          # Verify we got the expected response from our test function
+          if echo "$FUNC_RESPONSE" | grep -Fq "Hello from test function"; then
+            echo "HTTP trigger function works correctly!"
+          else
+            echo "ERROR: Function did not return expected response"
+            exit 1
+          fi
+
+          # Kill Azurite to prevent hanging during cleanup
+          pkill -9 -f azurite || true
