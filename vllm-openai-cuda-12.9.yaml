@@ -1,7 +1,7 @@
 #nolint:valid-pipeline-git-checkout-tag
 package:
   name: vllm-openai-cuda-12.9
-  version: 0.12.0
+  version: "0.13.0"
   epoch: 0
   description: A high-throughput and memory-efficient inference and serving engine for LLMs
   target-architecture:
@@ -22,8 +22,8 @@ package:
   # We must explicitly list dependencies for libraries used at runtime to prevent drift on updates.
   # Vendored libraries (with hashes in filename like libavif-850e7649.so) are bundled by PyPI wheels and not listed.
   #
-  # NOTE: Unlike upstream, we do NOT ship XPU (Intel) support. The bitsandbytes XPU library is removed
-  # during build as it requires Intel oneAPI libraries (libsvml.so, libsycl.so.8, etc.) not in our ecosystem.
+  # NOTE: Unlike upstream, we do NOT ship XPU (Intel) or ROCm (AMD) support. The bitsandbytes XPU and ROCm
+  # libraries are removed during build as they require vendor-specific libraries not in our ecosystem.
   dependencies:
     runtime:
       # Package dependencies (for scripts/tools)
@@ -82,8 +82,9 @@ vars:
   # for now we only ship x86_64
   bitsandbytes-x86-version: "0.46.1"
   timm-version: "1.0.17"
+  runai-model-streamer-version: "0.15.3"
   python-version: 3.12
-  # DeepGEMM commit from upstream vLLM 0.12.0 tools/install_deepgemm.sh
+  # DeepGEMM commit from upstream vLLM 0.13.0 tools/install_deepgemm.sh
   deepgemm-commit: "594953acce41793ae00a1233eb516044d604bcb6"
 
 var-transforms:
@@ -141,7 +142,7 @@ pipeline:
     with:
       repository: https://github.com/vllm-project/vllm.git
       tag: v${{package.version}}
-      expected-commit: 4fd9d6a85c00ac0186aa9abbeff73fc2ac6c721e
+      expected-commit: 72506c98349d6bcd32b4e33eec7b5513453c1502
 
   - runs: ccache -F 0 -M 0
 
@@ -210,6 +211,18 @@ pipeline:
         exit 1
       fi
 
+      # runai-model-streamer (verify 'runai-model-streamer[s3,gcs]>=<melange>' appears in the Dockerfile)
+      MELANGE_RUNAI="${{vars.runai-model-streamer-version}}"
+      echo "Dockerfile (upstream) runai-model-streamer lines:"
+      grep -n "runai-model-streamer" "$DOCKERFILE"
+      echo "runai-model-streamer -> upstream: see lines above  melange>='${MELANGE_RUNAI}'"
+      if grep -Eq "runai-model-streamer\[s3,gcs\]>=${MELANGE_RUNAI}" "$DOCKERFILE"; then
+        :
+      else
+        echo "runai-model-streamer drift (expected 'runai-model-streamer[s3,gcs]>=${MELANGE_RUNAI}' not found in Dockerfile)"
+        exit 1
+      fi
+
       # DeepGEMM commit check (from tools/install_deepgemm.sh)
       MELANGE_DEEPGEMM="${{vars.deepgemm-commit}}"
       DEEPGEMM_SCRIPT="tools/install_deepgemm.sh"
@@ -269,7 +282,7 @@ pipeline:
         accelerate hf_transfer modelscope \
         "bitsandbytes>=${{vars.bitsandbytes-x86-version}}" \
         "timm>=${{vars.timm-version}}" \
-        "runai-model-streamer[s3,gcs]>=0.15.0"
+        "runai-model-streamer[s3,gcs]>=${{vars.runai-model-streamer-version}}"
 
   # FlashInfer — mirror upstream precompiled cubin + JIT cache (no AOT, no git)
   - name: Install FlashInfer cubin + jit-cache
@@ -323,13 +336,16 @@ pipeline:
 
   - name: Prune incompatible GPU extras
     runs: |
-      # bitsandbytes: drop non-CUDA-12 and XPU artifacts
+      # bitsandbytes: drop non-CUDA-12, XPU, and ROCm artifacts
       # - cuda118/cuda130: incompatible CUDA versions
       # - xpu: requires Intel oneAPI libraries (libsvml.so, libirng.so, libimf.so, libintlc.so.5, libsycl.so.8)
-      #        which are not available in our ecosystem. Unlike upstream, we don't ship XPU support.We will mention in Compat Notes
+      #        which are not available in our ecosystem. Unlike upstream, we don't ship XPU support. We will mention in Compat Notes
+      # - rocm*: requires AMD HIP libraries (libhipblas.so, libhipsparse.so, libhipblaslt.so)
+      #          which are not available in our ecosystem. Unlike upstream, we don't ship ROCm support.
       rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda118.so
       rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda130.so
       rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_xpu.so
+      rm -f ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_rocm*.so
 
       # CuPy and its vendor backends are optional for vLLM; safest is to remove CuPy entirely:
       # upstream also removed but it is optionally used by ray
