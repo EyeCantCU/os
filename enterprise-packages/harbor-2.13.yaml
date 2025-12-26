@@ -38,6 +38,7 @@ environment:
       - npm
       - py3-setuptools
       - python3
+      - shadow
       - swagger<0.33
   environment:
     CGO_ENABLED: "0"
@@ -439,22 +440,91 @@ subpackages:
       - runs: |
           # Copy nginx config
           mkdir -p ${{targets.subpkgdir}}/etc/nginx
-          cp -rf /etc/nginx/* ${{targets.subpkgdir}}/etc/nginx/
-          cp src/portal/docker-build/nginx.conf.example ${{targets.subpkgdir}}/etc/nginx/nginx.conf
+          # Apply configuration changes to /etc/nginx/nginx.conf before copying to package.
+          # This allows the iamguarded-compat package to access the modified config as well.
+          cp src/portal/docker-build/nginx.conf.example /etc/nginx/nginx.conf
           # Default error logs to stderr
-          sed -i 's/#error_log  logs\/error.log;$/error_log  stderr  notice;/' ${{targets.subpkgdir}}/etc/nginx/nginx.conf
+          sed -i 's/#error_log  logs\/error.log;$/error_log  stderr  notice;/' /etc/nginx/nginx.conf
           # And access logs to stdout
-          sed -i 's/#access_log.*;$/access_log  \/dev\/stdout;/' ${{targets.subpkgdir}}/etc/nginx/nginx.conf
+          sed -i 's/#access_log.*;$/access_log  \/dev\/stdout;/' /etc/nginx/nginx.conf
+          cp -rf /etc/nginx/* ${{targets.subpkgdir}}/etc/nginx/
+
+  - name: ${{package.name}}-portal-iamguarded-compat
+    description: "compat package with iamguarded harbor-portal image"
+    dependencies:
+      provides:
+        - harbor-portal-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - ${{package.name}}-portal
+        - bash
+        - coreutils
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: harbor-portal
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/harbor/nginx-conf
+          cp -r /etc/nginx/* /opt/iamguarded/harbor/nginx-conf/
+          chmod g+rwX /opt/iamguarded
+
+          # will move this to build-compat.sh once tested
+          sed -i 's/# Loading bitnami paths/# Loading iamguarded paths/' /opt/iamguarded/scripts/harbor-portal/postunpack.sh
+          mv /opt/iamguarded/scripts/nginx/bitnami-templates/ /opt/iamguarded/scripts/nginx/iamguarded-templates/
+          mv /opt/iamguarded/nginx/conf/bitnami /opt/iamguarded/nginx/conf/iamguarded
+
+          # these are default nginx configs, not required for harbor portal
+          sed -i '/mv "${NGINX_BASE_DIR}\/html" \/app/d' /opt/iamguarded/scripts/nginx/postunpack.sh
+          sed -i '/ln -sf \/app "${NGINX_BASE_DIR}\/html"/d' /opt/iamguarded/scripts/nginx/postunpack.sh
+
+          /opt/iamguarded/scripts/nginx/postunpack.sh
+          /opt/iamguarded/scripts/harbor-portal/postunpack.sh
+
+          mkdir -p /opt/iamguarded/nginx/sbin
+          ln -sf /usr/sbin/nginx /opt/iamguarded/nginx/sbin/nginx
+
+          # /opt/iamguarded/harbor is expected to have portal content
+          rm -rf /opt/iamguarded/harbor
+          ln -sf /usr/share/nginx/html /opt/iamguarded/harbor
+      - uses: iamguarded/finalize-compat
+        with:
+          package: harbor-portal
+          version: ${{vars.major-minor-version}}
     test:
+      environment:
+        accounts:
+          groups:
+            - groupname: nginx
+              gid: 101
+          users:
+            - username: nginx
+              gid: 101
+              uid: 101
+          run-as: 0
+        contents:
+          packages:
+            - shadow
       pipeline:
+        - uses: test/tw/ldd-check
         - uses: test/virtualpackage
           with:
-            virtual-pkg-name: harbor-portal-nginx-config
+            virtual-pkg-name: harbor-portal-iamguarded-compat
             real-pkg-name: ${{subpkg.name}}
-        - uses: test/virtualpackage
+        - uses: iamguarded/test-compat
           with:
-            virtual-pkg-name: nginx-config
-            real-pkg-name: ${{subpkg.name}}
+            package: harbor-portal
+            version: ${{vars.major-minor-version}}
+        - uses: test/daemon-check-output
+          with:
+            start: /opt/iamguarded/scripts/harbor-portal/entrypoint.sh /opt/iamguarded/scripts/nginx/run.sh
+            expected_output: |
+              Starting harbor-portal setup
+              harbor-portal setup finished
+              Starting NGINX
+            post: |
+              #!/bin/sh -e
+              # cannot test further without full harbor setup
+              curl localhost:8080 | grep "harbor-app"
 
   - name: ${{package.name}}-registryctl
     description: harbor registryctl
