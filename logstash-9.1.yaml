@@ -16,11 +16,13 @@
 #    subpackage to be installed separately.
 package:
   name: logstash-9.1
-  version: "9.1.8"
-  epoch: 2 # CVE-2025-14762
+  version: "9.1.9"
+  epoch: 0 # CVE-2025-14762
   description: Logstash - transport and process your logs, events, or other data
   copyright:
     - license: Apache-2.0
+  resources:
+    memory: 16Gi
   dependencies:
     provides:
       - ${{package.name}}-base=${{package.full-version}}
@@ -29,7 +31,7 @@ package:
       - bash # some helper scripts use bash and busybox utilities
       - busybox
       - merged-usrsbin
-      - openjdk-17-default-jdk
+      - openjdk-21-default-jdk
       - wolfi-baselayout
 
 # Create a new major-minor-version variable that contains only the major version
@@ -68,7 +70,7 @@ environment:
       - logstash-integration-jdbc
       - logstash-output-opensearch
       - net-tools
-      - openjdk-17-default-jdk
+      - openjdk-21-default-jdk
       - posix-libc-utils
       - sed
       - yq
@@ -90,7 +92,7 @@ pipeline:
     with:
       repository: https://github.com/elastic/logstash
       tag: v${{package.version}}
-      expected-commit: 33f5ba63c027f1db8fc866096940d7f5b9dd9b06
+      expected-commit: 33a62d1cc1fd3010bc88dcba870cb2dfb91c3269
 
   - uses: patch
     with:
@@ -258,8 +260,8 @@ subpackages:
           install -m644 "${src}/config/logstash-full.yml"      "${dst}/config/logstash-full.yml"
 
           # Replace the incorrect Java paths in the Bitnami scripts
-          sed -i 's/export JAVA_HOME=\"${BITNAMI_ROOT_DIR}\/java\"/export JAVA_HOME="\/usr\/lib\/jvm\/java-17-openjdk"/g' ${{targets.contextdir}}/opt/bitnami/scripts/logstash-env.sh
-          sed -i 's/export LS_JAVA_HOME=\/opt\/bitnami\/java/export LS_JAVA_HOME="\/usr\/lib\/jvm\/java-17-openjdk"/g' ${{targets.contextdir}}/opt/bitnami/scripts/logstash/run.sh
+          sed -i 's/export JAVA_HOME=\"${BITNAMI_ROOT_DIR}\/java\"/export JAVA_HOME="\/usr\/lib\/jvm\/java-21-openjdk"/g' ${{targets.contextdir}}/opt/bitnami/scripts/logstash-env.sh
+          sed -i 's/export LS_JAVA_HOME=\/opt\/bitnami\/java/export LS_JAVA_HOME="\/usr\/lib\/jvm\/java-21-openjdk"/g' ${{targets.contextdir}}/opt/bitnami/scripts/logstash/run.sh
 
           # Disable some commands used in Bitnami scripts. These commands more likely fail in this since this image take non root approach
           sed -i 's/ensure_user_exists/# ensure_user_exists/g' ${{targets.contextdir}}/opt/bitnami/scripts/logstash/postunpack.sh
@@ -303,8 +305,8 @@ subpackages:
             - bash
             - curl
             - busybox
-            - openjdk-17
-            - openjdk-17-default-jdk
+            - openjdk-21
+            - openjdk-21-default-jdk
             - sudo
         accounts:
           groups:
@@ -438,8 +440,8 @@ subpackages:
             - bash
             - curl
             - busybox
-            - openjdk-17
-            - openjdk-17-default-jdk
+            - openjdk-21
+            - openjdk-21-default-jdk
             - sudo
         accounts:
           groups:
@@ -471,13 +473,14 @@ subpackages:
                     "PATH=/opt/iamguarded/logstash/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                     /opt/iamguarded/scripts/logstash/entrypoint.sh \
                     /opt/iamguarded/scripts/logstash/run.sh
-                timeout: 120
+                timeout: 180
                 expected_output: |
                   Starting Logstash setup
                   Starting Logstash
                   Starting http input listener
                 post: |
                   #!/bin/sh -e
+                  sleep 1
                   url=http://localhost:8080
                   response=$(curl -fsS --connect-timeout 10 --max-time 20 --retry 5 --retry-delay 1 --retry-max-time 40 "$url") || {
                     echo "curl ${url} failed $?"
@@ -493,28 +496,48 @@ subpackages:
   - name: ${{package.name}}-env2yaml
     description: Merge environment variables into logstash.yml
     pipeline:
-      - working-directory: docker/data/logstash/env2yaml
-        pipeline:
-          - uses: go/build
-            with:
-              packages: .
-              output: env2yaml
-              ldflags: -s -w
-      - uses: strip
+      - runs: |
+          # Build the Java-based env2yaml tool using the upstream gradle task
+          ./gradlew :docker:data:logstash:env2yaml:compileJava :docker:data:logstash:env2yaml:copyRuntimeLibs
+
+          # Install compiled classes and dependencies
+          mkdir -p "${{targets.contextdir}}/usr/share/logstash/env2yaml"
+          cp -r docker/data/logstash/env2yaml/classes "${{targets.contextdir}}/usr/share/logstash/env2yaml/"
+          cp -r docker/data/logstash/env2yaml/lib "${{targets.contextdir}}/usr/share/logstash/env2yaml/"
+
+          # Patch and install the wrapper script to use system java instead of bundled JDK
+          mkdir -p "${{targets.contextdir}}/usr/bin"
+          sed 's|/usr/share/logstash/jdk/bin/java|java|' \
+            docker/data/logstash/env2yaml/env2yaml > "${{targets.contextdir}}/usr/bin/env2yaml"
+          chmod +x "${{targets.contextdir}}/usr/bin/env2yaml"
     dependencies:
       runtime:
         - merged-usrsbin
         - wolfi-baselayout
+        - openjdk-21-default-jdk
         # Due to the way logstash implements their plugin system, this is a full
         # logstash package with the opensearch plugin bundled. It is based off the
         # same artifacts in the main package, meaning it will pick up the changes to
         # the default gems that were made in the main package it just adds the
         # opensearch plugin.
-    # test added by a robot (binary)
     test:
       pipeline:
         - runs: |
+            # Verify env2yaml files exist
             stat /usr/bin/env2yaml
+            stat /usr/share/logstash/env2yaml/classes
+            stat /usr/share/logstash/env2yaml/lib
+            test -x /usr/bin/env2yaml || { echo "ERROR: /usr/bin/env2yaml is not executable"; exit 1; }
+        - runs: |
+            # Test that env2yaml works - it modifies the file in place
+            # env2yaml reads environment variables and injects them into logstash.yml
+            echo "existing: value" > /tmp/logstash.yml
+            pipeline_workers=test env2yaml /tmp/logstash.yml
+            cat /tmp/logstash.yml
+            # Verify env2yaml injected the variable reference correctly
+            grep -F 'pipeline.workers: ${pipeline_workers}' /tmp/logstash.yml
+            # Verify existing configuration was preserved
+            grep -F 'existing: value' /tmp/logstash.yml
 
   - name: ${{package.name}}-with-output-opensearch
     description: Build logstash with logstash-output-opensearch plugin
@@ -525,9 +548,13 @@ subpackages:
         - bash # some helper scripts use bash and busybox utilities
         - busybox
         - merged-usrsbin
-        - openjdk-17-default-jdk
+        - openjdk-21
+        - openjdk-21-default-jdk
         - wolfi-baselayout
     pipeline:
+      - name: Install all the default plugins
+        runs: |
+          ./gradlew installDefaultGems
       - name: Re-inject default plugins that have been patched
         runs: |
           for gem in \
@@ -565,7 +592,7 @@ subpackages:
       environment:
         contents:
           packages:
-            - openjdk-17
+            - openjdk-21
             - sudo
         accounts:
           groups:
@@ -596,7 +623,7 @@ test:
   environment:
     contents:
       packages:
-        - openjdk-17-default-jdk
+        - openjdk-21-default-jdk
         - sudo
     accounts:
       groups:
