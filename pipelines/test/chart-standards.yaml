@@ -1,0 +1,116 @@
+name: Validate chart standards
+
+needs:
+  packages:
+    - busybox
+    - helm
+    - jq
+    - yq
+
+pipeline:
+  - name: Validate image configurability
+    runs: |
+      set -eu
+
+      info() { echo "INFO[chart-standards]:" "$@"; }
+      error() { echo "ERROR[chart-standards]:" "$@"; exit 1; }
+      fail() { echo "FAIL[chart-standards]:" "$@"; FAILS=$((FAILS+1)); }
+      pass() { echo "PASS[chart-standards]:" "$@"; PASSES=$((PASSES+1)); }
+
+      # Convert image name to marker prefix: kube-rbac-proxy -> MARKER_KUBE_RBAC_PROXY_
+      marker_prefix() { echo "MARKER_${1}_" | tr '[:lower:]-' '[:upper:]_'; }
+
+      FAILS=0
+      PASSES=0
+
+      # Find the chart
+      chart_yaml=$(find / -maxdepth 2 -name 'Chart.yaml' -type f 2>/dev/null | head -1)
+      [ -z "$chart_yaml" ] && error "No Chart.yaml found"
+
+      chart_path=$(dirname "$chart_yaml")
+      schema_file="$chart_path/values.images.json"
+
+      # Skip if no schema file (opt-in feature)
+      if [ ! -f "$schema_file" ]; then
+        info "No values.images.json found, skipping validation"
+        exit 0
+      fi
+
+      info "Chart: $chart_path"
+      info "Schema: $schema_file"
+
+      # Validate schema has images
+      image_count=$(jq '.images | keys | length' "$schema_file")
+      [ "$image_count" -eq 0 ] && error "No images defined in schema"
+      info "Found $image_count image(s): $(jq -r '.images | keys | join(", ")' "$schema_file")"
+
+      # Get test cases
+      case_count=$(jq '.test.cases | length' "$schema_file")
+      [ "$case_count" -eq 0 ] && error "No test cases defined"
+      info "Found $case_count test case(s)"
+
+      # Process each test case
+      for idx in $(seq 0 $((case_count - 1))); do
+        case_name=$(jq -r ".test.cases[$idx].name" "$schema_file")
+        info ""
+        info "=== Case: $case_name ==="
+
+        # Get expected images for this case
+        expected_images=$(jq -r ".test.cases[$idx].images // [] | .[]" "$schema_file")
+        if [ -z "$expected_images" ]; then
+          fail "Case '$case_name': no images specified (add 'images: [...]' to case)"
+          continue
+        fi
+        info "Case '$case_name': expecting images: $expected_images"
+
+        # Build merged values with markers:
+        # 1. Replace {"$ref": "field"} with MARKER_IMGNAME_FIELD
+        # 2. Merge images.*.values + test.values + case.values
+        values_file=$(mktemp)
+        jq --argjson idx "$idx" '
+          (.images | to_entries | map(
+            .key as $img |
+            .value.values | walk(
+              if type == "object" and (keys == ["$ref"]) then
+                "MARKER_" + ($img | gsub("-"; "_") | ascii_upcase) + "_" + (.["$ref"] | ascii_upcase)
+              else . end
+            )
+          ) | add) * .test.values * (.test.cases[$idx].values // {})
+        ' "$schema_file" > "$values_file"
+
+        # Render chart
+        rendered=$(mktemp)
+        if ! helm template "$chart_path" -f "$values_file" > "$rendered" 2>&1; then
+          fail "Case '$case_name': helm template failed"
+          sed 's/^/  /' "$rendered"
+          rm -f "$values_file" "$rendered"
+          continue
+        fi
+
+        case_ok=true
+
+        # Check expected images have markers in output
+        for img_name in $expected_images; do
+          if grep -qF "$(marker_prefix "$img_name")" "$rendered"; then
+            info "Case '$case_name': image '$img_name' markers found"
+          else
+            fail "Case '$case_name': image '$img_name' markers not found in rendered output"
+            case_ok=false
+          fi
+        done
+
+        # Check no unmarked images in output
+        for img in $(grep -oE 'image: [^[:space:]]+' "$rendered" | sed 's/image: //' | sort -u); do
+          if ! echo "$img" | grep -qF "MARKER_"; then
+            fail "Case '$case_name': unconfigurable image: $img"
+            case_ok=false
+          fi
+        done
+
+        [ "$case_ok" = true ] && pass "Case '$case_name'"
+        rm -f "$values_file" "$rendered"
+      done
+
+      info ""
+      info "Results: $PASSES passed, $FAILS failed"
+      [ "$FAILS" -eq 0 ]

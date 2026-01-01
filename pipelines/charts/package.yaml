@@ -6,12 +6,56 @@ needs:
     - busybox
     - helm
     - helm-docs
+    - jq
     - yq
 
 inputs:
   chart-path:
     description: |
       The path to the chart to package
+  images:
+    description: |
+      Optional. YAML defining named images and their value mappings.
+      Each image declares its Helm values with simple markers.
+
+      Available markers (from #ImageRef):
+        ${registry}       - Registry hostname (e.g., cgr.dev)
+        ${repo}           - Repository path (e.g., chainguard/nginx)
+        ${registry_repo}  - Combined registry/repo
+        ${digest}         - Image digest (sha256:...)
+        ${pseudo_tag}     - Tag for digest refs (unused@sha256:...)
+        ${ref}            - Full image reference
+
+      Example:
+        images: |
+          main:
+            values:
+              image:
+                registry: ${registry}
+                repository: ${repo}
+                tag: ${pseudo_tag}
+                sha: ${digest}
+          sidecar:
+            values:
+              sidecar:
+                image:
+                  repository: ${registry_repo}
+  test:
+    description: |
+      Optional. YAML defining test configuration for chart validation.
+      Contains values to merge (e.g., pull secrets) and test cases.
+
+      Example:
+        test: |
+          values:
+            imagePullSecrets:
+              - name: my-pull-secret
+          cases:
+            - name: default
+            - name: with-sidecar
+              values:
+                sidecar:
+                  enabled: true
 
 pipeline:
   - name: Package the target chart
@@ -62,3 +106,38 @@ pipeline:
       if [ "$(yq -e '.type == "library"' Chart.yaml)" != "true" ]; then
         helm template ${{targets.contextdir}}/$cname
       fi
+
+  - name: Write values.images.json
+    runs: |
+      set -eu
+
+      images_input='${{inputs.images}}'
+      test_input='${{inputs.test}}'
+
+      if [ -z "$images_input" ]; then
+        echo "No images input, skipping values.images.json"
+        exit 0
+      fi
+
+      cname=$(yq -e '.name' ${{inputs.chart-path}}/Chart.yaml)
+      output_file="${{targets.contextdir}}/$cname/values.images.json"
+
+      # Transform ${field} strings to {"$ref": "field"} objects
+      images_json=$(echo "$images_input" | yq -o=json | jq 'walk(
+        if type == "string" and test("^\\$\\{[a-z_]+\\}$") then
+          {"$ref": (ltrimstr("${") | rtrimstr("}"))}
+        else . end
+      )')
+
+      # Default test config if not provided
+      test_json=$(echo "${test_input:-"{}"}" | yq -o=json)
+      if [ "$test_json" = "{}" ]; then
+        test_json='{"values": {}, "cases": [{"name": "default"}]}'
+      fi
+
+      # Build final schema
+      jq -n \
+        --argjson images "$images_json" \
+        --argjson test "$test_json" \
+        '{version: "1", images: $images, test: $test}' \
+        | tee "$output_file"
