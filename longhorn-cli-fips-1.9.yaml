@@ -1,0 +1,97 @@
+package:
+  name: longhorn-cli-fips-1.9
+  version: 1.9.2
+  epoch: 0
+  description: Longhorn CLI is a headless way for preflighting, operating and troubleshooting Longhorn cluster.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - longhorn-cli=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/longhorn/cli.git
+      tag: v${{package.version}}
+      expected-commit: 267e00e4c3397bbe472fc81ddc2a3d246b8f8c37
+
+  - uses: go/build
+    with:
+      packages: ./cmd/remote
+      go-package: go-fips
+      output: longhornctl
+      ldflags: |
+        -X github.com/longhorn/cli/meta.Version=${{package.version}}
+        -X github.com/longhorn/cli/meta.GitCommit=$(git rev-parse --short HEAD)
+        -X github.com/longhorn/cli/meta.BuildDate=$(date -u ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+
+  - uses: go/build
+    with:
+      packages: ./cmd/local
+      go-package: go-fips
+      output: longhornctl-local
+      ldflags: |
+        -X github.com/longhorn/cli/meta.Version=${{package.version}}
+        -X github.com/longhorn/cli/meta.GitCommit=$(git rev-parse --short HEAD)
+        -X github.com/longhorn/cli/meta.BuildDate=$(date -u ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    dependencies:
+      provides:
+        - longhorn-cli-fips-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          ln -sf /usr/bin/longhornctl ${{targets.contextdir}}/longhornctl
+          ln -sf /usr/bin/longhornctl-local ${{targets.contextdir}}/longhornctl-local
+
+          # https://github.com/longhorn/cli/blob/77e0d186f5b523f7067e79cbff58a90a4b0933d6/package/Dockerfile#L25
+          git clone --recursive https://github.com/longhorn/spdk.git /spdk
+          # commit has been hardcoded in upstream and hasn't changed in over a year: https://github.com/longhorn/cli/blob/a7b44da8d3f6f7f92a846adb08290e9a452e1f2e/package/Dockerfile#L23
+          cd /spdk && git checkout a6478cde7e0cff2fb09992868308a7387aa5202a
+          rm -rf .git
+          cp -r /spdk ${{targets.contextdir}}/spdk
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    environment:
+      KUBECONFIG: /root/.kube/config
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Test binary help
+      uses: test/tw/help-check
+      with:
+        bins: longhornctl
+    - uses: test/tw/ver-check
+      with:
+        bins: longhornctl
+    - uses: test/kwok/cluster
+    - name: functional tests
+      runs: |
+        kubectl create ns longhorn-system
+        longhornctl install preflight
+        longhornctl check preflight > preflight.log 2>&1
+        grep -q 'Completed preflight checker' preflight.log
+
+update:
+  enabled: true
+  github:
+    identifier: longhorn/cli
+    tag-filter-prefix: v1.9
+    strip-prefix: v
+    use-tag: true
+  ignore-regex-patterns:
+    - '.*-rc\d+$'
+    - ".*-dev-.*"
