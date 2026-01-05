@@ -1,0 +1,86 @@
+package:
+  name: opensearch-k8s-operator-fips
+  version: "2.8.0"
+  epoch: 0
+  description: FIPS complaint OpenSearch Kubernetes Operator
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/opensearch-project/opensearch-k8s-operator
+      tag: v${{package.version}}
+      expected-commit: 7fdc6cfa562ce098b0da42c13cc18a9dbd6373ce
+
+  - uses: go/build
+    with:
+      modroot: ./opensearch-operator
+      packages: .
+      output: manager
+      go-package: go-fips
+
+subpackages:
+  - name: ${{package.name}}-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          ln -s ./usr/bin/manager ${{targets.contextdir}}/manager
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  github:
+    identifier: opensearch-project/opensearch-k8s-operator
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - git
+        - kustomize
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "8080"
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: manager
+    - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+    - name: Launch operator with dummy kubeconfig
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Install CRDs required by the operator
+          git clone --depth 1 --branch v${{package.version}} \
+            https://github.com/opensearch-project/opensearch-k8s-operator /tmp/operator
+          kustomize build /tmp/operator/opensearch-operator/config/crd | kubectl apply -f -
+          sleep 1
+        start: manager --health-probe-bind-address ":8081"
+        timeout: 30
+        expected_output: |
+          Starting Controller
+          Starting EventSource
+          Serving metrics server
+        post: |
+          set -eu
+          echo "Verifying metrics endpoint"
+          curl -sf http://127.0.0.1:8080/metrics > metrics.prom
+          grep -F -e "controller_runtime_reconcile_total" metrics.prom
+          grep -F -e "workqueue_queue_duration_seconds_bucket" metrics.prom
+          grep -F -e "go_gc_duration_seconds" metrics.prom
+          echo "Metrics endpoint is serving as expected"
+          echo "Verifying health endpoints"
+          curl -sf http://127.0.0.1:8081/healthz
+          curl -sf http://127.0.0.1:8081/readyz
+          echo "All endpoints serving as expected"
