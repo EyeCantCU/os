@@ -1,8 +1,7 @@
-name: Package a target Chart
+name: Package a Helm chart
 
 needs:
   packages:
-    - bash
     - busybox
     - helm
     - helm-docs
@@ -11,133 +10,123 @@ needs:
 
 inputs:
   chart-path:
-    description: |
-      The path to the chart to package
+    description: Path to the chart directory
+    required: true
   images:
     description: |
-      Optional. YAML defining named images and their value mappings.
-      Each image declares its Helm values with simple markers.
+      YAML declaring images and their Helm value paths.
 
-      Available markers (from #ImageRef):
-        ${registry}       - Registry hostname (e.g., cgr.dev)
-        ${repo}           - Repository path (e.g., chainguard/nginx)
+      Markers:
+        ${registry}       - Registry hostname
+        ${repo}           - Repository path
         ${registry_repo}  - Combined registry/repo
-        ${digest}         - Image digest (sha256:...)
-        ${pseudo_tag}     - Tag for digest refs (unused@sha256:...)
+        ${tag}            - Image tag
+        ${digest}         - Image digest
+        ${pseudo_tag}     - Tag with embedded digest (charts without digest field)
         ${ref}            - Full image reference
 
       Example:
         images: |
-          main:
+          nginx:
             values:
               image:
                 registry: ${registry}
                 repository: ${repo}
-                tag: ${pseudo_tag}
-                sha: ${digest}
-          sidecar:
-            values:
-              sidecar:
-                image:
-                  repository: ${registry_repo}
+                tag: ${tag}
+                digest: ${digest}
+    required: false
   test:
     description: |
-      Optional. YAML defining test configuration for chart validation.
-      Contains values to merge (e.g., pull secrets) and test cases.
+      YAML declaring test cases for image validation.
 
       Example:
         test: |
           values:
             imagePullSecrets:
-              - name: my-pull-secret
+              - name: pull-secret
           cases:
             - name: default
-            - name: with-sidecar
+              images: [nginx]
+            - name: with-metrics
+              images: [nginx, metrics]
               values:
-                sidecar:
-                  enabled: true
+                metrics.enabled: true
+    required: false
 
 pipeline:
-  - name: Package the target chart
+  - name: Vendor external dependencies
     working-directory: ${{inputs.chart-path}}
     runs: |
-      # Remove any leftover .orig files from applying the iamguarded.patch
-      find -name '*.orig' -exec rm -f {} \;
+      # Rewrite external chart dependencies to use local file:// paths.
+      #
+      # This relies on dependent charts ALREADY being packaged as APKs and
+      # specified as build dependencies in environment.contents.packages.
+      #
+      # We vendor dependencies instead of fetching remote charts to avoid
+      # needing to plumb cgr.dev auth into the build environment. From Helm's
+      # perspective, the result is identical since `helm package` vendors the
+      # dependent charts into the tarball anyway. The only visible change is
+      # Chart.yaml shows `file://` instead of `oci://` dependencies. At
+      # `helm install` time, this doesn't matter because dependencies are
+      # already vendored in the chart tarball.
 
-      # Vendor any local dependencies
-      # NOTE: This is a two step process, and relies on the dependent charts
-      # ALREADY being packaged as an apk and manually specified as a dependency
-      # in the build environment.
-      # NOTE: We vendor the dependencies instead of fetching the remote chart
-      # to avoid needing to plumb cgr.dev auth into the package build
-      # environment. From a helm perspective, the result is identical since the
-      # `helm package` below will fetch the dependent charts and package it all
-      # together anyways. The only thing this changes is the appearance of
-      # Chart.yaml, which will show a `file://` dependency instead of an
-      # `oci://` dependency. At `helm install` time, none of this matters
-      # because the dependent charts are already vendored.
-      if yq -e '.dependencies' Chart.yaml > /dev/null 2>&1; then
-        # Process each dependency using yq
-        for dep_name in $(yq -e '.dependencies[].name' Chart.yaml); do
-          # Update the repository for this dependency to use file:///name format
-          yq -i ".dependencies[] |= select(.name == \"$dep_name\") |= .repository = \"file:///$dep_name\"" Chart.yaml
+      vendor_deps() {
+        local file="$1"
+        [ -f "$file" ] || return 0
 
-          echo "Vendoring dependency: $dep_name with repository: file:///$dep_name"
+        yq -e '.dependencies[]' "$file" >/dev/null 2>&1 || return 0
+
+        yq -e '.dependencies[].name' "$file" | sort -u | while read -r name; do
+          echo "vendor: $name -> file:///$name"
+          yq -i "(.dependencies[] | select(.name == \"$name\")).repository = \"file:///$name\"" "$file"
         done
-      fi
+      }
 
-      # regenerate the Chart.lock with the newly vendored dependencies
+      vendor_deps Chart.yaml
+      vendor_deps requirements.yaml
+
+      rm -f Chart.lock requirements.lock
+
+  - name: Build chart package
+    working-directory: ${{inputs.chart-path}}
+    runs: |
       helm dependency update
       helm dependency build
-
-      # regenerate the helm docs
       helm-docs
 
-      # package the chart (use a tgz round trip since "helm package" enforces a correct chart structure)
-      ptmp=$(mktemp -d)
-      helm package . --destination=$ptmp \
-        --version=${{package.version}}
+      tmp=$(mktemp -d)
+      helm package . --destination="$tmp" --version="${{package.version}}"
+      tar -xf "$tmp"/*.tgz -C "${{targets.contextdir}}"
 
-      # unpackage the chart to the ${{targets.contextdir}} directory
-      tar -xf $ptmp/*.tgz -C ${{targets.contextdir}}
-
-      # Attempt to template it if its not a library chart
-      cname=$(yq -e '.name' Chart.yaml)
-      if [ "$(yq -e '.type == "library"' Chart.yaml)" != "true" ]; then
-        helm template ${{targets.contextdir}}/$cname
-      fi
-
-  - name: Write values.images.json
+  - name: Write image schema
     runs: |
-      set -eu
+      images='${{inputs.images}}'
+      test='${{inputs.test}}'
 
-      images_input='${{inputs.images}}'
-      test_input='${{inputs.test}}'
+      [ -n "$images" ] || [ -n "$test" ] || exit 0
 
-      if [ -z "$images_input" ]; then
-        echo "No images input, skipping values.images.json"
-        exit 0
+      chart_name=$(yq -e '.name' "${{inputs.chart-path}}/Chart.yaml")
+      output="${{targets.contextdir}}/$chart_name/values.images.json"
+
+      # Transform ${marker} -> {"$ref": "marker"}
+      if [ -n "$images" ]; then
+        images_json=$(echo "$images" | yq -o=json | jq 'walk(
+          if type == "string" and test("^\\$\\{[a-z_]+\\}$") then
+            {"$ref": (ltrimstr("${") | rtrimstr("}"))}
+          else . end
+        )')
+      else
+        images_json='{}'
       fi
 
-      cname=$(yq -e '.name' ${{inputs.chart-path}}/Chart.yaml)
-      output_file="${{targets.contextdir}}/$cname/values.images.json"
-
-      # Transform ${field} strings to {"$ref": "field"} objects
-      images_json=$(echo "$images_input" | yq -o=json | jq 'walk(
-        if type == "string" and test("^\\$\\{[a-z_]+\\}$") then
-          {"$ref": (ltrimstr("${") | rtrimstr("}"))}
-        else . end
-      )')
-
-      # Default test config if not provided
-      test_json=$(echo "${test_input:-"{}"}" | yq -o=json)
-      if [ "$test_json" = "{}" ]; then
+      if [ -n "$test" ]; then
+        test_json=$(echo "$test" | yq -o=json)
+      else
         test_json='{"values": {}, "cases": [{"name": "default"}]}'
       fi
 
-      # Build final schema
       jq -n \
         --argjson images "$images_json" \
         --argjson test "$test_json" \
         '{version: "1", images: $images, test: $test}' \
-        | tee "$output_file"
+        | tee "$output"
