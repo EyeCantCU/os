@@ -1,7 +1,7 @@
 package:
   name: rabbitmq-server-4.0
   version: "4.0.9"
-  epoch: 5
+  epoch: 6
   description: Open source RabbitMQ. core server and tier 1 (built-in) plugins
   copyright:
     - license: MPL-2.0
@@ -193,6 +193,46 @@ test:
   pipeline:
     - uses: test/daemon-check-output
       with:
+        expected_output: |
+          RabbitMQ ${{package.version}}
+          Starting broker...
+        post: |
+          # Wait for the management plugin to start
+          wait-for-it -t 30 localhost:15672 -- echo "management UI is up"
+
+          # Test core message broker functionality via management API
+          echo "Creating test queue via management API"
+          curl -sf -u guest:guest -X PUT http://localhost:15672/api/queues/%2F/test_queue \
+            -H "Content-Type: application/json" \
+            -d '{"durable":false}' || {
+            echo "FAIL: Could not create queue"
+            exit 1
+          }
+
+          echo "Publishing test message to queue"
+          curl -sf -u guest:guest -X POST http://localhost:15672/api/exchanges/%2F/amq.default/publish \
+            -H "Content-Type: application/json" \
+            -d '{"properties":{},"routing_key":"test_queue","payload":"test message","payload_encoding":"string"}' || {
+            echo "FAIL: Could not publish message"
+            exit 1
+          }
+
+          # Give message time to be routed
+          sleep 1
+
+          echo "Consuming message from queue"
+          response=$(curl -sf -u guest:guest -X POST http://localhost:15672/api/queues/%2F/test_queue/get \
+            -H "Content-Type: application/json" \
+            -d '{"count":1,"ackmode":"ack_requeue_false","encoding":"auto"}')
+
+          # Verify message was retrieved
+          if echo "$response" | grep -q '"payload":"test message"'; then
+            echo "SUCCESS: Message broker functionality verified - message published and consumed"
+          else
+            echo "FAIL: Expected message not found in queue"
+            echo "Response: $response"
+            exit 1
+          fi
         setup: |
           groupadd -r rabbitmq
           useradd -r -g rabbitmq -d /var/lib/rabbitmq -s /sbin/nologin rabbitmq
@@ -210,10 +250,40 @@ test:
           mkdir -p /etc/rabbitmq
           echo '[rabbitmq_management].' > $RABBITMQ_ENABLED_PLUGINS_FILE
         start: rabbitmq-server
-        timeout: 40
+        timeout: "40"
+    - name: Test rabbitmqctl CLI tool
+    - uses: test/daemon-check-output
+      with:
         expected_output: |
           RabbitMQ ${{package.version}}
           Starting broker...
         post: |
-          # wait for the management plugin to start
+          # Wait for the management plugin to start
           wait-for-it -t 30 localhost:15672 -- echo "management UI is up"
+
+          # Test rabbitmqctl status command
+          echo "Testing rabbitmqctl status"
+          status_output=$(sudo -u rabbitmq rabbitmqctl status 2>&1)
+
+          if echo "$status_output" | grep -q "RabbitMQ version"; then
+            echo "SUCCESS: rabbitmqctl can connect and retrieve cluster information"
+          else
+            echo "FAIL: rabbitmqctl status did not return expected output"
+            echo "Output: $status_output"
+            kill $RMQ_PID 2>/dev/null || true
+            exit 1
+          fi
+        start: rabbitmq-server
+        timeout: "40"
+    - name: Test rabbitmq-plugins CLI tool
+      runs: |
+        echo "Testing rabbitmq-plugins list"
+        plugins_output=$(rabbitmq-plugins list 2>&1)
+
+        if echo "$plugins_output" | grep -q "rabbitmq_management"; then
+          echo "SUCCESS: rabbitmq-plugins can list available plugins"
+        else
+          echo "FAIL: rabbitmq-plugins list did not return expected output"
+          echo "Output: $plugins_output"
+          exit 1
+        fi

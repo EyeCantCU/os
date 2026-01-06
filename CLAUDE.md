@@ -159,7 +159,7 @@ if ! some_command; then
 fi
 ```
 
-### 1. Use `set -euo pipefail` at the start of test scripts
+### 1. Always use `set -euo pipefail` as a single command
 ```bash
 set -euo pipefail
 ```
@@ -169,15 +169,32 @@ set -euo pipefail
 
 This ensures tests fail fast and don't mask errors.
 
-**IMPORTANT:** Always add `set -o pipefail` at the start of `post:` blocks in `test/daemon-check-output` to catch pipeline failures:
+**CRITICAL:** Always use `set -euo pipefail` as a single combined command. **NEVER** use separate commands like `set -e` or `set -o pipefail` alone:
+
+```bash
+# Good - always use the full combined form
+set -euo pipefail
+
+# Bad - never use separate set commands
+set -e
+set -u
+set -o pipefail
+```
+
+**IMPORTANT:** Always add `set -euo pipefail` at the start of `post:` blocks in `test/daemon-check-output` to catch pipeline failures and handle unset variables:
 
 ```yaml
-# Good
+# Good - full set -euo pipefail
+post: |-
+  set -euo pipefail
+  curl -sf http://localhost:8080/metrics | grep -F "uptime"
+
+# Bad - incomplete, only pipefail
 post: |-
   set -o pipefail
   curl -sf http://localhost:8080/metrics | grep -F "uptime"
 
-# Bad - failures may be masked
+# Bad - no shell options set, failures may be masked
 post: |-
   curl -sf http://localhost:8080/metrics | grep -F "uptime"
 ```
