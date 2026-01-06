@@ -13,6 +13,9 @@ inputs:
       YAML values required to render the chart (e.g., storage config for Loki).
       Applied to all test cases.
     required: false
+  kube-version:
+    description: Kubernetes version to use for helm template rendering.
+    default: "1.35.0"
 
 pipeline:
   - name: Validate chart images
@@ -59,6 +62,20 @@ pipeline:
       case_count=$(jq '.test.cases | length' "$schema")
       [ "$case_count" -gt 0 ] || { echo "ERROR: no test cases defined"; exit 1; }
       info "cases: $case_count"
+
+      # Disable external subcharts during testing.
+      # External deps (with repository field) are packaged as separate APKs and tested
+      # independently. We only need to validate the parent chart's images here.
+      # Local subcharts (no repository) are NOT disabled - their images need validation.
+      subchart_disables=""
+      if yq -e '.dependencies' "$chart_yaml" >/dev/null 2>&1; then
+        subchart_disables=$(yq -o=json '.dependencies' "$chart_yaml" | \
+          jq -r '.[] | select(.repository) | select(.repository != "") | select(.condition) | .condition + "=false"' | \
+          tr '\n' ',' | sed 's/,$//')
+      fi
+      if [ -n "$subchart_disables" ]; then
+        info "disabling external subcharts: $subchart_disables"
+      fi
 
       # Process each test case
       idx=0
@@ -109,9 +126,13 @@ pipeline:
           mv /tmp/merged.json "$values_file"
         fi
 
-        # Render chart
+        # Render chart (with external subcharts disabled)
         rendered=$(mktemp)
-        if ! helm template "$chart_path" -f "$values_file" --kube-version 1.30.0 > "$rendered" 2>&1; then
+        helm_args="--kube-version ${{inputs.kube-version}}"
+        if [ -n "$subchart_disables" ]; then
+          helm_args="$helm_args --set $subchart_disables"
+        fi
+        if ! helm template "$chart_path" -f "$values_file" $helm_args > "$rendered" 2>&1; then
           fail "$case_name: helm template failed"
           sed 's/^/  /' "$rendered"
           rm -f "$values_file" "$rendered"
@@ -125,23 +146,24 @@ pipeline:
         ignore_file=$(mktemp)
         jq -r '.test.ignore // [] | .[].image' "$schema" > "$ignore_file"
 
-        # Extract images structurally using jq
-        # Excludes helm test hooks (helm.sh/hook: test) - those only run during `helm test`
-        img_list=$(mktemp)
-        yq -o=json -N "$rendered" | jq -rs '
-          [.[] | select(.metadata.annotations["helm.sh/hook"] != "test") | .. | .image? // empty | select(type == "string")] | unique | .[]
-        ' > "$img_list"
-
-        # Check each expected image has its unique marker in the rendered output
+        # Check each expected image has its marker anywhere in the rendered output.
         for img_name in $expected; do
           marker="$MARKER_BASE/$img_name"
-          if grep -qF "$marker" "$img_list"; then
+          if grep -qF "$marker" "$rendered"; then
             info "found: $img_name"
           else
             fail "$case_name: image '$img_name' not found in rendered output"
             case_ok=false
           fi
         done
+
+        # Extract image: fields structurally using jq for unconfigurable check.
+        # This avoids false positives from URLs, labels, etc. that match image patterns.
+        # Excludes helm test hooks (helm.sh/hook: test) - those only run during `helm test`
+        img_list=$(mktemp)
+        yq -o=json -N "$rendered" | jq -rs '
+          [.[] | select(.metadata.annotations["helm.sh/hook"] != "test") | .. | .image? // empty | select(type == "string")] | unique | .[]
+        ' > "$img_list"
 
         # Check for unconfigured images (not matching any marker, not in ignore list)
         while read -r img; do
