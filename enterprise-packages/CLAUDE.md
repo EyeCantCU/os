@@ -47,6 +47,9 @@ dependencies:
 - Development packages at runtime unless required
 - Explicit library dependencies that static code analysis in melange handles automatically
 
+**Never use merged-* packages:**
+The `merged-*` packages (`merged-usrsbin`, `merged-bin`, `merged-sbin`, `merged-lib`) are legacy compatibility packages and should **never** be added as build-time or runtime dependencies for new packages or subpackages. These are automatically handled by the base system when needed.
+
 ### 2. Use variables and data lists appropriately
 If a value is reusable, use a variable. Use clear, descriptive variable names in `vars` section. Use `data` lists only when creating multiple similar subpackages with different names:
 
