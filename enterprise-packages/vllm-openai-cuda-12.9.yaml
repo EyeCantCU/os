@@ -2,7 +2,7 @@
 package:
   name: vllm-openai-cuda-12.9
   version: "0.13.0"
-  epoch: 0
+  epoch: 1 # CVE-2025-69223, CVE-2025-68131, CVE-2026-21441
   description: A high-throughput and memory-efficient inference and serving engine for LLMs
   target-architecture:
     - x86_64
@@ -333,6 +333,72 @@ pipeline:
         --system --prefix ${{targets.contextdir}}/usr \
         --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
         -r requirements/build.txt
+
+  # Remediate CVEs in Python dependencies
+  # The scan shows vulnerabilities in transitive dependencies that need explicit upgrades
+  - name: Remediate CVEs in Python dependencies
+    runs: |
+      set -eux
+
+      # Remediate aiohttp CVEs (CVE-2025-69223 High, CVE-2025-69226-69230 Low/Medium)
+      # Fixed in 3.13.3
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "aiohttp>=3.13.3"
+
+      # Remediate CVE-2026-21441 (High) in urllib3
+      # Fixed in 2.6.3
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "urllib3>=2.6.3"
+
+      # Remediate CVE-2025-68131 (Medium) in cbor2
+      # Fixed in 5.8.0
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "cbor2>=5.8.0"
+
+      # Upgrade ray to latest version - vllm requires ray[cgraph]>=2.48.0
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "ray[cgraph]>=2.53.0"
+
+  # Patch ray's vendored dependencies that have CVEs
+  # Ray bundles its own aiohttp and log4j which the scanner detects
+  - name: Patch ray vendored dependencies
+    runs: |
+      set -eux
+
+      SITE_PACKAGES="${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages"
+      RAY_SITE="${SITE_PACKAGES}/ray"
+
+      # Patch ray's vendored aiohttp (CVE-2025-69223, etc.)
+      # Ray bundles aiohttp in ray/_private/runtime_env/agent/thirdparty_files/
+      # Copy the already-installed fixed aiohttp from system site-packages
+      THIRDPARTY_DIR="${RAY_SITE}/_private/runtime_env/agent/thirdparty_files"
+      if [ -d "${THIRDPARTY_DIR}" ]; then
+        # Remove old aiohttp directories (both package and dist-info)
+        for item in "${THIRDPARTY_DIR}"/aiohttp*; do
+          if [ -e "$item" ]; then
+            rm -rf "$item"
+          fi
+        done
+
+        # Copy fixed aiohttp from system site-packages (already installed >=3.13.3)
+        cp -r "${SITE_PACKAGES}"/aiohttp "${THIRDPARTY_DIR}/"
+        cp -r "${SITE_PACKAGES}"/aiohttp-*.dist-info "${THIRDPARTY_DIR}/"
+      fi
+
+      # Patch ray's log4j in ray_dist.jar (CVE-2025-68161)
+      # ray/jars/ray_dist.jar contains log4j-core 2.17.1
+      # vllm doesn't use ray's Java components, so we can remove the vulnerable JAR
+      # to eliminate the CVE. If Java support is needed, this would need to be
+      # rebuilt with updated log4j.
+      if [ -f "${RAY_SITE}/jars/ray_dist.jar" ]; then
+        echo "Removing ray_dist.jar containing vulnerable log4j-core 2.17.1"
+        echo "vllm uses ray for Python-based distributed computing, not Java"
+        rm -f "${RAY_SITE}/jars/ray_dist.jar"
+      fi
 
   - name: Prune incompatible GPU extras
     runs: |
