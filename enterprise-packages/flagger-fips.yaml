@@ -1,0 +1,88 @@
+package:
+  name: flagger-fips
+  version: "1.42.0"
+  epoch: 0
+  description: Progressive delivery Kubernetes operator (Canary, A/B Testing and Blue/Green deployments)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/fluxcd/flagger.git
+      tag: v${{package.version}}
+      expected-commit: 3a27fd147f8302cb08b0cac3750563c10f3b048e
+
+  - uses: go/bump
+    with:
+      deps: golang.org/x/crypto@v0.45.0
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/flagger
+      output: flagger
+      ldflags: |
+        -X github.com/fluxcd/flagger/pkg/version.VERSION=${{package.version}}
+        -X github.com/fluxcd/flagger/pkg/version.REVISION=${{package.version}}
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility symlink for ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"
+          ln -sf ./usr/bin/flagger "${{targets.contextdir}}/flagger"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  github:
+    identifier: fluxcd/flagger
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+    environment:
+      HTTP_PORT: "8080"
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ver-check
+      with:
+        bins: flagger
+        version: ${{package.version}}
+    - uses: test/tw/help-check
+      with:
+        bins: flagger
+        expect-contains: mesh-provider
+    - uses: test/kwok/cluster
+    - name: Apply CRDs
+      runs: |
+        set -euo pipefail
+        kubectl apply -f https://raw.githubusercontent.com/fluxcd/flagger/v${{package.version}}/artifacts/flagger/crd.yaml
+    - name: Test flagger daemon
+      uses: test/daemon-check-output
+      with:
+        start: flagger -kubeconfig=$HOME/.kube/config -enable-leader-election=false -mesh-provider=kubernetes
+        timeout: 60
+        expected_output: |
+          Starting flagger
+          Starting HTTP server on port 8080
+        post: |
+          set -euo pipefail
+          wait-for-it "localhost:${HTTP_PORT}" -t 30
+          curl -fsSL "localhost:${HTTP_PORT}/healthz" | grep -F "OK"
+          curl -fsSL "localhost:${HTTP_PORT}/metrics" | grep -F "go_gc_duration_seconds"

@@ -1,0 +1,234 @@
+package:
+  name: prometheus-jmx-exporter-fips
+  version: "1.5.0"
+  epoch: 1
+  url: https://github.com/prometheus/jmx_exporter
+  description: JMX to Prometheus exporter javaagent
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jdk
+      - openssl-config-fipshardened
+
+vars:
+  java-version: 17
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bouncycastle-fips~2.1
+      - busybox
+      - ca-certificates-bundle
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+    SOURCE_DATE_EPOCH: "315619200" # 1980-02-01, minimum valid ZIP timestamp
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/prometheus/jmx_exporter
+      tag: ${{package.version}}
+      expected-commit: 72ad343795ce3e32651bd1810c4d3ed8395b3816
+
+  - name: build
+    runs: |
+      mvn -pl jmx_prometheus_javaagent -am package
+
+  - name: install
+    runs: |
+      mkdir -p ${{targets.contextdir}}/usr/lib/prometheus
+      mv jmx_prometheus_javaagent/target/jmx_prometheus_javaagent-${{package.version}}.jar ${{targets.destdir}}/usr/lib/prometheus/jmx_prometheus_javaagent.jar
+
+  - runs: |
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/usr/lib/prometheus/
+
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    description: "Compatibility package for iamguarded variant of Prometheus JMX Exporter"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: jmx-exporter
+          version: ${{vars.major-version}}
+      - runs: |
+          ./mvnw clean package -DskipTests
+      - runs: |
+          mkdir -p /opt/iamguarded/jmx-exporter
+          mkdir -p /opt/iamguarded/java
+          mkdir -p /opt/iamguarded/jmx-exporter/licenses
+          mkdir -p /tmp/iamguarded/pkg/cache/
+
+          # Symlink Java installation
+          for item in /usr/lib/jvm/java-${{vars.java-version}}-openjdk/*; do
+            base_item=$(basename "$item")
+            ln -sf "$item" /opt/iamguarded/java/$base_item
+          done
+
+           # examples/ contains default config files
+          cp -r ./examples /opt/iamguarded/jmx-exporter/
+          cp ./jmx_prometheus_javaagent/target/jmx_prometheus_javaagent-${{package.version}}.jar \
+              /opt/iamguarded/jmx-exporter/jmx_prometheus_javaagent.jar
+          cp ./jmx_prometheus_standalone/target/jmx_prometheus_standalone-${{package.version}}.jar \
+              /opt/iamguarded/jmx-exporter/jmx_prometheus_standalone.jar
+      - uses: iamguarded/finalize-compat
+        with:
+          package: jmx-exporter
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: jmx-exporter
+            version: ${{vars.major-version}}
+
+update:
+  enabled: true
+  github:
+    identifier: prometheus/jmx_exporter
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      CLASSPATH: /usr/share/java/bouncycastle-fips/*:./*:.
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - name: Copy test files and create config
+      runs: |
+        set -e
+
+        # Create JMX exporter config
+        echo -e "rules:\n- pattern: \".*\"" > agent-config.yaml
+
+        # Compile SimpleApp
+        javac SimpleApp.java
+    - name: Test Non-SSL JMX Export (FIPS Mode)
+      runs: |
+        set -e
+
+        # Run in FIPS mode
+        java -cp "/usr/share/java/bouncycastle-fips/*:." \
+           -Djava.security.properties=/usr/lib/jvm/jdk-fips-config/kernel-entropy.java.security \
+           -javaagent:/usr/lib/prometheus/jmx_prometheus_javaagent.jar=1234:agent-config.yaml \
+           SimpleApp > app.log 2>&1 &
+        echo $! > app.pid
+
+        sleep 5
+
+        if ! kill -0 $(cat app.pid) 2>/dev/null; then
+          echo "Java application failed to start."
+          cat app.log
+          exit 1
+        fi
+
+        echo "Java application started successfully in FIPS mode."
+    - name: Verify JMX Exporter Metrics
+      runs: |
+        set -e
+
+        if ! curl -s http://localhost:1234/metrics | grep -F 'jvm_memory_used_bytes'; then
+          echo "Error: JMX Exporter did not serve expected metrics"
+          exit 1
+        fi
+
+        echo "JMX Exporter is serving metrics successfully."
+
+        kill $(cat app.pid)
+    - name: Test SSL with FIPS
+      runs: |
+        set -ex
+
+        # Compile and run keystore generator
+        javac -cp "/usr/share/java/bouncycastle-fips/*" GenerateKeystore.java
+
+        java -cp "/usr/share/java/bouncycastle-fips/*:." \
+            -Djava.security.properties=/usr/lib/jvm/jdk-fips-config/kernel-entropy.java.security \
+            GenerateKeystore
+
+        cat <<EOF > ssl-config.yaml
+        lowercaseOutputName: true
+        rules:
+          - pattern: ".*"
+
+        httpServer:
+          ssl:
+            keyStore:
+              filename: /tmp/jmx_exporter.bcfks
+              password: changeit
+            certificate:
+              alias: jmx-exporter
+        EOF
+
+        # Run JMX Exporter with SSL in FIPS mode
+        java -cp "/usr/share/java/bouncycastle-fips/*:." \
+            -Djava.security.properties=/usr/lib/jvm/jdk-fips-config/kernel-entropy.java.security \
+            -Djavax.net.ssl.trustStoreType=BCFKS \
+            -Djavax.net.ssl.keyStoreType=BCFKS \
+            -Djavax.net.ssl.trustStore=/tmp/jmx_exporter.bcfks \
+            -Djavax.net.ssl.trustStorePassword=changeit \
+            -Djavax.net.ssl.keyStore=/tmp/jmx_exporter.bcfks \
+            -Djavax.net.ssl.keyStorePassword=changeit \
+            -javaagent:/usr/lib/prometheus/jmx_prometheus_javaagent.jar=8889:ssl-config.yaml \
+            SimpleApp > app-ssl.log 2>&1 &
+        SSL_PID=$!
+
+        sleep 10
+
+        if ! kill -0 "$SSL_PID" 2>/dev/null; then
+          echo "Error: JMX Exporter with SSL failed to start."
+          cat app-ssl.log
+          exit 1
+        fi
+
+        # Compile and run FIPS-compliant HTTPS client
+        javac -cp "/usr/share/java/bouncycastle-fips/*" FipsHttpsClient.java && \
+        java -cp "/usr/share/java/bouncycastle-fips/*:." \
+            -Djava.security.properties=/usr/lib/jvm/jdk-fips-config/kernel-entropy.java.security \
+            -Djavax.net.ssl.trustStore=/tmp/jmx_exporter.bcfks \
+            -Djavax.net.ssl.trustStorePassword=changeit \
+            -Djavax.net.ssl.trustStoreType=BCFKS \
+            FipsHttpsClient
+
+        kill "$SSL_PID"
+
+        echo "SSL test with FIPS mode completed successfully"
+    - name: Test Weak Crypto Rejection (Strict FIPS Compliance)
+      runs: |
+        set -e
+
+        # Test 512-bit RSA key generation (strictly forbidden by FIPS)
+        # This tests cryptographic strength requirements independent of format
+        echo "Testing FIPS rejection of 512-bit RSA key (strictly forbidden)..."
+
+        # Compile and run weak key test
+        javac -cp "/usr/share/java/bouncycastle-fips/*" TestWeakKey.java
+
+        # Run the test - it should exit with code 0 if rejection works correctly
+        if java -cp "/usr/share/java/bouncycastle-fips/*:." \
+            -Djava.security.properties=/usr/lib/jvm/jdk-fips-config/kernel-entropy.java.security \
+            TestWeakKey; then
+          echo "FIPS cryptographic strength requirements are properly enforced"
+        else
+          echo "ERROR: Test failed - FIPS is not rejecting weak keys"
+          exit 1
+        fi

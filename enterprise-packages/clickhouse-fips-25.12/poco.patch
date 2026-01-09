@@ -1,0 +1,135 @@
+Description: Fix Poco library FIPS compatibility issues
+ .
+ This patch addresses several FIPS-related issues in the Poco library:
+ - Fixes _GNU_SOURCE vs _POSIX_C_SOURCE conflict for proper strerror_r handling
+ - Updates SSLManager::isFIPSEnabled() to use OpenSSL 3.x provider API
+ - Configures SSL contexts to use FIPS-compliant cipher suites (PROFILE=SYSTEM)
+ - Disables non-FIPS TLS versions (SSLv2, SSLv3, TLSv1.0, TLSv1.1)
+ - Simplifies SSL context creation to use TLS_method for FIPS compliance
+Author: Michael Paul <michael.paul@chainguard.dev>
+Forwarded: not-needed
+
+diff --git a/base/poco/JSON/src/pdjson.c b/base/poco/JSON/src/pdjson.c
+index 09a6afd7a31..7a34af9b19f 100644
+--- a/base/poco/JSON/src/pdjson.c
++++ b/base/poco/JSON/src/pdjson.c
+@@ -1,4 +1,4 @@
+-#define _POSIX_C_SOURCE 200112L
++/* Using _GNU_SOURCE instead of _POSIX_C_SOURCE */
+ #include <stdlib.h>
+ #include <string.h>
+ #include <ctype.h>
+@@ -65,7 +65,8 @@ struct json_stack {
+ static void json_error_s(json_stream *json, int err)
+ {
+     char errbuf[1024] = {0};
+-    strerror_r(err, errbuf, sizeof(errbuf));
++    char *result = strerror_r(err, errbuf, sizeof(errbuf));
++    (void)result; /* Prevent unused result warning */
+     json_error(json, "%s", errbuf);
+ }
+ 
+diff --git a/base/poco/NetSSL_OpenSSL/include/Poco/Net/SSLManager.h b/base/poco/NetSSL_OpenSSL/include/Poco/Net/SSLManager.h
+index 6afa79c0add..4357d7a551d 100644
+--- a/base/poco/NetSSL_OpenSSL/include/Poco/Net/SSLManager.h
++++ b/base/poco/NetSSL_OpenSSL/include/Poco/Net/SSLManager.h
+@@ -18,7 +18,7 @@
+ #define NetSSL_SSLManager_INCLUDED
+ 
+ #include <unordered_map>
+-
++#include <openssl/provider.h>
+ #include <openssl/ssl.h>
+ #include "Poco/BasicEvent.h"
+ #include "Poco/Mutex.h"
+@@ -369,11 +369,10 @@ namespace Net
+ 
+     inline bool SSLManager::isFIPSEnabled()
+     {
+-#ifdef OPENSSL_FIPS
+-        return FIPS_mode() ? true : false;
+-#else
+-        return false;
+-#endif
++        OSSL_PROVIDER *fips = OSSL_PROVIDER_try_load(NULL, "fips", 1);
++        bool result = (fips != NULL);
++        if (fips) OSSL_PROVIDER_unload(fips);
++        return result;
+     }
+ 
+ 
+diff --git a/base/poco/NetSSL_OpenSSL/src/Context.cpp b/base/poco/NetSSL_OpenSSL/src/Context.cpp
+index 4cde1f7cd87..cf833eda790 100644
+--- a/base/poco/NetSSL_OpenSSL/src/Context.cpp
++++ b/base/poco/NetSSL_OpenSSL/src/Context.cpp
+@@ -316,10 +316,14 @@ void Context::init(const Params& params)
+ 		else
+ 			SSL_CTX_set_verify(_pSSLContext, params.verificationMode, &SSLManager::verifyClientCallback);
+ 
+-		SSL_CTX_set_cipher_list(_pSSLContext, params.cipherList.c_str());
++		// FIPS-compliant ciphers and TLS 1.2+ only
++		SSL_CTX_set_cipher_list(_pSSLContext, "PROFILE=SYSTEM");
+ 		SSL_CTX_set_verify_depth(_pSSLContext, params.verificationDepth);
+ 		SSL_CTX_set_mode(_pSSLContext, SSL_MODE_AUTO_RETRY);
+ 		SSL_CTX_set_session_cache_mode(_pSSLContext, SSL_SESS_CACHE_OFF);
++		
++		// Disable non-FIPS TLS versions
++		SSL_CTX_set_options(_pSSLContext, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+ 
+ 		initDH(params.dhParamsFile);
+ 		initECDH(params.ecdhCurve);
+@@ -476,52 +480,8 @@ const Context::CAPaths &Context::getCAPaths()
+ 
+ void Context::createSSLContext()
+ {
+-	if (SSLManager::isFIPSEnabled())
+-	{
+-		_pSSLContext = SSL_CTX_new(TLS_method());
+-	}
+-	else
+-	{
+-		switch (_usage)
+-		{
+-		case CLIENT_USE:
+-			_pSSLContext = SSL_CTX_new(TLS_client_method());
+-			break;
+-		case SERVER_USE:
+-			_pSSLContext = SSL_CTX_new(TLS_server_method());
+-			break;
+-#if defined(SSL_OP_NO_TLSv1) && !defined(OPENSSL_NO_TLS1)
+-		case TLSV1_CLIENT_USE:
+-			_pSSLContext = SSL_CTX_new(TLS_client_method());
+-			break;
+-		case TLSV1_SERVER_USE:
+-			_pSSLContext = SSL_CTX_new(TLS_server_method());
+-			break;
+-#endif
+-#if defined(SSL_OP_NO_TLSv1_1) && !defined(OPENSSL_NO_TLS1)
+-/* SSL_OP_NO_TLSv1_1 is defined in ssl.h if the library version supports TLSv1.1.
+- * OPENSSL_NO_TLS1 is defined in opensslconf.h or on the compiler command line
+- * if TLS1.x was removed at OpenSSL library build time via Configure options.
+- */
+-        case TLSV1_1_CLIENT_USE:
+-            _pSSLContext = SSL_CTX_new(TLS_client_method());
+-            break;
+-        case TLSV1_1_SERVER_USE:
+-            _pSSLContext = SSL_CTX_new(TLS_server_method());
+-            break;
+-#endif
+-#if defined(SSL_OP_NO_TLSv1_2) && !defined(OPENSSL_NO_TLS1)
+-        case TLSV1_2_CLIENT_USE:
+-            _pSSLContext = SSL_CTX_new(TLS_client_method());
+-            break;
+-        case TLSV1_2_SERVER_USE:
+-            _pSSLContext = SSL_CTX_new(TLS_server_method());
+-            break;
+-#endif
+-		default:
+-			throw Poco::InvalidArgumentException("Invalid or unsupported usage");
+-		}
+-	}
++	// Use TLS_method for FIPS compliance with system policies
++	_pSSLContext = SSL_CTX_new(TLS_method());
+ 	if (!_pSSLContext)
+ 	{
+ 		unsigned long err = ERR_get_error();

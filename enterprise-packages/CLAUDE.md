@@ -159,7 +159,7 @@ if ! some_command; then
 fi
 ```
 
-### 1. Use `set -euo pipefail` at the start of test scripts
+### 1. Always use `set -euo pipefail` as a single command
 ```bash
 set -euo pipefail
 ```
@@ -169,15 +169,32 @@ set -euo pipefail
 
 This ensures tests fail fast and don't mask errors.
 
-**IMPORTANT:** Always add `set -o pipefail` at the start of `post:` blocks in `test/daemon-check-output` to catch pipeline failures:
+**CRITICAL:** Always use `set -euo pipefail` as a single combined command. **NEVER** use separate commands like `set -e` or `set -o pipefail` alone:
+
+```bash
+# Good - always use the full combined form
+set -euo pipefail
+
+# Bad - never use separate set commands
+set -e
+set -u
+set -o pipefail
+```
+
+**IMPORTANT:** Always add `set -euo pipefail` at the start of `post:` blocks in `test/daemon-check-output` to catch pipeline failures and handle unset variables:
 
 ```yaml
-# Good
+# Good - full set -euo pipefail
+post: |-
+  set -euo pipefail
+  curl -sf http://localhost:8080/metrics | grep -F "uptime"
+
+# Bad - incomplete, only pipefail
 post: |-
   set -o pipefail
   curl -sf http://localhost:8080/metrics | grep -F "uptime"
 
-# Bad - failures may be masked
+# Bad - no shell options set, failures may be masked
 post: |-
   curl -sf http://localhost:8080/metrics | grep -F "uptime"
 ```
@@ -226,13 +243,13 @@ echo "$RESPONSE" | jq -e '.keys | length > 0'
 ### 5. Use test pipelines
 Use specialized test pipelines for different package types to ensure proper validation:
 
-**`test/docs`** - For documentation subpackages:
+**`test/tw/docs`** - For documentation subpackages:
 ```yaml
 subpackages:
   - name: ${{package.name}}-doc
     test:
       pipeline:
-        - uses: test/docs
+        - uses: test/tw/docs
 ```
 Validates that doc packages contain readable documentation (man pages, info pages, or text files) and aren't empty.
 
@@ -285,6 +302,152 @@ test:
     - uses: test/tw/ldd-check
 ```
 Checks that all binaries have their library dependencies satisfied and no missing shared objects.
+
+**`test/tw/debugpackage`** - For packages providing debug symbols:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/debugpackage
+```
+Check that the package structure matches debug package requirements and contains appropriate debug information files.
+
+**`test/tw/help-check`** - For CLI tools:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: ${{package.name}}
+        # Optional: verify help output contains specific strings
+        expect-contains: "Usage Options"
+```
+Verifies binaries respond to help flags (--help, -h, etc.) and optionally validates help content.
+
+**`test/tw/ver-check`** - For version validation:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/ver-check
+      with:
+        bins: ${{package.name}}
+        version: ${{package.version}}
+```
+Verifies binaries report the correct version matching package metadata.
+
+**`test/tw/header-check`** - For C/C++ development packages:
+```yaml
+subpackages:
+  - name: ${{package.name}}-dev
+    test:
+      pipeline:
+        - uses: test/tw/header-check
+          # Optional: specify custom compiler flags
+          with:
+            configure-opts: "-DENABLE_FEATURE_X"
+```
+Validates that C/C++ header files can be successfully included and compiled.
+
+**`test/tw/devpackage`** - For development packages:
+```yaml
+subpackages:
+  - name: ${{package.name}}-dev
+    test:
+      pipeline:
+        - uses: test/tw/devpackage
+```
+Validates that a package contains appropriate development files (headers, static libraries, pkg-config files).
+
+**`test/tw/staticpackage`** - For static library packages:
+```yaml
+subpackages:
+  - name: ${{package.name}}-static
+    test:
+      pipeline:
+        - uses: test/tw/staticpackage
+```
+Validates that a package contains only static libraries (.a files).
+
+**`test/tw/byproductpackage`** - For by-product packages:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/byproductpackage
+```
+Validates automatically generated packages created during the build process.
+
+**`test/tw/emptypackage`** - For empty packages:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/emptypackage
+```
+Validates that a package is intentionally empty.
+
+**`test/tw/verify-service`** - For systemd service files:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/verify-service
+      # Optional: skip specific files or include doc tests
+      with:
+        skip-files: "legacy.service"
+        man: "true"
+```
+Validates systemd service files are properly formatted and follow best practices.
+
+**`test/tw/contains-files`** - For verifying file presence:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /usr/bin/myapp
+          /etc/myapp/config.yaml
+```
+Checks for the presence of specific files or patterns in a package.
+
+**`test/tw/no-docs`** - For packages without documentation:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/no-docs
+```
+Ensures a package contains no documentation files (useful for runtime-only packages).
+
+**`test/tw/symlink-check`** - For symlink validation:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/symlink-check
+      # Optional: allow specific symlink types
+      with:
+        allow-dangling: false
+        allow-absolute: false
+```
+Verifies all symlinks point to valid targets and meet policy requirements.
+
+**`test/tw/gem-check`** - For Ruby gems:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/gem-check
+      # Optional: specify gem name if different from package
+      with:
+        require: "activesupport"
+```
+Validates that a Ruby gem can be properly required and loaded.
+
+**`test/tw/pip-check`** - For Python packages:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/pip-check
+      # Optional: specify Python version
+      with:
+        python: python3.11
+```
+Validates Python package dependencies are correctly installed using pip check.
 
 ### 6. Functional testing patterns
 Tests should validate actual functionality, not just version/help output. For examples of comprehensive functional tests, see packages like:

@@ -44,6 +44,10 @@ inputs:
       For dealing with build systems which do not detect and rebuild when changing headers.
     default: false
     required: false
+  keyname:
+    description: Filename for installed pubkey from generated keypair
+    default: ${{package.name}}.x509
+    required: false
 
 pipeline:
   - runs: |
@@ -58,6 +62,21 @@ pipeline:
 
       export KERNEL_UNAME=$(basename $(dirname "$kdir"))
 
+      # Mostly copied from certs/Makefile. `make modules modules_install` doesn't pull in
+      # a depenendcy that makes new certs, and there's no simple edit to make it
+      # do so.
+      hash=$(cd "$kdir" && scripts/config -s MODULE_SIG_HASH)
+      [ -z "$hash" ] && { echo "Can't find what hash to use for signing key! Is MODULE_SIG_HASH set?"; exit 1; }
+      ecdsa_args=""
+      [ "$(cd $kdir && scripts/config -s MODULE_SIG_KEY_TYPE_ECDSA)" = "y" ] && ecdsa_args=" -newkey ec -pkeyopt ec_paramgen_curve:secp384r1"
+      openssl req -new -nodes -utf8 -"$hash" -days 36500 \
+          -batch -x509 -config "$kdir"/certs/x509.genkey \
+          -outform PEM -out "$kdir"/certs/cert.pem -keyform PEM -keyout "$kdir"/certs/key.pem $ecdsa_args
+
+      cat "$kdir"/certs/key.pem "$kdir"/certs/cert.pem > "$kdir"/certs/signing_key.pem
+      openssl x509 -in "$kdir"/certs/cert.pem -outform DER -out "$kdir"/certs/signing_key.x509
+      rm "$kdir"/certs/key.pem "$kdir"/certs/cert.pem
+
       chdir_args=""
       if [ "${{inputs.chdir}}" = "true" ]; then
         chdir_args="-C '$kdir'"
@@ -70,8 +89,8 @@ pipeline:
       # Drop depmod generated files, we'll generate them again at image build time.
       find "${{targets.contextdir}}"/usr/lib/modules/ -name 'modules.*' -delete
 
-      # TODO(a-crate): sign with ephemeral keys. The kernel build system should do this,
-      # but something is broken.
+      install -Dm 0444 "$kdir"/certs/signing_key.x509 "${{targets.contextdir}}"/usr/lib/modules/"$KERNEL_UNAME"/certs/"${{inputs.keyname}}"
+
       if [ "${{inputs.clean}}" = "true" ]; then
         make $chdir_args clean
       fi
