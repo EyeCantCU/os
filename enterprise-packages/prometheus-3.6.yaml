@@ -1,7 +1,7 @@
 package:
   name: prometheus-3.6
   version: "3.6.0"
-  epoch: 4 # GHSA-j5w8-q4qc-rx2x
+  epoch: 5 # GHSA-j5w8-q4qc-rx2x
   description: The Prometheus monitoring system and time series database.
   copyright:
     - license: Apache-2.0
@@ -152,8 +152,9 @@ test:
     contents:
       packages:
         - curl
+        - jq
   pipeline:
-    - name: Check Prometheus Rules
+    - name: Check Prometheus Recording Rules
       runs: |
         cat << 'EOF' > rules.example
         groups:
@@ -167,11 +168,35 @@ test:
         prometheus --help
         promtool --version
         promtool --help
-    - name: Verify Prometheus Installation and Server Running Capability
+    - name: Check Prometheus Alert Rules
+      runs: |
+        # Test alert rule validation in addition to recording rules
+        cat << 'EOF' > alert_rules.yml
+        groups:
+        - name: example-alerts
+          rules:
+          - alert: HighErrorRate
+            expr: job:request_errors:rate5m > 0.5
+            for: 10m
+            labels:
+              severity: critical
+            annotations:
+              summary: "High error rate detected"
+              description: "Error rate is above 50% for 10 minutes"
+          - alert: InstanceDown
+            expr: up == 0
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Instance is down"
+        EOF
+        promtool check rules alert_rules.yml
+    - name: Verify Prometheus Server and Complete Monitoring Pipeline
       runs: |
         cat << 'EOF' > prometheus.yml
         global:
-          scrape_interval: 15s
+          scrape_interval: 5s
 
         scrape_configs:
           - job_name: "prometheus"
@@ -179,5 +204,44 @@ test:
             - targets: ["localhost:9090"]
         EOF
         prometheus --config.file=./prometheus.yml --web.listen-address=127.0.0.1:9090 > /dev/null 2>&1 &
+        PROMETHEUS_PID=$!
         sleep 5
+
+        # Test health endpoint
         curl -s "http://127.0.0.1:9090/-/healthy" | grep -q "Prometheus Server is Healthy."
+        echo "Health check passed"
+
+        # Wait a bit longer for initial scrapes to complete
+        sleep 10
+
+        # Test complete monitoring pipeline: scraping → storage → query
+        # Query the 'up' metric to verify Prometheus is scraping itself
+        UP_RESPONSE=$(curl -s "http://127.0.0.1:9090/api/v1/query?query=up")
+        echo "Query response: $UP_RESPONSE"
+
+        # Verify the query returned successful status
+        echo "$UP_RESPONSE" | jq -e '.status == "success"'
+        echo "Query status is success"
+
+        # Verify we got actual metric data from the self-scrape
+        UP_VALUE=$(echo "$UP_RESPONSE" | jq -r '.data.result[0].value[1]')
+        if [ "$UP_VALUE" = "1" ]; then
+          echo "Self-scrape verified: up metric = 1 (target is up)"
+        else
+          echo "ERROR: Expected up=1 but got up=$UP_VALUE"
+          exit 1
+        fi
+
+        # Verify the scraped target is prometheus itself
+        JOB_NAME=$(echo "$UP_RESPONSE" | jq -r '.data.result[0].metric.job')
+        if [ "$JOB_NAME" = "prometheus" ]; then
+          echo "Job name verified: $JOB_NAME"
+        else
+          echo "ERROR: Expected job=prometheus but got job=$JOB_NAME"
+          exit 1
+        fi
+
+        echo "Complete monitoring pipeline (scraping → storage → query) verified successfully"
+
+        # Clean shutdown
+        kill $PROMETHEUS_PID 2>/dev/null || true

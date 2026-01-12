@@ -1,0 +1,117 @@
+package:
+  name: duplicity
+  version: 3.0.7
+  epoch: 1
+  description: Encrypted backup using rsync algorithm
+  copyright:
+    - license: GPL-2.0-or-later
+
+vars:
+  pypi-package: duplicity
+  import: duplicity
+
+data:
+  - name: py-versions
+    items:
+      3.10:
+      3.11:
+      3.12:
+      3.13:
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - gettext-dev
+      - librsync-dev
+      - py3-supported-python-dev
+      - uv
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: dd97b414794b458b72f3c8006bff3f13da985922
+      repository: https://gitlab.com/duplicity/duplicity.git
+      tag: rel.${{package.version}}
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}
+    description: python${{range.key}} version of ${{vars.pypi-package}}
+    options:
+      # Don't depend on external libraries included in pip installs
+      no-depends: true
+    dependencies:
+      runtime:
+        - gpg
+        - gnupg
+        - librsync
+        - python-${{range.key}}
+        - tzdata
+    pipeline:
+      - uses: auth/uv
+        with:
+          allow-fallback-indexes: true
+      - runs: |
+          uv pip install "${{vars.pypi-package}}==${{package.version}}" --system --prefix "${{targets.contextdir}}/usr" --python ${{range.key}} -v
+
+          # Remediate CVEs CVE-2024-23342 (ecdsa) has no fix
+          uv pip install "cryptography>=44.0.1" "oslo.utils>=4.10.1" --system --prefix "${{targets.contextdir}}/usr" --python ${{range.key}} --upgrade -v
+          # Remove uv lock file that has world-writable permissions
+          rm -f "${{targets.contextdir}}/usr/.lock"
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+        - uses: test/tw/help-check
+          with:
+            bins: duplicity
+        - uses: test/tw/ver-check
+          with:
+            bins: duplicity
+        - name: Test librsync integration
+          runs: |
+            python${{range.key}} -c "from duplicity import librsync; print('librsync module loaded successfully')"
+        - name: Test backup and restore operations
+          runs: |
+            set -o pipefail
+            mkdir -p /tmp/source /tmp/backup_for_source /tmp/source/data
+            echo "sample file 1" > /tmp/source/data/file1.txt
+            echo "sample file 2" > /tmp/source/data/file2.txt
+
+            # Full backup
+            duplicity --no-encryption --allow-source-mismatch --copy-links --skip-if-no-change full /tmp/source file:///tmp/backup_for_source
+            echo "new data" > /tmp/source/data/file3.txt
+
+            # Dry-run incremental
+            duplicity --no-encryption --allow-source-mismatch --copy-links --skip-if-no-change incremental /tmp/source file:///tmp/backup_for_source --dry-run
+            duplicity --no-encryption --allow-source-mismatch --copy-links --skip-if-no-change incremental /tmp/source file:///tmp/backup_for_source
+
+            # Collection status
+            duplicity collection-status --no-encryption file:///tmp/backup_for_source
+
+            # Restore
+            rm -rf /tmp/source
+            duplicity restore --allow-source-mismatch --no-encryption --copy-links file:///tmp/backup_for_source /tmp/source
+            stat /tmp/source/data/file1.txt
+            stat /tmp/source/data/file2.txt
+            stat /tmp/source/data/file3.txt
+            grep -F -e "sample file 1" /tmp/source/data/file1.txt
+            grep -F -e "sample file 2" /tmp/source/data/file2.txt
+            grep -F -e "new data" /tmp/source/data/file3.txt
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+update:
+  enabled: true
+  git:
+    strip-prefix: rel.
+    tag-filter-prefix: rel.
