@@ -52,6 +52,18 @@ pipeline:
     with:
       patches: GHSA-84h7-rjj3-6jx4.patch
 
+  - name: "Drift check for upstream Java version"
+    runs: |
+      # Check that upstream's Java version hasn't changed using .java-version file
+      UPSTREAM_JAVA=$(cat .java-version | tr -d '\n\r ')
+      echo "Upstream Java version: $UPSTREAM_JAVA"
+      if [ "$UPSTREAM_JAVA" != "${{vars.java-version}}" ]; then
+        echo "ERROR: Upstream Java version has changed"
+        echo "Current Java version: ${{vars.java-version}}"
+        echo "Java version in upstream: $UPSTREAM_JAVA from .java-version file"
+        exit 1
+      fi
+
   - name: "Build kafbat-ui"
     runs: |
       ./gradlew clean build -x test \
@@ -101,6 +113,19 @@ test:
         - uuidgen
         - wait-for-it
         - ${{package.name}}-compat
+        # Cypress dependencies (see https://docs.cypress.io/app/get-started/install-cypress#Linux-Prerequisites)
+        - nodejs
+        - yarn
+        - xvfb
+        - nss
+        - libnss
+        - gtk-3
+        - xkbcomp
+        - xkeyboard-config
+        - libnspr
+        - mesa-gbm
+        - libudev
+        - font-opensans
     environment:
       JAVA_HOME: "/usr/lib/jvm/default-jvm"
       JAR_FILE: "/usr/share/java/kafbatui/api.jar"
@@ -112,6 +137,9 @@ test:
       CLASSPATH: "/usr/share/java/bouncycastle-fips/*:/usr/share/java/kafbatui/lib/fips/*:./*:."
       JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
   pipeline:
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
     - uses: java-fips/algorithms
       with:
         java-version: ${{vars.java-version}}
@@ -248,13 +276,8 @@ test:
           set -euo pipefail
 
           # Wait for server to be ready
-          for i in $(seq 1 30); do
-            if curl -k -sf https://localhost:8443/actuator/health >/dev/null 2>&1; then
-              break
-            fi
-            [ $i -eq 30 ] && exit 1
-            sleep 1
-          done
+          curl -k --fail --retry 10 --retry-delay 3 --retry-connrefused --retry-max-time 30 \
+            https://localhost:8443/actuator/health >/dev/null
 
           # Wait for metadata initialization
           curl -k -sf --retry 10 "https://localhost:8443/api/clusters/local/topics"
@@ -287,6 +310,11 @@ test:
           # Verify message counts
           curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics" | jq -r ".topics[] | select(.name == \"${TOPIC1}\") | .messagesCount" | grep -E "^[0-9]+$"
           curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics" | jq -r ".topics[] | select(.name == \"${TOPIC2}\") | .messagesCount" | grep -E "^[0-9]+$"
+
+          # Run Cypress E2E UI tests
+          export NODE_TLS_REJECT_UNAUTHORIZED=0  # Allow self-signed certs for Cypress
+          yarn add cypress --dev
+          yarn cypress run
 
 update:
   enabled: true
