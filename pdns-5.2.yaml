@@ -1,7 +1,7 @@
 package:
   name: pdns-5.2
   version: "5.2.7"
-  epoch: 1
+  epoch: 2
   description: PowerDNS Authoritative Server
   copyright:
     - license: GPL-2.0-or-later
@@ -184,6 +184,23 @@ subpackages:
           mkdir -p ${{targets.contextdir}}/var/lib/powerdns
       - uses: strip
     test:
+      environment:
+        contents:
+          packages:
+            - bind-tools
+            - curl
+            - wait-for-it
+            - sqlite
+            - ${{package.name}}-backend-gsqlite3
+        accounts:
+          groups:
+            - groupname: pdns
+              gid: 953
+          users:
+            - username: pdns
+              gid: 953
+              uid: 953
+          run-as: 0 # To bind :53 on the CI
       pipeline:
         - runs: |
             # this is dumb, but libmariadb.so.3 is not available here in tests  - apko solves for it at the image level
@@ -202,6 +219,25 @@ subpackages:
               echo "ERROR: pdns-nosodium should not link to libsodium or gnutls libraries"
               exit 1
             fi
+        - name: "start daemon on localhost and verify DNS queries"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              curl -fsSL https://raw.githubusercontent.com/PowerDNS/pdns/refs/tags/rec-${{package.version}}/dockerdata/pdns.conf -o /etc/pdns.conf
+              curl -fsSL https://raw.githubusercontent.com/PowerDNS/pdns/refs/tags/rec-${{package.version}}/modules/gsqlite3backend/schema.sqlite3.sql -o /tmp/schema.sqlite3.sql
+              sqlite3 /var/lib/powerdns/pdns.sqlite3 < /tmp/schema.sqlite3.sql
+              pdnsutil create-zone example.com ns1.example.com
+              pdnsutil add-record example.com ns1 A 127.0.0.1
+            start: "pdns_server"
+            timeout: 30
+            expected_output: |
+              Listening on controlsocket
+              UDP server bound
+              TCP server bound
+              Done launching threads, ready to distribute questions
+            post: |
+              wait-for-it -t 5 --strict localhost:53
+              dig @127.0.0.1 -p 53 example.com SOA +norecurse | tee -a test.debug | grep -qi "NOERROR"
 
   - name: ${{package.name}}-recursor-nosodium
     description: PowerDNS Recursive Server without libsodium
