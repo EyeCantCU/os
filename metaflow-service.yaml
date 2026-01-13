@@ -1,0 +1,174 @@
+package:
+  name: metaflow-service
+  version: "2.5.0"
+  epoch: 0
+  description: "Metadata tracking and UI service for Metaflow"
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  python-version: "3.11"
+  venv-home: "/usr/share/metaflow-service/venv"
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - libffi-dev
+      - python-${{vars.python-version}}-dev
+      - uv
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Netflix/metaflow-service
+      tag: v${{package.version}}
+      expected-commit: 9e47d2d85e127d2673d457dde7ae535a3341de0f
+
+  - name: "Create virtual environment"
+    runs: uv venv ${{vars.venv-home}}
+
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  - name: "Install metaflow-service"
+    runs: |
+      # requires EPOCH to be later than 1980
+      export SOURCE_DATE_EPOCH=315532800
+
+      # Activate virtual environment
+      source ${{vars.venv-home}}/bin/activate
+
+      # Install metaflow-service package
+      uv pip install .
+
+      # Install virtual environment
+      mkdir -p ${{targets.destdir}}/usr/share/metaflow-service
+      mv ${{vars.venv-home}} ${{targets.destdir}}/usr/share/metaflow-service/
+
+      # Fix virtual environment's installed path
+      sed -i "s|/home/build|/usr/share/metaflow-service|g" ${{targets.destdir}}/usr/share/metaflow-service/venv/bin/*
+      sed -i "s|/home/build|/usr/share/metaflow-service|g" ${{targets.destdir}}/usr/share/metaflow-service/venv/pyvenv.cfg
+
+      # Remove uv lock file (world-writable, triggers linter)
+      rm -f ${{targets.destdir}}/usr/share/metaflow-service/venv/.lock
+
+  - name: "Install service files"
+    runs: |
+      # Install services directory
+      mkdir -p ${{targets.destdir}}/usr/share/metaflow-service/services
+      cp -r services/* ${{targets.destdir}}/usr/share/metaflow-service/services/
+
+      # Install run_goose.py for migrations
+      cp run_goose.py ${{targets.destdir}}/usr/share/metaflow-service/
+
+  - uses: strip
+
+subpackages:
+  - name: metaflow-service-compat
+    description: "Compatibility layer for metaflow-service upstream container layout"
+    dependencies:
+      runtime:
+        - goose
+        - metaflow-service
+        - python-${{vars.python-version}}
+    pipeline:
+      - runs: |
+          # Create upstream-compatible directory structure
+          mkdir -p ${{targets.contextdir}}/root/services
+          mkdir -p ${{targets.contextdir}}/opt/latest
+
+          # Symlink services
+          ln -sf /usr/share/metaflow-service/services/metadata_service ${{targets.contextdir}}/root/services/metadata_service
+          ln -sf /usr/share/metaflow-service/services/migration_service ${{targets.contextdir}}/root/services/migration_service
+          ln -sf /usr/share/metaflow-service/services/ui_backend_service ${{targets.contextdir}}/root/services/ui_backend_service
+          ln -sf /usr/share/metaflow-service/services/data ${{targets.contextdir}}/root/services/data
+          ln -sf /usr/share/metaflow-service/services/utils ${{targets.contextdir}}/root/services/utils
+          ln -sf /usr/share/metaflow-service/run_goose.py ${{targets.contextdir}}/root/run_goose.py
+
+          # Symlink virtualenv to expected location
+          ln -sf /usr/share/metaflow-service/venv ${{targets.contextdir}}/opt/latest
+
+          # Symlink goose to expected location
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -sf /usr/bin/goose ${{targets.contextdir}}/usr/local/bin/goose
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - goose
+        - postgresql
+        - postgresql-client
+        - shadow
+        - sudo-rs
+        - wait-for-it
+        - curl
+    accounts:
+      groups:
+        - groupname: metaflow
+          gid: 1000
+      users:
+        - username: metaflow
+          uid: 1000
+          gid: 1000
+      run-as: 0
+    environment:
+      PGDATA: /tmp/test_db
+      PGUSER: wolfi
+      MF_METADATA_DB_HOST: 127.0.0.1
+      MF_METADATA_DB_PORT: "5432"
+      MF_METADATA_DB_USER: wolfi
+      MF_METADATA_DB_NAME: metaflow
+      MF_METADATA_DB_PSWD: ""
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test Python imports
+      runs: |
+        set -euo pipefail
+        export PATH=/usr/share/metaflow-service/venv/bin:$PATH
+
+        python3 -c "
+        import aiohttp
+        import aiopg
+        import psycopg2
+        import boto3
+        print('Core imports successful')
+        "
+    - name: "Start PostgreSQL and create database"
+      runs: |
+        useradd $PGUSER
+        sudo -u $PGUSER initdb -D $PGDATA
+        sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
+        createdb $MF_METADATA_DB_NAME
+        psql -lqt | cut -d \| -f 1 | grep -qw metaflow
+        wait-for-it -t 10 localhost:5432
+    - name: Test metadata service startup
+      uses: test/daemon-check-output
+      with:
+        start: |
+          env PATH=/usr/share/metaflow-service/venv/bin:$PATH \
+          metadata_service
+        timeout: 60
+        expected_output: |
+          Connection established
+        post: |
+          set -euo pipefail
+          # Test ping endpoint
+          curl -sf http://localhost:8080/ping | grep -F "pong"
+
+          # Test version endpoint
+          curl -sf http://localhost:8080/version
+
+update:
+  enabled: true
+  github:
+    identifier: Netflix/metaflow-service
+    strip-prefix: v
