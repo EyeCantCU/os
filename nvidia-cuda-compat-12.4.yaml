@@ -1,49 +1,96 @@
 package:
   name: nvidia-cuda-compat-12.4
   version: 550.54.15
-  epoch: 1
-  description: CUDA Runtime (cudart)
+  epoch: 3
+  description: CUDA ${{vars.cuda-version}} forward compatibility libraries
   copyright:
-    - license: PROPRIETARY
-  target-architecture:
-    - x86_64
+    - license: LicenseRef-NVIDIA-CUDA-compat
+      license-path: LICENSE
+  dependencies:
+    runtime:
+      - nvidia-cuda-ld-config-${{vars.cuda-version}}
 
 environment:
   contents:
     packages:
       - busybox
+      - crane
 
 var-transforms:
   - from: ${{package.name}}
     match: '.*-(\d+\.\d+).*'
     replace: '$1'
     to: cuda-version
+  - from: ${{package.name}}
+    match: '.*-(\d+)\.(\d+).*'
+    replace: '$1-$2'
+    to: cuda-version-deb
 
 pipeline:
-  - uses: fetch
-    with:
-      uri: "https://developer.download.nvidia.com/compute/cuda/redist/nvidia_driver/linux-x86_64/nvidia_driver-linux-x86_64-${{package.version}}-archive.tar.xz"
-      expected-sha256: "e1416ebc1e7b4a14d393ca584e3f9c5e22f9750f4ba502a8ba2c5c5ad943bbb5"
-      timeout: 30
+  - assertions:
+      required-steps: 1
+    pipeline:
+      - if: ${{build.arch}} == 'aarch64'
+        uses: fetch
+        with:
+          # SBSA = ARM Server Base System Architecture (now called SystemReady)
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/nvidia_driver/linux-sbsa/nvidia_driver-linux-sbsa-${{package.version}}-archive.tar.xz"
+          expected-sha256: "b39a8cb837fe3846284d89ab2202e93b14804349d3fc9aa8a8384fd2759ec2f5"
+          timeout: 30
+      - if: ${{build.arch}} == 'x86_64'
+        uses: fetch
+        with:
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/nvidia_driver/linux-x86_64/nvidia_driver-linux-x86_64-${{package.version}}-archive.tar.xz"
+          expected-sha256: "e1416ebc1e7b4a14d393ca584e3f9c5e22f9750f4ba502a8ba2c5c5ad943bbb5"
+          timeout: 30
 
-  - runs: |
-      mkdir -p ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/compat
-      cd lib
-      ln -s libcuda.so.${{package.version}} libcuda.so.1
-      ln -s libcuda.so.1 libcuda.so
-      ln -s libcudadebugger.so.${{package.version}} libcudadebugger.so.1
-      ln -s libcudadebugger.so.1 libcudadebugger.so
-      ln -s libnvidia-nvvm.so.${{package.version}} libnvidia.so.4
-      ln -s libnvidia-nvvm.so.${{package.version}} libnvidia.so
-      # libnvidia-pkcs11 for old openssl
-      for lib in libcuda libcudadebugger libnvidia-nvvm libnvidia-pkcs11-openssl3 libnvidia-ptxjitcompiler ; do
-         mv ${lib}.so* ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/compat
+  - working-directory: lib
+    runs: |
+      set -oue pipefail
+
+      # Directory containing compat libs
+      compatdir="usr/local/cuda-${{vars.cuda-version}}/compat"
+
+      # Use CUDA runtime image for the latest version of Ubuntu
+      # And use Docker instead of NGC as images appear to be published here first
+      cuda_tag=$(crane ls --platform linux/amd64 --omit-digest-tags nvidia/cuda | \
+                 grep "^${{vars.cuda-version}}.*runtime-ubuntu" | \
+                 sort | tail -n1)
+
+      # Extract compat library basenames from given tag. Filter out path, soversion, and dupes
+      compat_libs=$(crane export --platform linux/amd64 nvidia/cuda:$cuda_tag - | \
+                    tar tf - $compatdir | sed "s|^$compatdir/||; s|^$compatdir$||" | \
+                    sed "s/\.so.*//" | sort -u)
+
+      # Install compat libraries
+      mkdir -p ${{targets.contextdir}}/$compatdir
+      for lib in $compat_libs; do
+        # pkcs11 depends on libcrypto 1.1 which we do not provide or support
+        if [ "${lib}" = "libnvidia-pkcs11" ]; then
+          continue
+        fi
+        # aarch64 doesn't ship pkcs11 libraries
+        if [ "${lib}" = "libnvidia-pkcs11-openssl3" ] && [ "${{build.arch}}" = "aarch64" ]; then
+          continue
+        fi
+        mv ${lib}.so.* ${{targets.contextdir}}/$compatdir/
+      done
+
+      # Link libraries
+      for so in ${{targets.contextdir}}/$compatdir/*.so.*.*; do
+        ldconfig -l "$so"
       done
 
 update:
-  exclude-reason: "TODO(pnasrat): WIP to migrate to version streams"
+  exclude-reason: "TODO: implement automation to track updates upstream"
   enabled: false
 
 test:
   pipeline:
     - uses: test/tw/ldd-check
+    - runs: |
+        # Sanity check, we should at least have libcuda
+        compatdir="/usr/local/cuda-${{vars.cuda-version}}/compat"
+        stat "$compatdir/libcuda.so.${{package.version}}"
+        echo "$compatdir" > /etc/ld.so.conf.d/${{context.name}}.conf
+        ldconfig -v -N | grep "libcuda.so.1 -> libcuda.so.${{package.version}}"
