@@ -1,0 +1,102 @@
+# This manifest handles additional Crossplane AWS providers separately from
+# the main crossplane-provider-aws.yaml. We split these out because the
+# original manifest became flaky and CI runs were taking too long.
+#
+# As we add more providers, they should go here rather than in the main
+# manifest to keep build times manageable and reduce flakiness.
+package:
+  name: additional-crossplane-providers-aws-fips
+  version: "2.3.0"
+  epoch: 0
+  description: Official AWS Provider for Crossplane by Upbound
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 32
+    memory: 48Gi
+
+environment:
+  contents:
+    packages:
+      - crossplane-crank
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 3005cd978e05ae52d029735ee5891103b97defce
+      repository: https://github.com/crossplane-contrib/provider-upjet-aws
+      tag: v${{package.version}}
+
+data:
+  - name: packages
+    items:
+      cognitoidentity: provider-aws-cognitoidentity
+      ecr: provider-aws-ecr
+      efs: provider-aws-efs
+
+subpackages:
+  - name: crossplane-${{range.value}}-fips
+    range: packages
+    description: Crossplane AWS ${{range.key}} provider FIPS
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/provider/${{range.key}}
+          output: ${{range.value}}
+          go-package: go-fips-md5
+          ldflags: |
+            -X github.com/crossplane-contrib/provider-upjet-aws/internal/version.Version=v${{package.version}}
+      - runs: |
+          crank xpkg extract ghcr.io/crossplane-contrib/${{range.value}}:v${{package.version}}
+          gunzip out.gz -c > ${{targets.contextdir}}/package.yaml
+    test:
+      environment:
+        contents:
+          packages:
+            - openssl
+      pipeline:
+        - uses: test/go-fips-check
+        - uses: test/tw/ldd-check
+        - uses: test/kwok/cluster
+        - name: Running the operator
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tls/server
+              openssl req -x509 -newkey rsa:2048 -keyout /tls/server/tls.key \
+                -out /tls/server/tls.crt -days 1 -nodes -subj "/CN=test"
+              chmod 600 /tls/server/tls.key
+              chmod 644 /tls/server/tls.crt
+            start: |
+              ${{range.value}}
+            timeout: 30
+            expected_output: |
+              "logger":"provider-aws"
+              EnableBetaManagementPolicies
+            post: |
+              echo "Provider started with expected behavior"
+
+  - name: crossplane-${{range.value}}-fips-compat
+    range: packages
+    description: Provides ${{range.value}} FIPS at /usr/local/bin/provider
+    dependencies:
+      runtime:
+        - crossplane-${{range.value}}-fips
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -s /usr/bin/${{range.value}} ${{targets.contextdir}}/usr/local/bin/provider
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
