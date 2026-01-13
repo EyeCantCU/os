@@ -5,7 +5,7 @@
 package:
   name: opensearch-2
   version: "2.19.4"
-  epoch: 4
+  epoch: 5
   description: Open source distributed and RESTful search engine.
   copyright:
     - license: Apache-2.0
@@ -18,7 +18,7 @@ package:
       - openjdk-17-jre
 
 vars:
-  plugin_version_qualifier: "0" # external plugins use the same version as the main package with a qualifier
+  plugin_version_qualifier: "0" # external plugins use the same version as the main package with a qualifier
 
 environment:
   contents:
@@ -163,11 +163,27 @@ subpackages:
           mkdir -p ${{targets.contextdir}}/usr/share/opensearch/plugins/opensearch-${{range.key}}
           unzip "./plugins/${{range.key}}/build/distributions/${{range.key}}-${{package.version}}.zip" -d "${{targets.contextdir}}/usr/share/opensearch/plugins/opensearch-${{range.key}}"
     test:
+      environment:
+        contents:
+          packages:
+            - opensearch-2
+            - openjdk-17-default-jvm
+            - bash
+        environment:
+          JAVA_HOME: /usr/lib/jvm/default-jvm
       pipeline:
         - uses: test/tw/contains-files
           with:
             dir: "/usr/share/opensearch/plugins/opensearch-${{range.key}}/"
             name: "*.jar"
+        - name: Verify plugin is recognized by opensearch-plugin
+          runs: |
+            set -euo pipefail
+            # List installed plugins and verify our plugin appears
+            # Note: opensearch-plugin list shows plugins without the "opensearch-" prefix
+            opensearch-plugin list
+            opensearch-plugin list | grep -F "${{range.key}}"
+            echo "Plugin ${{range.key}} is recognized"
 
   - range: external-plugins
     name: ${{package.name}}-${{range.key}}
@@ -367,8 +383,17 @@ subpackages:
           fi
       - uses: strip
     test:
+      environment:
+        contents:
+          packages:
+            - opensearch-2
+            - openjdk-17-default-jvm
+            - bash
+        environment:
+          JAVA_HOME: /usr/lib/jvm/default-jvm
       pipeline:
-        - runs: |
+        - name: Verify k-nn JNI native libraries (if applicable)
+          runs: |
             # Verify k-nn JNI native libraries are present
             if [ "${{range.key}}" = "k-nn" ]; then
               # Common libraries (all architectures)
@@ -386,6 +411,89 @@ subpackages:
               fi
 
               echo "All k-nn JNI native libraries verified"
+            fi
+        - name: Verify plugin is recognized by opensearch-plugin
+          runs: |
+            # Determine the expected plugin name based on the key
+            case "${{range.key}}" in
+              "alerting")
+                EXPECTED_PLUGIN="opensearch-alerting"
+                ;;
+              "anomaly-detection")
+                EXPECTED_PLUGIN="opensearch-anomaly-detection"
+                ;;
+              "asynchronous-search")
+                EXPECTED_PLUGIN="opensearch-asynchronous-search"
+                ;;
+              "cross-cluster-replication")
+                EXPECTED_PLUGIN="opensearch-cross-cluster-replication"
+                ;;
+              "custom-codecs")
+                EXPECTED_PLUGIN="opensearch-custom-codecs"
+                ;;
+              "geospatial")
+                EXPECTED_PLUGIN="opensearch-geospatial"
+                ;;
+              "index-management")
+                EXPECTED_PLUGIN="opensearch-index-management"
+                ;;
+              "job-scheduler")
+                EXPECTED_PLUGIN="opensearch-job-scheduler"
+                ;;
+              "k-nn")
+                EXPECTED_PLUGIN="opensearch-knn"
+                ;;
+              "ml-commons")
+                EXPECTED_PLUGIN="opensearch-ml"
+                ;;
+              "neural-search")
+                EXPECTED_PLUGIN="opensearch-neural-search"
+                ;;
+              "notifications")
+                EXPECTED_PLUGIN="opensearch-notifications"
+                ;;
+              "observability")
+                EXPECTED_PLUGIN="opensearch-observability"
+                ;;
+              "performance-analyzer")
+                EXPECTED_PLUGIN="opensearch-performance-analyzer"
+                ;;
+              "reporting")
+                EXPECTED_PLUGIN="opensearch-reports-scheduler"
+                ;;
+              "security")
+                EXPECTED_PLUGIN="opensearch-security"
+                ;;
+              "security-analytics")
+                EXPECTED_PLUGIN="opensearch-security-analytics"
+                ;;
+              "sql")
+                EXPECTED_PLUGIN="opensearch-sql"
+                ;;
+              *)
+                EXPECTED_PLUGIN="opensearch-${{range.key}}"
+                ;;
+            esac
+
+            echo "Checking for plugin: ${EXPECTED_PLUGIN}"
+            opensearch-plugin list
+
+            # Verify the plugin directory exists
+            if [ -d "/usr/share/opensearch/plugins/${EXPECTED_PLUGIN}" ]; then
+              echo "Plugin directory ${EXPECTED_PLUGIN} exists"
+            else
+              echo "ERROR: Plugin directory ${EXPECTED_PLUGIN} not found"
+              ls -la /usr/share/opensearch/plugins/
+              exit 1
+            fi
+
+            # Verify the plugin is listed
+            if opensearch-plugin list | grep -q "${EXPECTED_PLUGIN}"; then
+              echo "Plugin ${EXPECTED_PLUGIN} is recognized by opensearch-plugin"
+            else
+              echo "ERROR: Plugin ${EXPECTED_PLUGIN} not recognized by opensearch-plugin"
+              opensearch-plugin list
+              exit 1
             fi
 
   - name: ${{package.name}}-entrypoint-compat
@@ -412,13 +520,97 @@ update:
 
 test:
   environment:
+    accounts:
+      groups:
+        - groupname: opensearch
+          gid: 1000
+      users:
+        - username: opensearch
+          uid: 1000
+          gid: 1000
+      run-as: 0
     contents:
       packages:
         - openjdk-17-default-jvm
         - bash
+        - curl
+        - sudo
+        - wait-for-it
+    environment:
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      OPENSEARCH_USER: opensearch
   pipeline:
-    - runs: |
+    - name: Verify binaries exist and run
+      runs: |
+        set -euo pipefail
         export JAVA_HOME=/usr/lib/jvm/default-jvm
         opensearch --version
         opensearch-env-from-file --version
         opensearch-env-from-file --help
+    - name: Test OpenSearch server starts and handles REST API requests
+      runs: |
+        set -euo pipefail
+
+        # Create required directories
+        mkdir -p /tmp/opensearch/data /tmp/opensearch/logs
+
+        # Give opensearch user ownership
+        chown -R "${OPENSEARCH_USER}:${OPENSEARCH_USER}" /usr/share/opensearch
+        chown -R "${OPENSEARCH_USER}:${OPENSEARCH_USER}" /tmp/opensearch
+
+        # Configure OpenSearch for single-node testing
+        tee /usr/share/opensearch/config/opensearch.yml <<EOF
+        cluster.name: test-cluster
+        node.name: test-node
+        path.data: /tmp/opensearch/data
+        path.logs: /tmp/opensearch/logs
+        network.host: 127.0.0.1
+        http.port: 9200
+        discovery.type: single-node
+        EOF
+
+        # Start OpenSearch as non-root user in background
+        export OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m"
+        sudo -E -u "${OPENSEARCH_USER}" /usr/share/opensearch/bin/opensearch &
+        OPENSEARCH_PID=$!
+
+        # Wait for HTTP port to be ready
+        echo "Waiting for OpenSearch to start..."
+        wait-for-it 127.0.0.1:9200 -t 120
+
+        # Test cluster health endpoint
+        echo "Testing cluster health..."
+        curl -sf http://127.0.0.1:9200/_cluster/health | grep -F 'cluster_name'
+        echo "Cluster health check passed"
+
+        # Test index creation
+        echo "Creating test index..."
+        curl -sf -X PUT "http://127.0.0.1:9200/test-index" \
+          -H 'Content-Type: application/json' \
+          -d '{"settings": {"number_of_shards": 1, "number_of_replicas": 0}}'
+
+        # Test document indexing
+        echo "Indexing test document..."
+        curl -sf -X POST "http://127.0.0.1:9200/test-index/_doc/1" \
+          -H 'Content-Type: application/json' \
+          -d '{"title": "Test Document", "content": "Hello OpenSearch"}'
+
+        # Refresh to make document searchable
+        curl -sf -X POST "http://127.0.0.1:9200/test-index/_refresh"
+
+        # Test search functionality
+        echo "Testing search..."
+        curl -sf -X GET "http://127.0.0.1:9200/test-index/_search" \
+          -H 'Content-Type: application/json' \
+          -d '{"query": {"match": {"content": "OpenSearch"}}}' | grep -F 'Test Document'
+        echo "Search test passed"
+
+        # Cleanup - delete test index
+        echo "Cleaning up test index..."
+        curl -sf -X DELETE "http://127.0.0.1:9200/test-index"
+
+        # Stop OpenSearch
+        kill "$OPENSEARCH_PID" 2>/dev/null || true
+        wait "$OPENSEARCH_PID" 2>/dev/null || true
+
+        echo "All OpenSearch REST API tests passed"
