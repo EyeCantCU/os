@@ -1,0 +1,111 @@
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+package:
+  name: tritonserver-backend-python-cuda-13.1
+  version: 25.12
+  epoch: 0
+  description: NVIDIA Triton Inference Server Python Backend
+  copyright:
+    - license: BSD-3-Clause
+  resources:
+    cpu: 64
+    memory: 128Gi
+  dependencies:
+    runtime:
+      - nvidia-cuda-cudart-${{vars.cuda-version}}
+      - nvidia-cuda-cupti-${{vars.cuda-version}}
+      - python-${{vars.python-version}}-base
+      - so:libarchive.so.13
+  options:
+    no-depends: true
+
+vars:
+  python-version: '3.12'
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{vars.cuda-version}}
+    match: (\d+)\.\d+
+    replace: $1
+    to: cuda-major-version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - cmake-3
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - libarchive-dev
+      - nvcc-${{vars.cuda-version}}-gcc-default
+      - py${{vars.python-version}}-build-base-dev
+      - rapidjson-dev
+      - triton-inference-server-backend=${{package.version}}
+      - triton-inference-server-common=${{package.version}}
+      - triton-inference-server-core=${{package.version}}
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 397eddfcee0bdc6051c4317cea2ff752b79ef9b4
+      repository: https://github.com/triton-inference-server/python_backend.git
+      branch: r${{package.version}}
+      recurse-submodules: true
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-${{vars.cuda-version}} \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DTRITON_REPO_ORGANIZATION:STRING=file:///usr/src/triton-inference-server \
+        -DTRITON_COMMON_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/common.git && git branch --show-current) \
+        -DTRITON_CORE_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/core.git && git branch --show-current) \
+        -DTRITON_BACKEND_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/backend.git && git branch --show-current) \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc \
+        -DCMAKE_INSTALL_PREFIX:PATH=/opt/tritonserver \
+        -DTRITON_ENABLE_GPU:BOOL=ON \
+        -DTRITON_ENABLE_MALI_GPU:BOOL=OFF \
+        -DTRITON_ENABLE_STATS:BOOL=ON \
+        -DTRITON_ENABLE_METRICS:BOOL=ON \
+        -DTRITON_ENABLE_MEMORY_TRACKER:BOOL=ON
+
+  - runs: |
+      # When this fails, we can presumably stop pinning cmake-3
+      find . -name CMakeLists.txt | \
+        xargs grep -E 'cmake_minimum_required\(VERSION 3(\.[0-4])[ \)]'
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - runs: |
+      # Cache Python backend
+      tmp_backend_dir=$(mktemp -d)
+      mv ${{targets.contextdir}}/opt/tritonserver/backends/python $tmp_backend_dir/python
+
+      # Remove Tritonserver installation
+      rm -r ${{targets.contextdir}}/opt/tritonserver/*
+
+      # Install Python backend
+      mkdir -p ${{targets.contextdir}}/opt/tritonserver/backends
+      mv $tmp_backend_dir/python ${{targets.contextdir}}/opt/tritonserver/backends/python
+
+test:
+  environment:
+    contents:
+      packages:
+        - tritonserver-cuda-${{vars.cuda-version}}
+  pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: /opt/tritonserver/lib
+    - name: Check imports
+      runs: |
+        # Make sure the imports in this script don't fail
+        python${{vars.python-version}} /opt/tritonserver/backends/python/triton_python_backend_utils.py
+
+update:
+  enabled: false
+  exclude-reason: "NVIDIA does not publish tags or GitHub releases for Tritonserver backends. They use monthly release branches."

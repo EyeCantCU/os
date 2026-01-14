@@ -1,0 +1,109 @@
+package:
+  name: valkey-bloom
+  version: "1.0.0"
+  epoch: 0
+  description: Bloom filter module for Valkey
+  copyright:
+    - license: BSD-3-Clause
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cargo-auditable
+      - clang-20
+      - rust
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/valkey-io/valkey-bloom
+      tag: ${{package.version}}
+      expected-commit: 02b8970bf89b1e948bcc677cfec323fc64dd5808
+
+  - runs: |
+      # https://github.com/valkey-io/valkey-bloom/blob/097c2a452211a419e8a31549cbd4ea6d788a3a28/README.md#feature-flags
+      cargo auditable build --release --features valkey_8_0
+      mkdir -p build-output
+      cp target/release/libvalkey_bloom.so build-output/valkey-bloom-8.0.so
+
+      # rebuild for all other versions
+      cargo clean
+      cargo auditable build --release
+      cp target/release/libvalkey_bloom.so build-output/valkey-bloom-default.so
+
+      # main package installs the default build
+      mkdir -p "${{targets.destdir}}/usr/lib/valkey/modules"
+      install -m755 build-output/valkey-bloom-default.so \
+        "${{targets.destdir}}/usr/lib/valkey/libvalkey_bloom.so"
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-8.0-compat
+    description: Bloom filter module for Valkey 8.0
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/usr/lib/valkey/modules"
+          install -m755 build-output/valkey-bloom-8.0.so \
+            "${{targets.contextdir}}/usr/lib/valkey/libvalkey_bloom.so"
+    test:
+      environment:
+        contents:
+          packages:
+            - valkey-8.0
+            - valkey-8.0-cli
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: Test module loading and bloom filter operations
+          runs: |
+            set -euo pipefail
+
+            valkey-server valkey.conf &
+            sleep 3
+
+            valkey-cli MODULE LIST | grep -F "valkey_bloom"
+            valkey-cli BF.RESERVE testfilter 0.01 1000
+            valkey-cli BF.ADD testfilter item1 | grep -F "1"
+            valkey-cli BF.EXISTS testfilter item1 | grep -F "1"
+            valkey-cli BF.EXISTS testfilter item2 | grep -F "0"
+            valkey-cli BF.MADD testfilter item2 item3 | grep -F "1"
+            valkey-cli BF.MEXISTS testfilter item1 item2 item3 | grep -F "1"
+            valkey-cli BF.INFO testfilter | grep -F "Capacity"
+            valkey-cli BF.CARD testfilter | grep -F "3"
+
+            valkey-cli SHUTDOWN NOSAVE || true
+
+update:
+  enabled: true
+  github:
+    identifier: valkey-io/valkey-bloom
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - valkey
+        - valkey-cli
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test module loading and bloom filter operations
+      runs: |
+        set -euo pipefail
+
+        valkey-server valkey.conf &
+        sleep 3
+
+        valkey-cli MODULE LIST | grep -F "valkey_bloom"
+        valkey-cli BF.RESERVE testfilter 0.01 1000
+        valkey-cli BF.ADD testfilter item1 | grep -F "1"
+        valkey-cli BF.EXISTS testfilter item1 | grep -F "1"
+        valkey-cli BF.EXISTS testfilter item2 | grep -F "0"
+        valkey-cli BF.MADD testfilter item2 item3 | grep -F "1"
+        valkey-cli BF.MEXISTS testfilter item1 item2 item3 | grep -F "1"
+        valkey-cli BF.INFO testfilter | grep -F "Capacity"
+        valkey-cli BF.CARD testfilter | grep -F "3"
+
+        valkey-cli SHUTDOWN NOSAVE || true
