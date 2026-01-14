@@ -1,0 +1,156 @@
+#As of writing this, we cannot use chainguard libraries because when a dependency is not available in chainguard libraries,
+#it falls back to maven central, but ontop requires a dependency from a third-party repository
+package:
+  name: ontop
+  version: "5.4.0"
+  epoch: 0
+  description: Ontop is a platform to query relational databases as Virtual RDF Knowledge Graphs using SPARQL
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash-binsh #required by entrypoint script and healthcheck script
+      - busybox # basic utility required by entrypoint and main binary like rm, dirname, cd
+      # wget, netcat, jattach required by docker image
+      # REF: https://github.com/ontop/ontop/blob/version5/client/docker/Dockerfile#L42
+      - jattach
+      - netcat-openbsd
+      # procps is required as healthcheck script uses -p flag for ps command
+      # REF: https://github.com/ontop/ontop/blob/version5/client/docker/healthcheck.sh#L20
+      - procps
+      - wget
+
+vars:
+  java-version: 11
+  java-home: /opt/java/openjdk
+  package-home: /opt/ontop
+  jre-modules: "java.base,java.compiler,java.desktop,java.instrument,java.management.rmi,java.naming,java.prefs,java.scripting,java.security.jgss,java.sql,jdk.httpserver,jdk.jfr,jdk.management,jdk.management.agent,jdk.unsupported,jdk.crypto.cryptoki,jdk.crypto.ec"
+
+environment:
+  contents:
+    packages:
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - openjdk-${{vars.java-version}}-jmods
+  environment:
+    MAVEN_OPTS: "-Dmaven.repo.local=/var/cache/melange"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ontop/ontop
+      tag: ontop-${{package.version}}
+      expected-commit: f3a5d55dbe53fedd6048dc5a3a86e27238b1b1d1
+
+  - name: "Verify JRE modules match upstream Dockerfile"
+    runs: |
+      set -euo pipefail
+      EXPECTED_MODULES="ONTOP_JRE_MODULES=${{vars.jre-modules}}"
+      tr -d '\\ "\n' < client/docker/Dockerfile | grep -F "$EXPECTED_MODULES"
+      echo "JRE modules match upstream Dockerfile"
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+      patch-file: pombump-deps.yaml
+
+  - runs: |
+      mvn clean package -Passet-cli -Dmaven.test.skip -Dassembly.cli.format=dir
+
+      jlink --add-modules "${{vars.jre-modules}}" \
+            --strip-debug \
+            --no-man-pages \
+            --no-header-files \
+            --compress=2 \
+            --output "${{targets.contextdir}}/jre"
+
+      mkdir -p "${{targets.contextdir}}/${{vars.java-home}}"
+      mv ${{targets.contextdir}}/jre/* "${{targets.contextdir}}/${{vars.java-home}}/"
+      rmdir "${{targets.contextdir}}/jre"
+
+      mkdir -p "${{targets.contextdir}}/${{vars.package-home}}"
+      mv build/distribution/target/ontop-cli-*/* "${{targets.contextdir}}/${{vars.package-home}}/"
+      install -m 755 client/docker/entrypoint.sh "${{targets.contextdir}}/${{vars.package-home}}/"
+      install -m 755 client/docker/healthcheck.sh "${{targets.contextdir}}/${{vars.package-home}}/"
+
+      rm -rf "${{targets.contextdir}}/${{vars.package-home}}/ontop.bat" \
+             "${{targets.contextdir}}/${{vars.package-home}}/ontop-completion.sh" \
+             "${{targets.contextdir}}/${{vars.package-home}}/jdbc"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - ".*beta.*"
+    - ".*rc.*"
+  github:
+    identifier: ontop/ontop
+    strip-prefix: ontop-
+    use-tag: true
+
+test:
+  environment:
+    environment:
+      JAVA_HOME: "/opt/java/openjdk"
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: ${{vars.package-home}}/ontop
+    - uses: test/tw/ver-check
+      with:
+        bins: /opt/ontop/ontop
+        version: "ontop version ${{package.version}}"
+        match-type: "exact"
+    - runs: |
+        set -eu
+        export PATH="${JAVA_HOME}/bin:/opt/ontop:${PATH}"
+
+        stat /opt/ontop/lib/ontop-cli-${{package.version}}.jar
+        stat /opt/ontop/lib/ontop-endpoint-${{package.version}}.jar
+
+        # This describes how rows in a PERSON table become RDF triples (more on this below)
+        # https://www.w3.org/TR/2012/REC-r2rml-20120927/#ex_EMP
+        cat << 'EOF' > /tmp/test-mapping.ttl
+        @base <http://example.org/mapping/> .
+        @prefix rr: <http://www.w3.org/ns/r2rml#> .
+        @prefix ex: <http://example.org/> .
+
+        <TriplesMap1>
+            rr:logicalTable [ rr:tableName "PERSON" ];
+            rr:subjectMap [
+                rr:template "http://example.org/person/{id}";
+                rr:class ex:Person
+            ];
+            rr:predicateObjectMap [
+                rr:predicate ex:name;
+                rr:objectMap [ rr:column "NAME" ]
+            ].
+        EOF
+
+        # Test mapping pretty-r2rml - formats R2RML files
+        ontop mapping pretty-r2rml -i /tmp/test-mapping.ttl -o /tmp/pretty-output.ttl
+
+        # Test mapping to-obda conversion
+        ontop mapping to-obda -i /tmp/test-mapping.ttl -o /tmp/output.obda
+
+        # Target RDF triple syntax
+        # (subject, predicate, object)
+        # (http://example.org/person/1, rdf:type, ex:Person)
+        # (http://example.org/person/1, ex:name, "Bob")
+        #
+        # since Ontop gives content of relational databases as knowledge graphs
+        # visual way to think about it
+        # [Person 1] --name--> "Bob"
+        #  |
+        #  +--type--> Person
+
+        # subject: ex:person/{id}
+        # predicate: a (rdf:type)
+        # object: ex:Person
+        #
+        # subject: ex:person/{id}
+        # predicate: ex:name
+        # object: {NAME}
+        grep -F -e "ex:person/{id} a ex:Person ; ex:name {NAME} ." /tmp/output.obda
+
+        # Data Source
+        grep -F -e "SELECT * FROM PERSON" /tmp/output.obda

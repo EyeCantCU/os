@@ -1,0 +1,322 @@
+package:
+  name: kafbat-ui-fips
+  version: 1.4.2
+  epoch: 1 # Netty 4.1.130 URI fix
+  description: "FIPS Variant of Kafbat UI, A web tool for managing Apache Kafka clusters "
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openssl-config-fipshardened
+
+# Using java 21 to match upstream java version used
+# REF: https://github.com/kafbat/kafka-ui/blob/v1.4.2/.github/workflows/release.yml#L28-L31
+vars:
+  java-version: 21
+  java-home: /usr/lib/jvm/default-jvm
+
+var-transforms:
+  - from: ${{package.name}}
+    match: "-fips"
+    replace: ""
+    to: mangled-package-name
+  - from: ${{vars.mangled-package-name}}
+    match: "-"
+    replace: ""
+    to: mangled-package-name
+
+environment:
+  contents:
+    packages:
+      - bouncycastle-fips~2.1
+      - build-base
+      - busybox
+      - gradle
+      - npm
+      - openjdk-${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: ${{vars.java-home}}
+    GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx2g -Xms2g"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kafbat/kafka-ui.git
+      tag: v${{package.version}}
+      expected-commit: dfa5a7e9068ea47b34bf7323dc7610432a4b1ab6
+
+  - uses: patch
+    with:
+      patches: GHSA-84h7-rjj3-6jx4.patch
+
+  - name: "Drift check for upstream Java version"
+    runs: |
+      # Check that upstream's Java version hasn't changed using .java-version file
+      UPSTREAM_JAVA=$(cat .java-version | tr -d '\n\r ')
+      echo "Upstream Java version: $UPSTREAM_JAVA"
+      if [ "$UPSTREAM_JAVA" != "${{vars.java-version}}" ]; then
+        echo "ERROR: Upstream Java version has changed"
+        echo "Current Java version: ${{vars.java-version}}"
+        echo "Java version in upstream: $UPSTREAM_JAVA from .java-version file"
+        exit 1
+      fi
+
+  - name: "Build kafbat-ui"
+    runs: |
+      ./gradlew clean build -x test \
+      -Pinclude-frontend=true \
+      -Pversion=v${{package.version}}
+
+  - name: "Install jar"
+    runs: |
+      # Create install directory
+      mkdir -p "${{targets.destdir}}/usr/share/java/${{vars.mangled-package-name}}"
+
+      # Install jar
+      install -m644 "api/build/libs/api-v${{package.version}}.jar" "${{targets.destdir}}/usr/share/java/${{vars.mangled-package-name}}/api.jar"
+
+      # Link BCFIPS JARs to lib directory
+      mkdir -p "${{targets.destdir}}/usr/share/java/${{vars.mangled-package-name}}/lib/fips"
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar "${{targets.destdir}}/usr/share/java/${{vars.mangled-package-name}}/lib/fips/"
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package with upstream Docker image
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"
+
+          # Matching upstream config directory name
+          # REF: https://github.com/kafbat/kafka-ui/blob/v1.4.2/api/Dockerfile#L14
+          mkdir -p "${{targets.destdir}}/etc/kafkaui"
+          ln -sf "./usr/share/java/${{vars.mangled-package-name}}/api.jar" "${{targets.subpkgdir}}/api.jar"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+
+test:
+  environment:
+    contents:
+      packages:
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - curl
+        - jq
+        - kafka
+        - openjdk-${{vars.java-version}}-default-jdk
+        - openssl-config-fipshardened
+        - uuidgen
+        - wait-for-it
+        - ${{package.name}}-compat
+        # Cypress dependencies (see https://docs.cypress.io/app/get-started/install-cypress#Linux-Prerequisites)
+        - nodejs
+        - yarn
+        - xvfb
+        - nss
+        - libnss
+        - gtk-3
+        - xkbcomp
+        - xkeyboard-config
+        - libnspr
+        - mesa-gbm
+        - libudev
+        - font-opensans
+    environment:
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+      JAR_FILE: "/usr/share/java/kafbatui/api.jar"
+      HTTP_PORT: "8080"
+      KAFKA_PORT: "9092"
+      KAFKA_HOME: "/usr/lib/kafka"
+      CLUSTER1: "local"
+      CLUSTER2: "secondLocal"
+      CLASSPATH: "/usr/share/java/bouncycastle-fips/*:/usr/share/java/kafbatui/lib/fips/*:./*:."
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+  pipeline:
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - name: "Test kafbat-ui with HTTPS and Kafka functionality"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create BCFKS keystore and truststore for HTTPS
+          mkdir -p /tmp/ssl
+
+          # Generate self-signed certificate in BCFKS keystore
+          keytool -genkeypair \
+            -alias kafbat \
+            -keyalg RSA -keysize 2048 \
+            -dname "CN=localhost" \
+            -keystore /tmp/ssl/keystore.bcfks \
+            -storetype BCFKS \
+            -providername BCFIPS \
+            -storepass changeit \
+            -keypass changeit \
+            -validity 365
+
+          # Export certificate for truststore and curl verification
+          keytool -exportcert \
+            -alias kafbat \
+            -keystore /tmp/ssl/keystore.bcfks \
+            -storetype BCFKS \
+            -providername BCFIPS \
+            -storepass changeit \
+            -rfc \
+            -file /tmp/ssl/server.crt
+
+          # Convert JDK cacerts (JKS) to BCFKS format to avoid "DER length" errors
+          keytool -importkeystore \
+            -srckeystore "$JAVA_HOME/lib/security/cacerts" \
+            -srcstoretype JKS \
+            -srcstorepass changeit \
+            -destkeystore /tmp/ssl/truststore.bcfks \
+            -deststoretype BCFKS \
+            -destprovidername BCFIPS \
+            -deststorepass changeit \
+            -noprompt
+
+          # Import our self-signed cert into the truststore
+          keytool -importcert \
+            -alias kafbat \
+            -file /tmp/ssl/server.crt \
+            -keystore /tmp/ssl/truststore.bcfks \
+            -storetype BCFKS \
+            -providername BCFIPS \
+            -storepass changeit \
+            -noprompt
+
+          # Start Kafka in KRaft mode (no Zookeeper needed)
+          cd /usr/lib/kafka
+
+          # Generate a cluster ID for KRaft mode
+          KAFKA_CLUSTER_ID=$(bin/kafka-storage.sh random-uuid)
+
+          # Format the storage directory
+          mkdir -p /tmp/kafka-logs
+          bin/kafka-storage.sh format -t "${KAFKA_CLUSTER_ID}" -c config/server.properties.original --standalone 2>&1
+
+          # Start Kafka broker in the background
+          bin/kafka-server-start.sh config/server.properties.original > /tmp/kafka.log 2>&1 &
+          KAFKA_PID=$!
+
+          # Wait for Kafka to be ready
+          wait-for-it localhost:9092 -t 60
+
+          # Create test topics
+          TOPIC1="test-topic-$(uuidgen)"
+          TOPIC2="test-topic-$(uuidgen)"
+
+          echo "${TOPIC1}" > /tmp/test-topic-1.txt
+          echo "${TOPIC2}" > /tmp/test-topic-2.txt
+
+          # Create topics on Kafka
+          bin/kafka-topics.sh --create --topic "${TOPIC1}" --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+          bin/kafka-topics.sh --create --topic "${TOPIC2}" --bootstrap-server localhost:9092 --partitions 2 --replication-factor 1
+
+          # Produce test messages
+          echo "test-message-1" | bin/kafka-console-producer.sh --topic "${TOPIC1}" --bootstrap-server localhost:9092
+          echo "test-message-2" | bin/kafka-console-producer.sh --topic "${TOPIC2}" --bootstrap-server localhost:9092
+
+          # Configure kafbat-ui with Kafka cluster and HTTPS
+          tee /tmp/kafbat-config.yml << EOF
+          kafka:
+            clusters:
+              - name: local
+                bootstrapServers: localhost:9092
+          server:
+            port: 8443
+            ssl:
+              enabled: true
+              key-store: /tmp/ssl/keystore.bcfks
+              key-store-type: BCFKS
+              key-store-provider: BCFIPS
+              key-store-password: changeit
+              key-alias: kafbat
+              trust-store: /tmp/ssl/truststore.bcfks
+              trust-store-type: BCFKS
+              trust-store-provider: BCFIPS
+              trust-store-password: changeit
+          spring:
+            security:
+              oauth2:
+          logging:
+            level:
+              root: INFO
+              io.kafbat.ui: DEBUG
+          # Disable external API calls
+          webclient:
+            ssl:
+              truststore-location: ""
+          application:
+            info:
+              github:
+                check-updates-enabled: false
+          EOF
+        start: |
+          java --add-opens java.rmi/javax.rmi.ssl=ALL-UNNAMED \
+          -Djavax.net.ssl.trustStore=/tmp/ssl/truststore.bcfks \
+          -Djavax.net.ssl.trustStoreType=BCFKS \
+          -Djavax.net.ssl.trustStorePassword=changeit \
+          -Dspring.config.additional-location=/tmp/kafbat-config.yml \
+          -jar "$JAR_FILE"
+        timeout: 60
+        expected_output: |
+          Starting KafkaUiApplication
+          Netty started on port 8443
+          Started KafkaUiApplication
+        post: |
+          set -euo pipefail
+
+          # Wait for server to be ready
+          curl -k --fail --retry 10 --retry-delay 3 --retry-connrefused --retry-max-time 30 \
+            https://localhost:8443/actuator/health >/dev/null
+
+          # Wait for metadata initialization
+          curl -k -sf --retry 10 "https://localhost:8443/api/clusters/local/topics"
+
+          # Test HTTPS endpoints
+          # Health endpoint, verify application is UP
+          curl --cacert /tmp/ssl/server.crt -sf https://localhost:8443/actuator/health | jq -r '.status' | grep -Fx "UP"
+
+          # Info endpoint , verify actuator endpoints are accessible
+          curl --cacert /tmp/ssl/server.crt -sf https://localhost:8443/actuator/info | jq -r '.build.version' | grep -Fx "v${{package.version}}"
+
+          # Main UI is accessible - verify React app is served
+          curl --cacert /tmp/ssl/server.crt -sf https://localhost:8443/ | grep -F "Kafbat UI"
+
+          # Verify cluster is ONLINE
+          curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters" | jq -r ".[] | select(.name == \"local\") | .status" | grep -Fx "ONLINE"
+
+          # Get topic names
+          TOPIC1=$(cat /tmp/test-topic-1.txt)
+          TOPIC2=$(cat /tmp/test-topic-2.txt)
+
+          # Verify topics exist
+          curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics" | jq -r ".topics[].name" | grep -Fx "${TOPIC1}"
+          curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics" | jq -r ".topics[].name" | grep -Fx "${TOPIC2}"
+
+          # Verify partition counts
+          curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics/${TOPIC1}" | jq -r ".partitionCount" | grep -Fx "3"
+          curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics/${TOPIC2}" | jq -r ".partitionCount" | grep -Fx "2"
+
+          # Verify message counts
+          curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics" | jq -r ".topics[] | select(.name == \"${TOPIC1}\") | .messagesCount" | grep -E "^[0-9]+$"
+          curl --cacert /tmp/ssl/server.crt -sf "https://localhost:8443/api/clusters/local/topics" | jq -r ".topics[] | select(.name == \"${TOPIC2}\") | .messagesCount" | grep -E "^[0-9]+$"
+
+          # Run Cypress E2E UI tests
+          export NODE_TLS_REJECT_UNAUTHORIZED=0  # Allow self-signed certs for Cypress
+          yarn add cypress --dev
+          yarn cypress run
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v

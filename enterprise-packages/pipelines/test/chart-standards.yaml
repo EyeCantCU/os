@@ -40,12 +40,12 @@ pipeline:
       [ -n "$chart_yaml" ] || { echo "ERROR: No Chart.yaml found"; exit 1; }
 
       chart_path=$(dirname "$chart_yaml")
-      schema="$chart_path/values.images.json"
+      schema="$chart_path/cg.json"
 
       info "chart: $chart_path"
 
       if [ ! -f "$schema" ]; then
-        info "no values.images.json - skipping validation"
+        info "no cg.json - skipping validation"
         exit 0
       fi
 
@@ -85,15 +85,19 @@ pipeline:
 
         info "--- $case_name ---"
 
-        # Build test values by substituting $ref markers
-        # Each image gets unique markers based on its name:
-        #   registry    -> cgr.test/<name>
-        #   repo        -> image
-        #   registry_repo -> cgr.test/<name>/image
-        #   tag         -> v0.0.0
-        #   digest      -> sha256:...
-        #   pseudo_tag  -> v0.0.0@sha256:...
-        #   ref         -> cgr.test/<name>/image@sha256:...
+        # Build test values by substituting ${...} markers with test values.
+        # Markers are designed to mirror real OCI reference structure:
+        #   ${registry}      -> cgr.test                          (registry hostname)
+        #   ${repo}          -> ns/<name>                         (repository path)
+        #   ${registry_repo} -> cgr.test/ns/<name>                (full image path)
+        #   ${tag}           -> v0.0.0                            (version tag)
+        #   ${digest}        -> sha256:...                        (content digest)
+        #   ${pseudo_tag}    -> v0.0.0@sha256:...                 (tag with digest)
+        #   ${ref}           -> cgr.test/ns/<name>@sha256:...     (full reference)
+        #
+        # This matches how go-containerregistry parses OCI refs:
+        #   Registry     = ref.Context().RegistryStr()
+        #   Repo         = ref.Context().RepositoryStr()
         values_file=$(mktemp)
         jq --argjson idx "$idx" \
            --arg base "$MARKER_BASE" \
@@ -101,16 +105,14 @@ pipeline:
           (.images | to_entries | map(
             .key as $name |
             .value.values | walk(
-              if type == "object" and has("$ref") then
-                {
-                  "registry": ($base + "/" + $name),
-                  "repo": "image",
-                  "registry_repo": ($base + "/" + $name + "/image"),
-                  "tag": "v0.0.0",
-                  "digest": $digest,
-                  "pseudo_tag": ("v0.0.0@" + $digest),
-                  "ref": ($base + "/" + $name + "/image@" + $digest)
-                }[.["$ref"]] // ("UNKNOWN_" + .["$ref"])
+              if type == "string" then
+                gsub("\\${registry}"; $base) |
+                gsub("\\${repo}"; "ns/" + $name) |
+                gsub("\\${registry_repo}"; $base + "/ns/" + $name) |
+                gsub("\\${tag}"; "v0.0.0") |
+                gsub("\\${digest}"; $digest) |
+                gsub("\\${pseudo_tag}"; "v0.0.0@" + $digest) |
+                gsub("\\${ref}"; $base + "/ns/" + $name + "@" + $digest)
               else . end
             )
           ) | reduce .[] as $v ({}; . * $v))
@@ -147,8 +149,9 @@ pipeline:
         jq -r '.test.ignore // [] | .[].image' "$schema" > "$ignore_file"
 
         # Check each expected image has its marker anywhere in the rendered output.
+        # The marker is the repo path: ns/<name>
         for img_name in $expected; do
-          marker="$MARKER_BASE/$img_name"
+          marker="ns/$img_name"
           if grep -qF "$marker" "$rendered"; then
             info "found: $img_name"
           else

@@ -1,0 +1,140 @@
+package:
+  name: onnxruntime-cuda-13.1
+  version: "1.23.2"
+  epoch: 0
+  description: Cross-platform, high performance ML inferencing and training accelerator
+  copyright:
+    - license: MIT
+  options:
+    no-depends: true
+  resources:
+    cpu: 80
+    memory: 128Gi
+  dependencies:
+    runtime:
+      - cuda-toolkit-${{vars.cuda-version}}
+      - nvidia-cudnn-${{vars.cudnn-version}}-cuda-${{vars.cuda-major-version}}
+      - nvidia-nccl-cuda-${{vars.cuda-version}}
+      - so:libopenvino.so.2541
+      - tensorrt-cuda-${{vars.cuda-major-version}}
+
+vars:
+  cuda-archs: '75;80;86;90;100;120'
+  cudnn-version: '9'
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+  - from: ${{package.name}}
+    match: '.*cuda-(\d+)\.\d+$'
+    replace: '$1'
+    to: cuda-major-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - cuda-toolkit-${{vars.cuda-version}}-dev
+      - eigen-dev
+      - nvcc-${{vars.cuda-version}}-gcc-default
+      - nvidia-cudnn-${{vars.cudnn-version}}-cuda-${{vars.cuda-major-version}}-dev
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev
+      - openvino-dev
+      - patch
+      - python3
+      - tensorrt-cuda-${{vars.cuda-major-version}}-dev
+      - zlib-dev
+  environment:
+    # abseil performs several null pointer checks that may be redundant
+    CXXFLAGS: "-fdelete-null-pointer-checks"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/microsoft/onnxruntime.git
+      tag: v${{package.version}}
+      expected-commit: a83fc4d58cb48eb68890dd689f94f28288cf2278
+
+  - uses: patch
+    with:
+      patches: |
+        remove-nvcc-wstrict-aliasing.patch
+        fix-semver-missing-cstdint.patch
+
+  # Please do not enable support for training as this package is only
+  # currently consumed by Tritonserver. If training is required, please
+  # create a new package to avoid significantly increasing the size of
+  # this package.
+  - runs: |
+      ./build.sh \
+        --build --update --config Release --build_shared_lib \
+        --compile_no_warning_as_error --parallel $(nproc) --nvcc_threads 1 \
+        --skip_submodule_sync \
+        --allow_running_as_root \
+        --use_cuda --use_tensorrt --use_tensorrt_builtin_parser --use_openvino \
+        --cuda_home=/usr/local/cuda-${{vars.cuda-version}} \
+        --cudnn_home=/usr/local/cudnn-${{vars.cudnn-version}} \
+        --tensorrt_home=/usr/local/tensorrt \
+        --cmake_extra_defines \
+          CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          CMAKE_INSTALL_PREFIX=/usr \
+          CMAKE_INSTALL_LIBDIR=lib \
+          onnxruntime_USE_MPI=ON \
+          onnxruntime_USE_PREINSTALLED_EIGEN=ON \
+          CMAKE_CUDA_ARCHITECTURES="${{vars.cuda-archs}}" \
+          CMAKE_CUDA_COMPILER=/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc \
+          onnxruntime_USE_NCCL=ON
+
+  - uses: cmake/install
+    with:
+      output-dir: build/Linux/Release
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development libraries
+    pipeline:
+      - uses: split/dev
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/pkgconf
+
+update:
+  enabled: true
+  github:
+    identifier: microsoft/onnxruntime
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-dev=${{package.full-version}}
+        - build-base
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Ensure libraries link and are functional
+      runs: |
+        set -o pipefail
+        tee orttest.cpp <<'EOF'
+        #include <iostream>
+        #include "onnxruntime_cxx_api.h"
+        int main(){
+          auto providers = Ort::GetAvailableProviders();
+          for (auto provider : providers) {
+            std::cout << provider << std::endl;
+          }
+          std::cout <<  Ort::GetVersionString() << std::endl;
+          return 0;
+        }
+        EOF
+        c++ orttest.cpp -o ort_version $(pkgconf --libs libonnxruntime) $(pkgconf --cflags libonnxruntime)
+        ldd ./ort_version | grep -F -e "libonnxruntime"
+        # No GPU support required since we are in a testing environment
+        ./ort_version | grep -F -e "${{package.version}}" -e "CPU" -e "GPU"
