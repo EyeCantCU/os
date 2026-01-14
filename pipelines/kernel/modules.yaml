@@ -4,6 +4,8 @@ needs:
   packages:
     - busybox
     - kmod
+    - perl
+    - binutils
 
 inputs:
   version-flavor:
@@ -13,5 +15,23 @@ inputs:
 pipeline:
   - runs: |
       make -j $(nproc) modules LOCALVERSION=""
-      make modules_install INSTALL_MOD_PATH=${{targets.subpkgdir}}/usr ZSTD="zstd -19" INSTALL_MOD_STRIP=1
+      make modules_install INSTALL_MOD_PATH=${{targets.contextdir}}/usr ZSTD="zstd -19" INSTALL_MOD_STRIP=1
       rm -f ${{targets.subpkgdir}}/usr/lib/modules/${{inputs.version-flavor}}/build
+      # Verify that certs are signed with the same key embedded in vmlinux. This
+      # doesn't solve the underlying issue in the build-system but it fails the
+      # build if we hit it, which is good enough for now.
+      # https://linear.app/chainguard/issue/VMS-266
+      ./scripts/extract-sys-certs.pl ./vmlinux ./extracted.x509
+      modules=$(find ${{targets.contextdir}}/usr/lib/modules -name "*.ko.*")
+      [ -z "$modules" ] && { echo "No modules found after installation"; exit 1; }
+
+      for m in $modules; do
+          out=$(./scripts/verify-mod-cert "$m" ./extracted.x509 2>&1) || {
+              echo "found module $m signed by a different key than the one embedded in vmlinux"
+              echo "./scripts/verify-mod-cert \"$m\" ./extracted.x509"
+              echo "$out"
+              echo "it is very likely that this build has hit a race condition in the linux build infrastructure"
+              echo "this build should be retried"
+              exit 1
+          }
+      done
