@@ -1,18 +1,26 @@
 package:
   name: metaflow-service
   version: "2.5.0"
-  epoch: 1
+  epoch: 2
   description: "Metadata tracking and UI service for Metaflow"
   copyright:
     - license: Apache-2.0
+  dependencies:
+    runtime:
+      # System Python for migration_service
+      - python-${{vars.python-version}}
 
 vars:
   python-version: "3.11"
-  venv-home: "/usr/share/metaflow-service/venv"
+  venv-home: "/opt/latest"
 
 environment:
+  environment:
+    UI_ENABLED: 1
+    UI_VERSION: "v1.3.13"
   contents:
     packages:
+      - bash
       - build-base
       - busybox
       - libffi-dev
@@ -41,59 +49,51 @@ pipeline:
       # Activate virtual environment
       source ${{vars.venv-home}}/bin/activate
 
+      # Install services to /root/services/ (upstream layout)
+      mkdir -p ${{targets.destdir}}/root/services
+      cp services/__init__.py ${{targets.destdir}}/root/services/
+      cp services/data/service_configs.py ${{targets.destdir}}/root/services/
+      cp -r services/data ${{targets.destdir}}/root/services/
+      cp -r services/metadata_service ${{targets.destdir}}/root/services/
+      cp -r services/ui_backend_service ${{targets.destdir}}/root/services/
+      cp -r services/utils ${{targets.destdir}}/root/services/
+
+      # Install setup files and run_goose.py to /root/
+      cp setup.py setup.cfg run_goose.py ${{targets.destdir}}/root/
+
       # Install metaflow-service package
       uv pip install .
 
-      # Install virtual environment
-      mkdir -p ${{targets.destdir}}/usr/share/metaflow-service
-      mv ${{vars.venv-home}} ${{targets.destdir}}/usr/share/metaflow-service/
+      # Install migration_service
+      cp -r services/migration_service ${{targets.destdir}}/root/services/
+      chmod 755 ${{targets.destdir}}/root/services/migration_service/run_script.py
 
-      # Fix virtual environment's installed path
-      sed -i "s|/home/build|/usr/share/metaflow-service|g" ${{targets.destdir}}/usr/share/metaflow-service/venv/bin/*
-      sed -i "s|/home/build|/usr/share/metaflow-service|g" ${{targets.destdir}}/usr/share/metaflow-service/venv/pyvenv.cfg
+      # Install virtual environment
+      mkdir -p ${{targets.destdir}}/opt
+      mv ${{vars.venv-home}} ${{targets.destdir}}/opt/latest
 
       # Remove uv lock file (world-writable, triggers linter)
-      rm -f ${{targets.destdir}}/usr/share/metaflow-service/venv/.lock
+      rm -f ${{targets.destdir}}/opt/latest/.lock
 
-  - name: "Install service files"
+  - name: Install UI
     runs: |
-      # Install services directory
-      mkdir -p ${{targets.destdir}}/usr/share/metaflow-service/services
-      cp -r services/* ${{targets.destdir}}/usr/share/metaflow-service/services/
+      ./services/ui_backend_service/download_ui.sh
 
-      # Install run_goose.py for migrations
-      cp run_goose.py ${{targets.destdir}}/usr/share/metaflow-service/
+      cp ./services/ui_backend_service/ui/asset-manifest.json ${{targets.contextdir}}/root/services/ui_backend_service/ui/asset-manifest.json
+      cp ./services/ui_backend_service/ui/favicon.ico  ${{targets.contextdir}}/root/services/ui_backend_service/ui/favicon.ico
+      cp ./services/ui_backend_service/ui/index.html  ${{targets.contextdir}}/root/services/ui_backend_service/ui/index.html
+      cp ./services/ui_backend_service/ui/manifest.json  ${{targets.contextdir}}/root/services/ui_backend_service/ui/manifest.json
+      cp ./services/ui_backend_service/ui/robots.txt  ${{targets.contextdir}}/root/services/ui_backend_service/ui/robots.txt
+      cp -r ./services/ui_backend_service/ui/static/* ${{targets.contextdir}}/root/services/ui_backend_service/ui/static/
+
+  - name: "Provide python dependencies for main python env"
+    runs: |
+      uv pip install -r services/migration_service/requirements.txt --prefix=${{targets.contextdir}}/usr
+
+      # Remove uv lock file (world-writable, triggers linter)
+      rm -f ${{targets.destdir}}/usr/.lock
 
   - uses: strip
-
-subpackages:
-  - name: metaflow-service-compat
-    description: "Compatibility layer for metaflow-service upstream container layout"
-    dependencies:
-      runtime:
-        - metaflow-service
-        - python-${{vars.python-version}}
-    pipeline:
-      - runs: |
-          # Create upstream-compatible directory structure
-          mkdir -p ${{targets.contextdir}}/root/services
-          mkdir -p ${{targets.contextdir}}/opt/latest
-
-          # Symlink services
-          ln -sf /usr/share/metaflow-service/services/metadata_service ${{targets.contextdir}}/root/services/metadata_service
-          ln -sf /usr/share/metaflow-service/services/migration_service ${{targets.contextdir}}/root/services/migration_service
-          ln -sf /usr/share/metaflow-service/services/ui_backend_service ${{targets.contextdir}}/root/services/ui_backend_service
-          ln -sf /usr/share/metaflow-service/services/data ${{targets.contextdir}}/root/services/data
-          ln -sf /usr/share/metaflow-service/services/utils ${{targets.contextdir}}/root/services/utils
-          ln -sf /usr/share/metaflow-service/run_goose.py ${{targets.contextdir}}/root/run_goose.py
-
-          # Symlink virtualenv to expected location
-          ln -sf /usr/share/metaflow-service/venv ${{targets.contextdir}}/opt/latest
-    test:
-      pipeline:
-        - uses: test/tw/symlink-check
-          with:
-            allow-absolute: true
 
 test:
   environment:
@@ -128,7 +128,7 @@ test:
     - name: Test Python imports
       runs: |
         set -euo pipefail
-        export PATH=/usr/share/metaflow-service/venv/bin:$PATH
+        export PATH=/opt/latest/bin:$PATH
 
         python3 -c "
         import aiohttp
@@ -149,7 +149,7 @@ test:
       uses: test/daemon-check-output
       with:
         start: |
-          env PATH=/usr/share/metaflow-service/venv/bin:$PATH \
+          env PATH=/opt/latest/bin:$PATH \
           metadata_service
         timeout: 60
         expected_output: |
