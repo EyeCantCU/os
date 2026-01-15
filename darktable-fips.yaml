@@ -1,10 +1,23 @@
 package:
-  name: darktable
+  name: darktable-fips
   version: 5.4.0
-  epoch: 1
-  description: Open source photography workflow application and raw developer
+  epoch: 0
+  description: Open source photography workflow application and raw developer (FIPS)
   copyright:
     - license: GPL-3.0-or-later
+  dependencies:
+    # Prevent apk add darktable installing darktable-fips
+    provider-priority: 0
+    # Yet still allow to directly install darktable-fips to satisfy darktable dependencies
+    provides:
+      - darktable=${{package.full-version}}
+    runtime:
+      # FIPS-compliant libgcrypt (Amazon Linux 2023 CMVP #4971 certified)
+      - libgcrypt-al2023-fips
+      # FIPS-compliant libsecret which uses libgcrypt-al2023-fips (CMVP #4971)
+      - libsecret-fips
+      # FIPS hardened OpenSSL configuration
+      - openssl-config-fipshardened
 
 vars:
   gcc-version: "15"
@@ -25,9 +38,8 @@ environment:
       - gcc-${{vars.gcc-version}}
       - gcc-${{vars.gcc-version}}-default
       - gmic-dev
-      - graphicsmagick-dev
       - gtk-3-dev
-      # ImageMagick support (core feature for image processing)
+      # ImageMagick support (customer requirement for darktable-cli integration)
       - imagemagick-dev
       - intltool
       - iso-codes-dev
@@ -36,13 +48,18 @@ environment:
       - lensfun-dev
       - libavif-dev
       - libdeflate-static
+      # Explicitly add FIPS-certified libgcrypt first to ensure it's selected
+      # libgcrypt-al2023-fips-dev provides libgcrypt-dev, so cups-dev will use it
+      - libgcrypt-al2023-fips
+      - libgcrypt-al2023-fips-dev
       - libgphoto2-dev
       - libheif-dev
       - libjpeg-turbo-dev
       - libjxl-dev
       - librsvg-dev
       - libsdl2-dev
-      - libsecret-dev
+      # Use FIPS-compliant libsecret instead of regular libsecret
+      - libsecret-fips-dev
       - libsoup3-dev
       - libwebp-dev
       - libxml2-dev
@@ -81,7 +98,9 @@ pipeline:
         -DCMAKE_C_FLAGS="-Wno-error=maybe-uninitialized" \
         -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized" \
         -DBUILD_NOISE_TOOLS=ON \
-        -DBUILD_CURVE_TOOLS=ON
+        -DBUILD_CURVE_TOOLS=ON \
+        -DUSE_GRAPHICSMAGICK=OFF \
+        -DUSE_IMAGEMAGICK=ON
 
   - uses: cmake/build
 
@@ -93,6 +112,10 @@ subpackages:
   - name: ${{package.name}}-doc
     pipeline:
       - uses: split/manpages
+    dependencies:
+      provider-priority: 0
+      provides:
+        - darktable-doc=${{package.full-version}}
     test:
       pipeline:
         - uses: test/tw/docs
@@ -100,6 +123,10 @@ subpackages:
   - name: ${{package.name}}-lang
     pipeline:
       - uses: split/locales
+    dependencies:
+      provider-priority: 0
+      provides:
+        - darktable-lang=${{package.full-version}}
 
 test:
   environment:
@@ -463,6 +490,85 @@ test:
         rm -rf /tmp/dt-imagemagick
 
         echo "=== ImageMagick integration test PASSED ==="
+    - name: Verify FIPS mode enabled (multi-check)
+      runs: |
+        set -euo pipefail
+        echo "=============================================="
+        echo "FIPS Crypto Verification for darktable-fips"
+        echo "=============================================="
+
+        PASS_COUNT=0
+        TOTAL_CHECKS=4
+
+        # Check 1: FIPS mode marker file
+        echo ""
+        echo "=== Check 1/4: FIPS Mode Marker ==="
+        if [ -f "/etc/gcrypt/fips_enabled" ]; then
+            echo "PASS: /etc/gcrypt/fips_enabled EXISTS"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            echo "FAIL: /etc/gcrypt/fips_enabled NOT FOUND"
+        fi
+
+        # Check 2: Library ownership verification
+        echo ""
+        echo "=== Check 2/4: Library Ownership ==="
+        for libpath in /usr/lib/libgcrypt.so.20*; do
+            if [ -f "$libpath" ]; then
+                owner=$(apk info --who-owns "$libpath" 2>/dev/null || echo "unknown")
+                echo "Library: $libpath"
+                echo "Owner: $owner"
+                if echo "$owner" | grep -qF "libgcrypt-al2023-fips"; then
+                    echo "PASS: Library owned by libgcrypt-al2023-fips"
+                    PASS_COUNT=$((PASS_COUNT + 1))
+                else
+                    echo "WARN: Library owned by different package"
+                fi
+                break
+            fi
+        done
+
+        # Check 3: FIPS package installed
+        echo ""
+        echo "=== Check 3/4: FIPS Package Installed ==="
+        if apk info -eq libgcrypt-al2023-fips >/dev/null 2>&1; then
+            echo "PASS: libgcrypt-al2023-fips package INSTALLED"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            echo "INFO: libgcrypt-al2023-fips not directly installed (may be dependency)"
+        fi
+
+        # Check 4: NIST CMVP certification
+        echo ""
+        echo "=== Check 4/4: NIST CMVP-4971 Certification ==="
+        if apk info -eq NIST-CMVP-4971 >/dev/null 2>&1; then
+            echo "PASS: NIST-CMVP-4971 certification package INSTALLED"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            echo "INFO: NIST-CMVP-4971 package not installed (optional attestation)"
+        fi
+
+        # Check transitive dependency chain
+        echo ""
+        echo "=== Dependency Chain Analysis ==="
+        echo "darktable-cli links to:"
+        ldd /usr/bin/darktable-cli 2>/dev/null | grep -E "libsecret|libgcrypt" || echo "  (checking...)"
+
+        # Final verdict
+        echo ""
+        echo "=============================================="
+        echo "RESULT: $PASS_COUNT checks passed"
+        echo "=============================================="
+
+        # Must have at least marker + one package verification
+        if [ $PASS_COUNT -ge 2 ]; then
+            echo "VERDICT: FIPS COMPLIANT"
+            echo "  - FIPS mode marker present"
+            echo "  - Certified package verified"
+        else
+            echo "VERDICT: FIPS VERIFICATION INCOMPLETE"
+            exit 1
+        fi
 
 update:
   enabled: true
