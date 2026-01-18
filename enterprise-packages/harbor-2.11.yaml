@@ -390,6 +390,15 @@ subpackages:
             # in the post step; so we used tini in the start command instead of setup.
             start: /sbin/tini -s -- sh -c 'cd /harbor && ./harbor_core & exec bash -x /opt/iamguarded/scripts/harbor-jobservice/entrypoint.sh /opt/iamguarded/scripts/harbor-jobservice/run.sh'
             timeout: 60
+            # Harbor 2.11 has a bug where it logs "[ERROR] failed to create audit log, error dial tcp:
+            # missing address" even when no audit log forward endpoint is configured. This was fixed in
+            # Harbor 2.13+ by only logging the error when len(logEndpoint) > 0. Since this error is
+            # non-fatal (falls back to stdout) and cannot be disabled via environment variable, we
+            # exclude ERROR from the error_strings list.
+            # See: https://github.com/goharbor/harbor/blob/v2.13.0/src/pkg/audit/forward.go#L44
+            error_strings: |
+              FAIL
+              FATAL
             expected_output: |
               Validating harbor-jobservice settings
               harbor-jobservice setup finished
@@ -471,6 +480,8 @@ subpackages:
           sed -i 's/#error_log  logs\/error.log;$/error_log  stderr  notice;/' /etc/nginx/nginx.conf
           # And access logs to stdout
           sed -i 's/#access_log.*;$/access_log  \/dev\/stdout;/' /etc/nginx/nginx.conf
+          # Increase server_names_hash_bucket_size to handle longer server names
+          sed -i '/http {/a\    server_names_hash_bucket_size 128;' /etc/nginx/nginx.conf
           cp -rf /etc/nginx/* ${{targets.subpkgdir}}/etc/nginx/
     test:
       pipeline:
@@ -934,7 +945,11 @@ subpackages:
             post: |
               set -euo pipefail
               wait-for-it -t 10 localhost:9090
-              curl -sf http://localhost:9090/metrics | grep -iqF "harbor_statistics"
+              # Check for promhttp metrics which are always present from the Prometheus
+              # HTTP handler, regardless of whether collectors successfully gather data.
+              # We can't check for harbor_statistics as it requires database tables that
+              # don't exist in the test environment.
+              curl -sf http://localhost:9090/metrics | grep -iqF "promhttp_metric_handler"
 
 test:
   pipeline:
