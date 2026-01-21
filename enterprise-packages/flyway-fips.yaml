@@ -1,0 +1,311 @@
+package:
+  name: flyway-fips
+  version: "11.20.2"
+  epoch: 0
+  description: "FIPS-compliant Flyway database migration tool"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-jre
+      - openssl-config-fipshardened
+
+vars:
+  java-version: "17"
+  flyway-base: "/usr/share/java/flyway"
+  lib-core: "accessors-smart commons-text content-type gson jackson jansi jcip-annotations jna json-smart lang-tag msal4j-persistence-extension nimbus-jose-jwt oauth2-oidc-sdk slf4j-nop stax2-api woodstox-core"
+  lib-aad: "azure msal4j reactive-streams reactor slf4j-api"
+  drivers-core: "aws-secretsmanager-jdbc databricks-jdbc google-cloud-storage h2 hsqldb jaybird jffi jtds mariadb-java-client mssql-jdbc ojdbc11 postgresql singlestore-jdbc-client snowflake-jdbc sqlite-jdbc"
+  drivers-cassandra: "asm caffeine cassandra-driver-kerberos cassandra-jdbc-wrapper commons-collections4 commons-io commons-lang3 config HdrHistogram java-driver-core java-driver-shaded jnr jsr305 metrics-core native-protocol semver4j"
+  # GCP Spanner drivers are excluded from FIPS build as they depend on conscrypt-openjdk-uber, which binds to boringssl.
+  # drivers-gcp: "animal-sniffer-annotations annotations api-common auto-value-annotations checker-qual commons-codec conscrypt-openjdk-uber detector-resources-support error_prone_annotations failureaccess gax google-auth-library google-cloud-core google-cloud-monitoring google-cloud-spanner google-http-client grpc guava httpclient httpcore j2objc-annotations javax.annotation-api listenablefuture opencensus perfmark-api proto protobuf-java re2j threetenbp"
+  drivers-mongo: "bson flyway-database-nc-mongodb mongodb-driver-core mongodb-driver-sync"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bouncycastle-fips~2.1
+      - build-base
+      - busybox
+      - maven
+      - openjdk-${{vars.java-version}}
+      - wolfi-base
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/flyway/flyway
+      tag: flyway-${{package.version}}
+      expected-commit: c78c70b258c2e2e156d19d2c35f802d74f45bf82
+
+  - uses: maven/pombump
+    with:
+      pom: flyway-commandline/pom.xml
+
+  - name: Build
+    runs: |
+      # Build flyway (excluding mongodb module which has separate build issues)
+      # Exclude netty-tcnative-boringssl-static and conscrypt
+      ./mvnw -B clean dependency:copy-dependencies package -e --file pom.xml -DskipTests \
+        -pl !flyway-database/flyway-database-mongodb \
+        -DexcludeArtifactIds=netty-tcnative-boringssl-static,conscrypt-openjdk-uber
+
+  - name: Create directories and move scripts
+    runs: |
+      #--------------------
+      # flyway files layout
+      #
+      # /usr/share/java/flyway/          # Flyway base installation directory `flyway-base`
+      # ├── lib/                         # Core libraries directory `vars.lib-core`
+      # │   ├── aad/                      # Azure Active Directory authentication libs `vars.lib-aad`
+      # │   ├── flyway/                   # Core Flyway JAR files (prefix with `flyway-`)
+      # │   ├── netty/                    # Netty networking libraries (prefix with `netty-`)
+      # │   └── fips/                     # BCFIPS JARs for FIPS compliance
+      # ├── conf/                        # Configuration files directory (in package have flyway.toml.example)
+      # └── drivers/                     # JDBC drivers directory `vars.drivers-core`
+      # |   ├── cassandra/                # Cassandra database drivers `vars.drivers-cassandra`
+      # |   └── mongo/                    # MongoDB drivers `vars.drivers-mongo`
+      # ├── licenses/                    # License files directory
+      # gcp drivers excluded - conscrypt-openjdk-uber binds to bringssl
+      #--------------------
+
+      # Create directories based on the layout
+      mkdir -p ${{targets.contextdir}}/${{vars.flyway-base}}
+      for dir in lib lib/aad lib/flyway lib/netty lib/fips conf drivers drivers/cassandra drivers/mongo licenses; do
+        mkdir -p ${{targets.contextdir}}/${{vars.flyway-base}}/$dir
+      done
+
+      # Move over flyway related cmd scripts, license info, etc.
+      cd flyway-commandline/src/main/assembly/
+
+      mv flyway flyway.cmd README.txt ${{targets.contextdir}}/${{vars.flyway-base}}/
+      # Setup permissions
+      chmod 0755 ${{targets.contextdir}}/${{vars.flyway-base}}/flyway ${{targets.contextdir}}/${{vars.flyway-base}}/flyway.cmd
+
+      mv flyway.toml.example ${{targets.contextdir}}/${{vars.flyway-base}}/conf
+      mv put-your-jdbc-drivers-here.txt ${{targets.contextdir}}/${{vars.flyway-base}}/drivers
+      mv LICENSE.md LICENSES-THIRD-PARTY.txt ${{targets.contextdir}}/${{vars.flyway-base}}/licenses
+
+  - name: Move flyway lib jars into
+    runs: |
+      # Install core jars to lib directory `flyway/lib` using `vars.lib-core`
+      for dep in ${{vars.lib-core}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/lib
+      done
+
+      echo "=== List of copied core jars in flyway/lib. ==="
+      echo "Total files: $(ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib | wc -l), Expected ~25 files"
+      echo "Files:"
+      ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/aad jars
+    runs: |
+      # Install third-party related jars to `flyway/lib/aad` using `vars.lib-aad`
+      for dep in ${{vars.lib-aad}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/lib/aad
+      done
+
+      echo "=== List of copied aad jars in flyway/lib/aad. ==="
+      echo "Total files: $(ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib/aad | wc -l), Expected ~11 files"
+      echo "Files:"
+      ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib/aad | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/flyway jars
+    runs: |
+      # Install driver related jars to `flyway/lib/flyway`
+      # Install the main flyway-commandline jar and rest of the flyway dependency jars(has a prefix of `flyway-`).
+      mv flyway-commandline/target/flyway-commandline-${{package.version}}.jar ${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway
+      mv flyway-commandline/target/dependency/flyway-*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway
+
+      # The above wildcard also matches flyway-database-nc-mongodb-*.jar, which should be moved to the mongo driver directory
+      # moving it back to flyway-commandline/target/dependency so that it can be moved to the mongo driver directory in the later step
+      mv ${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway/flyway-database-nc-mongodb-*.jar flyway-commandline/target/dependency
+
+      echo "=== List of copied flyway jars in flyway/lib/flyway. ==="
+      echo "Total files: $(ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway | wc -l), Expected ~39 files"
+      echo "Files:"
+      ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/netty jars
+    runs: |
+      # Install netty related jars to `flyway/lib/netty`
+      # netty-tcnative-boringssl-static excluded via -DexcludeArtifactIds
+      mv flyway-commandline/target/dependency/netty-*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty
+      # The above wildcard also matches netty-nio-client-*.jar, which is not needed
+      rm ${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty/netty-nio-client-*.jar
+
+      echo "=== List of copied netty jars in flyway/lib/netty. ==="
+      echo "Total files: $(ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty | wc -l), Expected ~19 files"
+      echo "Files:"
+      ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/drivers jars
+    runs: |
+      # Install core driver jars to drivers directory `flyway/drivers` using `vars.drivers-core`
+      for dep in ${{vars.drivers-core}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/drivers
+      done
+      echo "=== List of copied core driver jars in flyway/drivers. ==="
+      echo "Total files: $(ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/drivers | wc -l), Expected ~20 files"
+      echo "Files:"
+      ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/drivers | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/drivers jars
+    runs: |
+      # Install Cassandra driver related jars to `flyway/drivers/cassandra` using `vars.drivers-cassandra`
+      for dep in ${{vars.drivers-cassandra}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/drivers/cassandra
+      done
+      echo "=== List of copied cassandra driver jars in flyway/drivers/cassandra. ==="
+      echo "Total files: $(ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/drivers/cassandra | wc -l), Expected ~24 files"
+      echo "Files:"
+      ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/drivers/cassandra | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/mongo jars
+    runs: |
+      # Install Mongo driver related jars to `flyway/drivers/mongo` using `vars.drivers-mongo`
+      for dep in ${{vars.drivers-mongo}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/drivers/mongo
+      done
+
+      echo "=== List of copied mongo driver jars in flyway/drivers/mongo. ==="
+      echo "Total files: $(ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/drivers/mongo | wc -l), Expected ~5 files"
+      echo "Files:"
+      ls -1 ${{targets.contextdir}}/${{vars.flyway-base}}/drivers/mongo | sed 's/^/  /'
+      echo "==="
+
+  - name: Replace non-FIPS BouncyCastle JARs with FIPS versions
+    runs: |
+      # Remove any non-FIPS bcprov JARs from all directories
+      find ${{targets.contextdir}} -type f \( \
+          -name "bcprov-jdk*.jar" -o \
+          -name "bcpkix-jdk*.jar" -o \
+          -name "bcutil-jdk*.jar" -o \
+          -name "bcmail-jdk*.jar" -o \
+          -name "bcpg-jdk*.jar" -o \
+          -name "bctls-jdk*.jar" \) -delete
+
+      # Link BCFIPS JARs to Flyway lib/fips directory
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.contextdir}}/${{vars.flyway-base}}/lib/fips/
+
+      echo "=== FIPS JARs linked in flyway/lib/fips. ==="
+      ls -la ${{targets.contextdir}}/${{vars.flyway-base}}/lib/fips/
+      echo "==="
+
+  - name: Update flyway script to include FIPS JARs in classpath
+    runs: |
+      # Modify the flyway startup script to include FIPS JARs in the classpath
+      sed -i 's|CLASSPATH="\(.*\)"|CLASSPATH="$INSTALLDIR/lib/fips/*:\1"|' ${{targets.contextdir}}/${{vars.flyway-base}}/flyway
+
+  - name: Create symlinks for flyway
+    runs: |
+      ln -sf /usr/share/java/flyway ${{targets.destdir}}/flyway
+      mkdir -p ${{targets.destdir}}/opt/java/openjdk
+      for item in bin conf legal lib release; do
+        ln -sf /usr/lib/jvm/java-${{vars.java-version}}-openjdk/$item ${{targets.destdir}}/opt/java/openjdk
+      done
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: flyway/flyway
+    strip-prefix: flyway-
+
+test:
+  environment:
+    contents:
+      packages:
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - openjdk-${{vars.java-version}}-default-jdk
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - name: Test CLI basics
+      runs: |
+        export PATH=$PATH:/usr/share/java/flyway
+        flyway -h
+        flyway --version
+        flyway list-engines
+    - name: Verify FIPS JARs are present
+      runs: |
+        stat /usr/share/java/flyway/lib/fips
+        ls -la /usr/share/java/flyway/lib/fips/ | grep -F "bc-fips"
+    - name: Verify non-FIPS BouncyCastle JARs are removed
+      runs: |
+        # Ensure no non-FIPS BC jars exist
+        if find /usr/share/java/flyway -name "bcprov-jdk*.jar" | grep -q .; then
+          echo "ERROR: Found non-FIPS bcprov JARs"
+          exit 1
+        fi
+        if find /usr/share/java/flyway -name "bcpkix-jdk*.jar" | grep -q .; then
+          echo "ERROR: Found non-FIPS bcpkix JARs"
+          exit 1
+        fi
+        echo "No non-FIPS BouncyCastle JARs found - PASS"
+    - name: Verify conscrypt is not present
+      runs: |
+        if find /usr/share/java/flyway -name "conscrypt*.jar" | grep -q .; then
+          echo "ERROR: Found conscrypt JARs - not FIPS compliant"
+          exit 1
+        fi
+        echo "No conscrypt JARs found - PASS"
+    - name: Verify BoringSSL is not present
+      runs: |
+        if find /usr/share/java/flyway -name "*boringssl*.jar" | grep -q .; then
+          echo "ERROR: Found BoringSSL JARs - not FIPS compliant"
+          exit 1
+        fi
+        echo "No BoringSSL JARs found - PASS"
+    - name: Test basic migration with H2 database
+      runs: |
+        export PATH=$PATH:/usr/share/java/flyway
+
+        # Create migrations dir
+        mkdir -p /tmp/migrations
+
+        # Create flyway.toml config
+        tee /usr/share/java/flyway/conf/flyway.toml << 'EOF'
+        [flyway]
+        locations = ["filesystem:/tmp/migrations"]
+
+        [environments.default]
+        locations = ["filesystem:/tmp/migrations"]
+        url = "jdbc:h2:mem:db"
+        user = ""
+        password = ""
+        EOF
+
+        # Create migration files
+        tee /tmp/migrations/V1__Create_person_table.sql << 'EOF'
+        create table PERSON (
+            ID int not null,
+            NAME varchar(100) not null
+        );
+        EOF
+
+        tee /tmp/migrations/V2__add_people.sql << 'EOF'
+        insert into PERSON (ID, NAME) values (1, 'Axel');
+        insert into PERSON (ID, NAME) values (2, 'Mr. Foo');
+        insert into PERSON (ID, NAME) values (3, 'Ms. Bar');
+        EOF
+
+        # Test migration
+        flyway migrate
+        flyway info
