@@ -1,0 +1,95 @@
+package:
+  name: mailpit-fips
+  version: "1.28.3"
+  epoch: 0
+  description: An email and SMTP testing tool with API for developers
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - nodejs-20
+      - npm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/axllent/mailpit
+      tag: v${{package.version}}
+      expected-commit: eac491cd897127de41b0e26210be93a041f836dd
+
+  - runs: |
+      npm install
+      npm run package
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: .
+      output: mailpit
+      ldflags: -w -X github.com/axllent/mailpit/config.Version=${{package.version}}
+
+  - uses: strip
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+    environment:
+      HTTP_PORT: "8025"
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ver-check
+      with:
+        bins: mailpit
+        version: ${{package.version}}
+        version-flag: version
+    - uses: test/tw/help-check
+      with:
+        bins: mailpit
+    - uses: test/daemon-check-output
+      with:
+        start: mailpit
+        timeout: 30
+        expected_output: |
+          accessible via
+        post: |
+          set -euo pipefail
+
+          # Verify HTTP API is listening and get version info
+          curl -sf "http://localhost:${HTTP_PORT}/api/v1/info" | jq .
+
+          # Verify mailbox is empty before sending
+          curl -sf "http://localhost:${HTTP_PORT}/api/v1/messages" | jq -e '.messages | length == 0'
+
+          # Send a test email via HTTP API
+          curl -sf "http://localhost:${HTTP_PORT}/api/v1/send" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "From": {"Email": "sender@test.local", "Name": "Test Sender"},
+              "To": [{"Email": "receiver@test.local", "Name": "Test Receiver"}],
+              "Subject": "Test Email",
+              "Text": "This is a test email body."
+            }'
+
+          # Wait for message to be processed
+          sleep 1
+
+          # Verify the email was received via API
+          curl -sf "http://localhost:${HTTP_PORT}/api/v1/messages" | jq -e '.messages | length > 0'
+
+          # Verify email content
+          MESSAGE_ID=$(curl -sf "http://localhost:${HTTP_PORT}/api/v1/messages" | jq -r '.messages[0].ID')
+          curl -sf "http://localhost:${HTTP_PORT}/api/v1/message/${MESSAGE_ID}" | jq -e '.Subject == "Test Email"'
+
+update:
+  enabled: true
+  github:
+    identifier: axllent/mailpit
+    tag-filter: v
+    strip-prefix: v

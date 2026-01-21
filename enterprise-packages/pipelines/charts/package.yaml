@@ -98,6 +98,9 @@ pipeline:
   - name: Build chart package
     working-directory: ${{inputs.chart-path}}
     runs: |
+      # Clean up any .orig files (leftover from patching)
+      find . -name '*.orig' -delete
+
       helm dependency update
       helm dependency build
       helm-docs
@@ -106,37 +109,32 @@ pipeline:
       chart_version="${{inputs.chart-version}}"
       [ -n "$chart_version" ] || chart_version="${{package.version}}"
       helm package . --destination="$tmp" --version="$chart_version"
+      mkdir -p "${{targets.contextdir}}"
       tar -xf "$tmp"/*.tgz -C "${{targets.contextdir}}"
 
-  - name: Write image schema
+  - name: Write Chainguard metadata
     runs: |
-      images='${{inputs.images}}'
-      test='${{inputs.test}}'
-
-      [ -n "$images" ] || [ -n "$test" ] || exit 0
-
       chart_name=$(yq -e '.name' "${{inputs.chart-path}}/Chart.yaml")
-      output="${{targets.contextdir}}/$chart_name/values.images.json"
+      output="${{targets.contextdir}}/$chart_name/cg.json"
 
-      # Transform ${marker} -> {"$ref": "marker"}
-      if [ -n "$images" ]; then
-        images_json=$(echo "$images" | yq -o=json | jq 'walk(
-          if type == "string" and test("^\\$\\{[a-z_]+\\}$") then
-            {"$ref": (ltrimstr("${") | rtrimstr("}"))}
-          else . end
-        )')
-      else
-        images_json='{}'
-      fi
+      # Convert YAML inputs to JSON (empty string becomes empty object)
+      images_json=$(echo '${{inputs.images}}' | yq -o=json 'select(. != null) // {}')
+      test_json=$(echo '${{inputs.test}}' | yq -o=json 'select(. != null) // {"values": {}, "cases": [{"name": "default"}]}')
 
-      if [ -n "$test" ]; then
-        test_json=$(echo "$test" | yq -o=json)
-      else
-        test_json='{"values": {}, "cases": [{"name": "default"}]}'
+      # Validate only known ${...} markers are used
+      unknown=$(echo "$images_json" | grep -oE '\$\{[^}]+\}' | sort -u | while read -r var; do
+        case "$var" in
+          '${registry}'|'${repo}'|'${registry_repo}'|'${tag}'|'${digest}'|'${pseudo_tag}'|'${ref}') ;;
+          *) echo "$var" ;;
+        esac
+      done)
+      if [ -n "$unknown" ]; then
+        echo "ERROR: unknown markers: $unknown"
+        exit 1
       fi
 
       jq -n \
         --argjson images "$images_json" \
         --argjson test "$test_json" \
-        '{version: "1", images: $images, test: $test}' \
-        | tee "$output"
+        '{images: $images, test: $test}' \
+        > "$output"

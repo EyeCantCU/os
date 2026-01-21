@@ -1,7 +1,7 @@
 package:
   name: authentik-fips
   version: "2025.10.3"
-  epoch: 0
+  epoch: 1
   description: "authentik IdP — an open-source Identity Provider for modern SSO (FIPS-enabled)."
   copyright:
     - license: "CC-BY-4.0"
@@ -18,6 +18,7 @@ package:
       - libpq
       - libxslt
       - openssl-config-fipshardened # FIPS-compliant OpenSSL configuration
+      - py${{vars.python-version}}-cryptography # FIPS-compliant cryptography package built against system OpenSSL
       - python-${{vars.python-version}}
       - runit
       - tzdata
@@ -48,6 +49,8 @@ environment:
     packages:
       - build-base
       - busybox
+      - clang
+      - cmd:cargo
       - krb5-dev
       - libxml2-dev
       - libxslt-dev
@@ -85,7 +88,7 @@ pipeline:
         django.patch
 
   - name: "Create venv"
-    runs: uv venv ${{vars.venv-home}}
+    runs: uv venv ${{vars.venv-home}} --system-site-packages
 
   # Upstream pins lxml dependency to 6.0.0 - REF: https://github.com/goauthentik/authentik/blob/version/2025.10.0/pyproject.toml#L47
   # There's a known build failure issue with lxml 6.0.0 + libxml2 2.15, documented here https://bugs.launchpad.net/lxml/+bug/2125278
@@ -105,7 +108,13 @@ pipeline:
   - name: "Remediate CVEs"
     runs: |
       # GHSA-2xpw-w6gg-jr37, GHSA-gm62-xv2j-4w53
-      uv add "urllib3==2.6.0"
+      uv add "urllib3==2.6.3"
+      # GHSA-wcj4-jw5j-44wh
+      uv add "cbor2==5.8.0"
+      # GHSA-mqqc-3gqh-h2x8 GHSA-jj3x-wxrx-4x23 GHSA-g84x-mcqj-x9qq GHSA-6mq8-rvhq-8wgg
+      uv add "aiohttp==3.13.3"
+      # GHSA-mrfv-m5wm-5w6w
+      uv add "pynacl==1.6.2"
 
   # need to lock before configuring libraries.cgr.dev indices
   - name: "Export locked requirements"
@@ -115,32 +124,14 @@ pipeline:
     with:
       allow-fallback-indexes: true
 
-  # FIPS BUILD: Force source compilation of cryptography packages to link against
-  # system FIPS-enabled OpenSSL rather than bundled OpenSSL wheels
+  # FIPS BUILD: Use system py3.13-cryptography package built against FIPS-enabled OpenSSL
   - name: "Build authentik with FIPS cryptography"
     runs: |
-      # requires EPOCH to be later that 1980
-      export SOURCE_DATE_EPOCH=315532800
-
-      # Install authentik dependencies (allow binary wheels for non-crypto packages)
+      # Install authentik dependencies using system FIPS-compliant cryptography
+      # py3.13-cryptography is provided by system package as runtime dependency
+      # venv uses --system-site-packages to access system cryptography
       # Note: using --only-binary flag to avoid python-kadmin-rs build faliure
       uv pip sync requirements.locked --only-binary python-kadmin-rs
-
-      # Reinstall cryptography packages from source to link against
-      # FIPS-enabled system OpenSSL. Binary wheels bundle their own OpenSSL which
-      # bypasses FIPS mode.
-      #
-      # Packages rebuilt from source:
-      #  - cryptography: Core crypto library (RSA, AES, hashing)
-      #  - lxml: XML processing with libxml2/libxslt (SAML support)
-      #  - xmlsec: XML signatures/encryption (SAML, OAuth)
-      #
-      echo "Rebuilding cryptography packages from source for FIPS compliance..."
-      uv pip install --reinstall \
-        --no-binary cryptography \
-        --no-binary lxml \
-        --no-binary xmlsec \
-        cryptography lxml xmlsec
 
       # Install internal packages:
       #  - django-dramatiq-postgres
@@ -153,6 +144,10 @@ pipeline:
       do
         uv pip install --no-deps ./packages/$pkg
       done
+
+      # Uninstall cryptography from venv to ensure only system package is used
+      # The system py3.13-cryptography package remains accessible via --system-site-packages
+      uv pip uninstall cryptography
 
       # Install virtual environment
       mkdir -p ${{targets.destdir}}/usr/share/${{vars.mangled-package-name}}
@@ -292,6 +287,7 @@ test:
       TMPDIR: /dev/shm
   pipeline:
     - uses: test/tw/ldd-check
+    - uses: test/tw/pip-check
     - uses: test/tw/symlink-check
       with:
         allow-absolute: true
