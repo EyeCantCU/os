@@ -1,0 +1,64 @@
+#!/bin/sh
+# this works to force gitsign to use workstation identity if the system
+# is a google compute node.  Just put it in a place in PATH before
+# the real gitsign.
+#
+# The problem it works around is
+# 1. you want gitsign to use the gcp service account to sign
+#    so that you don't have to do the headless url dance.
+# 2. You need to 'gcloud auth login' (and maybe use application-default)
+#    in order to gain access to some things.
+# After you've done step 2, gitsign will
+# see $HOME/.config/gcloud/application_default_credentials.json and
+# use those credentials.
+# The solution here is to just wrap /usr/bin/gitsign and set
+# HOME to some non-useful value ($HOME/gitsign-home) so that it
+# will use the default gcp service path.
+#
+# To disable this wrapper, do one of the following:
+#   1. set environment GITSIGN_WRAP_ENABLE=false
+#   2. remove execute from this script or just remove it.
+
+# set GITSIGN_WRAP_LOG to a file path to write debug there.
+GITSIGN_WRAP_ENABLE=${GITSIGN_WRAP_ENABLE:-true}
+debug() {
+    [ -n "$GITSIGN_WRAP_LOG" ] || return 0
+    echo "[$0]" "$@" >> "$GITSIGN_WRAP_LOG"
+}
+fail() { debug "$@"; echo "[$0]" "$@" 1>&2; exit 1; }
+
+[ -z "$_GITSIGN_WRAPPED" ] ||
+    fail "exec loop detected real=$real _GITSIGN_WRAPPED=$_GITSIGN_WRAPPED"
+
+case "$GITSIGN_WRAP_ENABLE" in
+    true|false) :;;
+    *) fail "GITSIGN_WRAP_ENABLE='$GITSIGN_WRAP_ENABLE'" \
+        "must be 'true' or 'false'";;
+esac
+
+real=""
+oifs="$IFS"
+IFS=:
+for p in $PATH; do
+    # dont call yourself - skip $0
+    [ "$p/gitsign" -ef "$0" ] && continue
+    # must be an executable file
+    [ -f "$p/gitsign" ] && [ -x "$p/gitsign" ] || continue
+    real="$p/gitsign" && break
+done
+IFS="$oifs"
+[ -x "$real" ] || fail "did not find real gitsign in $PATH"
+
+pnf="/sys/class/dmi/id/product_name"
+ohome=$HOME
+# shellcheck disable=SC2162
+[ -r "$pnf" ] && read pn < "$pnf" &&
+    [ "$pn" = "Google Compute Engine" ] &&
+    HOME="$HOME/gitsign-home"
+
+[ "$GITSIGN_WRAP_ENABLE" = "false" ] && HOME="$ohome"
+
+debug "platform='$pn' real='$real'" \
+    "GITSIGN_WRAP_ENABLE='$GITSIGN_WRAP_ENABLE'" \
+    "WRAPPED=$_GITSIGN_WRAPPED HOME=$HOME -" "$@"
+HOME="$HOME" _GITSIGN_WRAPPED="pid-$$" exec "$real" "$@"
