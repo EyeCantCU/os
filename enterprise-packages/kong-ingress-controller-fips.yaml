@@ -1,0 +1,99 @@
+package:
+  name: kong-ingress-controller-fips
+  version: "3.5.3"
+  epoch: 0
+  description: "Kong Kubernetes Ingress Controller (FIPS)"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openssl-config-fipshardened
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Kong/kubernetes-ingress-controller
+      tag: v${{package.version}}
+      expected-commit: 5101c342ec791067a17c62ff48b3b2971f314887
+
+  - uses: go/build
+    with:
+      packages: ./internal/cmd/fips/main.go
+      output: manager
+      go-package: go-fips
+      ldflags: |
+        -X github.com/kong/kubernetes-ingress-controller/v3/pkg/metadata.Release=v${{package.version}}
+        -X github.com/kong/kubernetes-ingress-controller/v3/pkg/metadata.Commit=$(git rev-parse HEAD)
+        -X github.com/kong/kubernetes-ingress-controller/v3/pkg/metadata.Repo=$(git config --get remote.origin.url)
+        -X github.com/kong/kubernetes-ingress-controller/v3/pkg/metadata.ProjectURL=github.com/kong/kubernetes-ingress-controller
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package for Helm charts expecting /manager at root
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}
+          ln -s /usr/bin/manager ${{targets.subpkgdir}}/manager
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
+test:
+  environment:
+    contents:
+      packages:
+        - kong-ingress-controller-fips-compat
+        - kong
+        - curl
+        - wait-for-it
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      KONG_ADMIN_LISTEN: "127.0.0.1:8001"
+      KONG_PROXY_LISTEN: "127.0.0.1:8000"
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl config view --minify --raw > /tmp/kubeconfig.yaml
+
+          # Create minimal Kong config
+          cat <<'EOF' > /tmp/kong.yml
+          _format_version: "3.0"
+          EOF
+
+          # Start Kong Gateway in background
+          mkdir -p /tmp/kong_prefix
+          kong prepare -p /tmp/kong_prefix
+          kong start -p /tmp/kong_prefix &
+          wait-for-it 127.0.0.1:8001 -t 30
+        start: manager --kubeconfig=/tmp/kubeconfig.yaml --kong-admin-url=http://127.0.0.1:8001 --publish-status-address=127.0.0.1
+        timeout: 60
+        expected_output: |
+          Starting controller manager
+          The ingress class name has been set
+        post: |
+          set -euo pipefail
+          wait-for-it localhost:10254 -t 30
+          curl -sf http://localhost:10254/healthz
+          curl -sf http://localhost:10255/metrics | grep -F "go_gc_duration_seconds"
+
+update:
+  enabled: true
+  github:
+    identifier: Kong/kubernetes-ingress-controller
+    strip-prefix: v
+    tag-filter: v
+    use-tag: true
