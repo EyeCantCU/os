@@ -1,0 +1,282 @@
+package:
+  name: pinot
+  version: "1.4.0"
+  epoch: 0
+  description: Apache Pinot - A realtime distributed OLAP datastore
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - busybox
+
+vars:
+  java-version: "11"
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - corretto-${{vars.java-version}}-default-jdk
+      - curl
+      - libudev
+      - maven
+      - nodejs
+      - npm
+      - protobuf
+      - protoc
+      - thrift-dev
+      - udev
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/pinot
+      tag: release-${{package.version}}
+      expected-commit: 3a56c9db545e3b403863d8319055ea9be8eae771
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+      patch-file: pombump-deps.yaml
+
+  - runs: |
+      # Build Pinot distribution
+      mvn install package -DskipTests -Drat.skip=true -Dlicense.skip=true -Pbin-dist -Djdk.version=${{vars.java-version}} -T1C
+
+      # Extract the built distribution
+      tar -xf pinot-distribution/target/apache-pinot-${{package.version}}-bin.tar.gz
+
+      # Create directory structure
+      mkdir -p "${{targets.destdir}}/usr/share/java/pinot"
+
+      # Move all Pinot components
+      mv apache-pinot-${{package.version}}-bin/* "${{targets.destdir}}/usr/share/java/pinot/"
+
+      # Clean up Windows scripts
+      rm -f "${{targets.destdir}}"/usr/share/java/pinot/bin/*.cmd
+      rm -f "${{targets.destdir}}"/usr/share/java/pinot/bin/*.bat
+
+      # Make scripts executable
+      chmod +x "${{targets.destdir}}"/usr/share/java/pinot/bin/*.sh
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package providing /opt/pinot symlinks
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Create /opt directory
+          mkdir -p "${{targets.subpkgdir}}/opt"
+
+          # Create symlink from /opt/pinot to /usr/share/java/pinot
+          ln -sf /usr/share/java/pinot "${{targets.subpkgdir}}/opt/pinot"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - uuidgen
+        - ${{package.name}}-compat
+        - wait-for-it
+        - corretto-${{vars.java-version}}-default-jdk
+    environment:
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+  pipeline:
+    - uses: test/daemon-check-output
+      with:
+        setup: |-
+          export JAVA_OPTS="-Xms512M -Xmx2G"
+          # Start Zookeeper
+          /opt/pinot/bin/pinot-admin.sh StartZookeeper -zkPort 2191 > /tmp/pinot-zk.log 2>&1 &
+          wait-for-it -t 20 localhost:2191
+
+          # Start Controller
+          /opt/pinot/bin/pinot-admin.sh StartController -zkAddress localhost:2191 -controllerPort 9000 > /tmp/pinot-controller.log 2>&1 &
+          wait-for-it -t 20 localhost:9000
+
+          # Start Broker
+          /opt/pinot/bin/pinot-admin.sh StartBroker -zkAddress localhost:2191 > /tmp/pinot-broker.log 2>&1 &
+          wait-for-it -t 10 localhost:8099
+
+          # Start Server
+          /opt/pinot/bin/pinot-admin.sh StartServer -zkAddress localhost:2191 > /tmp/pinot-server.log 2>&1 &
+          wait-for-it -t 30 localhost:8097
+        start: |-
+          curl -sf --max-time 15 http://localhost:9000/cluster/info
+        timeout: "120"
+        expected_output: |
+          father
+        post: |-
+          set -euo pipefail
+          # Test Controller health
+          curl -sf --max-time 15 http://localhost:9000/health | grep -F 'OK'
+
+          # Test Broker health
+          curl -sf --max-time 15 http://localhost:8099/health | grep -F 'OK'
+
+          # Test cluster info
+          curl -sf --max-time 25 http://localhost:9000/cluster/info | jq -e '.clusterName'
+
+          # List tenants
+          curl -sf --max-time 25 http://localhost:9000/tenants | jq -e '. | length >= 0'
+
+          # Create test schema
+
+          TEST_TABLE="test_table_$(uuidgen | tr -d '-' | head -c 8)"
+
+          tee /tmp/schema.json << 'SCHEMAEOF'
+          {
+            "schemaName": "TABLENAME_PLACEHOLDER",
+            "dimensionFieldSpecs": [
+              {
+                "name": "studentID",
+                "dataType": "INT"
+              },
+              {
+                "name": "firstName",
+                "dataType": "STRING"
+              },
+              {
+                "name": "lastName",
+                "dataType": "STRING"
+              }
+            ],
+            "metricFieldSpecs": [
+              {
+                "name": "score",
+                "dataType": "FLOAT"
+              }
+            ],
+            "dateTimeFieldSpecs": [
+              {
+                "name": "timestampInEpoch",
+                "dataType": "LONG",
+                "format": "1:MILLISECONDS:EPOCH",
+                "granularity": "1:MILLISECONDS"
+              }
+            ]
+          }
+          SCHEMAEOF
+
+          sed -i "s/TABLENAME_PLACEHOLDER/${TEST_TABLE}/g" /tmp/schema.json
+
+          echo "Uploading schema..."
+          curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/schema.json \
+            http://localhost:9000/schemas
+
+          echo "Verifying schema..."
+          curl -sf --max-time 5 http://localhost:9000/schemas/${TEST_TABLE} | jq -e '.schemaName == "'${TEST_TABLE}'"'
+
+          # Create table
+          echo "Creating table..."
+          tee /tmp/table.json << 'TABLEEOF'
+          {
+            "tableName": "TABLENAME_PLACEHOLDER",
+            "tableType": "OFFLINE",
+            "segmentsConfig": {
+              "replication": "1"
+            },
+            "tenants": {
+              "broker": "DefaultTenant",
+              "server": "DefaultTenant"
+            },
+            "tableIndexConfig": {
+              "loadMode": "MMAP"
+            },
+            "metadata": {}
+          }
+          TABLEEOF
+
+          sed -i "s/TABLENAME_PLACEHOLDER/${TEST_TABLE}/g" /tmp/table.json
+
+          curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/table.json \
+            http://localhost:9000/tables
+
+          curl -sf --max-time 5 http://localhost:9000/tables/${TEST_TABLE} | jq -e '.OFFLINE.tableName == "'${TEST_TABLE}_OFFLINE'"'
+
+          mkdir -p /tmp/pinot-data /tmp/pinot-segments
+          tee /tmp/pinot-data/test_data.csv << 'CSVEOF'
+          studentID,firstName,lastName,score,timestampInEpoch
+          1,John,Doe,85.5,1640000000000
+          2,Jane,Smith,92.3,1640000001000
+          3,Bob,Johnson,78.9,1640000002000
+          CSVEOF
+
+          /opt/pinot/bin/pinot-admin.sh CreateSegment \
+            -tableConfigFile /tmp/table.json \
+            -schemaFile /tmp/schema.json \
+            -dataDir /tmp/pinot-data \
+            -format CSV \
+            -outDir /tmp/pinot-segments
+
+          # Find the generated segment directory
+          SEGMENT_DIR=$(ls -d /tmp/pinot-segments/${TEST_TABLE}_* | head -1)
+
+          # Create tar.gz from segment directory
+          SEGMENT_NAME=$(basename "$SEGMENT_DIR")
+          tar -czf "/tmp/pinot-segments/${SEGMENT_NAME}.tar.gz" -C /tmp/pinot-segments "$SEGMENT_NAME"
+
+          curl -sf --max-time 15 -X POST \
+            -F "segment=@/tmp/pinot-segments/${SEGMENT_NAME}.tar.gz" \
+            http://localhost:9000/segments
+
+          for i in $(seq 1 30); do
+            SEGMENT_STATUS=$(curl -sf --max-time 5 http://localhost:9000/tables/${TEST_TABLE}/segments/${SEGMENT_NAME} 2>/dev/null || echo '{}')
+            if echo "$SEGMENT_STATUS" | jq -e '.OFFLINE' >/dev/null 2>&1; then
+              echo "Segment loaded successfully"
+              break
+            fi
+            echo "Waiting for segment... ($i/30)"
+            sleep 2
+          done
+
+          QUERY_RESPONSE=$(curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"sql":"SELECT studentID, firstName, lastName, score FROM '${TEST_TABLE}' ORDER BY studentID LIMIT 10"}' \
+            http://localhost:8099/query/sql)
+
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows | length == 3'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[0][0] == 1'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[0][1] == "John"'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[1][1] == "Jane"'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[2][1] == "Bob"'
+          echo "✓ Data insertion and query passed"
+
+          AGG_RESPONSE=$(curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"sql":"SELECT COUNT(*) FROM '${TEST_TABLE}'"}' \
+            http://localhost:8099/query/sql)
+
+          echo "$AGG_RESPONSE" | jq -e '.resultTable.rows[0][0] == 3'
+
+          # Test table deletion
+          curl -sf --max-time 10 -X DELETE \
+            http://localhost:9000/tables/${TEST_TABLE}
+
+update:
+  enabled: true
+  github:
+    identifier: apache/pinot
+    tag-filter: release-1.4
+    strip-prefix: release-
+    use-tag: true
