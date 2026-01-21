@@ -346,8 +346,8 @@ func createGCSReader(ctx context.Context, gcsPath string, threshold int) (io.Rea
 	var prefix string
 	if len(parts) > 1 {
 		prefix = parts[1]
-		// Ensure prefix ends with / for directory-style matching
-		if !strings.HasSuffix(prefix, "/") {
+		// Ensure prefix ends with / for directory-style matching (but only if non-empty)
+		if prefix != "" && !strings.HasSuffix(prefix, "/") {
 			prefix = prefix + "/"
 		}
 	}
