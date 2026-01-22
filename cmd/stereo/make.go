@@ -150,5 +150,16 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 
 	cmd.Env = append(cmd.Env, fmt.Sprintf("MELANGE_EXTRA_OPTS=%s", extra))
 
+	cleanup := func() {
+		if err := cleanupTokens(dir, pkg); err != nil {
+			log.Printf("failed to clean tokens for %s: %v", pkg, err)
+		}
+	}
+	defer cleanup()
+
+	if err := ensureTokens(ctx, dir, pkg, subcmd); err != nil {
+		return err
+	}
+
 	return cmd.Run()
 }
