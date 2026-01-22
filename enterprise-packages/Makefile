@@ -83,14 +83,6 @@ clean-cache:
 apk-token:
 	chainctl auth login --audience apk.cgr.dev
 
-${CACHEDIR}/.libraries_token.txt: cache
-	tmpf=$(shell mktemp); \
-	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
-	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
-
-.PHONY: lib-token
-lib-token: ${CACHEDIR}/.libraries_token.txt
-
 .PHONY: fetch-kernel
 fetch-kernel:
 	rm -rf kernel/$(ARCH)

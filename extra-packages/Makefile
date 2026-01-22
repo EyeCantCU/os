@@ -127,15 +127,6 @@ kernel/%/vmlinuz: kernel/%/linux.apk
 		[ -f $$tmpd/boot/vmlinuz ] && mv $$tmpd/boot/* $(dir $@) && \
 		rc=$$?; rm -Rf $$tmpd; exit $$rc
 
-${CACHEDIR}/.libraries_token.txt: cache
-	tmpf=$(shell mktemp); \
-	chainctl auth login --audience libraries.cgr.dev; \
-	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
-	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
-
-.PHONY: lib-token
-lib-token: ${CACHEDIR}/.libraries_token.txt
-
 yamls := $(wildcard *.yaml)
 pkgs := $(subst .yaml,,$(yamls))
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
