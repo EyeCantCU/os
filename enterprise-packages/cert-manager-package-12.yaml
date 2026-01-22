@@ -1,16 +1,23 @@
+# Provides Debian CA certificates for cert-manager's trust-manager to inject into pods.
+# How it works: Extracts ca-certificates from Debian repos, converts to JSON, packages with
+# copyandmaybepause binary. trust-manager runs this as init container to inject CA bundles
+# into application containers, enabling them to trust the same CAs as Debian systems.
+# This reverse-engineers upstream's GitHub Actions build process.
+# Ref: https://github.com/cert-manager/trust-manager/tree/main/trust-packages
 package:
   name: cert-manager-package-12
-  version: 20230311.12.1.3 # Tracks Debian 12 (Bookworm) ca-certificates version (20230311-deb12u1.X)
+  version: 20230311.12.1.3 # Debian 12 (Bookworm) ca-certificates (20230311-deb12u1.X)
   epoch: 0
-  description: cert-manager trust package with Debian 12 (Bookworm) CA certificates
+  description: Debian 12 CA bundle for cert-manager trust-manager init containers
   copyright:
     - license: Apache-2.0
   dependencies:
     runtime:
       - tini
-      - trust-package
+      - trust-package # Provides copyandmaybepause binary
 
 var-transforms:
+  # K8s pod labels cannot contain '+', transform numeric version to Debian format
   - from: ${{package.version}}
     match: '^(\d+)\.(\d+)\.(\d+)\.(\d+)$'
     replace: '${1}-deb${2}u${3}.${4}'
@@ -28,7 +35,9 @@ environment:
       - xz
 
 pipeline:
-  # Check version drift with upstream - fail build if mismatch
+  # Why: cert-manager's trust-manager expects packages to match their upstream builds exactly.
+  # This check ensures our package version stays synchronized with what trust-manager expects,
+  # preventing compatibility issues in production deployments.
   - runs: |
       set -euo pipefail
 
@@ -38,7 +47,7 @@ pipeline:
         cut -d'=' -f2 | \
         tr -d ' ')
 
-      # Convert our hyphen-based version to plus for comparison
+      # Why convert format: Our package uses dots for K8s compatibility, upstream uses plus
       OUR_VERSION=$(echo "${{vars.debian-version}}" | sed 's/-deb/+deb/')
 
       # Compare with upstream version
@@ -51,14 +60,14 @@ pipeline:
       fi
       echo "Version matches upstream: $UPSTREAM_VERSION"
 
-  # Create symlink to copyandmaybepause from trust-package runtime dependency
+  # Symlink copyandmaybepause at root level where upstream expects it
+  # Source: https://github.com/cert-manager/trust-manager/tree/main/trust-packages/debian
   - runs: |
       mkdir -p ${{targets.destdir}}
-      # Create symlink to the binary provided by trust-package
       ln -s /usr/bin/copyandmaybepause ${{targets.destdir}}/copyandmaybepause
 
-  # Fetch and process the Debian ca-certificates package
-  # Replicates upstream: make/debian-trust-package-fetch.sh
+  # Replicate upstream's exact process from make/debian-trust-package-fetch.sh
+  # Source: https://github.com/cert-manager/trust-manager/blob/main/make/debian-trust-package-fetch.sh
   - name: Process Debian CA certificates
     runs: |
       set -euo pipefail
@@ -125,20 +134,19 @@ test:
         - go
         - build-base
   pipeline:
-    # Validate JSON bundle with trust-manager's official validator
+    # Build trust-manager's validator tool (not part of our package) to verify
+    # our JSON bundle format matches what trust-manager expects in production
+    # Source: https://github.com/cert-manager/trust-manager/blob/main/cmd/validate-trust-package/main.go
     - name: Validate with trust-manager validator
       runs: |
         set -euo pipefail
+        # Clone and build external validator tool for testing only
         git clone --depth 1 --branch main https://github.com/cert-manager/trust-manager /tmp/trust-manager
         cd /tmp/trust-manager
 
-        # Build the validator
         go build -o /tmp/validate-trust-package ./cmd/validate-trust-package
-
-        # Validate the JSON bundle
         /tmp/validate-trust-package < /debian-package/cert-manager-package-debian.json
 
-        # Cleanup
         rm -rf /tmp/trust-manager /tmp/validate-trust-package
     - name: Verify JSON bundle structure
       runs: |
