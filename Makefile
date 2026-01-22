@@ -18,12 +18,6 @@ DOCKER_PLATFORM_ARG := $(shell \
   echo "--platform=linux/$$darch" \
 )
 
-ifeq (${TMPDIR}, )
-	CACHEDIR = /tmp/melange-cache
-else
-	CACHEDIR = ${TMPDIR}/melange-cache
-endif
-
 pkgs := $(shell $(STEREO) make targets)
 
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
@@ -139,19 +133,6 @@ clean:
 	make -C extra-packages clean
 	make -C enterprise-packages clean
 	$(MAKE) clean-archive
-
-.PHONY: cache
-cache:
-	mkdir -p ${CACHEDIR}
-
-${CACHEDIR}/.libraries_token.txt: cache
-	tmpf=$(shell mktemp); \
-	chainctl auth login --audience libraries.cgr.dev; \
-	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
-	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
-
-.PHONY: lib-token
-lib-token: ${CACHEDIR}/.libraries_token.txt
 
 %.rsa:
 	make -C $(dir $@) $(notdir $@)
