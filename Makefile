@@ -36,10 +36,6 @@ test_debug_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(test_debug_targets): test-debug/%: $(STEREO)
 	$(STEREO) make test-debug $*
 
-compile_targets = $(foreach name,$(pkgs),compile/$(name))
-$(compile_targets): compile/%: $(STEREO)
-	@$(STEREO) make compile $*
-
 package-list: $(STEREO)
 	$(STEREO) make targets
 

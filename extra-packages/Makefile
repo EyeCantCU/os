@@ -176,15 +176,6 @@ packages/$(ARCH)/%.apk: cache $(KEY) $(QEMU_KERNEL_DEP)
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) --source-dir ./$(pkgname)/
 
-# Please do not print any additional content via this target
-# so that we can parse output directly with jq
-compile_targets = $(foreach name,$(pkgs),compile/$(name))
-$(compile_targets): compile/%:
-	@$(MAKE) $(KEY) >/dev/null 2>&1
-	@mkdir -p ./$(*)/
-	$(eval yamlfile := $*.yaml)
-	@$(MELANGE) compile $(yamlfile) $(MELANGE_OPTS) --source-dir ./$(*)/
-
 .PHONY: dev-container
 dev-container:
 	docker run --pull=always --privileged --rm -it \
