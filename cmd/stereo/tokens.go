@@ -52,6 +52,8 @@ func compilePkgConfig(ctx context.Context, sourceDir string) (*config.Configurat
 
 	bc, err := build.New(
 		ctx,
+		build.WithConfigFileRepositoryURL("unused"),
+		build.WithConfigFileRepositoryCommit("unused"),
 		build.WithConfig(configPath),
 		build.WithSourceDir(sourceDir),
 		build.WithPipelineDir(pipelineDir),
