@@ -1,0 +1,215 @@
+package:
+  name: emsdk
+  version: "4.0.23"
+  epoch: 0
+  description: Emscripten SDK - Toolchain for compiling C/C++ to WebAssembly
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - binaryen
+      - build-base
+      - ca-certificates-bundle
+      - clang
+      - cmake
+      - coreutils
+      - curl
+      - dash-binsh
+      - git
+      - git-lfs
+      - libxml2
+      - llvm-lld
+      - make
+      - nodejs
+      - npm
+      - openssh-client
+      - py3-pip
+      - python3
+      - unzip
+      - wget
+      - zip
+
+vars:
+  java-version: "11" # Upstream ships with jdk 11
+
+environment:
+  contents:
+    packages:
+      - bash
+      - binaryen
+      - build-base
+      - busybox
+      - clang
+      - cmake
+      - jq
+      - nodejs
+      - npm
+      - openjdk-${{vars.java-version}}-default-jdk
+      - python3
+      - wolfi-base
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/emscripten-core/emsdk
+      tag: ${{package.version}}
+      expected-commit: c0bb220cb6e6f4e0fabb6f6db9efd53390ef5e56
+
+  - runs: |
+      COMMIT_HASH=$(jq -r '.releases["${{package.version}}"]' emscripten-releases-tags.json)
+
+      # Install Emscripten toolchain
+      ./emsdk install "releases-${COMMIT_HASH}-64bit"
+      ./emsdk activate "releases-${COMMIT_HASH}-64bit"
+
+      # Install emsdk to /usr/lib/emsdk (following Dockerfile approach)
+      mkdir -p "${{targets.destdir}}"/usr/lib/emsdk
+
+      # Copy essential files for emsdk to work
+      cp emsdk emsdk.py "${{targets.destdir}}"/usr/lib/emsdk/
+      cp emsdk_manifest.json emscripten-releases-tags.json "${{targets.destdir}}"/usr/lib/emsdk/
+      cp legacy-emscripten-tags.txt legacy-binaryen-tags.txt llvm-tags-64bit.txt "${{targets.destdir}}"/usr/lib/emsdk/
+      cp emsdk_env.sh "${{targets.destdir}}"/usr/lib/emsdk/
+
+  - runs: |
+      # Generate config by compiling a test program (Dockerfile approach)
+      echo "int main() { return 0; }" > hello.c
+      ./upstream/emscripten/emcc -c hello.c
+      rm -f hello.*
+      mv ./upstream "${{targets.destdir}}"/usr/lib/emsdk
+
+      # Clean up unnecessary files (from Dockerfile)
+      find "${{targets.destdir}}"/usr/lib/emsdk -name "tests" -type d -exec rm -rf {} +
+      find "${{targets.destdir}}"/usr/lib/emsdk -name "__pycache__" -type d -exec rm -rf {} +
+
+subpackages:
+  - name: emsdk-oci-entrypoint
+    description: OCI entrypoint for emsdk container images
+    dependencies:
+      runtime:
+        - emsdk
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/lib/emsdk/docker/
+          install -Dm755 docker/entrypoint.sh "${{targets.subpkgdir}}"/usr/lib/emsdk/docker/entrypoint.sh
+    test:
+      environment:
+        contents:
+          packages:
+            - python3
+      pipeline:
+        - name: "Test OCI entrypoint"
+          runs: |
+            set -euo pipefail
+            stat /usr/lib/emsdk/docker/entrypoint.sh
+            test -x /usr/lib/emsdk/docker/entrypoint.sh
+
+  - name: emsdk-compat
+    description: Compatibility package providing emsdk at /emsdk (Docker image compatible)
+    dependencies:
+      runtime:
+        - emsdk
+    pipeline:
+      - runs: |
+          # Create symlink from /emsdk to /usr/lib/emsdk (Docker compatible path)
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/lib/emsdk "${{targets.subpkgdir}}"/emsdk
+    test:
+      environment:
+        contents:
+          packages:
+            - python3
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - name: "Test Docker-compatible paths"
+          runs: |
+            set -euo pipefail
+
+            # Verify /emsdk symlink exists and points to correct location
+            stat /emsdk
+            test -L /emsdk
+            readlink /emsdk | grep -F "/usr/lib/emsdk"
+
+            # Verify the symlink target is accessible
+            stat /emsdk/emsdk
+            stat /emsdk/upstream/emscripten/emcc
+
+test:
+  environment:
+    contents:
+      packages:
+        - python3
+        - ${{package.name}}-compat
+  pipeline:
+    - name: "Test emsdk installation"
+      runs: |
+        set -euo pipefail
+        export PATH="/usr/lib/emsdk:/usr/lib/emsdk/upstream/emscripten:$PATH"
+
+        # Test emsdk command
+        emsdk list | grep -F "INSTALLED"
+
+        # Verify emcc version and configuration
+        emcc --version 2>&1 | grep -F "${{package.version}}"
+        em++ --version 2>&1 | grep -F "${{package.version}}"
+        emar --version 2>&1 | grep -F "LLVM version"
+
+        # Verify emscripten tools exist
+        stat /usr/lib/emsdk/upstream/emscripten/emcc
+        stat /usr/lib/emsdk/upstream/emscripten/em++
+
+        # Verify LLVM/Clang is installed
+        stat /usr/lib/emsdk/upstream/bin/clang
+    - name: "Test emcc version"
+      runs: |
+        set -euo pipefail
+        export PATH="/usr/lib/emsdk:/usr/lib/emsdk/upstream/emscripten:$PATH"
+
+        # Verify emcc reports the correct version
+        emcc --version 2>&1 | grep -F "${{package.version}}"
+    - name: "Test WebAssembly compilation"
+      runs: |
+        set -euo pipefail
+        export PATH="/usr/lib/emsdk:/usr/lib/emsdk/upstream/emscripten:$PATH"
+
+        # Compile to WebAssembly
+        emcc hello-world.c
+
+        # Verify output was created
+        stat a.out.js
+        stat a.out.wasm
+
+        # Run with emsdk's bundled node
+        node a.out.js | grep -F "hello, world!"
+    - name: "Test library linking"
+      runs: |
+        set -euo pipefail
+        export PATH="/usr/lib/emsdk:/emsdk/upstream/emscripten:$PATH"
+        cat > main.cpp <<'EOF'
+        #include <iostream>
+        int add(int,int);
+        int main(){ std::cout << add(2,3) << std::endl; }
+        EOF
+        em++ -c add.cpp -o add.o
+        emar rcs libadd.a add.o
+        emar t libadd.a | grep -F "add.o"
+
+        # Verify output was created
+        stat add.cpp
+        stat add.o
+
+        # Compile to WebAssembly
+        em++ main.cpp -L. -ladd -o main.js -sENVIRONMENT=node -sEXIT_RUNTIME=1
+        stat main.js
+        stat main.wasm
+
+        # Run with emsdk's bundled node
+        node main.js | grep -F 5
+
+update:
+  enabled: true
+  github:
+    identifier: emscripten-core/emsdk
+    use-tag: true

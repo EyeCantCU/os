@@ -1,0 +1,165 @@
+package:
+  name: chart-istio
+  version: "1.28.3"
+  epoch: 0
+  description: Istio Helm charts
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - yq
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/istio/istio
+      tag: ${{package.version}}
+      expected-commit: 4c1f845d839e9086ee85ad9337f2647492322eb4
+
+  # Istio's source Chart.yaml files contain placeholder version "1.0.0" with a comment:
+  #   "This version is never actually shipped. istio/release-builder will replace it at build-time"
+  #
+  # The official release process uses istio/release-builder to stamp versions:
+  #   https://github.com/istio/release-builder/blob/master/pkg/build/helm.go
+  #
+  # Specifically, stampChartForRelease() sets:
+  #   - chartFile.Version = manifest.Version
+  #   - chartFile.AppVersion = manifest.Version
+  #
+  # We replicate this minimal stamping here.
+  - runs: |
+      for dir in \
+        manifests/charts/base \
+        manifests/charts/gateway \
+        manifests/charts/istio-cni \
+        manifests/charts/ztunnel \
+        manifests/charts/istio-control/istio-discovery
+      do
+        yq -i '.version = "${{package.version}}"' "$dir/Chart.yaml"
+        yq -i '.appVersion = "${{package.version}}"' "$dir/Chart.yaml"
+      done
+
+      # Istio values.yaml files place all defaults under _internal_defaults_do_not_set.
+      # At render time, zzz_profile.yaml merges user values over these defaults.
+      # However, our SDK uses JSON Patch "replace" operations which require target paths
+      # to exist. We add empty top-level keys so the SDK can patch them, and Istio's
+      # mustMergeOverwrite will correctly use our values over the internal defaults.
+
+      # chart-istio-cni: add top-level image key
+      yq -i '. = {"image": ""} + .' manifests/charts/istio-cni/values.yaml
+
+      # chart-istio-istiod: add top-level image and global.proxy/proxy_init keys
+      yq -i '. = {"image": "", "global": {"proxy": {"image": ""}, "proxy_init": {"image": ""}}} + .' manifests/charts/istio-control/istio-discovery/values.yaml
+
+      # chart-istio-ztunnel: add top-level image key
+      yq -i '. = {"image": ""} + .' manifests/charts/ztunnel/values.yaml
+
+# Explicit subpackages (not using range) because each chart has different
+# image configurations and test ignores that don't fit a common template.
+subpackages:
+  - name: chart-istio-base
+    description: Istio base Helm chart (CRDs)
+    pipeline:
+      - uses: charts/package
+        with:
+          chart-path: manifests/charts/base
+          chart-version: ${{package.version}}
+          # Base chart contains only CRDs, no images
+          test: |
+            cases:
+              - name: default
+    test:
+      pipeline:
+        - uses: test/chart-standards
+
+  - name: chart-istio-gateway
+    description: Istio gateway Helm chart
+    pipeline:
+      - uses: charts/package
+        with:
+          chart-path: manifests/charts/gateway
+          chart-version: ${{package.version}}
+          # Gateway uses "image: auto" for sidecar injection
+          test: |
+            ignore:
+              - auto
+            cases:
+              - name: default
+    test:
+      pipeline:
+        - uses: test/chart-standards
+
+  - name: chart-istio-cni
+    description: Istio CNI Helm chart
+    pipeline:
+      - uses: charts/package
+        with:
+          chart-path: manifests/charts/istio-cni
+          chart-version: ${{package.version}}
+          images: |
+            install-cni:
+              values:
+                image: ${ref}
+          test: |
+            cases:
+              - name: default
+                images: [install-cni]
+    test:
+      pipeline:
+        - uses: test/chart-standards
+
+  - name: chart-istio-istiod
+    description: Istio control plane Helm chart
+    pipeline:
+      - uses: charts/package
+        with:
+          chart-path: manifests/charts/istio-control/istio-discovery
+          chart-version: ${{package.version}}
+          images: |
+            pilot:
+              values:
+                image: ${ref}
+            proxy:
+              values:
+                global:
+                  proxy:
+                    image: ${ref}
+            proxy-init:
+              values:
+                global:
+                  proxy_init:
+                    image: ${ref}
+          test: |
+            cases:
+              - name: default
+                images: [pilot, proxy, proxy-init]
+    test:
+      pipeline:
+        - uses: test/chart-standards
+
+  - name: chart-istio-ztunnel
+    description: Istio ztunnel Helm chart
+    pipeline:
+      - uses: charts/package
+        with:
+          chart-path: manifests/charts/ztunnel
+          chart-version: ${{package.version}}
+          images: |
+            ztunnel:
+              values:
+                image: ${ref}
+          test: |
+            cases:
+              - name: default
+                images: [ztunnel]
+    test:
+      pipeline:
+        - uses: test/chart-standards
+
+update:
+  enabled: true
+  github:
+    identifier: istio/istio
+    use-tag: true
