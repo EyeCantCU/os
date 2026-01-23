@@ -1,0 +1,125 @@
+package:
+  name: truffleruby
+  description: High perf implementation of Ruby built with GraalVM ${{vars.major-version}}
+  version: 33.0.1
+  epoch: 0
+  options:
+    no-depends: true
+    no-provides: true
+  dependencies:
+    # Dependencies are noted here:
+    # https://github.com/truffleruby/truffleruby?tab=readme-ov-file#dependencies
+    runtime:
+      - bash
+      - ca-certificates
+      - gcc
+      - glibc-dev
+      - glibc-locale-en
+      - make
+      - openssl-dev
+      - yaml-dev
+      - zlib-dev
+
+vars:
+  graalvm-version: '25'
+  # Set here: https://github.com/truffleruby/truffleruby/blob/graal-TRUFFLERUBY_VERSION/mx.truffleruby/suite.py
+  mx-version: '7.68.4'
+  ruby-version: '3.3'
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - cmake
+      - graalvm-${{vars.graalvm-version}}-ce
+      - graalvm-${{vars.graalvm-version}}-ce-jmods
+      - jq
+      - mx~${{vars.mx-version}}
+      - perl
+      - ruby-${{vars.ruby-version}}
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.graalvm-version}}-graalvm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 44e079ec2dd2ac8046a7aac5bf5a141e00052665
+      tag: graal-${{package.version}}
+      repository: https://github.com/truffleruby/truffleruby
+
+  - uses: patch
+    with:
+      patches: |
+        dangling-pointers.patch
+
+  - runs: |
+      set -oue pipefail
+
+      # Validate GraalVM version
+      graalvm_version=$(jq -r '.jdks["labsjdk-ce-latest"].version
+                                | capture("ce-(?<major>[0-9]+)")
+                                | .major' ./common.json)
+      package_graalvm_version="${{vars.graalvm-version}}"
+      if [ "$package_graalvm_version" != "$graalvm_version" ]; then
+        echo "Invalid GraalVM version!"
+        echo "GraalVM version used by TruffleRuby: $graalvm_version"
+        echo "GraalVM version used by package: $package_graalvm_version"
+        echo "Please update vars.graalvm-version to $graalvm_version."
+        exit 1
+      fi
+
+      # Validate Ruby version
+      ruby_version="$(cat ./.ruby-version)"
+      package_ruby_version="${{vars.ruby-version}}"
+      if [ "${ruby_version#*"$package_ruby_version"}" = "$ruby_version" ]; then
+        echo "Invalid Ruby version!"
+        echo "Ruby version used by TruffleRuby: $ruby_version"
+        echo "Ruby version used by package: $package_ruby_version"
+        echo "Please update vars.ruby-version."
+        exit 1
+      fi
+
+      # Clean tree
+      mx clean --aggressive
+
+      # Build TruffleRuby
+      mx --env=native build
+
+      # Install TruffleRuby
+      mkdir -p ${{targets.contextdir}}/usr/share/truffleruby
+      if [ -d mxbuild/linux-${{build.goarch}} ]; then
+        cp -r mxbuild/linux-${{build.goarch}}/TRUFFLERUBY_NATIVE_STANDALONE/* \
+          ${{targets.contextdir}}/usr/share/truffleruby
+      else
+        cp -r mxbuild/linux-${{build.arch}}/TRUFFLERUBY_NATIVE_STANDALONE/* \
+          ${{targets.contextdir}}/usr/share/truffleruby
+      fi
+
+      # Symlink binaries provided by TruffleRuby
+      mkdir -p ${{targets.contextdir}}/usr/bin
+      for path in ${{targets.contextdir}}/usr/share/truffleruby/bin/*; do
+        bin=$(basename $path)
+        ln -s ../share/truffleruby/bin/$bin ${{targets.contextdir}}/usr/bin/$bin
+      done
+
+  - uses: strip
+
+update:
+  enabled: true
+  git:
+    strip-prefix: graal-
+    tag-filter-prefix: graal-
+
+test:
+  environment:
+    environment:
+      LANG: "en_US.UTF-8"
+  pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: /usr/share/truffleruby/lib/sulong/native/lib
+    - runs: |
+        cat > hello.rb <<'EOF'
+        puts 'Hello, TruffleRuby!'
+        EOF
+        truffleruby ./hello.rb | grep "Hello, TruffleRuby!"
