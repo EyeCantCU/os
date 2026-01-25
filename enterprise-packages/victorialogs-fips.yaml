@@ -1,0 +1,120 @@
+package:
+  name: victorialogs-fips
+  version: "1.43.1"
+  epoch: 0
+  description: VictoriaLogs is a fast, easy to use database for logs designed to efficiently manage terabytes of log data with high performance and reliability.
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - nodejs
+      - nofips-node
+      - npm
+      - python3
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 66d23fbb3d16ba8caa6d7e77161a2a247f5d5dfc
+      repository: https://github.com/VictoriaMetrics/VictoriaLogs
+      tag: v${{package.version}}
+
+  - working-directory: app/vmui/packages/vmui
+    runs: |
+      npm install
+      npm install -g tsx
+      npm run gen:logsql-pipes
+      npm run build
+
+  - runs: |
+      rm -rf app/vlselect/vmui/* && mv app/vmui/packages/vmui/build/* app/vlselect/vmui && rm -rf app/vlselect/vmui/dashboards
+
+  - uses: go/build
+    with:
+      packages: ./app/victoria-logs
+      output: victoria-logs
+      go-package: go-fips
+      ldflags: -X github.com/VictoriaMetrics/VictoriaMetrics/lib/buildinfo.Version=victoria-logs-$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" "+%Y-%m-%dT%H:%M:%SZ")-${{package.version}}
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package to place binaries in the location expected by upstream Dockerfile
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/
+          ln -sf ./usr/bin/victoria-logs ${{targets.contextdir}}/victoria-logs-prod
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+
+test:
+  environment:
+    environment:
+      TERM: xterm
+      DISPLAY: ":99"
+      CYPRESS_CACHE_FOLDER: /tmp/cypress-cache
+    contents:
+      packages:
+        - curl
+        - nodejs
+        - npm
+        - xvfb
+        - xkeyboard-config
+        - xkbcomp
+        - chromium
+        - font-opensans
+        - ncurses
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+    - name: Test the victoria-logs binary
+      runs: |
+        victoria-logs -version | grep ${{package.version}}
+    - uses: test/tw/help-check
+      with:
+        bins: victoria-logs
+    - name: "Test victoria-logs service"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          Xvfb :99 -screen 0 1280x1024x24 2>/dev/null &
+          npm install && npx cypress install
+        start: victoria-logs -httpListenAddr=:9428
+        post: |
+          # Test vmui static assets are served
+          curl -sf http://localhost:9428/select/vmui/favicon.svg | grep -q "svg"
+          curl -sf http://localhost:9428/select/vmui/manifest.json | grep -q "name"
+
+          # Test health endpoint
+          curl -sf http://localhost:9428/health | grep -q "OK"
+
+          # Test log ingestion endpoint accepts data
+          curl -sf -X POST "http://localhost:9428/insert/jsonline" \
+            -H "Content-Type: application/json" \
+            -d '{"_msg":"test log message","level":"info"}'
+
+          # Verify ingested log can be queried (query endpoint returns JSON lines)
+          sleep 1
+          curl -sf "http://localhost:9428/select/logsql/query?query=test&limit=10" | grep -q "test log message"
+
+          # Test hits endpoint returns proper JSON with timestamps
+          curl -sf "http://localhost:9428/select/logsql/hits?query=*&start=1d" | grep -q "timestamps"
+
+          # Run Cypress e2e tests for vmui
+          npm run cy:run && CYPRESS_EXIT=0 || CYPRESS_EXIT=$?
+          pkill -f chromium 2>/dev/null || true
+          pkill -f Xvfb 2>/dev/null || true
+          exit ${CYPRESS_EXIT}
+        expected_output: |
+          started server at http://0.0.0.0:9428/
