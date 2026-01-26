@@ -60,6 +60,7 @@ environment:
       - pcre2-dev
       - php-${{vars.php-version}}
       - php-${{vars.php-version}}-curl
+      - pkgconf
       - postgresql-${{vars.postgres-version}}-dev
       - sqlite-dev
       - unixodbc-dev
@@ -115,6 +116,40 @@ pipeline:
       cp /tmp/zabbix_server src/zabbix_server/zabbix_server
       cp -r /tmp/postgresql_schema/* database/postgresql/
       cp -r /tmp/sqlite3_schema/* database/sqlite3/
+
+      # Save proxy binary and schema files to /tmp (preserved across make clean)
+      cp src/zabbix_proxy/zabbix_proxy /tmp/zabbix_proxy
+      # Re-save schema files (they were already in /tmp but make clean in Phase 1 may have modified)
+      cp -r database/postgresql /tmp/postgresql_schema_final
+      cp -r database/sqlite3 /tmp/sqlite3_schema_final
+
+      make clean
+
+  # =============================================================
+  # Phase 3: Build agent utilities (zabbix_get and zabbix_sender)
+  # These are lightweight client tools with no database dependencies
+  # Use minimal configure options - these tools only need OpenSSL and pcre2
+  # =============================================================
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --enable-agent \
+        --enable-ipv6 \
+        --with-openssl \
+        --with-libpcre2 \
+        --sysconfdir=/etc/zabbix
+
+  - runs: |
+      # Build the required libraries first, then build zabbix_get and zabbix_sender
+      # These tools depend on various internal Zabbix libraries (zbxcomms, zbxjson, etc.)
+      make -j$(nproc) -C src/libs
+      make -j$(nproc) -C src/zabbix_get
+      make -j$(nproc) -C src/zabbix_sender
+
+      # Restore proxy binary and schema files from /tmp
+      cp /tmp/zabbix_proxy src/zabbix_proxy/zabbix_proxy
+      cp -r /tmp/postgresql_schema_final/* database/postgresql/
+      cp -r /tmp/sqlite3_schema_final/* database/sqlite3/
 
   # =============================================================
   # Create shared runtime directories (used by both server and proxy)
@@ -504,6 +539,92 @@ subpackages:
             # Verify directories from zabbix-proxy-sqlite3 package exist
             stat /var/lib/zabbix/db_data
             stat /var/lib/zabbix/enc_internal
+
+  # =============================================================
+  # Zabbix Agent Utilities (zabbix_get and zabbix_sender)
+  # These are lightweight client tools with no database dependencies
+  # =============================================================
+  - name: zabbix-get-${{vars.major-minor}}-fips
+    description: FIPS-enabled Zabbix client utility for retrieving data from Zabbix agents
+    dependencies:
+      provides:
+        - zabbix-get-fips=${{package.full-version}}
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          install -Dm755 src/zabbix_get/zabbix_get "${{targets.contextdir}}/usr/bin/zabbix_get"
+    test:
+      environment:
+        contents:
+          packages:
+            - openssl-fips-test
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: zabbix_get
+        - name: Check FIPS OpenSSL
+          runs: |
+            openssl-fips-test
+        - name: Verify no non-FIPS crypto libraries
+          runs: |
+            # Verify the binary does NOT link against non-FIPS crypto libraries
+            if ldd /usr/bin/zabbix_get | grep -E "(libsodium|libgcrypt|libgnutls)"; then
+              echo "ERROR: zabbix_get should not link to non-FIPS crypto libraries"
+              exit 1
+            fi
+            echo "Verified: no non-FIPS crypto libraries linked"
+        - name: Test version output
+          runs: |
+            zabbix_get -V 2>&1 | grep -F "zabbix_get (Zabbix)"
+        - name: Test basic functionality
+          runs: |
+            # Test TLS options are available
+            zabbix_get --help 2>&1 | grep -F "tls"
+
+  - name: zabbix-sender-${{vars.major-minor}}-fips
+    description: FIPS-enabled Zabbix client utility for sending values to Zabbix server
+    dependencies:
+      provides:
+        - zabbix-sender-fips=${{package.full-version}}
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          install -Dm755 src/zabbix_sender/zabbix_sender "${{targets.contextdir}}/usr/bin/zabbix_sender"
+    test:
+      environment:
+        contents:
+          packages:
+            - openssl-fips-test
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: zabbix_sender
+        - name: Check FIPS OpenSSL
+          runs: |
+            openssl-fips-test
+        - name: Verify no non-FIPS crypto libraries
+          runs: |
+            # Verify the binary does NOT link against non-FIPS crypto libraries
+            if ldd /usr/bin/zabbix_sender | grep -E "(libsodium|libgcrypt|libgnutls)"; then
+              echo "ERROR: zabbix_sender should not link to non-FIPS crypto libraries"
+              exit 1
+            fi
+            echo "Verified: no non-FIPS crypto libraries linked"
+        - name: Test version output
+          runs: |
+            zabbix_sender -V 2>&1 | grep -F "zabbix_sender (Zabbix)"
+        - name: Test basic functionality
+          runs: |
+            # Test TLS options are available
+            zabbix_sender --help 2>&1 | grep -F "tls"
+            # Test input file format validation (create empty temp file)
+            touch /tmp/test_input.txt
+            # zabbix_sender should accept -i flag for input files
+            zabbix_sender --help 2>&1 | grep -F -- "-i"
 
   # =============================================================
   # Zabbix Web Interface with Nginx and PostgreSQL
