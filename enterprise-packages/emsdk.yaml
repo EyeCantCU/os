@@ -1,33 +1,26 @@
 package:
   name: emsdk
   version: "4.0.23"
-  epoch: 1
+  epoch: 2
   description: Emscripten SDK - Toolchain for compiling C/C++ to WebAssembly
   copyright:
     - license: MIT
+  # Prevent emscripten's WebAssembly-specific pkg-config files from being
+  # advertised as system library providers (egl, glesv2, glfw3, sdl are
+  # WebAssembly implementations, not native system libraries)
+  options:
+    no-provides: true
   dependencies:
     runtime:
       - bash
       - binaryen
-      - build-base
       - ca-certificates-bundle
       - clang
-      - cmake
       - coreutils
-      - curl
-      - git
-      - git-lfs
-      - libxml2
-      - llvm-lld
-      - make
+      - lld
+      - llvm
       - nodejs
-      - npm
-      - openssh-client
-      - py3-pip
       - python3
-      - unzip
-      - wget
-      - zip
 
 vars:
   java-version: "11" # Upstream ships with jdk 11
@@ -42,6 +35,8 @@ environment:
       - clang
       - cmake
       - jq
+      - lld
+      - llvm
       - nodejs
       - npm
       - openjdk-${{vars.java-version}}-default-jdk
@@ -79,8 +74,24 @@ pipeline:
       mv ./upstream "${{targets.destdir}}"/usr/lib/emsdk
 
       # Clean up unnecessary files (from Dockerfile)
-      find "${{targets.destdir}}"/usr/lib/emsdk -name "tests" -type d -exec rm -rf {} +
-      find "${{targets.destdir}}"/usr/lib/emsdk -name "__pycache__" -type d -exec rm -rf {} +
+      find "${{targets.destdir}}"/usr/lib/emsdk \( -name "test" -o -name "tests" \) -type d -exec rm -rf {} + || true
+      find "${{targets.destdir}}"/usr/lib/emsdk -name "__pycache__" -type d -exec rm -rf {} + || true
+
+  # Remove vendored LLVM binaries and replace with symlinks to system LLVM
+  - runs: |
+      LLVM_BIN="${{targets.destdir}}/usr/lib/emsdk/upstream/bin"
+      SYSTEM_LLVM="/usr/bin"
+
+      # Remove all vendored LLVM/clang binaries and libraries
+      rm -f "$LLVM_BIN"/clang* "$LLVM_BIN"/lld* "$LLVM_BIN"/ld.lld "$LLVM_BIN"/ld64.lld \
+            "$LLVM_BIN"/wasm-ld "$LLVM_BIN"/llvm-* "$LLVM_BIN"/libclang.so*
+
+      # Create symlinks to system LLVM for required tools
+      for tool in clang clang++ lld ld.lld wasm-ld \
+                  llvm-ar llvm-as llvm-dis llvm-dwarfdump llvm-dwp llvm-nm \
+                  llvm-objcopy llvm-ranlib llvm-readobj llvm-size llvm-strip llvm-symbolizer; do
+        ln -sf "$SYSTEM_LLVM/$tool" "$LLVM_BIN/$tool"
+      done
 
 subpackages:
   - name: emsdk-oci-entrypoint
@@ -160,8 +171,9 @@ test:
         stat /usr/lib/emsdk/upstream/emscripten/emcc
         stat /usr/lib/emsdk/upstream/emscripten/em++
 
-        # Verify LLVM/Clang is installed
-        stat /usr/lib/emsdk/upstream/bin/clang
+        # Verify LLVM symlinks point to system LLVM
+        readlink /usr/lib/emsdk/upstream/bin/clang | grep -F "/usr/bin"
+        readlink /usr/lib/emsdk/upstream/bin/wasm-ld | grep -F "/usr/bin"
     - name: "Test emcc version"
       runs: |
         set -euo pipefail
