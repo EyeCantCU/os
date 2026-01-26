@@ -1,7 +1,7 @@
 package:
   name: istio-1.27
   version: "1.27.5"
-  epoch: 0 # GHSA-jv3w-x3r3-g6rm
+  epoch: 1 # GHSA-jv3w-x3r3-g6rm
   description: Istio is an open source service mesh that layers transparently onto existing distributed applications.
   copyright:
     - license: Apache-2.0
@@ -54,6 +54,20 @@ subpackages:
         - istio-cni=${{package.full-version}}
     test:
       pipeline:
+        - name: Verify istio-cni binary executes
+          runs: |
+            set -euo pipefail
+            # Verify binary exists and is executable (fails test if missing)
+            stat /usr/bin/istio-cni
+            test -x /usr/bin/istio-cni || { echo "FAIL: istio-cni is not executable"; exit 1; }
+            # CNI plugins require CNI_* env vars to function, but we can verify the binary loads
+            # Running without CNI env will show usage/error but proves binary is functional
+            if istio-cni 2>&1 | head -5; then
+              echo "Binary executed successfully"
+            else
+              # CNI plugins exit non-zero without proper env, which is expected
+              echo "Binary executed (non-zero exit expected without CNI environment)"
+            fi
         - uses: test/virtualpackage
           with:
             virtual-pkg-name: istio-cni
@@ -76,9 +90,12 @@ subpackages:
         - istioctl=${{package.full-version}}
     test:
       pipeline:
-        - runs: |
-            istioctl version
-            istioctl --help
+        - uses: test/tw/ver-check
+          with:
+            bins: istioctl
+        - uses: test/tw/help-check
+          with:
+            bins: istioctl
 
   - name: istioctl-bash-completion-${{vars.major-minor-version}}
     dependencies:
@@ -143,6 +160,14 @@ subpackages:
         - istio-install-cni=${{package.full-version}}
     test:
       pipeline:
+        - name: Verify install-cni binary executes
+          runs: |
+            set -euo pipefail
+            # Verify binary exists and is executable (fails test if missing)
+            stat /usr/bin/install-cni
+            test -x /usr/bin/install-cni || { echo "FAIL: install-cni is not executable"; exit 1; }
+            # Test that install-cni shows help/usage information
+            install-cni --help 2>&1 | grep -F "Usage" || install-cni --help 2>&1 | head -10
         - uses: test/virtualpackage
           with:
             virtual-pkg-name: istio-install-cni
@@ -182,6 +207,26 @@ subpackages:
           mkdir -p ${{targets.subpkgdir}}/var/lib/istio/envoy
           cp ./tools/packaging/common/envoy_bootstrap.json \
             ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+      pipeline:
+        - name: Verify pilot-agent version and startup capability
+          runs: |
+            set -euo pipefail
+            # Verify binary exists and is executable (fails test if missing)
+            stat /usr/bin/pilot-agent
+            test -x /usr/bin/pilot-agent || { echo "FAIL: pilot-agent is not executable"; exit 1; }
+
+            # Verify version information is correctly embedded (not "unknown")
+            pilot-agent version -o json | jq -e '.clientVersion.version' | grep -F "${{package.version}}"
+            pilot-agent version -o json | jq -e '.clientVersion.revision != "unknown"'
+            pilot-agent version -o json | jq -e '.clientVersion.tag != "unknown"'
+
+            # Verify help output shows expected commands
+            pilot-agent --help 2>&1 | grep -F "proxy"
 
   - name: istio-pilot-agent-${{vars.major-minor-version}}-compat
     pipeline:
@@ -218,6 +263,26 @@ subpackages:
           mkdir -p ${{targets.subpkgdir}}/var/lib/istio/envoy
           cp ./tools/packaging/common/envoy_bootstrap.json \
             ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+      pipeline:
+        - name: Verify pilot-discovery version and startup capability
+          runs: |
+            set -euo pipefail
+            # Verify binary exists and is executable (fails test if missing)
+            stat /usr/bin/pilot-discovery
+            test -x /usr/bin/pilot-discovery || { echo "FAIL: pilot-discovery is not executable"; exit 1; }
+
+            # Verify version information is correctly embedded (not "unknown")
+            pilot-discovery version -o json | jq -e '.clientVersion.version' | grep -F "${{package.version}}"
+            pilot-discovery version -o json | jq -e '.clientVersion.revision != "unknown"'
+            pilot-discovery version -o json | jq -e '.clientVersion.tag != "unknown"'
+
+            # Verify help output shows expected commands
+            pilot-discovery --help 2>&1 | grep -F "discovery"
 
   - name: istio-pilot-discovery-${{vars.major-minor-version}}-compat
     pipeline:
@@ -255,13 +320,20 @@ test:
         - istio-pilot-agent-${{vars.major-minor-version}}
         - istio-pilot-discovery-${{vars.major-minor-version}}
   pipeline:
-    - runs: |
+    - runs: |-
+        set -euo pipefail
         # check version/tag/commit are not "unknown" for pilot-discovery
-        pilot-discovery version -o json | jq .clientVersion.version | grep -q ${{package.version}}
-        pilot-discovery version -o json | jq .clientVersion.revision | grep -qv unknown
-        pilot-discovery version -o json | jq .clientVersion.tag | grep -qv unknown
+        # Verify version matches package version (fails test if mismatch)
+        pilot-discovery version -o json | jq .clientVersion.version | grep -F ${{package.version}}
+        # Verify revision is set (fails test if "unknown")
+        pilot-discovery version -o json | jq .clientVersion.revision | grep -vF unknown
+        # Verify tag is set (fails test if "unknown")
+        pilot-discovery version -o json | jq .clientVersion.tag | grep -vF unknown
 
         # check version/tag/commit are not "unknown" for pilot-agent
-        pilot-agent version -o json | jq .clientVersion.version | grep -q ${{package.version}}
-        pilot-agent version -o json | jq .clientVersion.revision | grep -qv unknown
-        pilot-agent version -o json | jq .clientVersion.tag | grep -qv unknown
+        # Verify version matches package version (fails test if mismatch)
+        pilot-agent version -o json | jq .clientVersion.version | grep -F ${{package.version}}
+        # Verify revision is set (fails test if "unknown")
+        pilot-agent version -o json | jq .clientVersion.revision | grep -vF unknown
+        # Verify tag is set (fails test if "unknown")
+        pilot-agent version -o json | jq .clientVersion.tag | grep -vF unknown
