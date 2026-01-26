@@ -62,6 +62,9 @@ pipeline:
 
 subpackages:
   - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
     pipeline:
       - uses: iamguarded/build-compat
         with:
@@ -80,15 +83,67 @@ subpackages:
           with:
             package: grafana-alloy
             version: ${{vars.major-minor-version}}
+        - runs: |
+            stat /opt/iamguarded/grafana-alloy/bin/alloy
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      HTTP_PORT: "12345"
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
+    - name: Verify binary works
+      runs: |
+        set -euo pipefail
         alloy --version
-        alloy --help
-    - runs: |
-        /usr/bin/alloy --version
+    - name: Test with minimal config
+      runs: |
+        set -euo pipefail
+        tee /tmp/alloy-config.alloy << 'EOF'
+        logging {
+          level = "info"
+          format = "logfmt"
+        }
+
+        prometheus.exporter.self "default" {}
+
+        prometheus.scrape "self" {
+          targets = prometheus.exporter.self.default.targets
+          forward_to = [prometheus.remote_write.default.receiver]
+        }
+
+        prometheus.remote_write "default" {
+          endpoint {
+            url = "http://localhost:9999/api/v1/push"
+          }
+        }
+        EOF
+
+        alloy fmt /tmp/alloy-config.alloy
+    - uses: test/daemon-check-output
+      with:
+        setup: |-
+          tee /tmp/alloy-test.alloy << 'EOF'
+          logging {
+            level = "info"
+            format = "logfmt"
+          }
+
+          prometheus.exporter.self "default" {}
+          EOF
+        start: alloy run --server.http.listen-addr=0.0.0.0:${HTTP_PORT} --storage.path=/tmp/alloy /tmp/alloy-test.alloy
+        timeout: 60
+        expected_output: |
+          running...
+        post: |-
+          set -euo pipefail
+          sleep 2
+          curl -sf http://localhost:${HTTP_PORT}/metrics | grep -F "alloy_build_info"
+          curl -sf http://localhost:${HTTP_PORT}/-/ready
+          curl -sf http://localhost:${HTTP_PORT}/-/healthy
 
 update:
   enabled: true

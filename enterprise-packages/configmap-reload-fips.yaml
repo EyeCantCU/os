@@ -37,6 +37,9 @@ pipeline:
 
 subpackages:
   - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
     pipeline:
       - uses: iamguarded/build-compat
         with:
@@ -55,10 +58,47 @@ subpackages:
           with:
             package: configmap-reload
             version: ${{vars.major-version}}
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - runs: |
+            stat /opt/iamguarded/configmap-reload/bin/configmap-reload
 
 test:
   pipeline:
     - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: configmap-reload
+    - name: Verify binary functionality
+      runs: |
+        set -euo pipefail
+
+        # Create test directory and file to watch
+        mkdir -p /tmp/test-volume
+        echo "initial-config" > /tmp/test-volume/config.yaml
+
+        # Start configmap-reload in background with timeout
+        # Binary will watch for file changes and call webhook
+        timeout 3s configmap-reload \
+          -volume-dir=/tmp/test-volume \
+          -webhook-url=http://localhost:8080/reload \
+          -webhook-method=POST \
+          > /tmp/output.log 2>&1 &
+        PID=$!
+
+        # Give it a moment to start watching
+        sleep 1
+
+        # Verify process is running
+        stat /proc/$PID/exe
+
+        # Wait for timeout (expected exit code 143 from SIGTERM or 124 from timeout)
+        wait $PID || EXIT_CODE=$?
+        [ "$EXIT_CODE" -eq 143 ] || [ "$EXIT_CODE" -eq 124 ]
+
+        # Verify it detected the volume directory
+        grep -F "/tmp/test-volume" /tmp/output.log
 
 update:
   enabled: true
