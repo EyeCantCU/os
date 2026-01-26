@@ -41,6 +41,7 @@ MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 MELANGE_BUILD_OPTS += ${MELANGE_OPTS}
 MELANGE_BUILD_OPTS += --signing-key ${KEY}
 MELANGE_BUILD_OPTS += --pipeline-dir ./pipelines/
+MELANGE_BUILD_OPTS += --package-append busybox
 MELANGE_BUILD_OPTS += --env-file build-${ARCH}.env
 MELANGE_BUILD_OPTS += --namespace chainguard
 MELANGE_BUILD_OPTS += --license 'NONE'
