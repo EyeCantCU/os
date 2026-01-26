@@ -2,7 +2,7 @@
 package:
   name: apache-apisix
   version: "3.14.1"
-  epoch: 34
+  epoch: 37
   description: "The Cloud-Native API Gateway and AI Gateway"
   resources:
     cpu: 30
@@ -11,23 +11,20 @@ package:
     - license: Apache-2.0
   dependencies:
     runtime:
-      # https://github.com/apache/apisix/blob/master/docker/debian-dev/docker-entrypoint.sh
+      # The apisix "binary" is actually a bash script wrapper around openresty
       - bash
       - bash-binsh
-      # base64 is required at runtime
+      - ca-certificates
       - coreutils
       - gawk
-      - gd
-      - geoip
       - grep
-      - libgcc
       - libwasmtime
-      - libxslt
       - luajit
       - openssl
-      - pcre
-      - perl
-      - zlib
+  checks:
+    disabled:
+      # Disabled until merged-varrun is done.
+      - tempdir
 
 environment:
   contents:
@@ -88,7 +85,8 @@ vars:
   WASM_NGINX_MODULE_CHECKSUM: "0b4b31d6ecfdbc587e8ea455ed6e920a98aadff1"
   LUA_VAR_NGINX_MODULE_VERSION: "v0.5.3"
   LUA_VAR_NGINX_MODULE_CHECKSUM: "dc04c71e14e8a0407831f9019043d7e6da61b3c3"
-  # This checksum is retrived from the apisix-build-tools repository
+  LUA_VERSION: "5.1"
+  # This checksum is retrieved from the apisix-build-tools repository
   # https://github.com/api7/apisix-build-tools
   APISIX_BUILD_TOOLS_CHECKSUM: "7621ba36cad49a3ac76c02988e08759e6a1e2172"
 
@@ -198,8 +196,8 @@ pipeline:
             --add-module=../apisix-nginx-module/src/stream \
             --build=${{host.triplet.gnu}} \
             --with-pcre \
-            --with-cc-opt='-DNGX_LUA_ABORT_AT_PANIC -I/usr/include' \
-            --with-ld-opt='-L/usr/lib -Wl,-rpath,/usr/lib' \
+            --with-cc-opt='-O2 -DAPISIX_RUNTIME_VER=${{vars.NGX_MULTI_UPSTREAM_VERSION}} -DNGX_LUA_ABORT_AT_PANIC -I/usr/include' \
+            --with-ld-opt='-Wl,-rpath,/usr/local/openresty/luajit/lib -Wl,-rpath,/usr/local/openresty/wasmtime-c-api/lib -L/usr/lib -Wl,-rpath,/usr/lib' \
             --with-poll_module \
             --with-pcre-jit \
             --without-http_rds_json_module \
@@ -210,6 +208,7 @@ pipeline:
             --with-stream_ssl_preread_module \
             --with-http_v2_module \
             --with-http_v3_module \
+            --with-http_ssl_module \
             --without-mail_pop3_module \
             --without-mail_imap_module \
             --without-mail_smtp_module \
@@ -293,7 +292,7 @@ pipeline:
           install -d "${{targets.contextdir}}"/usr/local/apisix/deps/share
           install -m755 -D /usr/bin/apisix "${{targets.contextdir}}"/usr/local/bin/apisix
           mv /usr/local/apisix/* "${{targets.contextdir}}"/usr/local/apisix/
-          mv /usr/share/lua/5.1/apisix "${{targets.contextdir}}"/usr/local/apisix/
+          mv /usr/share/lua/${{vars.LUA_VERSION}}/apisix "${{targets.contextdir}}"/usr/local/apisix/
           mv deps/lib "${{targets.contextdir}}"/usr/local/apisix/deps/
           mv deps/share "${{targets.contextdir}}"/usr/local/apisix/deps/
 
@@ -340,7 +339,20 @@ subpackages:
     description: "compat package with iamguarded image"
     dependencies:
       runtime:
-        - luarocks
+        # Additional dependencies for iamguarded compatibility
+        - bash
+        - bash-binsh
+        - ca-certificates
+        - coreutils
+        - curl
+        - gawk
+        - grep
+        - libwasmtime
+        - luajit
+        - openssl
+        - perl-dev
+        - perl-utils
+        - procps
     pipeline:
       - uses: iamguarded/build-compat
         with:
@@ -348,20 +360,33 @@ subpackages:
           version: ${{vars.major-version}}
       - runs: |
           # Create iamguarded-compatible directory structure
+          mkdir -p ${{targets.contextdir}}/etc/nginx/
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix
           mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/bin
-          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/conf
-          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/logs
-          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/deps
-          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/ui
           mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/bin
           mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/nginx/sbin
           mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/bin
-          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luarocks/bin
+          mkdir -p ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/share/lua/${{vars.LUA_VERSION}}
+          mkdir -p ${{targets.contextdir}}/usr/bin/
+          mkdir -p ${{targets.contextdir}}/usr/local/openresty/
+          mkdir -p ${{targets.contextdir}}/var/log/openresty/
 
-          # Create symlinks for iamguarded compatibility
-          ln -sf ../../../../usr/local/bin/apisix ${{targets.contextdir}}/opt/iamguarded/apisix/bin/apisix
+          # Copy entire apisix installation from main package, symlink luajit modules
+          cp -r ${{targets.destdir}}/usr/local/apisix/* ${{targets.contextdir}}/opt/iamguarded/apisix/
+          cp ${{targets.destdir}}/usr/local/bin/apisix ${{targets.contextdir}}/opt/iamguarded/apisix/bin/
+          ln -sf ../../../../../../../../opt/iamguarded/apisix/apisix ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/share/lua/${{vars.LUA_VERSION}}/apisix
 
-          # OpenResty binaries
+          # OpenResty binaries / config / symlinks
+          cp -r ${{targets.destdir}}/usr/local/openresty/* ${{targets.contextdir}}/usr/local/openresty/
+          cp -r ${{targets.destdir}}/usr/bin/* ${{targets.contextdir}}/usr/bin/
+          cp -r \
+            ${{targets.destdir}}/etc/nginx/nginx.conf \
+            ${{targets.destdir}}/etc/nginx/conf.d \
+            ${{targets.contextdir}}/etc/nginx/
+          cp -r ${{targets.destdir}}/var/log/openresty/* ${{targets.contextdir}}/var/log/openresty/
+
+          ln -sf ../../../dev/stdout ${{targets.contextdir}}/var/log/openresty/access.log
+          ln -sf ../../../dev/stderr ${{targets.contextdir}}/var/log/openresty/error.log
           ln -sf ../../../../usr/bin/openresty ${{targets.contextdir}}/opt/iamguarded/apisix/bin/openresty
           ln -sf ../../../../../usr/bin/openresty ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/bin/openresty
           ln -sf ../../../../../../usr/bin/openresty ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/nginx/sbin/nginx
@@ -369,15 +394,7 @@ subpackages:
           # LuaJIT binaries
           ln -sf ../../../../../../usr/bin/luajit ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luajit/bin/luajit
 
-          # LuaRocks binaries
-          ln -sf ../../../../../../usr/bin/luarocks ${{targets.contextdir}}/opt/iamguarded/apisix/openresty/luarocks/bin/luarocks
-
-          # Configuration, dependencies, and UI
-          ln -sf ../../../../usr/local/apisix/conf ${{targets.contextdir}}/opt/iamguarded/apisix/conf
-          ln -sf ../../../../usr/local/apisix/deps ${{targets.contextdir}}/opt/iamguarded/apisix/deps
-          ln -sf ../../../../usr/local/apisix/ui ${{targets.contextdir}}/opt/iamguarded/apisix/ui
-
-          # Log directory symlinks
+          # Log directory symlinks to stdout/stderr
           ln -sf ../../../../dev/stdout ${{targets.contextdir}}/opt/iamguarded/apisix/logs/access.log
           ln -sf ../../../../dev/stderr ${{targets.contextdir}}/opt/iamguarded/apisix/logs/error.log
       - uses: iamguarded/finalize-compat
@@ -388,17 +405,17 @@ subpackages:
       environment:
         contents:
           packages:
-            - ${{package.name}}
-            - curl
             - etcd
             - jq
             - nodejs
             - yq
         environment:
-          PROXY_URL: "http://127.0.0.1:19080"
           ADMIN_URL: "http://127.0.0.1:19180"
+          PROXY_URL: "http://127.0.0.1:19080"
       pipeline:
         - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
         - uses: iamguarded/test-compat
           with:
             package: apisix
@@ -412,10 +429,13 @@ subpackages:
                  /opt/iamguarded/apisix/openresty/bin/openresty \
                  /opt/iamguarded/apisix/openresty/nginx/sbin/nginx \
                  /opt/iamguarded/apisix/openresty/luajit/bin/luajit \
-                 /opt/iamguarded/apisix/openresty/luarocks/bin/luarocks \
+                 /opt/iamguarded/apisix/openresty/luajit/share/lua/${{vars.LUA_VERSION}}/apisix \
                  /opt/iamguarded/apisix/conf \
                  /opt/iamguarded/apisix/deps \
                  /opt/iamguarded/apisix/ui
+
+            # Mimic chart initContainer behavior to symlink /usr/local/apisix to /opt/iamguarded/apisix
+            ln -sf ../../opt/iamguarded/apisix /usr/local/apisix
 
             # Test apisix via iamguarded path
             /opt/iamguarded/apisix/bin/apisix test | grep -F "configuration test is successful"
@@ -485,6 +505,7 @@ subpackages:
             }).listen(8001, () => console.log('Listening on http://0.0.0.0:8001'));
             EOF
             nohup node server.js &
+            NODE_PID=$!
             curl --fail --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 http://127.0.0.1:8001/get
             # Get the API key
             ADMIN_KEY=$(yq e -r '.deployment.admin.admin_key[] | .key' /usr/local/apisix/conf/config.yaml)
@@ -517,8 +538,8 @@ subpackages:
               echo "ERROR: Expected 200 with key, got $CODE_KEY"
               exit 1
             fi
-            pkill etcd
-            pkill node
+
+            kill -9 $NODE_PID
 
 update:
   enabled: true
@@ -533,11 +554,11 @@ test:
   environment:
     contents:
       packages:
-        - etcd
         - curl
-        - yq
+        - etcd
         - jq
         - nodejs
+        - yq
     environment:
       PROXY_URL: "http://127.0.0.1:9080"
       ADMIN_URL: "http://127.0.0.1:9180"
@@ -597,6 +618,7 @@ test:
         }).listen(8000, () => console.log('Listening on http://0.0.0.0:8000'));
         EOF
         nohup node server.js &
+        NODE_PID=$!
         curl --fail --retry 5 --retry-delay 2 --retry-connrefused --retry-max-time 15 http://127.0.0.1:8000/get
         # Get the API key
         ADMIN_KEY=$(yq e -r '.deployment.admin.admin_key[] | .key' /usr/local/apisix/conf/config.yaml)
@@ -629,5 +651,5 @@ test:
           echo "ERROR: Expected 200 with key, got $CODE_KEY"
           exit 1
         fi
-        pkill etcd
-        pkill node
+
+        kill -9 $NODE_PID

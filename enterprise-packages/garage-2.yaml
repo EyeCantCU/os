@@ -3,7 +3,7 @@
 package:
   name: garage-2
   version: "2.1.0"
-  epoch: 0
+  epoch: 2
   description: S3-compatible distributed object storage service for self-hosting
   copyright:
     - license: AGPL-3.0-only
@@ -28,9 +28,15 @@ pipeline:
 
   - uses: rust/cargobump
 
+  # Upstream release builds enable these non-default features (release=true in compile.nix):
+  # https://git.deuxfleurs.fr/Deuxfleurs/garage/src/branch/main-v1/nix/compile.nix
   - uses: cargo/build
     with:
       output: garage
+      opts: --release --features fjall,consul-discovery,kubernetes-discovery,telemetry-otlp,syslog,journald
+    environment:
+      # # Set GIT_VERSION to avoid "-modified" suffix being added to the version, when cargobump is used.
+      GIT_VERSION: v${{package.version}}
 
   - uses: strip
 
@@ -80,6 +86,8 @@ test:
     - uses: test/tw/ver-check
       with:
         bins: garage
+        version: v${{package.version}} \[features
+        match-type: regex
     - uses: test/daemon-check-output
       with:
         setup: |
@@ -168,3 +176,54 @@ test:
           # Test metrics endpoint
           # Verify Prometheus metrics exposed on admin API with auth token
           curl -sf -H "Authorization: Bearer testmetricstoken1234567890abcd" http://127.0.0.1:3903/metrics | grep -F "cluster_healthy"
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Test kubernetes discovery feature with kwok
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/garage-k8s/meta /tmp/garage-k8s/data
+          cp test-config-k8s.toml /tmp/garage-k8s.toml
+        start: garage -c /tmp/garage-k8s.toml server
+        timeout: 90
+        expected_output: "garage_rpc::kubernetes"
+        post: |
+          set -o pipefail
+          # Verify garage created the GarageNode CRD
+          kubectl get crd garagenodes.deuxfleurs.fr
+          # Verify garage registered itself as a GarageNode
+          kubectl get garagenodes -n default -l garage.deuxfleurs.fr/service=garage-test
+    - name: Test fjall database backend feature
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/garage-fjall/meta /tmp/garage-fjall/data
+          cp test-config-fjall.toml /tmp/garage-fjall.toml
+        start: garage -c /tmp/garage-fjall.toml server
+        timeout: 30
+        expected_output: "Opening Fjall database"
+    - name: Test syslog logging
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/garage-syslog/meta /tmp/garage-syslog/data
+          cp test-config-syslog.toml /tmp/garage-syslog.toml
+        start: sh -c "GARAGE_LOG_TO_SYSLOG=true garage -c /tmp/garage-syslog.toml server"
+        timeout: 30
+        expected_output: "garage_db::sqlite_adapter: Opening Sqlite database"
+        # Custom error patterns for Rust binary - excludes "ERROR" which
+        # false-positives on syslog format priority markers
+        error_strings: |
+          panic
+          FATAL
+    - name: Test journald logging feature
+      runs: |
+        set -eu
+        mkdir -p /tmp/garage-journald/meta /tmp/garage-journald/data
+        cp test-config-journald.toml /tmp/garage-journald.toml
+        # Should fail with journald connection error (no journald in container)
+        # This proves the journald feature is compiled in
+        # Note: garage exits non-zero when journald unavailable, so we capture output and check it
+        OUTPUT=$(GARAGE_LOG_TO_JOURNALD=true garage -c /tmp/garage-journald.toml server 2>&1) || true
+        echo "$OUTPUT" | grep -F "Couldn't connect to journald"

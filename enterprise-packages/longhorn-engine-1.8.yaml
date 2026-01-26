@@ -1,7 +1,8 @@
+#nolint:update-identifier-must-match-git-repository
 package:
   name: longhorn-engine-1.8
   version: 1.8.2
-  epoch: 0
+  epoch: 3
   description: Longhorn Engine implements a lightweight block device storage controller capable of storing the data in a number of replicas.
   copyright:
     - license: Apache-2.0
@@ -21,6 +22,7 @@ package:
       - qemu-utils
       - rancher-tgt
       - sg3-utils
+      - tini
 
 var-transforms:
   - from: ${{package.version}}
@@ -31,8 +33,14 @@ var-transforms:
 environment:
   contents:
     packages:
+      - glibc-dev
       - libqcow-dev
+      - openssl-dev
       - zlib-dev
+      - zlib-static
+  environment:
+    # Add OpenSSL and jitterentropy to CGO linker flags since libqcow depends on them
+    CGO_LDFLAGS: "-lcrypto -ljitterentropy"
 
 pipeline:
   - uses: git-checkout
@@ -45,10 +53,14 @@ pipeline:
     with:
       packages: .
       output: longhorn
+      # Use static linking so the binary can run on the host node without library dependencies.
+      # Longhorn copies this binary to the host and runs it directly, not inside a container.
+      tags: netgo
       ldflags: |
         -X main.Version=${{package.version}}
         -X main.GitCommit=$(git rev-parse --short HEAD)
         -X main.BuildDate=$(date -u ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+        -linkmode external -extldflags -static
 
   - name: Install scripts
     runs: |
@@ -66,9 +78,11 @@ subpackages:
     pipeline:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -sf /usr/bin/longhorn ${{targets.contextdir}}/usr/local/bin/longhorn
           ln -sf /usr/bin/engine-manager ${{targets.contextdir}}/usr/local/bin/engine-manager
           ln -sf /usr/bin/launch-simple-file ${{targets.contextdir}}/usr/local/bin/launch-simple-file
           ln -sf /usr/bin/launch-simple-longhorn ${{targets.contextdir}}/usr/local/bin/launch-simple-longhorn
+          ln -sf /usr/bin/tini ${{targets.contextdir}}/tini
     test:
       environment:
         contents:
@@ -87,6 +101,7 @@ test:
         - procps
         - util-linux
         - wait-for-it
+        - posix-libc-utils
   pipeline:
     - uses: test/tw/ldd-check
     - name: Test binary help
@@ -104,6 +119,8 @@ test:
         test -x /usr/bin/launch-simple-longhorn
     - name: Test version
       runs: longhorn --version | grep ${{package.version}}
+    - name: Verify longhorn binary is statically linked
+      runs: ldd /usr/bin/longhorn 2>&1 | grep -q "not a dynamic executable"
     - name: Test controller with replicas
       uses: test/daemon-check-output
       with:
@@ -145,10 +162,13 @@ test:
           longhorn snapshot ls | grep -F "test-snapshot"
           echo "Volume operations completed successfully"
 
+# All of the version streamed components of longhorn should follow a single release as shown in https://github.com/longhorn/longhorn
+# To align with this, we will watch for releases from the longhorn/longhorn repo.
+# The expectation is that should a release/tag be available in the group repo, that release/tag will also be available in the component but not vice versa.
 update:
   enabled: true
   github:
-    identifier: longhorn/longhorn-engine
+    identifier: longhorn/longhorn
     tag-filter-prefix: v1.8
     strip-prefix: v
     use-tag: true

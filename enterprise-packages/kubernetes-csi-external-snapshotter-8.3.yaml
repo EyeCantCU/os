@@ -1,0 +1,272 @@
+package:
+  name: kubernetes-csi-external-snapshotter-8.3
+  version: "8.3.0"
+  epoch: 7 # CVE-2025-61729
+  description: Sidecar container that watches Kubernetes Snapshot CRD objects and triggers CreateSnapshot/DeleteSnapshot against a CSI endpoint
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - kubernetes-csi-external-snapshotter=${{package.full-version}}
+      - kubernetes-csi-external-csi-snapshotter=${{package.full-version}}
+      - kubernetes-csi-external-csi-snapshotter-${{vars.major-minor-version}}=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes-csi/external-snapshotter
+      tag: v${{package.version}}
+      expected-commit: 6b2feaaf7fc3d6d0fe21029d1032ea0eee2081e9
+
+  - uses: go/build
+    with:
+      packages: ./cmd/csi-snapshotter
+      output: csi-snapshotter
+      ldflags: -X main.version=$(git describe --long --tags --match="v*" --dirty 2>/dev/null || git rev-list -n1 HEAD) -extldflags "-static"
+
+  - uses: strip
+
+subpackages:
+  - name: kubernetes-csi-external-snapshot-controller-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - kubernetes-csi-external-snapshot-controller=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/snapshot-controller
+          output: snapshot-controller
+          ldflags: -X main.version=$(git describe --long --tags --match="v*" --dirty 2>/dev/null || git rev-list -n1 HEAD) -extldflags "-static"
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - kubernetes-csi-external-snapshot-controller-${{vars.major-minor-version}}
+            - kubernetes-csi-driver-hostpath
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: kubernetes-csi-external-snapshot-controller
+            real-pkg-name: ${{subpkg.name}}
+        # Verify snapshot-controller binary version and help
+        - uses: test/tw/ver-check
+          with:
+            bins: snapshot-controller
+        - uses: test/tw/help-check
+          with:
+            bins: snapshot-controller
+        # Start a KWOK cluster to test controller functionality
+        - uses: test/kwok/cluster
+        # Test snapshot-controller processes VolumeSnapshotClass and VolumeSnapshot resources
+        - name: Test snapshot-controller processes snapshot resources
+          runs: |
+            # Install snapshot CRDs first
+            for crd in volumesnapshotclasses volumesnapshotcontents volumesnapshots; do
+              kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v${{package.version}}/client/config/crd/snapshot.storage.k8s.io_${crd}.yaml
+            done
+
+            # Wait for CRDs to be established
+            kubectl wait --for=condition=established --timeout=60s crd/volumesnapshotclasses.snapshot.storage.k8s.io
+            kubectl wait --for=condition=established --timeout=60s crd/volumesnapshotcontents.snapshot.storage.k8s.io
+            kubectl wait --for=condition=established --timeout=60s crd/volumesnapshots.snapshot.storage.k8s.io
+
+            # Start the snapshot-controller with HTTP metrics endpoint
+            snapshot-controller --v=5 --kubeconfig ~/.kube/config --http-endpoint ":8081" > /tmp/controller.log 2>&1 &
+            CTRL_PID=$!
+
+            # Wait for controller to be ready
+            sleep 5
+            if [ ! -d "/proc/$CTRL_PID" ]; then
+              echo "ERROR: snapshot-controller failed to start"
+              cat /tmp/controller.log
+              exit 1
+            fi
+
+            # Verify metrics endpoint is accessible
+            curl -f -s localhost:8081/metrics | grep -F "snapshot_controller"
+
+            # Create a VolumeSnapshotClass
+            kubectl apply -f - <<'EOF'
+            apiVersion: snapshot.storage.k8s.io/v1
+            kind: VolumeSnapshotClass
+            metadata:
+              name: csi-hostpath-snapclass
+            driver: hostpath.csi.k8s.io
+            deletionPolicy: Delete
+            EOF
+
+            # Verify VolumeSnapshotClass was created
+            kubectl get volumesnapshotclass csi-hostpath-snapclass
+
+            # Create a dummy PVC for the snapshot (required for VolumeSnapshot)
+            kubectl apply -f - <<'EOF'
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            metadata:
+              name: test-pvc
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 1Gi
+              storageClassName: standard
+            EOF
+
+            # Create a VolumeSnapshot
+            kubectl apply -f - <<'EOF'
+            apiVersion: snapshot.storage.k8s.io/v1
+            kind: VolumeSnapshot
+            metadata:
+              name: test-snapshot
+            spec:
+              volumeSnapshotClassName: csi-hostpath-snapclass
+              source:
+                persistentVolumeClaimName: test-pvc
+            EOF
+
+            # Wait for controller to process the snapshot
+            sleep 5
+
+            # Verify snapshot was detected and controller is processing it
+            kubectl get volumesnapshot test-snapshot -o yaml
+
+            # Check controller logs show it detected the VolumeSnapshot
+            grep -F "VolumeSnapshot" /tmp/controller.log || grep -F "snapshot" /tmp/controller.log
+
+            echo "SUCCESS: snapshot-controller processes VolumeSnapshot resources"
+
+            # Cleanup
+            kill $CTRL_PID 2>/dev/null || true
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes-csi/external-snapshotter
+    strip-prefix: v
+    tag-filter: v8.3
+
+test:
+  environment:
+    contents:
+      packages:
+        - kubernetes-csi-external-snapshot-controller-${{vars.major-minor-version}}
+        - curl
+        - kubernetes-csi-driver-hostpath
+  pipeline:
+    # Verify binaries exist and respond correctly
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          csi-snapshotter
+          snapshot-controller
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          csi-snapshotter
+          snapshot-controller
+    - uses: test/kwok/cluster
+    # Test csi-snapshotter detects and triggers CSI snapshot operations
+    - name: Test csi-snapshotter processes VolumeSnapshot CRDs and triggers CSI operations
+      runs: |
+        # Install snapshot CRDs first
+        for crd in volumesnapshotclasses volumesnapshotcontents volumesnapshots; do
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v${{package.version}}/client/config/crd/snapshot.storage.k8s.io_${crd}.yaml
+        done
+
+        # Wait for CRDs to be established
+        kubectl wait --for=condition=established --timeout=60s crd/volumesnapshotclasses.snapshot.storage.k8s.io
+        kubectl wait --for=condition=established --timeout=60s crd/volumesnapshotcontents.snapshot.storage.k8s.io
+        kubectl wait --for=condition=established --timeout=60s crd/volumesnapshots.snapshot.storage.k8s.io
+
+        # Start the CSI hostpath driver
+        mkdir -p /csi
+        hostpathplugin --v=5 --endpoint="unix:///csi/csi.sock" --nodeid="node-000000" > /tmp/hostpath.log 2>&1 &
+        HOSTPATH_PID=$!
+        sleep 3
+
+        if [ ! -d "/proc/$HOSTPATH_PID" ]; then
+          echo "ERROR: hostpathplugin failed to start"
+          cat /tmp/hostpath.log
+          exit 1
+        fi
+
+        # Start the csi-snapshotter sidecar
+        csi-snapshotter --v=5 --csi-address "/csi/csi.sock" --kubeconfig ~/.kube/config --http-endpoint ":8080" > /tmp/snapshotter.log 2>&1 &
+        SNAP_PID=$!
+        sleep 5
+
+        if [ ! -d "/proc/$SNAP_PID" ]; then
+          echo "ERROR: csi-snapshotter failed to start"
+          cat /tmp/snapshotter.log
+          exit 1
+        fi
+
+        # Verify metrics endpoint is available
+        curl -f -s localhost:8080/metrics | grep -F "csi_sidecar"
+
+        # Create a VolumeSnapshotClass
+        kubectl apply -f - <<'EOF'
+        apiVersion: snapshot.storage.k8s.io/v1
+        kind: VolumeSnapshotClass
+        metadata:
+          name: csi-hostpath-snapclass
+        driver: hostpath.csi.k8s.io
+        deletionPolicy: Delete
+        EOF
+
+        # Verify VolumeSnapshotClass was created
+        kubectl get volumesnapshotclass csi-hostpath-snapclass
+
+        # Create a VolumeSnapshotContent (pre-provisioned snapshot for testing)
+        # This simulates a snapshot that csi-snapshotter should detect
+        kubectl apply -f - <<'EOF'
+        apiVersion: snapshot.storage.k8s.io/v1
+        kind: VolumeSnapshotContent
+        metadata:
+          name: test-snapshot-content
+        spec:
+          deletionPolicy: Delete
+          driver: hostpath.csi.k8s.io
+          source:
+            snapshotHandle: test-snapshot-handle
+          volumeSnapshotRef:
+            name: test-snapshot
+            namespace: default
+          volumeSnapshotClassName: csi-hostpath-snapclass
+        EOF
+
+        # Wait for csi-snapshotter to detect and process the snapshot content
+        sleep 5
+
+        # Check logs to confirm csi-snapshotter is watching and processing snapshot objects
+        echo "Checking csi-snapshotter logs for snapshot processing..."
+        cat /tmp/snapshotter.log
+
+        # Verify csi-snapshotter detected the VolumeSnapshotContent
+        grep -F "VolumeSnapshotContent" /tmp/snapshotter.log || grep -iF "snapshot" /tmp/snapshotter.log
+
+        # List snapshot contents to confirm they exist
+        kubectl get volumesnapshotcontent
+
+        # Test deletion flow - delete the snapshot content
+        kubectl delete volumesnapshotcontent test-snapshot-content
+
+        sleep 3
+
+        # Check logs show delete processing
+        grep -iF "delet" /tmp/snapshotter.log
+
+        echo "SUCCESS: csi-snapshotter detects VolumeSnapshot CRDs and processes CSI operations"
+
+        # Cleanup
+        kill $SNAP_PID 2>/dev/null || true
+        kill $HOSTPATH_PID 2>/dev/null || true

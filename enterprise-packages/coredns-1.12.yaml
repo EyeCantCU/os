@@ -1,7 +1,7 @@
 package:
   name: coredns-1.12
   version: "1.12.4"
-  epoch: 6 # GHSA-j5w8-q4qc-rx2x
+  epoch: 9 # GHSA-cfpf-hrx2-8rv6
   description: CoreDNS is a DNS server that chains plugins
   copyright:
     - license: Apache-2.0
@@ -28,8 +28,9 @@ pipeline:
   - uses: go/bump
     with:
       deps: |-
-        github.com/quic-go/quic-go@v0.54.1
         golang.org/x/crypto@v0.45.0
+        github.com/quic-go/quic-go@v0.57.0
+        github.com/expr-lang/expr@v1.17.7
 
   - runs: |
       # Generate code and fetch plugins
@@ -59,8 +60,8 @@ subpackages:
             - ${{package.name}}
       pipeline:
         - runs: |
-            set -o pipefail
-            readlink -f /coredns | grep /usr/bin/coredns
+            set -euo pipefail
+            readlink -f /coredns | grep -F /usr/bin/coredns
             /coredns --version
             /coredns --help
 
@@ -90,11 +91,74 @@ subpackages:
       environment:
         contents:
           packages:
+            - bind-tools
             - libcap-utils
       pipeline:
-        - runs: |
+        - name: Verify version and plugins
+          runs: |
             coredns -version
             coredns -plugins
+        - name: Verify Kuma-specific plugins are available
+          runs: |
+            # Kuma requires specific plugins like forward, cache, reload, etc.
+            # Verify key plugins are compiled in
+            plugins=$(coredns -plugins)
+            echo "$plugins" | grep -F "forward" || { echo "FAIL: forward plugin not found"; exit 1; }
+            echo "$plugins" | grep -F "log" || { echo "FAIL: log plugin not found"; exit 1; }
+            echo "SUCCESS: Kuma-required plugins are present"
+        - name: Test DNS server functionality
+          runs: |
+            set -euo pipefail
+
+            # Create Corefile using template plugin (available in Kuma build)
+            tee Corefile <<'EOF'
+            .:2053 {
+                template IN A kuma.test {
+                    answer "{{ .Name }} 60 IN A 10.0.0.1"
+                }
+                template IN TXT kuma.test {
+                    answer "{{ .Name }} 60 IN TXT \"kuma-dns-test\""
+                }
+                log
+                errors
+            }
+            EOF
+
+            # Start CoreDNS in background
+            coredns > /tmp/coredns.log 2>&1 &
+            COREDNS_PID=$!
+            sleep 2
+
+            # Verify process is running
+            if [ ! -d "/proc/$COREDNS_PID" ]; then
+              echo "FAIL: CoreDNS failed to start"
+              cat /tmp/coredns.log
+              exit 1
+            fi
+
+            # Test DNS query for TXT record
+            result=$(dig @localhost -p 2053 foo.kuma.test TXT +short)
+            echo "Query result: $result"
+            echo "$result" | grep -F '"kuma-dns-test"' || {
+              echo "FAIL: Expected TXT record not found"
+              cat /tmp/coredns.log
+              kill $COREDNS_PID 2>/dev/null || true
+              exit 1
+            }
+
+            # Test DNS query for A record
+            result=$(dig @localhost -p 2053 service.kuma.test A +short)
+            echo "A record result: $result"
+            echo "$result" | grep -F "10.0.0.1" || {
+              echo "FAIL: Expected A record not found"
+              cat /tmp/coredns.log
+              kill $COREDNS_PID 2>/dev/null || true
+              exit 1
+            }
+
+            # Clean up
+            kill $COREDNS_PID 2>/dev/null || true
+            echo "SUCCESS: DNS server functional test passed"
 
 update:
   enabled: true
@@ -118,7 +182,9 @@ test:
         coredns --version
         coredns --help
     - runs: |
-        cat > Corefile <<EOF
+        set -euo pipefail
+
+        tee Corefile <<EOF
         .:1053 {
             file /home/build/db.wolfi.dev
             log
@@ -127,7 +193,7 @@ test:
         }
         EOF
 
-        cat > /home/build/db.wolfi.dev <<'EOF'
+        tee /home/build/db.wolfi.dev <<'EOF'
         $TTL 3600
         @    IN SOA ns1.wolfi.dev. admin.wolfi.dev. (
                   20240101   ; Serial
@@ -141,11 +207,12 @@ test:
         foo.wolfi.dev  IN TXT "hi"
         EOF
 
-        coredns > /dev/null 2>&1 &
+        coredns > /tmp/coredns.log 2>&1 &
         sleep 2
 
         # validates intree plugins can be successfully loaded
-        dig @localhost -p 1053 foo.wolfi.dev TXT +short | grep -q '"hi"'
+        dig @localhost -p 1053 foo.wolfi.dev TXT +short | grep -F '"hi"'
     - name: Test file capabilities
       runs: |
-        getcap /usr/bin/coredns | cut -d ' ' -f2 | grep -q -E '^cap_net_bind_service=ep$'
+        set -euo pipefail
+        getcap /usr/bin/coredns | cut -d ' ' -f2 | grep -E '^cap_net_bind_service=ep$'

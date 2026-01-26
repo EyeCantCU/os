@@ -3,7 +3,7 @@ package:
   version: "8.14.3"
   # For version upgrades check whether patches are still needed.
   # Upstream changes are being tracked in https://github.com/gradle/gradle/issues/25945
-  epoch: 5
+  epoch: 6
   description: A Java project management and project comprehension tool.
   copyright:
     - license: Apache-2.0
@@ -84,20 +84,123 @@ test:
   environment:
     contents:
       packages:
-        - openjdk-17-default-jvm
+        - openjdk-17-default-jdk
   pipeline:
     - name: Verify gradle installation
       runs: |
-        gradle --version || exit 1
+        set -euo pipefail
+        gradle --version
     - name: Basic Gradle project build
       runs: |
-        cat << 'EOF' > settings.gradle
+        set -euo pipefail
+
+        tee settings.gradle << 'EOF'
         rootProject.name = 'demo'
         EOF
 
-        cat << 'EOF' > build.gradle
+        tee build.gradle << 'EOF'
         println "gradle works!"
         EOF
 
-        gradle build --no-daemon | grep -q 'gradle works!'
-        gradle build --no-daemon | grep -q 'gradle works!'
+        gradle build --no-daemon | grep -F 'gradle works!'
+        gradle build --no-daemon | grep -F 'gradle works!'
+    - name: Compile Java source code
+      runs: |
+        set -euo pipefail
+
+        # Create a Java project that compiles actual Java code
+        mkdir -p java-compile-test/src/main/java/com/example
+        cd java-compile-test
+
+        tee settings.gradle << 'EOF'
+        rootProject.name = 'java-compile-test'
+        EOF
+
+        tee build.gradle << 'EOF'
+        plugins {
+            id 'java'
+        }
+
+        repositories {
+            mavenCentral()
+        }
+        EOF
+
+        tee src/main/java/com/example/HelloWorld.java << 'EOF'
+        package com.example;
+
+        public class HelloWorld {
+            public static void main(String[] args) {
+                System.out.println("Hello from compiled Java!");
+            }
+
+            public static String greet(String name) {
+                return "Hello, " + name + "!";
+            }
+        }
+        EOF
+
+        # Compile the Java code
+        gradle compileJava --no-daemon
+
+        # Verify the compiled .class file exists
+        stat build/classes/java/main/com/example/HelloWorld.class
+
+        # Run the compiled class to verify it executes correctly
+        java -cp build/classes/java/main com.example.HelloWorld | grep -F "Hello from compiled Java!"
+    - name: Test dependency resolution
+      runs: |
+        set -euo pipefail
+
+        # Create a project with an external dependency
+        mkdir -p dep-test/src/main/java/com/example
+        cd dep-test
+
+        tee settings.gradle << 'EOF'
+        rootProject.name = 'dep-test'
+        EOF
+
+        tee build.gradle << 'EOF'
+        plugins {
+            id 'java'
+            id 'application'
+        }
+
+        repositories {
+            mavenCentral()
+        }
+
+        dependencies {
+            implementation 'org.apache.commons:commons-lang3:3.12.0'
+        }
+
+        application {
+            mainClass = 'com.example.DependencyTest'
+        }
+        EOF
+
+        tee src/main/java/com/example/DependencyTest.java << 'EOF'
+        package com.example;
+
+        import org.apache.commons.lang3.StringUtils;
+
+        public class DependencyTest {
+            public static void main(String[] args) {
+                // Use commons-lang3 to verify dependency was resolved
+                String reversed = StringUtils.reverse("gradle");
+                System.out.println("Reversed: " + reversed);
+                if ("eldarG".equalsIgnoreCase(reversed)) {
+                    System.out.println("Dependency resolution works!");
+                }
+            }
+        }
+        EOF
+
+        # Build the project - this will download the dependency and compile
+        gradle build --no-daemon
+
+        # Verify the compiled class exists
+        stat build/classes/java/main/com/example/DependencyTest.class
+
+        # Run with the dependency on classpath to verify it works
+        gradle run --no-daemon | grep -F "Dependency resolution works!"

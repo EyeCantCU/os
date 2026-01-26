@@ -1,0 +1,169 @@
+package:
+  name: percona-xtradb-cluster-operator-fips
+  version: "1.19.0"
+  epoch: 0
+  description: Percona Operator for MySQL based on Percona XtraDB Cluster
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/percona/percona-xtradb-cluster-operator.git
+      tag: v${{package.version}}
+      expected-commit: 52cfd58c567a91c46fb8151f2e1c997f174079ed
+
+  - uses: go/build
+    with:
+      packages: cmd/manager/main.go
+      output: percona-xtradb-cluster-operator
+      ldflags: |
+        -X main.GitCommit=$(git rev-parse HEAD)
+        -X main.GitBranch=$(git rev-parse --abbrev-ref HEAD)
+        -X main.BuildTime=$(date -u -d "@$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")
+      # Using go-fips-md5
+      # Upstream using md5 hashes for secret data
+      # Ref: https://github.com/percona/percona-xtradb-cluster-operator/blob/v1.18.0/pkg/controller/pxc/upgrade.go#L769-L770
+      go-package: go-fips-md5
+
+  - name: copy license
+    runs: |
+      mkdir -p ${{targets.contextdir}}/licenses
+      install -Dm664 LICENSE ${{targets.contextdir}}/licenses/LICENSE
+
+subpackages:
+  - name: ${{package.name}}-peer-list
+    description: peer list binary for ${{package.name}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: cmd/peer-list/main.go
+          output: peer-list
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/tw/help-check
+          with:
+            bins: peer-list
+        - uses: test/go-fips-check
+
+  #Using go-md5-fips
+  #Ref: https://github.com/percona/percona-xtradb-cluster-operator/blob/v1.18.0/cmd/pitr/collector/collector.go#L622
+  - name: ${{package.name}}-pitr
+    description: pitr binary for ${{package.name}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: cmd/pitr/main.go
+          output: pitr
+          go-package: go-fips-md5
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+
+  - name: ${{package.name}}-mysql-state-monitor
+    description: mysql state monitor binary for ${{package.name}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: cmd/mysql-state-monitor/main.go
+          output: mysql-state-monitor
+          ldflags: -X main.GitCommit=$(git rev-parse HEAD) -X main.GitBranch=$(git rev-parse --abbrev-ref HEAD) -X main.BuildTime=$(date -u -d "@$SOURCE_DATE_EPOCH" +"%Y-%m-%dT%H:%M:%SZ")
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+
+  - name: ${{package.name}}-compat
+    description: compatibility package for percona-xtradb-cluster-operator
+    # Image entrypoint script requires to have bash and coreutils
+    # REF: https://github.com/percona/percona-xtradb-cluster-operator/blob/v1.18.0/build/pxc-init-entrypoint.sh#L1
+    dependencies:
+      runtime:
+        - bash-binsh
+        - coreutils
+    pipeline:
+      - runs: |
+          # Setup compat dirs
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+
+          ln -s ../../bin/percona-xtradb-cluster-operator ${{targets.contextdir}}/usr/local/bin/percona-xtradb-cluster-operator
+          ln -s ./usr/bin/peer-list ${{targets.contextdir}}/peer-list
+          ln -s ./usr/bin/pitr ${{targets.contextdir}}/pitr
+          ln -s ./usr/bin/mysql-state-monitor ${{targets.contextdir}}/mysql-state-monitor
+
+          install -Dpm0755 -t "${{targets.subpkgdir}}" $(ls "build"/*.sh | grep -v "build-versionservice-client.sh") "build"/*.cfg "build"/*.cnf "build/get-pxc-state"
+
+          mkdir -p ${{targets.contextdir}}/backup
+          cp -r build/backup/. ${{targets.contextdir}}/backup
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - ${{package.name}}-peer-list
+            - ${{package.name}}-pitr
+            - ${{package.name}}-mysql-state-monitor
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  github:
+    identifier: percona/percona-xtradb-cluster-operator
+    strip-prefix: v
+
+test:
+  environment:
+    environment:
+      OPERATOR_NAME: percona-xtradb-cluster-operator
+      WATCH_NAMESPACE: "default"
+      LOG_STRUCTURED: "false"
+      LOG_LEVEL: INFO
+      DISABLE_TELEMETRY: "false"
+      S3_WORKERS_LIMIT: "10"
+      MAX_CONCURRENT_RECONCILES: "1"
+      PXCO_FEATURE_GATES: ""
+      METRICS_HOST: "127.0.0.1"
+      METRICS_PORT: 8080
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: percona-xtradb-cluster-operator
+    - name: "Check FIPS"
+      uses: test/go-fips-check
+    - name: "Setup KWOK cluster"
+      uses: test/kwok/cluster
+    - name: "Install PXC CRD that the operator watches"
+      runs: |
+        kubectl apply -f https://raw.githubusercontent.com/percona/percona-xtradb-cluster-operator/v${{package.version}}/deploy/bundle.yaml
+        kubectl wait --for=condition=Established crd --all --timeout=60s
+    - name: "Verify operator"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /var/run/secrets/kubernetes.io/serviceaccount
+          printf "default" > /var/run/secrets/kubernetes.io/serviceaccount/namespace
+          kubectl wait --for=condition=Available deployment/percona-xtradb-cluster-operator --timeout=5m
+        start: |
+          sh -c 'POD_NAME=$(kubectl get pods --no-headers -l app.kubernetes.io/name=percona-xtradb-cluster-operator | awk "{print \$1}") HOSTNAME=$POD_NAME exec percona-xtradb-cluster-operator'
+        timeout: 60
+        expected_output: |
+          Successfully acquired lease
+          Starting metrics server
+          Serving metrics server
+          starting server
+          Starting EventSource
+          Starting Controller
+          Starting worker
+        post: |
+          set -eu
+          wait-for-it ${METRICS_HOST}:${METRICS_PORT} -t 30
+          curl -fsS http://${METRICS_HOST}:${METRICS_PORT}/metrics > metrics.prom
+          grep -F -e "go_sched_pauses_stopping_other_seconds_bucket" metrics.prom
+          grep -F -e "pxcbackup-controller" metrics.prom
+          grep -F -e "workqueue_queue_duration_seconds_bucket" metrics.prom

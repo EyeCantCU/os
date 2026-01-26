@@ -1,7 +1,7 @@
 package:
   name: fluent-bit-4.1
-  version: "4.1.1"
-  epoch: 1
+  version: "4.1.2"
+  epoch: 2
   description: Fast and Lightweight Log processor and forwarder
   resources:
     cpu: 40
@@ -26,6 +26,10 @@ environment:
       - flex
       - gcc-14-default
       - glibc
+      - jemalloc-dev
+      - librdkafka-dev
+      - luajit-dev
+      - msgpack-c-dev
       - openssl-dev
       - postgresql-dev
       - systemd-dev
@@ -44,7 +48,7 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/fluent/fluent-bit
-      expected-commit: 912b7d783a328c09c82aeb16bd26330a468f2005
+      expected-commit: ad534bebfbb7f55bdc7305fcd8c73d01e826a58a
       tag: v${{package.version}}
 
   - runs: |
@@ -52,6 +56,7 @@ pipeline:
       cmake -DFLB_RELEASE=On \
         -DCMAKE_INSTALL_PREFIX=/usr \
         -DCMAKE_INSTALL_LIBDIR=lib \
+        -DFLB_PREFER_SYSTEM_LIBS=On \
         -DFLB_JEMALLOC=On \
         -DFLB_TLS=On \
         -DFLB_EXAMPLES=Off \
@@ -62,6 +67,7 @@ pipeline:
         -DFLB_OUT_PGSQL=On \
         -DFLB_LOG_NO_CONTROL_CHARS=On \
         -DFLB_CHUNK_TRACE=On \
+        -DFLB_SIMD=On \
       ..
       make
 
@@ -162,6 +168,7 @@ test:
         - shadow
         - sudo-rs
         - glibc-locales
+        - jq
   pipeline:
     - name: Expect the 'fluent-bit' CLI Tool on PATH
       runs: command -v fluent-bit
@@ -169,7 +176,7 @@ test:
       runs: fluent-bit --version
     - name: Expect a Clean Exit Code on 'luajit -v'
       runs: luajit -v
-    - name: Launch 'fluent-bit' Logging Dummy Data to Stdout, Confirm Graceful Shutdown
+    - name: Launch 'fluent-bit' Logging Dummy Data to Stdout, Confirm Graceful Shutdown and Log Processing
       runs: |
         # 1. Spawn 'fluent-bit' logging placeholder data to stdout
         # 2. Send a SIGINT after 5-seconds (this is normal).
@@ -182,7 +189,92 @@ test:
         #       the '--preserve-status' flag, which passes through the binary's
         #       exit code and skips a '124' exit code on timeout.
         timeout --preserve-status -s INT -k 6 5 \
-          fluent-bit -i dummy -o stdout -l ${PWD}/out.log
+          fluent-bit -i dummy -o stdout -l ${PWD}/out.log > ${PWD}/stdout.log 2>&1 || true
+
+        # Verify log processing: dummy input generates records with messages
+        # Each dummy record has "message"=>"dummy" field in Ruby-style format
+        echo "Checking stdout output for processed log entries..."
+        if grep -F '"message"=>' ${PWD}/stdout.log; then
+          echo "SUCCESS: Found processed log entries with message field"
+        else
+          echo "FAIL: Expected processed dummy log entries in stdout"
+          echo "Stdout contents:"
+          cat ${PWD}/stdout.log
+          exit 1
+        fi
+
+        # Verify the log file was created and contains runtime info
+        echo "Checking log file for runtime activity..."
+        if stat ${PWD}/out.log && grep -E "Fluent Bit|info" ${PWD}/out.log; then
+          echo "SUCCESS: Log file contains expected runtime information"
+        else
+          echo "FAIL: Log file missing or has no expected content"
+          cat ${PWD}/out.log 2>/dev/null || echo "Log file not found"
+          exit 1
+        fi
+    - name: Test configuration file parsing
+      runs: |
+        # Verify fluent-bit can parse the installed config files
+        # Use --dry-run to validate config without starting the daemon
+        echo "Testing config file parsing with parsers.conf..."
+        fluent-bit --dry-run \
+          -R /fluent-bit/etc/parsers.conf \
+          -i dummy \
+          -o stdout || {
+          echo "FAIL: fluent-bit failed to parse parsers.conf"
+          exit 1
+        }
+        echo "SUCCESS: Configuration file parsed successfully"
+    - name: Validate schema.json is valid JSON with plugin definitions
+      runs: |
+        # Verify schema.json exists and is valid JSON
+        echo "Checking schema.json exists..."
+        stat /fluent-bit/schema.json
+
+        echo "Validating schema.json is valid JSON..."
+        if ! jq empty /fluent-bit/schema.json; then
+          echo "FAIL: schema.json is not valid JSON"
+          exit 1
+        fi
+
+        # Check that schema contains expected plugin definitions (inputs, outputs, filters)
+        echo "Checking for input plugins in schema..."
+        if jq -e '.inputs' /fluent-bit/schema.json > /dev/null; then
+          input_count=$(jq '.inputs | length' /fluent-bit/schema.json)
+          echo "SUCCESS: Found $input_count input plugins in schema"
+        else
+          echo "FAIL: schema.json missing 'inputs' section"
+          exit 1
+        fi
+
+        echo "Checking for output plugins in schema..."
+        if jq -e '.outputs' /fluent-bit/schema.json > /dev/null; then
+          output_count=$(jq '.outputs | length' /fluent-bit/schema.json)
+          echo "SUCCESS: Found $output_count output plugins in schema"
+        else
+          echo "FAIL: schema.json missing 'outputs' section"
+          exit 1
+        fi
+
+        echo "Checking for filter plugins in schema..."
+        if jq -e '.filters' /fluent-bit/schema.json > /dev/null; then
+          filter_count=$(jq '.filters | length' /fluent-bit/schema.json)
+          echo "SUCCESS: Found $filter_count filter plugins in schema"
+        else
+          echo "FAIL: schema.json missing 'filters' section"
+          exit 1
+        fi
+
+        # Verify specific plugins we expect based on build options
+        echo "Checking for expected stdout output plugin..."
+        if jq -e '.outputs[] | select(.name == "stdout")' /fluent-bit/schema.json > /dev/null; then
+          echo "SUCCESS: stdout output plugin found in schema"
+        else
+          echo "FAIL: Expected stdout output plugin in schema"
+          exit 1
+        fi
+
+        echo "SUCCESS: schema.json is valid and contains expected plugin definitions"
     - name: Validate Presence of all Library Dependencies
       uses: test/tw/ldd-check
     - name: iamguarded Compat Test

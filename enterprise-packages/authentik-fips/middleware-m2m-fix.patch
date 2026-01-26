@@ -1,0 +1,54 @@
+Description: Fix m2m_changed_handler TypeError caused by enterprise removal
+.
+FIX FOR OSS BUILD: Required when building without /authentik/enterprise.
+.
+When Django ORM triggers m2m_changed signals (e.g., group.users.add(user)),
+the thread_kwargs parameter is not passed and defaults to None. The base
+AuditMiddleware.m2m_changed_handler attempts to unpack None with **,
+causing a TypeError: "argument after ** must be a mapping, not NoneType".
+.
+ROOT CAUSE - ENTERPRISE MIDDLEWARE REMOVAL:
+In standard authentik deployments, authentik/enterprise/audit/middleware.py
+contains EnterpriseAuditMiddleware which extends AuditMiddleware. At line 130,
+it initializes thread_kwargs = {} before calling super().m2m_changed_handler().
+.
+The base AuditMiddleware is designed to be called by EnterpriseAuditMiddleware,
+not directly by Django signals. When we remove /authentik/enterprise for an
+OSS-only build, the base middleware is called directly with thread_kwargs=None,
+exposing this incompatibility.
+.
+WHY THIS FIX IS NEEDED:
+Without /authentik/enterprise, the middleware inheritance chain changes:
+  Standard: Django signal → EnterpriseAuditMiddleware (init params) → AuditMiddleware
+  OSS Build: Django signal → AuditMiddleware (receives None directly)
+.
+The base AuditMiddleware.post_save_handler correctly handles None (line 207):
+  thread.kwargs.update(thread_kwargs or {})  ← Defensive pattern
+This patch applies the same defensive pattern to m2m_changed_handler.
+.
+This manifests as:
+- Frontend: "POST /api/v3/core/groups/{id}/add_user/ 405 (Method Not Allowed)"
+- Backend: "EventNewThread() argument after ** must be a mapping, not NoneType"
+  at authentik/events/middleware.py:249 in m2m_changed_handler
+.
+Bug Impact:
+- Cannot add users to groups via admin UI or API
+- Cannot remove users from groups
+- Cannot add groups to users
+- Cannot modify permissions or roles
+- All m2m operations on User/Group models fail completely
+.
+Author: Matthew Ramirez <matthew.ramirez@chainguard.dev>
+Forwarded: not-needed
+
+diff --git a/authentik/events/middleware.py b/authentik/events/middleware.py
+index e53db33da..10ca867db 100644
+--- a/authentik/events/middleware.py
++++ b/authentik/events/middleware.py
+@@ -251,5 +251,5 @@ class AuditMiddleware:
+             request,
+             user=user,
+             model=model_to_dict(instance),
+-            **thread_kwargs,
++            **(thread_kwargs or {}),
+         ).run()

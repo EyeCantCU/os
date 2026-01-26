@@ -1,0 +1,174 @@
+package:
+  name: pelias-api
+  version: "7.6.0"
+  epoch: 0
+  description: "Pelias geocoding API - open-source geocoding service"
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - pelias-baseimage
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - jq
+      - nodejs
+      - npm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pelias/api
+      tag: v${{package.version}}
+      expected-commit: 972046ab769f175498a1597fbd8dab7954b9d40e
+
+  - name: Remediate npm CVEs in transitive dependencies
+    runs: |
+      # Use npm overrides to force fixed versions of vulnerable transitive deps
+      # lodash: CVE-2021-23337, CVE-2019-10744, CVE-2020-8203, CVE-2018-16487, CVE-2018-3721
+      # qs: CVE-2025-15284, CVE-2022-24999, CVE-2017-1000048
+      # nth-check: CVE-2021-3803
+      # css-what: CVE-2022-21222
+      # trim: CVE-2020-7753
+      # vue: CVE-2024-9506 (major version bump 2.x -> 3.x)
+      overrides='{
+        "lodash": "^4.17.21",
+        "qs": "^6.14.1",
+        "nth-check": "^2.0.1",
+        "css-what": "^6.1.0",
+        "trim": "^0.0.3",
+        "vue": "^3.5.13"
+      }'
+      jq --argjson overrides "$overrides" '.overrides += $overrides' package.json > temp.json && mv temp.json package.json
+
+  - runs: |
+      npm install
+      mkdir -p "${{targets.destdir}}"/code/pelias/api
+
+      cp -r \
+        Dockerfile \
+        LICENSE \
+        README.md \
+        app.js \
+        index.js \
+        package.json \
+        schema.js \
+        bin \
+        controller \
+        helper \
+        middleware \
+        public \
+        query \
+        routes \
+        sanitizer \
+        service \
+        test \
+        node_modules \
+        "${{targets.destdir}}"/code/pelias/api/
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: pelias/api
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    environment:
+      API_PORT: "3100" # Correct default port from index.js
+      PELIAS_CONFIG: "/tmp/pelias.json"
+    contents:
+      packages:
+        - curl
+        - jq
+        - npm
+  pipeline:
+    - name: Run npm test
+      runs: |
+        cd /code/pelias/api
+        npm test
+    - name: Verify installation structure
+      runs: |
+        set -euo pipefail
+        stat /code/pelias/api/package.json
+        stat /code/pelias/api/bin/start
+        stat /code/pelias/api/index.js
+        stat /code/pelias/api/app.js
+    - name: Verify package.json content
+      runs: |
+        set -euo pipefail
+        jq -e '.name == "pelias-api"' /code/pelias/api/package.json
+        jq -e '.version' /code/pelias/api/package.json
+        jq -e '.scripts.start' /code/pelias/api/package.json
+        jq -e '.scripts.test' /code/pelias/api/package.json
+    - name: Verify node_modules installed
+      runs: |
+        set -euo pipefail
+        stat /code/pelias/api/node_modules
+        stat /code/pelias/api/node_modules/express
+    - name: Test API server startup and endpoints
+      uses: test/daemon-check-output
+      with:
+        timeout: 60
+        # Custom error_strings to avoid flagging expected Elasticsearch connection errors
+        # (API starts successfully without ES backend). Only fail on actual fatal errors.
+        error_strings: |
+          FATAL
+          PANIC
+          command not found
+        setup: |-
+          # Create minimal Pelias config (ES connection will fail, but server should start)
+          tee "$PELIAS_CONFIG" << 'EOF'
+          {
+            "esclient": {
+              "hosts": [{"host": "localhost", "port": 9200}]
+            },
+            "api": {
+              "indexName": "pelias",
+              "version": "1.0",
+              "host": "0.0.0.0"
+            },
+            "logger": {
+              "level": "info"
+            }
+          }
+          EOF
+        start: sh -c 'cd /code/pelias/api && PORT=$API_PORT node index.js'
+        expected_output: |
+          pelias is now running
+        post: |-
+          set -o pipefail
+
+          # Test root endpoint (redirects to /v1/)
+          curl -sf http://localhost:$API_PORT/ | jq -e 'type == "object"'
+
+          # Test /v1/ endpoint
+          V1_RESPONSE=$(curl -sf http://localhost:$API_PORT/v1/)
+          echo "$V1_RESPONSE" | jq -e '.name == "Pelias API"'
+          echo "$V1_RESPONSE" | jq -e '.version'
+
+          # Test /status endpoint (returns plain text "OK")
+          STATUS_RESPONSE=$(curl -sf http://localhost:$API_PORT/status)
+          echo "$STATUS_RESPONSE" | grep -F "OK"
+
+          # Test /attribution endpoint
+          ATTR_RESPONSE=$(curl -sf http://localhost:$API_PORT/attribution)
+          echo "$ATTR_RESPONSE" | jq -e 'type == "object"'
+
+          # Test /v1/search endpoint (will error without ES, but should return valid error JSON)
+          SEARCH_RESPONSE=$(curl -s http://localhost:$API_PORT/v1/search?text=london)
+          echo "$SEARCH_RESPONSE" | jq -e '.geocoding or .error or .message'
+
+          # Test /v1/autocomplete endpoint
+          AUTO_RESPONSE=$(curl -s http://localhost:$API_PORT/v1/autocomplete?text=lond)
+          echo "$AUTO_RESPONSE" | jq -e '.geocoding or .error or .message'
+
+          # Test /v1/reverse endpoint (lat/lon required)
+          REV_RESPONSE=$(curl -s "http://localhost:$API_PORT/v1/reverse?point.lat=51.5&point.lon=-0.1")
+          echo "$REV_RESPONSE" | jq -e '.geocoding or .error or .message'
+    - uses: test/tw/ldd-check

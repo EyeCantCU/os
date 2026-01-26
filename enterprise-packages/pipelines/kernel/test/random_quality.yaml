@@ -20,11 +20,13 @@ name: random_quality
 # This does not affect test results.
 needs:
   packages:
-    - qemu
+    - bash
     - busybox-full
-    - python3
     - boringssl-fips-static-2023042800-tools
+    - kmod
     - posix-libc-utils
+    - python3
+    - qemu
 
 inputs:
   sample_count:
@@ -46,44 +48,11 @@ inputs:
 pipeline:
   - name: Test random number quality in microvm
     runs: |
-      set +x
-
+      initrd_root=$(mktemp -d -t initrd_root.XXXXXXXX)
+      initrd_image=$(mktemp -t initrd_image.XXXXXXXX)
       arch=$(uname -m)
 
-      # Function to copy binary and its dependencies to initrd
-      copy_binary_with_deps() {
-        local binary="$1"
-        local target_dir="$2"
-
-        mkdir -p "$target_dir"
-        cp "$binary" "$target_dir/"
-
-        ldd "$binary" 2>/dev/null | while read line; do
-          if echo "$line" | grep -q "=>"; then
-            # Format: "libname.so => /path/to/lib (0x...)"
-            lib_path=$(echo "$line" | sed 's/.*=> \([^ ]*\).*/\1/')
-          elif echo "$line" | grep -q "^[[:space:]]*/"; then
-            # Format: "/lib64/ld-linux-x86-64.so.2 (0x...)"
-            lib_path=$(echo "$line" | awk '{print $1}')
-          else
-            continue
-          fi
-
-          if [ ! -f "$lib_path" ]; then
-            continue
-          fi
-
-          lib_dir=$(dirname "$lib_path")
-          mkdir -p "initrd_root$lib_dir"
-
-          cp "$lib_path" "initrd_root$lib_dir/"
-        done
-      }
-
-      echo "Creating initrd scripts"
-
-      # Create test script for random quality testing
-      cat > random_test.py << 'EOF'
+      cat > average_test << 'EOF'
       #!/usr/bin/python3
       import os
       import sys
@@ -152,75 +121,48 @@ pipeline:
       if __name__ == "__main__":
           main()
       EOF
+      chmod +x ./average_test
 
-      # Create init script
-      cat > init << 'EOF'
-      #!/usr/bin/sh
-      echo "Preparing for random quality testing."
-      # Mount essential filesystems
-      mount -t proc proc /proc
-      mount -t sysfs sysfs /sys
-      mount -t devtmpfs devtmpfs /dev
-      # Run the test
+      cat > random_test << 'EOF'
+      echo "Preparing for random quality test."
       echo "Starting bssl test."
-      /usr/bin/bssl genrsa || echo "FAIL bssl genrsa"
-      /usr/bin/bssl rand -hex 10240 || echo "FAIL bssl rand"
+      bssl genrsa || echo "FAIL bssl genrsa"
+      bssl rand -hex 10240 || echo "FAIL bssl rand"
       echo "Finished bssl test."
       echo "Starting average test."
-      /usr/bin/python3 /usr/bin/random_test.py
+      average_test
       echo "Finished average test."
-      echo "Finished random quality testing."
-      echo s > /proc/sysrq-trigger
-      echo o > /proc/sysrq-trigger
-      sleep 5
+      echo "Finished random quality test."
       EOF
+      chmod +x ./random_test
 
-      echo "Building initrd baselayout"
-      mkdir -p initrd_root/usr/bin
-      ln -s usr/bin initrd_root/bin
-      ln -s usr/bin initrd_root/sbin
-      ln -s bin initrd_root/usr/sbin
-      mkdir -p initrd_root/usr/lib
-      ln -s usr/lib initrd_root/lib64
-      ln -s usr/lib initrd_root/lib
-      ln -s lib initrd_root/usr/lib64
-      mkdir -p initrd_root/proc
-      mkdir -p initrd_root/sys
-      mkdir -p initrd_root/dev
-      mkdir -p initrd_root/tmp
-      echo "Copying binaries and scripts to initrd"
-      # Copy binaries and their dependencies
-      mv init initrd_root/
-      chmod +x initrd_root/init
-      mv random_test.py initrd_root/usr/bin/
-      chmod +x initrd_root/usr/bin/random_test.py
-      copy_binary_with_deps /usr/bin/python3 initrd_root/usr/bin
-      copy_binary_with_deps /usr/bin/bssl initrd_root/usr/bin
-      copy_binary_with_deps /usr/bin/busybox initrd_root/usr/bin
-      /usr/bin/busybox --install -s initrd_root/usr/bin
+      ./scripts/make-busybox-initramfs make-root "$initrd_root"
+
+      ./scripts/make-busybox-initramfs add-binary "$initrd_root" /usr/bin/python3
+      ./scripts/make-busybox-initramfs add-binary "$initrd_root" /usr/bin/bssl
+      ./scripts/make-busybox-initramfs add-binary "$initrd_root" average_test
+
       for i in /usr/lib/python3*; do
-        target=initrd_root/"$i"
+        target="$initrd_root"/"$i"
         mkdir -p "$(dirname $target)"
         cp -r "$i" "$target"
       done
 
-      echo "Zipping up initrd"
-      # Create the initrd
-      cd initrd_root
-      find . | cpio -o -H newc | gzip > ../test_initrd.gz
-      cd ..
-      echo "Running microvm"
+      ./scripts/make-busybox-initramfs make-init "$initrd_root" random_test
+
+      ./scripts/make-busybox-initramfs make-image "$initrd_root" "$initrd_image"
+
       case "$arch" in
           x86_64)
             timeout 300 qemu-system-x86_64 \
                 -kernel /boot/vmlinuz -m 1G -cpu max -machine q35 \
-                -nographic -append "console=ttyS0 init=/init panic=1 ${{inputs.args}}" -initrd test_initrd.gz \
+                -nographic -append "console=ttyS0 panic=-1 ${{inputs.args}}" -initrd "$initrd_image" \
                 -no-reboot > qemu_output.log
           ;;
           aarch64)
             timeout 300 qemu-system-aarch64 \
                 -kernel /boot/vmlinuz -m 1G -cpu max -machine virt \
-                -nographic -append "init=/init panic=1 ${{inputs.args}}" -initrd test_initrd.gz \
+                -nographic -append "panic=-1 ${{inputs.args}}" -initrd "$initrd_image" \
                 -no-reboot > qemu_output.log
           ;;
       esac

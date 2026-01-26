@@ -1,0 +1,86 @@
+package:
+  name: jobset-fips
+  version: 0.10.1
+  epoch: 1
+  description: JobSet is a Kubernetes-native API for distributed ML training and HPC workloads
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openssl-config-fipshardened
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: da72d32bb0060354aa04b1a5868f3b363b088446
+      repository: https://github.com/kubernetes-sigs/jobset.git
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      packages: .
+      output: manager
+      go-package: go-fips
+      ldflags: |
+        -X sigs.k8s.io/jobset/pkg/version.GitVersion=v${{package.version}}
+        -X sigs.k8s.io/jobset/pkg/version.GitCommit=da72d32bb0060354aa04b1a5868f3b363b088446
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package to place binary in the location expected by upstream helm charts
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/manager "${{targets.subpkgdir}}/manager"
+    test:
+      pipeline:
+        - runs: |
+            stat /manager
+            readlink /manager
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}
+        - git
+        - openssl
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        git clone --branch v${{package.version}} --depth 1 https://github.com/kubernetes-sigs/jobset.git
+    - uses: test/kwok/cluster
+    - runs: kubectl apply --server-side -f jobset/config/components/crd/bases/
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create config that disables internal cert management for testing
+          tee /tmp/jobset-config.yaml << 'EOF'
+          apiVersion: config.jobset.x-k8s.io/v1alpha1
+          kind: Configuration
+          internalCertManagement:
+            enable: false
+          leaderElection:
+            leaderElect: false
+          health:
+            healthProbeBindAddress: ":8081"
+          metrics:
+            bindAddress: ":8443"
+          webhook:
+            port: 9443
+          EOF
+          # Create dummy TLS certs for webhook server
+          mkdir -p /tmp/k8s-webhook-server/serving-certs
+          openssl req -x509 -newkey rsa:2048 -keyout /tmp/k8s-webhook-server/serving-certs/tls.key -out /tmp/k8s-webhook-server/serving-certs/tls.crt -days 1 -nodes -subj "/CN=jobset-webhook"
+        start: /usr/bin/manager --config=/tmp/jobset-config.yaml --zap-log-level=info --zap-encoder=console
+        timeout: 30
+        expected_output: |
+          Starting workers
+          Starting EventSource
+          Starting Controller
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes-sigs/jobset
+    strip-prefix: v

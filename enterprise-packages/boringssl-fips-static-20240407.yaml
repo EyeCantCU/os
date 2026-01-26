@@ -1,0 +1,250 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: boringssl-fips-static-20240407
+  version: 20240407
+  epoch: 0
+  description: FIPS validated BoringSSL static libraries
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - binutils
+      - build-base
+      - busybox
+      - coreutils
+      - curl
+      - gcc-12-default
+      - git
+      # note not used during boring build, only for end-user tools
+      - go-fips
+      - libstdc++-12-dev
+      - libtool
+      # Even though this is the latest version, our solver does not pick it up.
+      - ncurses~6.4_p20230722
+      - patch
+      - perl
+      - python3-dev<3.13
+
+vars:
+  clang: 17.0.6
+  go: 1.22.3
+  ninja: 1.12.1
+  cmake: 3.29.3
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/google/boringssl
+      branch: fips-20240407
+      expected-commit: 85897d07196b7bf164dbd4673fc78b762aff3e8b
+      destination: boringssl
+
+  - runs: mkdir -p clang go ninja cmake
+
+  - if: ${{build.arch}} == 'aarch64'
+    uses: fetch
+    with:
+      uri: https://github.com/llvm/llvm-project/releases/download/llvmorg-${{vars.clang}}/clang+llvm-${{vars.clang}}-aarch64-linux-gnu.tar.xz
+      expected-sha256: 6dd62762285326f223f40b8e4f2864b5c372de3f7de0731cb7cd55ca5287b75a
+      directory: clang
+
+  - if: ${{build.arch}} == 'x86_64'
+    uses: fetch
+    with:
+      uri: https://github.com/llvm/llvm-project/releases/download/llvmorg-${{vars.clang}}/clang+llvm-${{vars.clang}}-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+      expected-sha256: 884ee67d647d77e58740c1e645649e29ae9e8a6fe87c1376be0f3a30f3cc9ab3
+      directory: clang
+
+  - if: ${{build.arch}} == 'aarch64'
+    uses: fetch
+    with:
+      uri: https://dl.google.com/go/go${{vars.go}}.linux-arm64.tar.gz
+      expected-sha256: 6c33e52a5b26e7aa021b94475587fce80043a727a54ceb0eee2f9fc160646434
+      directory: go
+
+  - if: ${{build.arch}} == 'x86_64'
+    uses: fetch
+    with:
+      uri: https://dl.google.com/go/go${{vars.go}}.linux-amd64.tar.gz
+      expected-sha256: 8920ea521bad8f6b7bc377b4824982e011c19af27df88a815e3586ea895f1b36
+      directory: go
+
+  - uses: fetch
+    with:
+      uri: https://github.com/ninja-build/ninja/archive/refs/tags/v${{vars.ninja}}.tar.gz
+      expected-sha256: 821bdff48a3f683bc4bb3b6f0b5fe7b2d647cf65d52aeb63328c91a6c6df285a
+      directory: ninja
+
+  - if: ${{build.arch}} == 'aarch64'
+    uses: fetch
+    with:
+      uri: https://github.com/Kitware/CMake/releases/download/v${{vars.cmake}}/cmake-${{vars.cmake}}-linux-aarch64.tar.gz
+      expected-sha256: ae61d262b2771ba9cbdf1eeac288e64d6510d2f0417d2d92e27807d269ac90fa
+      directory: cmake
+
+  - if: ${{build.arch}} == 'x86_64'
+    uses: fetch
+    with:
+      uri: https://github.com/Kitware/CMake/releases/download/v${{vars.cmake}}/cmake-${{vars.cmake}}-linux-x86_64.tar.gz
+      expected-sha256: 90b543a30220401db0e08347af067545be158ce89ffb09b7df1516cda8617329
+      directory: cmake
+
+  # This comes from envoyproxy/envoy/blob/main/bazel/external/boringssl_fips.genrule_cmd
+  # with a few mods to make old Clang works w/ newer cstdlib.
+  #
+  # This script is based on the BoringSSL Security policy and update stream documentation as described in:
+  # https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp5104.pdf
+  # https://boringssl.googlesource.com/boringssl/+/refs/heads/main/crypto/fipsmodule/FIPS.md#update-stream
+  #
+  # A package with this much of version pinning is not very suitable for our
+  # infrastructures & tools, because we prefer getting newer/better versions for more
+  # security. However, this narrow qualification is somewhat called out in the doc, so
+  # we do what needs to be done here.
+  - runs: |
+      set -x
+      # Older Clang does not know about standard C++ headers locations for newer stdlibc++.
+      # We need to be explicit here.
+      GCC_INCLUDE=$(find /usr/lib/gcc/${{host.triplet.gnu}} -path '/usr/lib/gcc/*/include/c++' -type d)
+      export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:$GCC_INCLUDE:$GCC_INCLUDE/${{host.triplet.gnu}}
+
+      # Since the Envoy binary is compiled with -fPIC, we need to do the same
+      # for these libraries, or else they won't link, like the errors reported here
+      # https://github.com/envoyproxy/envoy/issues/23784
+      export CFLAGS="-fPIC"
+      export CPPFLAGS="$CFLAGS"
+      export CXXFLAGS="$CFLAGS"
+
+      OS=`uname`
+      ARCH=`uname -m`
+
+      # Override $PATH for build tools, to avoid picking up anything else.
+      export PATH="/usr/bin:/bin"
+
+      # Sadly, this pre-compiled Clang was compiled w/ libtinfo 5. However,
+      # during this build, the ncurses/terminfo libs didn't matter.
+      #
+      # We create a symlink here so that Clang does not panic, but we
+      # probably need to create a separate version stream for ncurses-5, if
+      # we want to make this less apalling. However, as the passing test
+      # suite suggests this makes no difference.
+      ln -sf /usr/lib/libtinfo.so.6 /usr/lib/libtinfo.so.5
+
+      export HOME="$PWD"
+      printf "set(CMAKE_C_COMPILER \"clang\")\nset(CMAKE_CXX_COMPILER \"clang++\")\n" > ${HOME}/toolchain
+      export PATH="$PWD/clang/bin:$PATH"
+
+      if [ `clang --version | head -1 | awk '{print $3}'` != "${{vars.clang}}" ]; then
+        echo "ERROR: Clang version doesn't match."
+        exit 1
+      fi
+
+      export GOPATH="$PWD/gopath"
+      export GOROOT="$PWD/go"
+      export PATH="$GOPATH/bin:$GOROOT/bin:$PATH"
+
+      if [ `go version | awk '{print $3}'` != "go${{vars.go}}" ]; then
+        echo "ERROR: Go version doesn't match."
+        exit 1
+      fi
+
+      # Ninja
+      cd ninja
+      python3 ./configure.py --bootstrap
+
+      export PATH="$PWD:$PATH"
+
+      if [ `ninja --version` != "${{vars.ninja}}" ]; then
+        echo "ERROR: Ninja version doesn't match."
+        exit 1
+      fi
+      cd ..
+
+      # CMake
+      export PATH="$PWD/cmake/bin:$PATH"
+
+      if [ `cmake --version | head -n1` != "cmake version ${{vars.cmake}}" ]; then
+        echo "ERROR: CMake version doesn't match."
+        exit 1
+      fi
+
+      # Build BoringSSL.
+      cd boringssl
+      mkdir build && cd build && cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib/boringssl-fips-static -DCMAKE_INSTALL_INCLUDEDIR=lib/boringssl-fips-static/include -GNinja -DCMAKE_TOOLCHAIN_FILE=${HOME}/toolchain -DFIPS=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+      ninja
+
+      ninja run_tests
+
+      # Verify correctness of the FIPS build.
+      if [ `./tool/bssl isfips` != "1" ]; then
+        echo "ERROR: BoringSSL tool didn't report FIPS build."
+        exit 1
+      else
+        echo "PASSED: BoringSSL tool reported FIPS build."
+      fi
+
+      # Verify Module version
+      ./util/fipstools/test_fips | grep "^Module: 'BoringCrypto', version: ${{package.version}} hash:$"
+
+      DESTDIR=${{targets.destdir}} ninja install
+      cp util/fipstools/test_fips ${{targets.contextdir}}/usr/bin/bssl-test_fips
+
+      cd ../
+      # Use system go for end-user tooling, uses standard library only thus no need to keep symbols
+      env -u GOROOT -u GOPATH PATH=/usr/bin go build -ldflags "-w" -o ${{targets.contextdir}}/usr/bin/ ./util/fipstools/break-hash.go
+      env -u GOROOT -u GOPATH PATH=/usr/bin go build -ldflags "-w" -o ${{targets.contextdir}}/usr/bin/ ./util/fipstools/break-kat.go
+
+      # Break hash of the original bssl-test_fips
+      ${{targets.contextdir}}/usr/bin/break-hash build/util/fipstools/test_fips original.test_fips
+      rm build/util/fipstools/test_fips
+
+      # Start building patched libssl, all changes outside of the FIPS
+      # boundary. If needed, for now we don't need any patches, but
+      # add patches here if need arises
+      # patch -p1 < ../0001-backports-to-things-outside-of-boundary.patch
+      cd build
+      ninja
+      ninja run_tests
+      DESTDIR=${{targets.destdir}} ninja install
+      cd ../
+
+      # Break hash of the patched bssl-test_fips
+      ${{targets.contextdir}}/usr/bin/break-hash build/util/fipstools/test_fips patched.test_fips
+
+      # Moment of truth, is the FIPS module inside libcrypto still the
+      # same after libssl was patched, or not. They should both have
+      # identical expected & broken module hash
+      ./original.test_fips 2>&1 | tee original.txt || true
+      ./patched.test_fips 2>&1 | tee patched.txt || true
+      grep -q 'Expected:' original.txt
+      diff -u original.txt patched.txt
+      echo FIPS boundary is unchanged
+
+      # Finish up install
+      rm -rf ${{targets.contextdir}}/usr/lib/cmake
+      cp build/util/fipstools/test_fips ${{targets.contextdir}}/usr/bin/bssl-test_fips
+      cp ../BUILD ../WORKSPACE ${{targets.contextdir}}/usr/lib/boringssl-fips-static
+
+subpackages:
+  - name: ${{package.name}}-tools
+    description: "ship test tools"
+    dependencies:
+      runtime:
+        - NIST-CMVP-5104
+    pipeline:
+      - uses: split/bin
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+
+test:
+  pipeline:
+    - uses: test/cmvp-fips-certification-check
+      with:
+        certificate-number: 5104
+
+update:
+  enabled: false
+  exclude-reason: |
+    This can only be updated every 6 months when there is a new validated version. Each time as a new version stream.

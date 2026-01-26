@@ -1,0 +1,104 @@
+package:
+  name: chaos-mesh-fips
+  version: "2.8.1"
+  epoch: 0
+  description: A chaos engineering platform for kuberenetes.
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/chaos-mesh/chaos-mesh
+      tag: v${{package.version}}
+      expected-commit: 9d390d04bca86ad2433a72d3a635ee884c50ebf3
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/docker/docker@v28.0.0
+        github.com/containerd/containerd@v1.7.29
+        github.com/opencontainers/selinux@v1.13.0
+        golang.org/x/crypto@v0.45.0
+
+  - uses: go/build
+    with:
+      packages: cmd/chaos-controller-manager/main.go
+      output: chaos-controller-manager
+      go-package: go-fips
+
+subpackages:
+  - name: chaos-mesh-compat-fips
+    description: Compatibility package
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/chaos-controller-manager "${{targets.subpkgdir}}/usr/local/bin/chaos-controller-manager"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - uses: test/tw/help-check
+          with:
+            bins: /usr/local/bin/chaos-controller-manager
+
+test:
+  environment:
+    contents:
+      packages:
+        - kustomize
+        - kubectl
+        - git
+        - mkcert
+        - nss
+        - curl
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: /usr/bin/chaos-controller-manager
+    - name: Fetch the testdata from the source repo
+      runs: git clone --branch v${{package.version}} --depth=1 https://github.com/chaos-mesh/chaos-mesh
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Install CRDs
+      runs: kubectl apply --server-side -f chaos-mesh/manifests/crd.yaml
+    - name: "Test manager run"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /etc/webhook/certs
+          mkcert -install
+          mkcert -key-file /etc/webhook/certs/tls.key -cert-file /etc/webhook/certs/tls.crt localhost
+        start: /usr/bin/chaos-controller-manager --kubeconfig $HOME/.kwok/clusters/kwok/kubeconfig.yaml
+        timeout: 30
+        expected_output: |
+          Controller manager Version:
+          Chaos controller manager is running in cluster scoped mode.
+          Starting Controller
+          Starting workers
+        error_strings: |
+          no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
+        post: |
+          sleep 3
+          STATUS=$(curl -k -s -o /dev/null -w "%{http_code}" http://localhost:10080/metrics)
+          # Check if the status code is 200, if so exit 0, otherwise exit 1
+          if [ "$STATUS" -eq 200 ]; then
+              echo "Health check passed with status code 200"
+              exit 0
+          else
+              echo "Health check failed with status code $STATUS"
+              exit 1
+          fi
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v

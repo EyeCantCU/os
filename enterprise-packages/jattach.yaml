@@ -1,0 +1,88 @@
+package:
+  name: jattach
+  version: "2.2"
+  epoch: 0
+  description: Utility to send commands to a JVM process via Dynamic Attach mechanism
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/jattach/jattach
+      tag: v${{package.version}}
+      expected-commit: 030d74328bd6b04114f804ba1b4de2ddfa031b55
+
+  - uses: autoconf/make
+
+  - runs: |
+      install -Dm755 build/jattach "${{targets.destdir}}/usr/bin/jattach"
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: jattach/jattach
+    strip-prefix: v
+
+#upstream uses java version 8 for compatibility across other jdk version
+#REF: https://github.com/jattach/jattach/blob/v2.2/README.md#jvm-dynamic-attach-utility
+vars:
+  test-java-version: "8"
+
+test:
+  environment:
+    contents:
+      packages:
+        - openjdk-${{vars.test-java-version}}-default-jdk
+        - async-profiler
+        - prometheus-jmx-exporter
+  pipeline:
+    - uses: test/tw/ldd-check
+    - runs: |
+        set -euo pipefail
+
+        # Running jattach returns exit code 1, hence "|| true"
+        output=$(jattach 2>&1 || true)
+        echo $output | grep -F -e "jattach ${{package.version}}"
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          cat > Hello.java <<'EOF'
+          import java.lang.management.ManagementFactory;
+          import java.io.FileWriter;
+          public class Hello {
+            public static void main(String[] args) throws Exception {
+              String pid = ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
+              try (FileWriter fw = new FileWriter("/tmp/jvm.pid")) { fw.write(pid); }
+              System.out.println("PID=" + pid);
+              Thread.sleep(10_000_000);
+            }
+          }
+          EOF
+          javac Hello.java
+
+          cat > /tmp/jmx-config.yaml <<'EOF'
+          rules:
+          - pattern: ".*"
+          EOF
+        start: java Hello
+        expected_output: "PID="
+        post: |
+          set -euo pipefail
+          PID=$(cat /tmp/jvm.pid)
+          jattach $PID properties | grep -F "java.vm.vendor=wolfi"
+          jattach $PID threaddump | grep -F "Full thread dump"
+          jattach $PID jcmd help -all | grep -F -e "JFR.start"
+
+          # https://github.com/jattach/jattach/blob/v2.2/README.md#examples
+          jattach $PID load /usr/lib/libasyncProfiler.so true | grep -F "JVM response code = 0"
+          jattach $PID load instrument false \
+          "/usr/lib/prometheus/jmx_prometheus_javaagent.jar=9999:/tmp/jmx-config.yaml" | grep -F "JVM response code = 0"

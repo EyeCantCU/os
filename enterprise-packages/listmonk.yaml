@@ -1,0 +1,158 @@
+package:
+  name: listmonk
+  version: "6.0.0"
+  epoch: 1
+  description: newsletter and mailing list manager, uses a PostgreSQL database as its data store
+  copyright:
+    - license: AGPL-3.0-only
+    - license: MIT
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - nodejs
+      - yarn
+  environment:
+    CGO_ENABLED: "0"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/knadh/listmonk.git
+      tag: v${{package.version}}
+      expected-commit: 00f303c25b925e2e2b33f515f53a704c8d1e1645
+
+  - uses: go/build
+    with:
+      go-package: go
+      ldflags: |
+        -X main.buildString=${{package.version}}
+        -X main.versionString=${{package.version}}
+      output: listmonk
+      packages: cmd/*.go
+
+  - runs: |
+      # NOTE: move listmonk here so "make dist" doesn't rebuild the binary
+      mv ${{targets.contextdir}}/usr/bin/listmonk .
+      # that builds the frontend and uses stuffbin to put everything (frontend & backend) into
+      # a single binary
+      # NOTE: don't use strip in the pipeline. that would remove static files required to run the binary
+      make dist
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/usr/bin
+      install -m755 -D listmonk "${{targets.contextdir}}/usr/bin/"
+
+subpackages:
+  - name: ${{package.name}}-compat
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          install -Dm755 docker-entrypoint.sh ${{targets.contextdir}}/usr/bin/docker-entrypoint.sh
+          # for upstream compat
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+          ln -s /usr/bin/docker-entrypoint.sh "${{targets.contextdir}}/usr/local/bin/"
+          # for upstream docker-compose compat, we need /listmonk/listmonk so create the directory
+          # first and then symlink the binary
+          install -d 755 "${{targets.contextdir}}/listmonk"
+          ln -s /usr/bin/listmonk "${{targets.contextdir}}/listmonk/"
+          install -Dm644 config.toml.sample ${{targets.contextdir}}/listmonk/config.toml
+    dependencies:
+      runtime:
+        - ${{package.name}}=${{package.full-version}}
+        - merged-bin
+        # su-exec is required for the docker-entrypoint.sh script
+        - su-exec
+        - wolfi-baselayout
+        - tzdata
+        # for cat
+        - busybox
+        # for getent
+        - posix-libc-utils
+        - dash-binsh
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+update:
+  enabled: true
+  github:
+    identifier: knadh/listmonk
+    strip-prefix: v
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: listmonk
+          gid: 65532
+      users:
+        - username: listmonk
+          gid: 65532
+          uid: 65532
+      run-as: 0
+    contents:
+      packages:
+        - sudo
+        - postgresql
+        # contrib required for the pgcrypto extension
+        - postgresql-contrib
+        - postgresql-client
+        - curl
+        - yarn
+        - nodejs
+        # for cypress testing (see https://docs.cypress.io/app/get-started/install-cypress#Linux-Prerequisites)
+        - xvfb
+        - nss
+        - libnss
+        - gtk-3
+        - xkbcomp
+        - xkeyboard-config
+        - libnspr
+        - mesa-gbm
+        - libudev
+        - font-opensans
+    environment:
+      PGDATA: /tmp/listmonk_db
+      PGUSER: listmonk
+      PGPASSWORD: listmonk
+      PGDB: listmonk
+      ALLOW_EMPTY_PASS: true
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: listmonk
+    - uses: test/tw/ver-check
+      with:
+        bins: listmonk
+    # setup the database
+    - name: setup postgres DB
+      runs: |
+        sudo -u $PGUSER initdb -D $PGDATA
+        sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
+        sudo -u $PGUSER createdb $PGDB
+        # pgcrypto required to fix "install.go:60: error migrating DB schema: pq: extension "pgcrypto" is not available"
+        sudo -u $PGUSER psql -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
+    # setup listmonk and run very basic smoke test against the API
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          listmonk --new-config
+          LISTMONK_ADMIN_USER=admin LISTMONK_ADMIN_PASSWORD=password listmonk --install --yes
+        start: listmonk
+        expected_output: |
+          ${{ package.version }}
+          reading config: config.toml
+          connecting to db: localhost:5432/listmonk
+          http server started on 127.0.0.1:9000
+        post: |
+          wait-for-it localhost:9000 --timeout=10
+          curl --fail http://localhost:9000/health || exit 1
+          # now do the cypress e2e tests
+          yarn add cypress --dev
+          yarn cypress run

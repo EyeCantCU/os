@@ -1,7 +1,7 @@
 package:
   name: redis-7.2
   version: "7.2.12"
-  epoch: 0
+  epoch: 2
   description: Advanced key-value store
   copyright:
     - license: BSD-3-Clause
@@ -10,7 +10,7 @@ package:
       - redis=${{package.full-version}}
     runtime:
       - merged-usrsbin
-      - posix-libc-utils # `getent` is required on startup in ha mode for ip introspection cluster formation
+      - posix-libc-utils-bin # `getent` is required on startup in ha mode for ip introspection cluster formation
       - wolfi-baselayout
 
 var-transforms:
@@ -84,10 +84,65 @@ subpackages:
         - merged-usrsbin
         - wolfi-baselayout
     test:
+      environment:
+        contents:
+          packages:
+            - redis
       pipeline:
         - runs: |
             redis-benchmark --version
             redis-benchmark --help
+        - name: Test benchmarking against a running Redis instance
+          runs: |
+            # Create a minimal redis config
+            tee /tmp/redis.conf <<'EOF'
+            dbfilename dump.rdb
+            pidfile /tmp/redis_6379.pid
+            dir /tmp/
+            EOF
+
+            # Start Redis server in background
+            redis-server /tmp/redis.conf > /tmp/redis.log 2>&1 &
+            REDIS_PID=$!
+
+            # Wait for Redis to be ready
+            sleep 3
+
+            # Verify Redis is running
+            if [ ! -d "/proc/$REDIS_PID" ]; then
+              echo "ERROR: Redis failed to start"
+              cat /tmp/redis.log
+              exit 1
+            fi
+
+            # Run redis-benchmark with minimal workload for quick testing
+            # -t set,get : only run SET and GET tests
+            # -n 100 : only 100 requests per test
+            # -q : quiet mode with summary output
+            output=$(redis-benchmark -t set,get -n 100 -q 2>&1)
+            benchmark_rc=$?
+
+            # Check benchmark completed successfully
+            if [ "$benchmark_rc" -ne 0 ]; then
+              echo "ERROR: redis-benchmark failed with exit code $benchmark_rc"
+              echo "Output: $output"
+              kill $REDIS_PID 2>/dev/null || true
+              exit 1
+            fi
+
+            # Verify benchmark produced performance output
+            echo "$output" | grep -F "requests per second" || {
+              echo "ERROR: Expected 'requests per second' in benchmark output"
+              echo "Actual output: $output"
+              kill $REDIS_PID 2>/dev/null || true
+              exit 1
+            }
+
+            echo "SUCCESS: redis-benchmark completed with valid performance data"
+            echo "$output"
+
+            # Cleanup
+            kill $REDIS_PID 2>/dev/null || true
 
   - name: redis-${{vars.major-minor-version}}-iamguarded-compat
     dependencies:

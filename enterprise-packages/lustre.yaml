@@ -1,0 +1,156 @@
+package:
+  name: lustre
+  version: 2.17.50
+  epoch: 0
+  description: "Lustre parallel distributed file system - userspace utilities"
+  copyright:
+    - license: GPL-2.0-only
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - bison
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - e2fsprogs-dev
+      - flex
+      - gawk
+      - keyutils-dev
+      - libaio-dev
+      - libnl3-dev
+      - libtool
+      - linux-headers
+      - openssl-dev
+      - pkgconf-dev
+      - readline-dev
+      - util-linux-dev
+      - yaml-dev
+      - zlib-dev
+  environment:
+    # Use bash explicitly to avoid shell compatibility issues with busybox ash
+    CONFIG_SHELL: /bin/bash
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/lustre/lustre-release
+      tag: ${{package.version}}
+      expected-commit: 53cd308a6504f80c9471f783d963399c092de8ca
+
+  - runs: |
+      bash autogen.sh
+
+      # Workaround upstream bug in crypto check (LU-XXXXX): when building without
+      # kernel modules (--disable-modules), the crypto check incorrectly requires
+      # in-kernel fscrypt even when crypto is disabled. This sed fixes the condition
+      # to properly respect --enable-crypto=no.
+      sed -i 's/AS_IF(\[test "x\$enable_crypto" = xin-kernel -o "x\$enable_modules" = xno -a "x\$enable_dist" = xno\]/AS_IF([test "x$enable_crypto" != xno -a \\( "x$enable_crypto" = xin-kernel -o "x$enable_modules" = xno \\) -a "x$enable_dist" = xno]/' config/lustre-core.m4
+
+      # Regenerate configure after patching
+      autoreconf -vfi
+
+  # Build client utilities without kernel modules
+  - uses: autoconf/configure
+    with:
+      opts: |
+        CPPFLAGS="-I$PWD/lnet/include/uapi -I$PWD/lustre/include/uapi -I/usr/include/libnl3" \
+        CFLAGS="-Wno-stringop-truncation" \
+        --bindir=/usr/bin \
+        --sbindir=/usr/bin \
+        --disable-modules \
+        --disable-server \
+        --enable-crypto=no \
+        --enable-client \
+        --enable-utils
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  # Move mount.lustre from /sbin to /usr/bin for usrmerge compliance
+  - runs: |
+      if [ -f "${{targets.destdir}}/sbin/mount.lustre" ]; then
+        mv "${{targets.destdir}}/sbin/mount.lustre" "${{targets.destdir}}/usr/bin/"
+        rmdir "${{targets.destdir}}/sbin" 2>/dev/null || true
+      fi
+
+  - uses: strip
+
+subpackages:
+  - name: lustre-client
+    description: Lustre client utilities for mounting and managing Lustre filesystems
+    dependencies:
+      runtime:
+        - lustre
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/usr/bin"
+
+          # Move client utilities to subpackage (matching Amazon Linux lustre-client)
+          for bin in lctl lnetctl mount.lustre lfs lfs_migrate lhsmtool_posix \
+                     l_getidentity ll_decode_linkea llverfs llverdev lustre_rsync \
+                     routerstat lustre_routes_conversion lst ldev llsom_sync \
+                     l_foreign_symlink ldlm_debug_upcall lustre_routes_config \
+                     llobdstat llstat plot-llstat ko2iblnd-probe ksocklnd-config; do
+            if [ -f "${{targets.destdir}}/usr/bin/$bin" ]; then
+              mv "${{targets.destdir}}/usr/bin/$bin" "${{targets.contextdir}}/usr/bin/"
+            fi
+          done
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: "Verify lustre client utilities"
+          runs: |
+            set -euo pipefail
+            # Check critical client utilities exist (matching Amazon Linux)
+            stat /usr/bin/mount.lustre
+            stat /usr/bin/lctl
+            stat /usr/bin/lnetctl
+            stat /usr/bin/lfs
+            # Verify utilities are executable and respond to help
+            lctl --help
+            lfs --help
+
+  - name: lustre-dev
+    description: Development files for Lustre
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - lustre
+    test:
+      pipeline:
+        - uses: test/pkgconf
+
+  - name: lustre-doc
+    description: Documentation for Lustre
+    pipeline:
+      - uses: split/manpages
+    test:
+      pipeline:
+        - uses: test/tw/docs
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - RC
+  git: {}
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: "Verify lustre libraries exist"
+      runs: |
+        set -euo pipefail
+        stat /usr/lib/liblustreapi.so.1
+        stat /usr/lib/liblnetconfig.so.4
+    - name: "Verify lustre survey utilities exist"
+      runs: |
+        set -euo pipefail
+        stat /usr/bin/obdfilter-survey
+        stat /usr/bin/ost-survey
+        stat /usr/bin/mds-survey

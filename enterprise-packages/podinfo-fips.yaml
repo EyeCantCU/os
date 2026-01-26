@@ -1,0 +1,119 @@
+package:
+  name: podinfo-fips
+  version: "6.9.4"
+  epoch: 0 # CVE-2025-61729
+  description: Podinfo is a tiny web application made with Go (FIPS)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates
+      - curl
+      - netcat-openbsd
+      - openssl-config-fipshardened
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/stefanprodan/podinfo
+      tag: ${{package.version}}
+      expected-commit: b6b680fe507b8d290de02e6269dec63f5ceac4f5
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: ./cmd/podinfo
+      output: podinfo
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/home/app
+      cp -r ui ${{targets.contextdir}}/home/app/ui
+
+subpackages:
+  - name: podcli-fips
+    description: CLI for podinfo (FIPS)
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: go/build
+        with:
+          go-package: go-fips
+          packages: ./cmd/podcli
+          output: podcli
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - uses: test/tw/ver-check
+          with:
+            bins: podcli
+        - uses: test/tw/help-check
+          with:
+            bins: podcli
+
+  - name: ${{package.name}}-compat
+    description: Compat package to add podinfo binary symlink
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/home/app
+          ln -s /usr/bin/podinfo ${{targets.contextdir}}/home/app/podinfo
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+  - name: podcli-fips-compat
+    description: Compat package to add podcli binary symlink
+    dependencies:
+      runtime:
+        - podcli-fips
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -s /usr/bin/podcli ${{targets.contextdir}}/usr/local/bin/podcli
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+update:
+  enabled: true
+  github:
+    identifier: stefanprodan/podinfo
+
+test:
+  environment:
+    contents:
+      packages:
+        - wait-for-it
+        - ${{package.name}}-compat
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: podinfo
+    - uses: test/tw/ver-check
+      with:
+        bins: podinfo
+        version: ${{package.version}}
+    - name: Check UI file present
+      runs: stat /home/app/ui/vue.html
+    - name: Check API and UI
+      uses: test/daemon-check-output
+      working-directory: /home/app
+      with:
+        start: /home/app/podinfo
+        timeout: 30
+        expected_output: |
+          Starting podinfo
+          Starting HTTP Server
+        post: |
+          set -o pipefail
+          wait-for-it localhost:9898 --timeout=60
+          curl -fsSL localhost:9898 | grep -F "greetings from podinfo"
+          curl -fsSL -H "Accept: text/html" -A "Mozilla/5.0" localhost:9898 | grep -F "<html>"

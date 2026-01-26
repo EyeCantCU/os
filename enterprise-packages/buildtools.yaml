@@ -1,0 +1,164 @@
+package:
+  name: buildtools
+  version: "8.2.1"
+  epoch: 0
+  description: Developer tools for working with Bazel build files
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/bazelbuild/buildtools
+      tag: v${{package.version}}
+      expected-commit: b1e23f1025b8556cc75eebb28ff7f40b8930d353
+
+subpackages:
+  - name: ${{package.name}}-buildifier
+    description: Formatter and linter for Bazel BUILD files
+    pipeline:
+      - uses: go/build
+        with:
+          output: buildifier
+          packages: ./buildifier
+          ldflags: |
+            -X main.buildVersion=${{package.version}}
+            -X main.buildScmRevision=${{package.version}}
+    test:
+      pipeline:
+        - name: Verify buildifier version
+          runs: |
+            set -euo pipefail
+            buildifier --version | grep -F "${{package.version}}"
+        - name: Test BUILD file formatting
+          runs: |
+            set -euo pipefail
+            # Create a poorly formatted BUILD file
+            tee /tmp/BUILD << 'EOF'
+            load("@rules_go//go:def.bzl","go_binary")
+            go_binary(name="hello",srcs=["main.go"],deps=["//lib:foo","//lib:bar"])
+            EOF
+
+            # Format and verify output is valid
+            buildifier /tmp/BUILD
+            buildifier --mode=check /tmp/BUILD
+        - name: Test lint warnings
+          runs: |
+            set -euo pipefail
+            # Create a file with lint issues
+            tee /tmp/BUILD.bazel << 'EOF'
+            load("@rules_go//go:def.bzl", "go_binary")
+
+            go_binary(
+                name = "hello",
+                srcs = ["main.go"],
+            )
+            EOF
+
+            # Verify lint mode works
+            buildifier --lint=warn /tmp/BUILD.bazel
+        - name: Test different file types
+          runs: |
+            set -euo pipefail
+            # Test .bzl file formatting
+            tee /tmp/test.bzl << 'EOF'
+            def my_rule(name,deps=[]):
+                native.genrule(name=name,outs=[name+".txt"],cmd="echo hello")
+            EOF
+
+            buildifier --type=bzl /tmp/test.bzl
+            buildifier --mode=check --type=bzl /tmp/test.bzl
+
+  - name: ${{package.name}}-buildozer
+    description: Command-line tool to manipulate Bazel BUILD files
+    pipeline:
+      - uses: go/build
+        with:
+          output: buildozer
+          packages: ./buildozer
+          ldflags: |
+            -X main.buildVersion=${{package.version}}
+            -X main.buildScmRevision=${{package.version}}
+    test:
+      pipeline:
+        - name: Verify buildozer version
+          runs: |
+            set -euo pipefail
+            buildozer --version | grep -F "${{package.version}}"
+        - name: Test adding dependencies
+          runs: |
+            set -euo pipefail
+            mkdir -p /tmp/pkg
+
+            # Create a BUILD file with a rule
+            tee /tmp/pkg/BUILD << 'EOF'
+            go_binary(
+                name = "hello",
+                srcs = ["main.go"],
+            )
+            EOF
+
+            # Add a dependency
+            buildozer 'add deps //lib:foo' /tmp/pkg:hello
+
+            # Verify the dependency was added
+            grep -F "//lib:foo" /tmp/pkg/BUILD
+        - name: Test setting attributes
+          runs: |
+            set -euo pipefail
+            mkdir -p /tmp/pkg2
+
+            tee /tmp/pkg2/BUILD << 'EOF'
+            go_binary(
+                name = "app",
+                srcs = ["main.go"],
+            )
+            EOF
+
+            # Set visibility
+            buildozer 'set visibility //visibility:public' /tmp/pkg2:app
+
+            # Verify visibility was set
+            grep -F "//visibility:public" /tmp/pkg2/BUILD
+        - name: Test print commands
+          runs: |
+            set -euo pipefail
+            mkdir -p /tmp/pkg3
+
+            tee /tmp/pkg3/BUILD << 'EOF'
+            go_library(
+                name = "mylib",
+                srcs = ["lib.go"],
+                deps = ["//base:core"],
+            )
+            EOF
+
+            # Print rule kind
+            buildozer 'print kind' /tmp/pkg3:mylib | grep -F "go_library"
+
+            # Print name
+            buildozer 'print name' /tmp/pkg3:mylib | grep -F "mylib"
+        - name: Test creating new rules
+          runs: |
+            set -euo pipefail
+            mkdir -p /tmp/pkg4
+
+            tee /tmp/pkg4/BUILD << 'EOF'
+            # Existing content
+            EOF
+
+            # Create a new rule
+            buildozer 'new go_test mytest' /tmp/pkg4:__pkg__
+
+            # Verify the rule was created
+            grep -F "go_test" /tmp/pkg4/BUILD
+            grep -F "mytest" /tmp/pkg4/BUILD
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v

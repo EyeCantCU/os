@@ -1,0 +1,219 @@
+package:
+  name: povray
+  version: 3.7.0.10
+  epoch: 3
+  description: The Persistence of Vision Raytracer (POV-Ray)
+  copyright:
+    - license: AGPL-3.0-only
+
+environment:
+  contents:
+    packages:
+      - boost-dev
+      - build-base
+      - busybox
+      - freetype-dev
+      - libboost-thread
+      - libjpeg-dev
+      - libpng-dev
+      - libsdl3-dev
+      - openexr-dev
+      - pkgconf
+      - tiff-dev
+      - zlib-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+).*
+    replace: $1
+    to: major-minor-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/POV-Ray/${{package.name}}
+      tag: v${{package.version}}
+      expected-commit: cd074e4d2698b3faa5b157c6b05c5f3ad432fddc
+
+  - name: Run prebuild script
+    working-directory: unix
+    runs: ./prebuild.sh
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --disable-optimiz-arch \
+        --disable-static \
+        --enable-shared \
+        --localstatedir=/var \
+        --mandir=/usr/share/man \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        COMPILED_BY="Chainguard Team https://www.chainguard.dev/" \
+        CXXFLAGS="-O2 -mtune=generic"
+
+  - uses: autoconf/make
+
+  - uses: autoconf/make-install
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-doc
+    description: POV-Ray documentation
+    pipeline:
+      - uses: split/alldocs
+    test:
+      pipeline:
+        - uses: test/docs
+
+  - name: ${{package.name}}-conf
+    description: POV-Ray configuration files
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/etc/${{package.name}}
+          if [ -d ${{targets.destdir}}/usr/etc/${{package.name}} ]; then
+            mv ${{targets.destdir}}/usr/etc/${{package.name}}/* ${{targets.contextdir}}/etc/${{package.name}}/
+            rmdir ${{targets.destdir}}/usr/etc/${{package.name}} || true
+          fi
+          if [ -d ${{targets.destdir}}/etc/${{package.name}} ]; then
+            mv ${{targets.destdir}}/etc/${{package.name}}/* ${{targets.contextdir}}/etc/${{package.name}}/
+          fi
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            dir: "/etc/povray/3.7/"
+            name: "*.conf"
+
+  - name: ${{package.name}}-data
+    description: POV-Ray data files (includes, scenes, etc.)
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share
+          if [ -d ${{targets.destdir}}/usr/share/${{package.name}}-${{vars.major-minor-version}} ]; then
+            mv ${{targets.destdir}}/usr/share/${{package.name}}-${{vars.major-minor-version}} ${{targets.contextdir}}/usr/share/
+          fi
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            dir: "/usr/share/povray-3.7/scenes/templates/Animation/"
+            name: "*.txt"
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-conf
+        - ${{package.name}}-data
+        - binutils
+        - file
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: ${{package.name}}
+    - uses: test/tw/ldd-check
+    - uses: test/tw/ver-check
+      with:
+        bins: ${{package.name}}
+    - name: Check for illegal CPU instructions
+      runs: |
+        set -euo pipefail
+        echo "Checking povray binary for AVX-512 instructions..."
+
+        # Check for zmm register usage (AVX-512 registers)
+        if objdump -d /usr/bin/povray | grep -E '(zmm[0-9]|%zmm[0-9])'; then
+          echo "ERROR: povray binary contains AVX-512 instructions"
+          echo "Found illegal instructions:"
+          objdump -d /usr/bin/povray | grep -E '(zmm[0-9]|%zmm[0-9])' | head -10
+          exit 1
+        fi
+
+        echo "✓ No AVX-512 instructions found in povray binary"
+    - name: Test basic POV-Ray functionality
+      runs: |
+        # Create a simple test scene
+        # https://github.com/POV-Ray/povray/blob/master/distribution/scenes/textures/interior_texture.pov
+
+        tee /tmp/test.pov <<EOF
+        #version ${{vars.major-minor-version}};
+        global_settings {assumed_gamma 1.0}
+
+        #include "colors.inc"
+
+        camera { location <100,50,50>
+                right     x*image_width/image_height
+                angle 58
+                look_at <-5,25,0>
+              }
+
+        plane {y,0 pigment {White}}
+
+        //--------------declaring two "peel" textures
+        #declare Texture_1 =
+        texture {
+          pigment {
+          spiral1 1
+          color_map {
+            [0.0 White]
+            [0.2 Wheat]
+            [0.4 Orange]
+            [0.4 Clear]
+            [1.0 Clear]
+          }
+          scale 5
+          }
+          normal {bumps .3 scale .2}
+          }
+        #declare Texture_2 =
+        texture {
+          pigment {
+          spiral1 1
+          color_map {
+            [0.0 Blue]
+            [0.2 Red]
+            [0.6 YellowGreen]
+            [0.6 Clear]
+            [1.0 Clear]
+          }
+          scale 5
+          }
+          normal {bumps .3 scale .2}
+          }
+
+        //--------making spheres with different inside/outside textures
+
+        sphere {<0,25,-30>,25
+                texture {Texture_1}
+                interior_texture {Texture_2}
+                }
+
+        sphere {<0,25,30>,25
+                texture {pigment {rgb <0.5,0.4,1>}}
+                interior_texture {pigment {rgb <1,0.7,0.0>} normal {bumps .7 scale .15} }
+                clipped_by {box {<-50,20,-50>,<50,35,50> inverse}}
+                }
+
+        light_source {<400,5000,3000> White*1.5 }
+        fog {White distance 1700}
+        EOF
+    - name: Render test scene
+      runs: |
+        # Test rendering with minimal quality to verify functionality
+        ${{package.name}} +I/tmp/test.pov +O/tmp/test.png +W320 +H240 +A
+    - name: Verify output file was created
+      runs: |
+        stat /tmp/test.png
+        file /tmp/test.png | grep -F "PNG image"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -[alpha|beta|x]\.[0-9]+$
+    - -x\.[a-z]+\.[0-9]+$
+    - ^gh-actions
+    - ^nexus
+  github:
+    identifier: POV-Ray/povray
+    strip-prefix: v

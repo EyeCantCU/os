@@ -1,0 +1,366 @@
+package:
+  name: authentik-fips
+  version: "2025.10.3"
+  epoch: 2
+  description: "authentik IdP — an open-source Identity Provider for modern SSO (FIPS-enabled)."
+  copyright:
+    - license: "CC-BY-4.0"
+    - license: "MIT"
+  dependencies:
+    runtime:
+      - bash # Needed by lifecycle/ak script
+      - ca-certificates
+      - coreutils # Needed by lifecycle/ak script
+      - dumb-init
+      - glibc-locales
+      - libltdl
+      - libmaxminddb-libs
+      - libpq
+      - libxslt
+      - openssl-config-fipshardened # FIPS-compliant OpenSSL configuration
+      - py${{vars.python-version}}-cryptography # FIPS-compliant cryptography package built against system OpenSSL
+      - python-${{vars.python-version}}
+      - runit
+      - tzdata
+      - xmlsec
+      - xmlsec-openssl
+
+vars:
+  venv-home: '/usr/share/authentik/venv'
+  # NOTE: align with py-version required by upstream.
+  # REF: https://docs.goauthentik.io/developer-docs/setup/full-dev-environment/#prerequisites
+  python-version: 3.13
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '^(.*)-fips$'
+    replace: "$1"
+    to: mangled-package-name
+
+environment:
+  environment:
+    VIRTUAL_ENV: ${{vars.venv-home}}
+    # Disable FIPS OpenSSL for Node.js build tooling (not runtime)
+    # Node.js build tools may use legacy crypto algorithms incompatible with FIPS
+    # The resulting JavaScript bundle is static and doesn't use crypto at runtime
+    NODE_OPTIONS: "--openssl-legacy-provider"
+    CGO_ENABLED: "1"
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - clang
+      - cmd:cargo
+      - krb5-dev
+      - libxml2-dev
+      - libxslt-dev
+      - node-gyp # Required to build native npm modules (tree-sitter packages)
+      - nodejs-24 # upstream needs node-24 and node-25 has compatibility issues with node-gyp v11.5.0 - REF: https://github.com/goauthentik/authentik/blob/version/2025.8.4/web/package.json#L126
+      - npm
+      - openssl-config-fipshardened # FIPS OpenSSL configuration for build environment
+      - pkgconf
+      - postgresql-dev
+      - python-${{vars.python-version}}-dev # Build needs python headers
+      - uv
+      - xmlsec-dev
+      - xmlsec-openssl
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/goauthentik/authentik
+      tag: version/${{package.version}}
+      expected-commit: "0d617e4ad1eb9e4540ba5381e6ce06e971affc63"
+
+  # OSS/Enterprise build are the same and both ship with Enterprise related code at 'authentik/enterprise'
+  # Enterprise functionality locked behind license checker.
+  #
+  # Removing this directory requires removal of all references related to authentik.enterprise module
+  # otherwise authentik fails to startup.
+  - uses: patch
+    with:
+      patches: |
+        root.settings.patch \
+        enterprise.patch \
+        enterprise.mro.patch \
+        frontend-sync-chart.patch \
+        middleware-m2m-fix.patch \
+        django.patch
+
+  - name: "Create venv"
+    runs: uv venv ${{vars.venv-home}} --system-site-packages
+
+  # Upstream pins lxml dependency to 6.0.0 - REF: https://github.com/goauthentik/authentik/blob/version/2025.10.0/pyproject.toml#L47
+  # There's a known build failure issue with lxml 6.0.0 + libxml2 2.15, documented here https://bugs.launchpad.net/lxml/+bug/2125278
+  # Bumping lxml from 6.0.0 to 6.0.2 resolves the build failure
+  - name: "Bump lxml dependency in pyproject.toml"
+    runs: |
+      # Verify lxml bump is still needed
+      if ! grep -q 'lxml==6\.0\.0' pyproject.toml; then
+        echo "ERROR: upstream authentik no longer pins lxml==6.0.0"
+        echo "The lxml version bump workaround can be removed from this build."
+        echo "Please remove both this check and the 'Bump lxml dependency' step."
+        exit 1
+      fi
+
+      sed -i 's/lxml==6\.0\.0/lxml==6\.0\.2/' pyproject.toml
+
+  - name: "Remediate CVEs"
+    runs: |
+      # GHSA-2xpw-w6gg-jr37, GHSA-gm62-xv2j-4w53
+      uv add "urllib3==2.6.3"
+      # GHSA-wcj4-jw5j-44wh
+      uv add "cbor2==5.8.0"
+      # GHSA-mqqc-3gqh-h2x8 GHSA-jj3x-wxrx-4x23 GHSA-g84x-mcqj-x9qq GHSA-6mq8-rvhq-8wgg
+      uv add "aiohttp==3.13.3"
+      # GHSA-mrfv-m5wm-5w6w
+      uv add "pynacl==1.6.2"
+      # GHSA-jm66-cg57-jjv5
+      uv add "azure-core==1.38.0"
+      # GHSA-63vm-454h-vhhq
+      uv add "pyasn1==0.6.2"
+
+  # need to lock before configuring libraries.cgr.dev indices
+  - name: "Export locked requirements"
+    runs: uv export --no-dev --no-hashes > requirements.locked
+
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  # FIPS BUILD: Use system py3.13-cryptography package built against FIPS-enabled OpenSSL
+  - name: "Build authentik with FIPS cryptography"
+    runs: |
+      # Install authentik dependencies using system FIPS-compliant cryptography
+      # py3.13-cryptography is provided by system package as runtime dependency
+      # venv uses --system-site-packages to access system cryptography
+      # Note: using --only-binary flag to avoid python-kadmin-rs build faliure
+      uv pip sync requirements.locked --only-binary python-kadmin-rs
+
+      # Install internal packages:
+      #  - django-dramatiq-postgres
+      #  - django-channels-postgres
+      #  - django-postgres-cache
+      for pkg in \
+        django-dramatiq-postgres \
+        django-channels-postgres \
+        django-postgres-cache ; \
+      do
+        uv pip install --no-deps ./packages/$pkg
+      done
+
+      # Uninstall cryptography from venv to ensure only system package is used
+      # The system py3.13-cryptography package remains accessible via --system-site-packages
+      uv pip uninstall cryptography
+
+      # Install virtual environment
+      mkdir -p ${{targets.destdir}}/usr/share/${{vars.mangled-package-name}}
+      mv ${{vars.venv-home}} ${{targets.destdir}}/usr/share/${{vars.mangled-package-name}}/
+      chmod 0755 ${{targets.destdir}}/usr/share/${{vars.mangled-package-name}}/venv/.lock
+      mv packages ${{targets.destdir}}/usr/share/${{vars.mangled-package-name}}/
+
+  # FIPS BUILD: Disable FIPS OpenSSL for Node.js build process
+  # The Node.js webpack/build tools may use legacy crypto algorithms not available in FIPS mode
+  # This is safe because the resulting JS bundle is static and doesn't perform crypto at runtime
+  - name: "Build authentik web UI"
+    working-directory: web
+    runs: |
+      # Upstream's package-lock.json has inconsistent optional peer dependency structure
+      # causing npm ci to fail with: "Missing: tree-sitter@0.22.1 from lock file"
+      # Regenerate package-lock.json to fix npm ci failure with tree-sitter peer deps
+      # REF: https://github.com/chainguard-dev/enterprise-packages/issues/41560
+      npm install --package-lock-only
+
+      # Build UI components with FIPS OpenSSL temporarily disabled
+      # nofips-node package + OPENSSL_CONF=/dev/null ensure build compatibility
+      echo "Building web UI (FIPS disabled for build tools)..."
+      OPENSSL_CONF=/dev/null npm ci
+      OPENSSL_CONF=/dev/null npm run build && OPENSSL_CONF=/dev/null npm run build:sfe
+
+  - name: "Create authentik directories"
+    runs: |
+      # Create directories to match upstream
+      # REF: https://github.com/goauthentik/authentik/blob/version/2025.8.4/Dockerfile#L170-L186
+      for dir in \
+        /ak-root \
+        /authentik \
+        /certs \
+        /media \
+        /schemas \
+        /locale \
+        /tests \
+        /blueprints \
+        /lifecycle \
+        /web/dist \
+        /web/authentik \
+        /geoip ; \
+      do
+        mkdir -p ${{targets.contextdir}}$dir && chmod 0755 ${{targets.contextdir}}$dir;
+      done
+
+  - name: "Copy over authentik related files"
+    runs: |
+      # Copy over authentik-UI files
+      cp -r web/dist/* ${{targets.contextdir}}/web/dist
+      cp -r web/authentik/* ${{targets.contextdir}}/web/authentik
+
+      # Copy over other related authentik dir files
+      cp pyproject.toml ${{targets.contextdir}}/pyproject.toml
+      cp uv.lock ${{targets.contextdir}}/uv.lock
+      cp manage.py ${{targets.contextdir}}/manage.py
+      install -m 0644 tests/GeoLite2-ASN-Test.mmdb ${{targets.contextdir}}/geoip/GeoLite2-ASN.mmdb
+      install -m 0644 tests/GeoLite2-City-Test.mmdb ${{targets.contextdir}}/geoip/GeoLite2-City.mmdb
+
+      for dir in \
+        authentik \
+        schemas \
+        locale \
+        tests \
+        blueprints \
+        lifecycle ; \
+      do
+        cp -r $dir/* ${{targets.contextdir}}/$dir
+      done
+
+      # Remove enterprise bits
+      rm -rf ${{targets.contextdir}}/authentik/enterprise
+
+      # create symlinks
+      ln -sf /usr/share/${{vars.mangled-package-name}}/venv/ ${{targets.contextdir}}/ak-root/venv
+      ln -sf /usr/share/${{vars.mangled-package-name}}/packages/ ${{targets.contextdir}}/ak-root/packages
+      ln -sf /usr/share/${{vars.mangled-package-name}}/packages/ ${{targets.contextdir}}/packages
+
+  - uses: strip
+
+subpackages:
+  - name: authentik-go-server-fips
+    description: authentik go server binary (FIPS-enabled)
+    pipeline:
+      - uses: go/bump
+        with:
+          deps: |
+            golang.org/x/crypto@v0.45.0
+      - uses: go/build
+        with:
+          packages: ./cmd/server
+          output: authentik
+          go-package: go-fips
+    test:
+      pipeline:
+        - name: "Check FIPS"
+          uses: test/go-fips-check
+          with:
+            package-match: "^authentik-go-server"
+
+test:
+  environment:
+    contents:
+      packages:
+        - authentik-go-server-fips
+        - openssl-config-fipshardened # Ensure FIPS mode enabled during tests
+        - postgresql
+        - postgresql-client
+        - redis
+        - shadow
+        - sudo-rs
+        - wait-for-it
+    accounts:
+      groups:
+        - groupname: authentik
+          gid: 1000
+      users:
+        - username: authentik
+          uid: 1000
+          gid: 1000
+      # sudo must retain permissions
+      # REF: https://github.com/goauthentik/authentik/blob/version/2025.8.4/lifecycle/ak#L37-L41
+      run-as: 0
+    environment:
+      PGDATA: /tmp/test_db
+      PGUSER: wolfi
+      AUTHENTIK_LOG_LEVEL: info
+      PG_PASS: ""
+      AUTHENTIK_SECRET_KEY: Thisisasecretkeythatislongenoughtosatisfyauthentikscharacterlength
+      AUTHENTIK_POSTGRESQL__HOST: 127.0.0.1
+      AUTHENTIK_POSTGRESQL__PORT: 5432
+      AUTHENTIK_POSTGRESQL__USER: wolfi
+      AUTHENTIK_POSTGRESQL__NAME: testdb
+      AUTHENTIK_POSTGRESQL__PASSWORD: ""
+      AUTHENTIK_REDIS__HOST: 127.0.0.1
+      AUTHENTIK_REDIS__PORT: 6379
+      TMPDIR: /dev/shm
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/pip-check
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
+    - name: Test authentik binary exists and runs
+      runs: |
+        set -o pipefail
+        authentik --help
+        authentik --version | grep -F -e ${{package.version}}
+    - name: Verify Python FIPS OpenSSL
+      runs: |
+        set -euo pipefail
+        export PATH=/lifecycle:/ak-root/venv/bin:$PATH
+
+        echo "Checking Python OpenSSL version..."
+        python3 -c "import ssl; print('OpenSSL version:', ssl.OPENSSL_VERSION)"
+
+        echo "Verifying cryptography package links to system OpenSSL and FIPS is enabled..."
+        python3 -c "from cryptography.hazmat.backends.openssl import backend; print('Cryptography backend:', backend)" | tee /tmp/crypto-backend.txt
+
+        # Verify FIPS mode is enabled
+        grep -F "FIPS: True" /tmp/crypto-backend.txt
+    - name: "Start postgresql instance and create database"
+      runs: |
+        useradd $PGUSER
+        sudo -u $PGUSER initdb -D /tmp/test_db
+        sudo -u $PGUSER pg_ctl -D /tmp/test_db -l /tmp/logfile start
+        createdb testdb
+        psql -lqt | cut -d \| -f 1 | grep -qw testdb
+        wait-for-it -t 10 localhost:5432
+    - name: "Start redis instance"
+      runs: |
+        redis-server --daemonize yes > /dev/null 2>&1
+        wait-for-it -t 10 localhost:6379
+    - name: Test basic authentik server startup
+      uses: test/daemon-check-output
+      working-directory: /
+      with:
+        start: |
+          env PATH=/lifecycle:/ak-root/venv/bin:$PATH \
+          dumb-init -- ak server
+        timeout: 300
+        expected_output: |
+          Starting Metrics server
+          Starting HTTP server
+          Starting HTTPS server
+          Starting authentik bootstrap
+          PostgreSQL connection successful
+          Finished authentik bootstrap
+          Booting authentik
+          Starting gunicorn
+          authentik Core Worker finished starting
+          Starting authentik outpost
+    - name: Test basic authentik worker startup
+      uses: test/daemon-check-output
+      working-directory: /
+      with:
+        start: |
+          env PATH=/lifecycle:/ak-root/venv/bin:$PATH \
+          dumb-init -- ak worker
+        timeout: 300
+        expected_output: |
+          Starting authentik bootstrap
+          PostgreSQL connection successful
+          Finished authentik bootstrap
+          Booting authentik
+          authentik Core Worker finished starting
+          Worker process is ready for action.
+
+update:
+  enabled: true
+  git:
+    strip-prefix: version/

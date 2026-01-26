@@ -1,7 +1,7 @@
 package:
   name: traefik-3.5
   version: "3.5.6"
-  epoch: 3 # GHSA-j5w8-q4qc-rx2x
+  epoch: 5 # GHSA-g754-hx8w-x2g6
   description: The Cloud Native Application Proxy
   copyright:
     - license: MIT
@@ -31,6 +31,7 @@ pipeline:
     with:
       deps: |-
         golang.org/x/crypto@v0.45.0
+        github.com/quic-go/quic-go@v0.57.0
 
   - working-directory: webui
     runs: |
@@ -55,12 +56,19 @@ update:
     tag-filter: v3.5.
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - python3
   pipeline:
-    - runs: |
-        set -o pipefail
-        traefik version | grep ${{package.version}}
-        traefik --help
-    - name: Run and test traefik
+    - uses: test/tw/ver-check
+      with:
+        bins: traefik
+    - uses: test/tw/help-check
+      with:
+        bins: traefik
+    - name: Test traefik startup with ping and API endpoints
       uses: test/daemon-check-output
       with:
         start: traefik --ping=true --ping.entryPoint=traefik --api.insecure=true --log.level=DEBUG
@@ -68,3 +76,91 @@ test:
         expected_output: |
           Creating middleware
           Setting up redirection
+        post: |
+          set -euo pipefail
+          # Wait for traefik to be ready on port 8080
+          wait-for-it localhost:8080 -t 10
+
+          # Test ping endpoint responds with OK
+          ping_response=$(curl -sf http://localhost:8080/ping)
+          if echo "$ping_response" | grep -F "OK"; then
+            echo "SUCCESS: Ping endpoint works"
+          else
+            echo "ERROR: Ping endpoint did not return expected 'OK'"
+            echo "Response: $ping_response"
+            exit 1
+          fi
+
+          # Test API endpoint - get version info
+          version_response=$(curl -sf http://localhost:8080/api/version)
+          if echo "$version_response" | grep -F "Version"; then
+            echo "SUCCESS: API version endpoint works"
+          else
+            echo "ERROR: API version endpoint did not return version info"
+            echo "Response: $version_response"
+            exit 1
+          fi
+
+          # Test API - get overview (proves API is fully functional)
+          overview_response=$(curl -sf http://localhost:8080/api/overview)
+          if echo "$overview_response" | grep -F "http"; then
+            echo "SUCCESS: API overview endpoint works"
+          else
+            echo "ERROR: API overview endpoint did not return expected data"
+            echo "Response: $overview_response"
+            exit 1
+          fi
+    - name: Test HTTP proxying through traefik
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          set -euo pipefail
+          # Create backend content
+          mkdir -p /tmp/backend
+          echo "Hello from backend" > /tmp/backend/index.html
+
+          # Start backend HTTP server
+          cd /tmp/backend
+          python3 -m http.server 9000 > /tmp/backend.log 2>&1 &
+
+          # Wait for backend to be ready
+          wait-for-it localhost:9000 -t 10
+
+          # Create traefik dynamic config for routing
+          mkdir -p /tmp/traefik
+          tee /tmp/traefik/routes.yaml <<'EOF'
+          http:
+            routers:
+              backend:
+                rule: "PathPrefix(`/`)"
+                entryPoints:
+                  - web
+                service: backend
+
+            services:
+              backend:
+                loadBalancer:
+                  servers:
+                    - url: "http://127.0.0.1:9000"
+          EOF
+        start: traefik --entryPoints.web.address=:8080 --providers.file.directory=/tmp/traefik --log.level=DEBUG
+        timeout: 30
+        expected_output: |
+          entryPoint
+        post: |
+          set -euo pipefail
+          # Wait for traefik to be ready
+          wait-for-it localhost:8080 -t 10
+
+          # Give traefik time to load the configuration
+          sleep 2
+
+          # Test proxying - request to traefik should return backend content
+          response=$(curl -sf http://localhost:8080/)
+          if echo "$response" | grep -F "Hello from backend"; then
+            echo "SUCCESS: HTTP proxying through traefik works correctly"
+          else
+            echo "ERROR: Expected backend response through proxy"
+            echo "Response: $response"
+            exit 1
+          fi

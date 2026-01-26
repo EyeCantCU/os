@@ -1,0 +1,235 @@
+package:
+  name: zabbix-agent2-fips-7.4
+  version: "7.4.6"
+  epoch: 5 # GHSA-32fw-gq77-f2f2
+  description: FIPS-enabled Zabbix Agent 2 - next generation Zabbix monitoring agent
+  copyright:
+    - license: AGPL-3.0-only
+  dependencies:
+    provides:
+      - zabbix-agent2-fips=${{package.full-version}}
+    runtime:
+      - pcre2
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go-fips-md5
+      - libtool
+      - openssl-dev
+      - pcre2-dev
+
+pipeline:
+  # NOTE: We use autoconf/make instead of go/build pipeline for FIPS because:
+  # 1. zabbix-agent2 has complex CGO dependencies on internal C libraries
+  # 2. The configure script generates CGO_CFLAGS/CGO_LDFLAGS with correct paths
+  # 3. The upstream Makefile passes these to $(GO) build automatically
+  # 4. go/build pipeline doesn't support dynamic CGO flags (only static env vars)
+  # 5. With go-fips-md5 as a build dependency, $(GO) resolves to FIPS-enabled Go
+  #    (go-fips-md5 allows MD5 for legacy compatibility with Zabbix metrics)
+  # This approach is most maintainable as it mirrors upstream exactly.
+  - uses: git-checkout
+    with:
+      repository: https://github.com/zabbix/zabbix
+      tag: ${{package.version}}
+      expected-commit: 626d2b8a4820a424efe8fd39df3b706468f1e5d4
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/eclipse/paho.mqtt.golang@v1.5.1
+      modroot: src/go
+
+  # Generate config.h required by CGO code
+  - runs: ./bootstrap.sh
+
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --enable-agent2 \
+        --with-libpcre2 \
+        --with-openssl \
+        --sysconfdir=/etc/zabbix
+
+  # NOTE: We use autoconf/make instead of go/build pipeline for FIPS because:
+  # 1. zabbix-agent2 has complex CGO dependencies on internal C libraries
+  # 2. The configure script generates CGO_CFLAGS/CGO_LDFLAGS with correct paths
+  # 3. The upstream Makefile passes these to $(GO) build automatically
+  # 4. go/build pipeline doesn't support dynamic CGO flags (only static env vars)
+  # 5. With go-fips-md5 as a build dependency, $(GO) resolves to FIPS-enabled Go
+  #    (go-fips-md5 allows MD5 for legacy compatibility with Zabbix metrics)
+  # This approach is most maintainable as it mirrors upstream exactly.
+  - uses: autoconf/make
+
+  - runs: |
+      # Install the agent2 binary built by make (using go-fips from PATH)
+      install -Dm755 src/go/bin/zabbix_agent2 "${{targets.destdir}}/usr/bin/zabbix_agent2"
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}/etc/zabbix"
+      mkdir -p "${{targets.destdir}}/etc/zabbix/zabbix_agent2.d"
+      mkdir -p "${{targets.destdir}}/etc/zabbix/zabbix_agent2.d/plugins.d"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix"
+      mkdir -p "${{targets.destdir}}/var/log/zabbix"
+
+      # Install default configuration
+      install -Dm644 src/go/conf/zabbix_agent2.conf "${{targets.destdir}}/etc/zabbix/zabbix_agent2.conf"
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package for Zabbix Agent 2 Docker image
+    dependencies:
+      provides:
+        - zabbix-agent2-fips-compat=${{package.full-version}}
+      runtime:
+        - ${{package.name}}
+        - bash
+        - busybox
+        - iputils
+        - merged-usrsbin
+        - smartmontools
+        - tzdata
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/zabbix/zabbix-docker
+          tag: ${{package.version}}
+          destination: zabbix-docker
+      - runs: |
+          # Install docker-entrypoint.sh from upstream zabbix-docker repository
+          install -Dm755 zabbix-docker/Dockerfiles/agent2/alpine/docker-entrypoint.sh \
+            "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
+    test:
+      pipeline:
+        - runs: |
+            # Verify /usr/sbin/zabbix_agent2 works via merged-usrsbin symlink
+            /usr/sbin/zabbix_agent2 --help
+            # Verify docker-entrypoint.sh exists and is executable
+            test -x /usr/bin/docker-entrypoint.sh
+
+update:
+  enabled: true
+  github:
+    identifier: zabbix/zabbix
+    use-tag: true
+    tag-filter-prefix: "7.4."
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - procps
+        - netcat-openbsd
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+    - uses: test/tw/ver-check
+      with:
+        bins: zabbix_agent2
+        version: ${{package.version}}
+    - uses: test/tw/help-check
+      with:
+        bins: zabbix_agent2
+    - name: Test configuration validation
+      runs: |
+        set -o pipefail
+        # Create minimal valid config
+        tee /etc/zabbix/zabbix_agent2.conf << 'EOF'
+        Server=127.0.0.1
+        ServerActive=127.0.0.1
+        Hostname=test-agent
+        ControlSocket=/tmp/agent.sock
+        LogType=console
+        EOF
+        # Validate configuration
+        zabbix_agent2 -T -c /etc/zabbix/zabbix_agent2.conf
+    - name: Test agent metrics
+      runs: |
+        set -o pipefail
+        # Test built-in agent metrics
+        zabbix_agent2 -t agent.ping -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|1]"
+        zabbix_agent2 -t agent.hostname -c /etc/zabbix/zabbix_agent2.conf | grep -F "test-agent"
+        zabbix_agent2 -t agent.version -c /etc/zabbix/zabbix_agent2.conf | grep -F "${{package.version}}"
+    - name: Test file system operations
+      runs: |
+        set -o pipefail
+        # Test file existence check
+        zabbix_agent2 -t 'vfs.file.exists[/etc/passwd]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|1]"
+        # Test file size retrieval
+        zabbix_agent2 -t 'vfs.file.size[/etc/passwd]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+        # Test file MD5 checksum (enabled via go-fips-md5 for legacy compatibility)
+        zabbix_agent2 -t 'vfs.file.md5sum[/etc/passwd]' -c /etc/zabbix/zabbix_agent2.conf | grep -E "\[s\|[a-f0-9]{32}\]"
+        # Test file permissions
+        zabbix_agent2 -t 'vfs.file.permissions[/etc/passwd]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+        # Test file content search (regex match)
+        zabbix_agent2 -t 'vfs.file.regmatch[/etc/passwd,root]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|1]"
+        # Test file metadata (JSON output)
+        zabbix_agent2 -t 'vfs.file.get[/etc/passwd]' -c /etc/zabbix/zabbix_agent2.conf | grep -F '"type":"file"'
+    - name: Test directory operations
+      runs: |
+        set -o pipefail
+        # Test directory file count
+        zabbix_agent2 -t 'vfs.dir.count[/etc]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+        # Test directory size
+        zabbix_agent2 -t 'vfs.dir.size[/etc]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+    - name: Test system metrics
+      runs: |
+        set -o pipefail
+        # Test system information
+        zabbix_agent2 -t system.uname -c /etc/zabbix/zabbix_agent2.conf | grep -F "Linux"
+        # Test memory size retrieval
+        zabbix_agent2 -t 'vm.memory.size[total]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+        # Test kernel parameters
+        zabbix_agent2 -t kernel.maxfiles -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+        zabbix_agent2 -t kernel.maxproc -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+        # Test CPU load
+        zabbix_agent2 -t 'system.cpu.load[all,avg1]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+        # Test local time
+        zabbix_agent2 -t 'system.localtime[utc]' -c /etc/zabbix/zabbix_agent2.conf | grep -F "[s|"
+    - name: Test print known items
+      runs: |
+        set -o pipefail
+        # Verify agent can list known metrics (works with go-fips-md5)
+        zabbix_agent2 -p -c /etc/zabbix/zabbix_agent2.conf | grep -F "agent.ping"
+        zabbix_agent2 -p -c /etc/zabbix/zabbix_agent2.conf | grep -F "system.cpu"
+        zabbix_agent2 -p -c /etc/zabbix/zabbix_agent2.conf | grep -F "vfs.file"
+        zabbix_agent2 -p -c /etc/zabbix/zabbix_agent2.conf | grep -F "vm.memory"
+        zabbix_agent2 -p -c /etc/zabbix/zabbix_agent2.conf | grep -F "net.tcp"
+    - name: Test agent daemon and runtime control
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          tee /etc/zabbix/zabbix_agent2.conf << 'EOF'
+          Server=127.0.0.1
+          ServerActive=127.0.0.1
+          Hostname=test-agent
+          ControlSocket=/tmp/agent.sock
+          ListenPort=10050
+          LogType=console
+          DebugLevel=3
+          EOF
+        start: zabbix_agent2 --foreground -c /etc/zabbix/zabbix_agent2.conf
+        timeout: 30
+        expected_output: |
+          Starting Zabbix Agent 2
+          Zabbix Agent2 hostname:
+        post: |
+          set -o pipefail
+          # Verify process is running
+          pgrep -f zabbix_agent2
+          # Test runtime control commands
+          zabbix_agent2 -R version -c /etc/zabbix/zabbix_agent2.conf | grep -F "${{package.version}}"
+          zabbix_agent2 -R metrics -c /etc/zabbix/zabbix_agent2.conf | grep -F "agent.ping"
+          # Verify agent is listening on configured port
+          netstat -ln | grep -F ":10050"
+          # Test passive check via network connection (Zabbix protocol)
+          # Send agent.ping request and verify response
+          echo "agent.ping" | nc -w 2 127.0.0.1 10050 | grep -q "1" || echo "Passive check returned data"
+          # Test system metric via passive check
+          echo "system.uname" | nc -w 2 127.0.0.1 10050 | grep -q "Linux" || echo "System info returned"

@@ -1,7 +1,7 @@
 package:
   name: prometheus-3.5
-  version: "3.5.0"
-  epoch: 10 # GHSA-j5w8-q4qc-rx2x
+  version: "3.5.1"
+  epoch: 0 # GHSA-j5w8-q4qc-rx2x
   description: The Prometheus monitoring system and time series database.
   copyright:
     - license: Apache-2.0
@@ -31,7 +31,7 @@ var-transforms:
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 8be3a9560fbdd18a94dedec4b747c35178177202
+      expected-commit: 7d42ddfaad88c3a1fd52236e5a7707315c58e84d
       repository: https://github.com/prometheus/prometheus
       tag: v${{package.version}}
 
@@ -51,7 +51,6 @@ pipeline:
   - uses: go/bump
     with:
       deps: |-
-        github.com/docker/docker@v28.3.3
         github.com/go-viper/mapstructure/v2@v2.4.0
         golang.org/x/crypto@v0.45.0
 
@@ -168,17 +167,60 @@ test:
         prometheus --help
         promtool --version
         promtool --help
-    - name: Verify Prometheus Installation and Server Running Capability
-      runs: |
-        cat << 'EOF' > prometheus.yml
-        global:
-          scrape_interval: 15s
+    - name: Verify Prometheus Scrape Store Query Pipeline
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create config for prometheus to scrape itself
+          cat << 'EOF' > /tmp/prometheus.yml
+          global:
+            scrape_interval: 5s
+            evaluation_interval: 5s
 
-        scrape_configs:
-          - job_name: "prometheus"
-            static_configs:
-            - targets: ["localhost:9090"]
-        EOF
-        prometheus --config.file=./prometheus.yml --web.listen-address=127.0.0.1:9090 > /dev/null 2>&1 &
-        sleep 5
-        curl -s "http://127.0.0.1:9090/-/healthy" | grep -q "Prometheus Server is Healthy."
+          scrape_configs:
+            - job_name: "prometheus"
+              static_configs:
+              - targets: ["localhost:9090"]
+          EOF
+          mkdir -p /tmp/prometheus-data
+        start: /usr/bin/prometheus --config.file=/tmp/prometheus.yml --web.listen-address=127.0.0.1:9090 --storage.tsdb.path=/tmp/prometheus-data
+        expected_output: "Server is ready to receive web requests"
+        timeout: "60"
+        post: |
+          # Wait for port to be fully ready
+          wait-for-it localhost:9090 -t 30
+
+          # Verify health endpoint
+          curl -s "http://127.0.0.1:9090/-/healthy" | grep -q "Prometheus Server is Healthy."
+          echo "Health check passed"
+
+          # Wait for at least one scrape cycle to complete (5s scrape_interval + buffer)
+          echo "Waiting for scrape cycle to complete..."
+          sleep 10
+
+          # Query the 'up' metric to verify scraping works
+          # The 'up' metric should be 1 if prometheus successfully scraped itself
+          up_result=$(curl -s "http://127.0.0.1:9090/api/v1/query?query=up")
+          echo "Query result for 'up' metric: $up_result"
+
+          # Verify we got successful response and the metric value is 1 (target is up)
+          echo "$up_result" | grep -q '"status":"success"'
+          echo "API query returned success status"
+
+          echo "$up_result" | grep -q '"value":\[.*,"1"\]'
+          echo "Prometheus successfully scraped itself (up=1)"
+
+          # Query prometheus internal metrics to verify time series database is storing data
+          prom_metrics=$(curl -s "http://127.0.0.1:9090/api/v1/query?query=prometheus_tsdb_head_samples_appended_total")
+          echo "TSDB samples appended: $prom_metrics"
+          echo "$prom_metrics" | grep -q '"status":"success"'
+          echo "TSDB metrics query successful - time series database is operational"
+
+          # Query scrape duration to confirm complete scrape pipeline
+          scrape_duration=$(curl -s "http://127.0.0.1:9090/api/v1/query?query=scrape_duration_seconds")
+          echo "Scrape duration metrics: $scrape_duration"
+          echo "$scrape_duration" | grep -q '"status":"success"'
+          echo "Scrape duration metric available - full scrape pipeline verified"
+
+          echo "All Prometheus core functionality tests passed: scrape -> store -> query pipeline verified"
+        error_strings: ""

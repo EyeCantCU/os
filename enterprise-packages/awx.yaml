@@ -3,7 +3,7 @@
 package:
   name: awx
   version: 24.6.1
-  epoch: 19 # GHSA-p34h-wq7j-h5v6 and GHSA-r7r6-cc7p-4v5m
+  epoch: 25
   description: AWX provides a web-based user interface, REST API, and task engine built on top of Ansible
   copyright:
     - license: Apache-2.0
@@ -38,6 +38,10 @@ package:
       - vim
       - xmlsec-legacy
       - xmlsec-legacy-openssl
+  checks:
+    disabled:
+      # Disabled until merged-varrun is done.
+      - tempdir
 
 environment:
   contents:
@@ -85,6 +89,12 @@ environment:
     AWX_LOGGING_MODE: stdout
     VENV_BASE: /var/lib/awx/venv
     NPM_CONFIG_LEGACY_PEER_DEPS: true
+    CRYPTOGRAPHY_OPENSSL_NO_LEGACY: true
+
+vars:
+  # We end up installing Django in a few places to ensure the intended version
+  # is shipped: we always want them aligned
+  django-version: 4.2.27
 
 pipeline:
   - uses: git-checkout
@@ -109,21 +119,35 @@ pipeline:
       npm install ajv@6.12.6 ajv-keywords@3.5.2 dompurify@2.5.2 --save-dev --legacy-peer-deps
       npm install --package-lock-only --legacy-peer-deps
 
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
   - runs: |
-      pip3.11 install -vv build
-      # # Install Python dependencies
-      pip3.11 install --upgrade pip setuptools wheel build cryptography==44.0.1 django==4.2.26 requests==2.32.4 python-jose==3.4.0
+      uv venv $VENV_BASE/awx --system-site-packages
+      source $VENV_BASE/awx/bin/activate
+      # not sure this line is needed in uv pip sync land, but leaving for now
+      uv pip install --upgrade pip setuptools wheel build django==${{vars.django-version}} requests==2.32.5 python-jose==3.4.0
 
-      mkdir -p $VENV_BASE
-      python3.11 -m venv $VENV_BASE/awx --system-site-packages
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip sync --no-binary=lxml --no-binary=xmlsec requirements/requirements.txt
 
-      CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec -r requirements/requirements.txt
-      CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec -r requirements/requirements_tower_uninstall.txt
-      CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec -r requirements/requirements_git.txt
-      # Remediate GHSA-p34h-wq7j-h5v6 and GHSA-r7r6-cc7p-4v5m
-      CFLAGS="-Wno-error=incompatible-pointer-types" $VENV_BASE/awx/bin/pip install --no-binary=lxml,xmlsec python-ldap==3.4.5
+      # Upgrade Django before anything further, so it doesn't get upgraded to
+      # 5.x by other dependencies which have a higher lower-bound than AWX's
+      # version
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec django==${{vars.django-version}}
+
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec -r requirements/requirements_tower_uninstall.txt
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec -r requirements/requirements_git.txt
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec python-ldap==3.4.5
+      # Remediate GHSA-qmgc-5h2g-mvrw
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec filelock==3.20.3
+      # Remediate GHSA-jm66-cg57-jjv5
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec azure-core==1.38.0
+      # Remediate GHSA-54jq-c3m8-4m76 GHSA-69f9-5gxw-wvc2 GHSA-6jhg-hg63-jvvf GHSA-6mq8-rvhq-8wgg GHSA-fh55-r93g-j68g GHSA-g84x-mcqj-x9qq GHSA-jj3x-wxrx-4x23 GHSA-mqqc-3gqh-h2x8
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec aiohttp==3.13.3
+
       # This is important otherwise application breaks with missing libpq error
-      $VENV_BASE/awx/bin/pip install "psycopg[binary,pool]==3.1.18"
+      uv pip install "psycopg[binary,pool]==3.1.18"
 
       # Install favicons dependency in ui_next after it's cloned but before build
       make awx/ui_next/src || true
@@ -132,8 +156,9 @@ pipeline:
       fi
 
       make sdist
-      $VENV_BASE/awx/bin/pip install dist/awx.tar.gz
+      uv pip install ./dist/awx-*.tar.gz
       rm -rf $VENV_BASE/awx/bin/__pycache*
+      chmod 444 /var/lib/awx/venv/awx/.lock
 
   - runs: |
       mkdir -p ${{targets.destdir}}/var/lib/awx/public
@@ -237,14 +262,14 @@ pipeline:
       source /var/lib/awx/venv/awx/bin/activate
 
       # Update the vulnerable packages
-      pip install --upgrade cryptography==44.0.1
-      pip install --upgrade django==4.2.26
-      pip install --upgrade python-jose==3.4.0
-      pip install --upgrade requests==2.32.4
-      pip install --upgrade ecdsa
-      pip install --upgrade pip
-      pip install --upgrade protobuf==4.25.8
-      pip install --upgrade urllib3==2.5.0
+      uv pip install --upgrade cryptography==44.0.1
+      uv pip install --upgrade django==${{vars.django-version}}
+      uv pip install --upgrade python-jose==3.4.0
+      uv pip install --upgrade requests==2.32.4
+      uv pip install --upgrade ecdsa
+      uv pip install --upgrade pip
+      uv pip install --upgrade protobuf==4.25.8
+      uv pip install --upgrade urllib3==2.6.3
 
       mkdir -p ${{targets.contextdir}}/var/lib/awx
       # Remove unnecessary cache files

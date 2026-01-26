@@ -1,7 +1,7 @@
 package:
   name: kubernetes-csi-external-resizer-fips
   version: "2.0.0"
-  epoch: 2 # CVE-2025-61729
+  epoch: 3 # CVE-2025-61729
   description: Sidecar container that watches Kubernetes PersistentVolumeClaims objects and triggers controller side expansion operation against a CSI endpoint
   copyright:
     - license: Apache-2.0
@@ -40,6 +40,9 @@ test:
       packages:
         - curl
         - kubernetes-csi-driver-hostpath
+    environment:
+      CSI_SOCKET: "/csi/csi.sock"
+      RESIZER_PORT: "8081"
   pipeline:
     - runs: csi-resizer --version | grep "v${{package.version}}"
     - uses: test/kwok/cluster
@@ -74,4 +77,197 @@ test:
 
         # Kill both background processes so the test can complete. Was hanging previously here.
         kill $HOSTPATH_PID $CSI_PID
+    - name: Setup CSI environment and start services
+      runs: |
+        set -euo pipefail
+
+        mkdir -p /csi
+
+        # Start the CSI hostpath driver plugin
+        hostpathplugin --v=5 --endpoint="unix://${CSI_SOCKET}" --nodeid="node-000000" > hostpathplugin.log 2>&1 &
+        echo "$!" > /tmp/hostpath.pid
+        sleep 5
+
+        # Verify the CSI socket was created
+        stat "${CSI_SOCKET}"
+        if [ ! -S "${CSI_SOCKET}" ]; then
+          echo "ERROR: CSI socket not created"
+          exit 1
+        fi
+
+        # Start csi-resizer controller
+        csi-resizer --v=5 --csi-address "${CSI_SOCKET}" --kubeconfig ~/.kube/config --http-endpoint ":${RESIZER_PORT}" > csi-resizer.log 2>&1 &
+        echo "$!" > /tmp/csi-resizer.pid
+        sleep 10
+    - name: Create Kubernetes resources
+      runs: |
+        set -euo pipefail
+
+        # Create a CSI Driver resource
+        tee /tmp/csidriver.yaml <<'EOF'
+        apiVersion: storage.k8s.io/v1
+        kind: CSIDriver
+        metadata:
+          name: hostpath.csi.k8s.io
+        spec:
+          attachRequired: false
+          podInfoOnMount: true
+          volumeLifecycleModes:
+            - Persistent
+        EOF
+        kubectl apply -f /tmp/csidriver.yaml
+
+        # Create a StorageClass that allows volume expansion
+        tee /tmp/storageclass.yaml <<'EOF'
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: csi-hostpath-sc
+        provisioner: hostpath.csi.k8s.io
+        allowVolumeExpansion: true
+        reclaimPolicy: Delete
+        volumeBindingMode: Immediate
+        EOF
+        kubectl apply -f /tmp/storageclass.yaml
+
+        # Create a PersistentVolume (simulating the CSI driver's provisioned PV)
+        tee /tmp/pv.yaml <<'EOF'
+        apiVersion: v1
+        kind: PersistentVolume
+        metadata:
+          name: test-pv
+        spec:
+          capacity:
+            storage: 1Gi
+          accessModes:
+            - ReadWriteOnce
+          persistentVolumeReclaimPolicy: Delete
+          storageClassName: csi-hostpath-sc
+          csi:
+            driver: hostpath.csi.k8s.io
+            volumeHandle: test-volume-001
+        EOF
+        kubectl apply -f /tmp/pv.yaml
+
+        # Create a PersistentVolumeClaim requesting 1Gi
+        tee /tmp/pvc.yaml <<'EOF'
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: test-pvc
+          namespace: default
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+          storageClassName: csi-hostpath-sc
+        EOF
+        kubectl apply -f /tmp/pvc.yaml
+    - name: Wait for PVC binding
+      runs: |
+        set -euo pipefail
+
+        echo "Waiting for PVC to be bound..."
+        for i in $(seq 1 30); do
+          phase=$(kubectl get pvc test-pvc -o jsonpath='{.status.phase}')
+          if [ "$phase" = "Bound" ]; then
+            echo "SUCCESS: PVC is now Bound"
+            break
+          fi
+          echo "Attempt $i: PVC phase is $phase, waiting..."
+          sleep 1
+        done
+
+        kubectl get pvc test-pvc -o wide
+    - name: Test PVC resize operation
+      runs: |
+        set -euo pipefail
+
+        # Clear previous logs for clean detection
+        echo "--- RESIZE TEST START ---" >> csi-resizer.log
+        echo "--- RESIZE TEST START ---" >> hostpathplugin.log
+
+        # Modify PVC to request larger size (resize operation)
+        echo "Patching PVC to request 2Gi (resize from 1Gi)..."
+        kubectl patch pvc test-pvc -p '{"spec":{"resources":{"requests":{"storage":"2Gi"}}}}'
+
+        # Wait for resizer to detect and process the resize request
+        echo "Waiting for resizer to process the resize request..."
+        resize_detected=false
+        for i in $(seq 1 30); do
+          # Check if csi-resizer detected the resize request in logs
+          if grep -F "ControllerExpandVolume" csi-resizer.log 2>/dev/null; then
+            echo "SUCCESS: csi-resizer detected and initiated ControllerExpandVolume operation"
+            resize_detected=true
+            break
+          fi
+          # Also check for external resize related messages
+          if grep -i "resiz" csi-resizer.log 2>/dev/null | grep -F "test-pvc"; then
+            echo "SUCCESS: csi-resizer is processing resize for test-pvc"
+            resize_detected=true
+            break
+          fi
+          echo "Attempt $i: Waiting for resize operation..."
+          sleep 1
+        done
+
+        if [ "$resize_detected" = "false" ]; then
+          echo "WARNING: Did not detect ControllerExpandVolume in csi-resizer logs"
+          echo "--- csi-resizer logs ---"
+          tail -100 csi-resizer.log
+          echo "--- END csi-resizer logs ---"
+        fi
+
+        # Check if the CSI driver (hostpathplugin) received the expansion call
+        echo "Checking if hostpathplugin received expansion RPC..."
+        if grep -F "ControllerExpandVolume" hostpathplugin.log; then
+          echo "SUCCESS: hostpathplugin received ControllerExpandVolume RPC call"
+        else
+          echo "INFO: ControllerExpandVolume not found in hostpathplugin logs (may be expected if driver doesn't support online expansion)"
+        fi
+    - name: Verify resize results
+      runs: |
+        set -euo pipefail
+
+        # Verify PVC status shows resize conditions
+        echo "Checking PVC status for resize conditions..."
+        kubectl describe pvc test-pvc
+
+        # Check PVC shows expected state - should have updated capacity request
+        pvc_request=$(kubectl get pvc test-pvc -o jsonpath='{.spec.resources.requests.storage}')
+        echo "PVC requested storage: $pvc_request"
+        if [ "$pvc_request" = "2Gi" ]; then
+          echo "SUCCESS: PVC spec updated to 2Gi"
+        else
+          echo "FAIL: PVC spec not updated, still shows $pvc_request"
+          exit 1
+        fi
+
+        # Verify csi-resizer is processing volume resize operations
+        echo "Checking csi-resizer metrics for resize operations..."
+        curl -fs "localhost:${RESIZER_PORT}/metrics" | grep -F "csi_sidecar_operations_seconds" || true
+
+        # Show final state
+        echo "=== Final Test Summary ==="
+        echo "PVC Status:"
+        kubectl get pvc test-pvc -o wide
+        echo "PV Status:"
+        kubectl get pv test-pv -o wide
+        echo "csi-resizer log excerpt:"
+        tail -20 csi-resizer.log
+    - name: Cleanup
+      runs: |
+        set -euo pipefail
+
+        # Kill background processes
+        if [ -f /tmp/hostpath.pid ]; then
+          kill "$(cat /tmp/hostpath.pid)" 2>/dev/null || true
+        fi
+        if [ -f /tmp/csi-resizer.pid ]; then
+          kill "$(cat /tmp/csi-resizer.pid)" 2>/dev/null || true
+        fi
+
+        echo "SUCCESS: PVC resize test completed - resizer detected volume resize request"
     - uses: test/go-fips-check

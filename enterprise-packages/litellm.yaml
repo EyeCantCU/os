@@ -1,0 +1,449 @@
+package:
+  name: litellm
+  version: "1.80.15.0"
+  epoch: 1
+  description: OpenAI Proxy Server (LLM Gateway) to call 100+ LLMs in a unified interface & track spend, set budgets per virtual key/user
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - bash
+      - bash-binsh
+      - coreutils
+      - nodejs
+      - npm
+      - openssl
+      - openssl-provider-legacy
+      - py${{vars.python-version}}-pip
+      - python-${{vars.python-version}}
+      - tzdata
+  options:
+    no-provides: true
+
+vars:
+  python-version: "3.13"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - cmake
+      - gcc
+      - make
+      - maturin
+      - nodejs
+      - npm
+      - oniguruma-dev
+      - openssl
+      - openssl-dev
+      - pkgconf
+      - py${{vars.python-version}}-hatchling
+      - py${{vars.python-version}}-pip
+      - py${{vars.python-version}}-scikit-build-core
+      - py${{vars.python-version}}-setuptools
+      - py${{vars.python-version}}-setuptools-scm
+      - python-${{vars.python-version}}
+      - python-${{vars.python-version}}-dev
+      - rust
+      - samurai
+      - uv
+  environment:
+    RUSTONIG_SYSTEM_LIBONIG: 1
+    SOURCE_DATE_EPOCH: 315532800
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+\.\d+)(.0)?(\.[1-9]+)?
+    replace: v$1-stable$3
+    to: git-tag
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+\.\d+).*
+    replace: $1
+    to: maj-min-patch
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/BerriAI/litellm
+      tag: ${{vars.git-tag}}
+      expected-commit: 17c8d8d109b5d10c8a691108c47b9ce39f2f2646
+
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  - runs: |
+      mkdir -p ${{targets.contextdir}}/usr/bin
+      mkdir -p ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages
+      mkdir -p ${{targets.contextdir}}/usr/share/litellm
+      mkdir -p ${{targets.contextdir}}/usr/share/prisma-cli
+
+      # Clean package build artifacts
+      rm -rf dist/*
+      uv build
+
+      # Create virtual environment and install package
+      uv venv --python ${{vars.python-version}} --system-site-packages
+      source .venv/bin/activate
+
+      # Remove enterprise-only dependencies since we don't include enterprise directory
+      sed -i '/litellm-enterprise/d' requirements.txt
+      sed -i '/nodejs-wheel-binaries/d' requirements.txt
+      uv pip install dist/*.whl --no-build-isolation
+      uv pip install -r requirements.txt --no-build-isolation
+
+      uv pip install aurelio-sdk semantic_router
+
+      # Fix CVE-2025-67221 / GHSA-hx9q-6w63-j58v by upgrading orjson to 3.11.5+
+      uv pip install --upgrade orjson>=3.11.5
+
+      # Generate Prisma client
+      prisma generate
+
+      # Pre-cache the Node.js Prisma CLI and engine binaries
+      export PRISMA_BINARY_CACHE_DIR=${{targets.contextdir}}/usr/share/prisma-cli
+      python${{vars.python-version}} -c "import prisma.cli.prisma as p; p.ensure_cached()"
+
+      # Copy missing query-engine binary that ensure_cached() skips
+      cp $HOME/.cache/prisma-python/binaries/*/*/node_modules/@prisma/engines/query-engine-* \
+         ${{targets.contextdir}}/usr/share/prisma-cli/node_modules/@prisma/engines/
+
+      # Create symlink for query engine discovery
+      for engine in ${{targets.contextdir}}/usr/share/prisma-cli/node_modules/@prisma/engines/query-engine-*; do
+        if [ -f "$engine" ]; then
+          engine_name=$(basename "$engine")
+          ln -sf ./node_modules/@prisma/engines/"$engine_name" ${{targets.contextdir}}/usr/share/prisma-cli/query-engine
+          break
+        fi
+      done
+
+      sed -i "s|/home/build/.venv|/usr|g" .venv/bin/*
+
+      # Cleanup
+      find .venv -name "*.pyc" -delete
+      find .venv -name "__pycache__" -exec rm -rf {} +
+      find .venv/lib -type f -path "*/tornado/test/*" -delete
+      find .venv/lib -type d -path "*/tornado/test" -delete
+
+      # Install virtual environment
+      cp -r \
+        .venv/lib/python${{vars.python-version}}/site-packages/* \
+        ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/
+      cp -r \
+        .venv/bin/litellm* \
+        .venv/bin/prisma* \
+        ${{targets.contextdir}}/usr/bin/
+
+      # Install application files
+      cp -r litellm \
+        mcp_servers.json \
+        model_prices_and_context_window.json \
+        provider_endpoints_support.json \
+        schema.prisma \
+        ${{targets.contextdir}}/usr/share/litellm/
+
+      # Remove enterprise symlink since we don't include enterprise directory
+      rm -f ${{targets.contextdir}}/usr/share/litellm/litellm/proxy/enterprise
+
+  - name: Build UI for non-root container
+    runs: |
+      # Build Admin UI following Dockerfile.non_root pattern exactly
+      mkdir -p ${{targets.contextdir}}/var/lib/litellm/ui
+      mkdir -p ${{targets.contextdir}}/var/lib/litellm/assets
+
+      npm install -g npm@latest && npm cache clean --force
+      cd ui/litellm-dashboard
+      if [ -f "enterprise/enterprise_ui/enterprise_colors.json" ]; then
+        cp enterprise/enterprise_ui/enterprise_colors.json ./ui_colors.json
+      fi
+      rm -f package-lock.json
+      npm install --legacy-peer-deps
+      npm run build
+      cp -r out/* ${{targets.contextdir}}/var/lib/litellm/ui/
+      cd ../..
+      cp litellm/proxy/logo.jpg ${{targets.contextdir}}/var/lib/litellm/assets/logo.jpg
+
+      # Restructure UI HTML files
+      cd ${{targets.contextdir}}/var/lib/litellm/ui
+      for html_file in *.html; do
+        if [ "$html_file" != "index.html" ] && [ -f "$html_file" ]; then
+          folder_name="${html_file%.html}"
+          mkdir -p "$folder_name"
+          mv "$html_file" "$folder_name/index.html"
+        fi
+      done
+      cd -
+
+      # Remove duplicate UI files from site-packages now that we have them in /var/lib
+      rm -rf ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/litellm/proxy/_experimental/out
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - supervisor-config
+      runtime:
+        - supervisor
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/app/docker
+          mkdir -p ${{targets.contextdir}}/etc
+
+          for link in litellm mcp_servers.json model_prices_and_context_window.json provider_endpoints_support.json schema.prisma; do
+            ln -sf ../usr/share/litellm/$link ${{targets.contextdir}}/app/$link
+          done
+
+          install -Dm755 docker/entrypoint.sh ${{targets.contextdir}}/app/docker/docker-entrypoint.sh
+          install -Dm755 docker/prod_entrypoint.sh ${{targets.contextdir}}/app/docker/prod_entrypoint.sh
+          install -Dm644 docker/supervisord.conf ${{targets.contextdir}}/etc/supervisord.conf
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - curl
+            - jq
+            - ollama
+            - wait-for-it
+        environment:
+          LITELLM_MASTER_KEY: sk-compat-test-key-1234567890
+          OLLAMA_HOST: localhost:11434
+          OLLAMA_MODELS: /home/build/ollama_models
+          OLLAMA_TEST_MODEL: smollm2:135m
+      pipeline:
+        - uses: test/tw/symlink-check
+        - name: Test Docker-compatible layout with Ollama
+          uses: test/daemon-check-output
+          working-directory: /app
+          with:
+            setup: |
+              cleanup() {
+                # Kill Ollama and all its children
+                OLLAMA_PID=$(cat /tmp/ollama.pid)
+                echo "Killing Ollama PID: $OLLAMA_PID"
+
+                # Kill the process group to get all children
+                pkill -P $OLLAMA_PID 2>/dev/null || true
+                kill -9 $OLLAMA_PID 2>/dev/null || true
+              }
+
+              # Start test ollama server
+              ollama serve &
+              OLLAMA_PID=$!
+              echo $OLLAMA_PID > /tmp/ollama.pid
+
+              wait-for-it $OLLAMA_HOST
+
+              # Pull model with cache clearing retries
+              for attempt in 1 2 3 4 5; do
+                [ $attempt -gt 1 ] && rm -rf $OLLAMA_MODELS
+                ollama rm "$OLLAMA_TEST_MODEL" 2>/dev/null || true
+                if ollama pull "$OLLAMA_TEST_MODEL" && ollama list | grep -q "$OLLAMA_TEST_MODEL"; then
+                  break
+                fi
+                [ $attempt -eq 5 ] && cleanup && exit 1
+              done
+
+              # Create config in /app directory
+              tee /app/config.yaml << EOF
+              model_list:
+                - model_name: test-ollama-compat
+                  litellm_params:
+                    model: ollama/$OLLAMA_TEST_MODEL
+                    api_base: http://$OLLAMA_HOST
+
+              general_settings:
+                disable_spend_logs: true
+                database_url: null
+                master_key: $LITELLM_MASTER_KEY
+              EOF
+            start: docker/prod_entrypoint.sh --config config.yaml --port 4001
+            expected_output: |
+              Started server process
+              Application startup complete
+              Uvicorn running on
+            post: |
+              cleanup() {
+                OLLAMA_PID=$(cat /tmp/ollama.pid)
+                pkill -P $OLLAMA_PID 2>/dev/null || true
+                kill -9 $OLLAMA_PID 2>/dev/null || true
+              }
+              trap cleanup EXIT
+
+              wait-for-it localhost:4001
+
+              # Test healthcheck
+              curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4001/health | jq '.unhealthy_count == 0' || exit 1
+
+              # Test models endpoint - should return our test model
+              curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4001/v1/models | jq -e '.data[] | select(.id == "test-ollama-compat")' || exit 1
+
+              RESPONSE=$( \
+                curl -sf -X POST \
+                -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+                -H "Content-Type: application/json" \
+                -d '{"model": "test-ollama-compat", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 5}' \
+                http://localhost:4001/v1/chat/completions \
+              )
+
+              # Check that we used the correct model
+              echo $RESPONSE | jq -e --arg model "ollama/$OLLAMA_TEST_MODEL" '.model == $model'
+
+              # Check that we received a valid response with content
+              echo $RESPONSE | jq '.object == "chat.completion"'
+              echo $RESPONSE | jq '.choices[] | select(.index == 0) | .finish_reason == "stop"'
+              echo $RESPONSE | jq '.choices[] | select(.index == 0) | .message.content != null'
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - dev
+    - nightly
+    - patch
+    - staging
+  git:
+    tag-filter-prefix: v
+  version-transform:
+    - match: ^v(\d+\.\d+\.\d+)-stable$
+      replace: $1.0
+    - match: ^v(\d+\.\d+\.\d+)-stable\.(\d+)$
+      replace: $1.$2
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - ollama
+        - wait-for-it
+    environment:
+      LITELLM_MASTER_KEY: sk-test-master-key-1234567890
+      OLLAMA_HOST: localhost:11434
+      OLLAMA_MODELS: /home/build/ollama_models
+      OLLAMA_TEST_MODEL: smollm2:135m
+  pipeline:
+    - uses: python/import
+      with:
+        python: python${{vars.python-version}}
+        imports: |
+          import ${{package.name}}
+          import ${{package.name}}.proxy
+          import ${{package.name}}.proxy.proxy_cli
+          import ${{package.name}}.proxy.proxy_server
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          ${{package.name}}
+          ${{package.name}}-proxy
+    - uses: test/tw/ldd-check
+    - uses: test/tw/pip-check
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          ${{package.name}}
+          ${{package.name}}-proxy
+        version: ${{vars.maj-min-patch}}
+    - name: Test configuration validation
+      runs: |
+        tee /tmp/minimal-config.yaml << 'EOF'
+        model_list:
+          - model_name: test-model
+            litellm_params:
+              model: echo
+              api_base: http://localhost:8000
+        general_settings:
+          master_key: sk-1234
+        EOF
+
+        # Test config loading without starting server
+        litellm --config /tmp/minimal-config.yaml --skip_server_startup
+    - name: Test basic server startup / functionality with model provider
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Function to cleanup ollama processes
+          cleanup() {
+            # Kill Ollama and all its children
+            OLLAMA_PID=$(cat /tmp/ollama.pid)
+            echo "Killing Ollama PID: $OLLAMA_PID"
+
+            # Kill the process group to get all children
+            pkill -P $OLLAMA_PID 2>/dev/null || true
+            kill -9 $OLLAMA_PID 2>/dev/null || true
+          }
+
+          # Start test ollama server
+          ollama serve &
+          OLLAMA_PID=$!
+          echo $OLLAMA_PID > /tmp/ollama.pid
+
+          wait-for-it $OLLAMA_HOST
+
+          # Pull model with cache clearing retries
+          for attempt in 1 2 3 4 5; do
+            [ $attempt -gt 1 ] && rm -rf $OLLAMA_MODELS
+            ollama rm "$OLLAMA_TEST_MODEL" 2>/dev/null || true
+            if ollama pull "$OLLAMA_TEST_MODEL" && ollama list | grep -q "$OLLAMA_TEST_MODEL"; then
+              break
+            fi
+            [ $attempt -eq 5 ] && cleanup && exit 1
+          done
+
+          tee /tmp/minimal-config.yaml << EOF
+          model_list:
+            - model_name: test-ollama
+              litellm_params:
+                model: ollama/$OLLAMA_TEST_MODEL
+                api_base: http://$OLLAMA_HOST
+
+          general_settings:
+            disable_spend_logs: true
+            database_url: null  # Disable database requirement
+            master_key: $LITELLM_MASTER_KEY
+          EOF
+        start: litellm --config /tmp/minimal-config.yaml --port 4000 --host 0.0.0.0
+        expected_output: |
+          Started server process
+          Application startup complete
+          Uvicorn running on
+        post: |
+          # Function to cleanup ollama processes
+          cleanup() {
+            # Kill Ollama and all its children
+            OLLAMA_PID=$(cat /tmp/ollama.pid)
+            echo "Killing Ollama PID: $OLLAMA_PID"
+
+            # Kill the process group to get all children
+            pkill -P $OLLAMA_PID 2>/dev/null || true
+            kill -9 $OLLAMA_PID 2>/dev/null || true
+          }
+
+          trap cleanup EXIT
+
+          wait-for-it localhost:4000
+
+          # Test healthcheck
+          curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4000/health | jq '.unhealthy_count == 0' || exit 1
+
+          # Test models endpoint - should return our test model
+          curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4000/v1/models | jq -e '.data[] | select(.id == "test-ollama")' || exit 1
+
+          RESPONSE=$( \
+            curl -sf -X POST \
+            -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model": "test-ollama", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 5}' \
+            http://localhost:4000/v1/chat/completions \
+          )
+
+          # Check that we used the correct model
+          echo $RESPONSE | jq -e --arg model "ollama/$OLLAMA_TEST_MODEL" '.model == $model'
+
+          # Check that we received a valid response with content
+          echo $RESPONSE | jq '.object == "chat.completion"'
+          echo $RESPONSE | jq '.choices[] | select(.index == 0) | .finish_reason == "stop"'
+          echo $RESPONSE | jq '.choices[] | select(.index == 0) | .message.content != null'

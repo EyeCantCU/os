@@ -1,0 +1,87 @@
+package:
+  name: nvidia-cuda-crt-13.1
+  version: "13.1.115"
+  epoch: 0
+  description: CUDA Application Compiler
+  copyright:
+    - license: PROPRIETARY
+
+environment:
+  contents:
+    packages:
+      - busybox
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '.*-(\d+\.\d+).*'
+    replace: '$1'
+    to: cuda-version
+
+pipeline:
+  - assertions:
+      required-steps: 1
+    pipeline:
+      - if: ${{build.arch}} == 'aarch64'
+        uses: fetch
+        with:
+          # SBSA = ARM Server Base System Architecture (now called SystemReady)
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_crt/linux-sbsa/cuda_crt-linux-sbsa-${{package.version}}-archive.tar.xz"
+          expected-sha256: "520621d632fc99371d21c042dd4c1f43cd5570b57602f2783c93b4f8cb48a0e8"
+          timeout: 30
+      - if: ${{build.arch}} == 'x86_64'
+        uses: fetch
+        with:
+          uri: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_crt/linux-x86_64/cuda_crt-linux-x86_64-${{package.version}}-archive.tar.xz"
+          expected-sha256: "e2861bbc6400815be6689cdc84afddfedc51103189888c8e51a2e9543e55a5b3"
+          timeout: 30
+
+  # Without this patch nvcc will not work with glibc 2.42 an newer, as their
+  # recently added C23 math functions conflict with CUDA header definitions.
+  - uses: patch
+    with:
+      patches: math_functions_glibc_2.42.patch
+
+  # Setup version symlinks
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
+      mv LICENSE ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/${{package.name}}.LICENSE
+      mv include ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development headers
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      environment:
+        contents:
+          packages:
+            - nvcc-${{vars.cuda-version}}-gcc-wrapper
+            - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
+            - nvidia-cuda-nvcc-${{vars.cuda-version}}-dev
+      pipeline:
+        - name: Test .cu files can be compiled
+          runs: |
+            nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
+            tmpdir="$(mktemp -d)"
+            trap "rm -rf $tmpdir" EXIT
+            cat <<EOF > "$tmpdir/test-cu.cu"
+            #include <math.h>
+            int main() {
+              return 0;
+            }
+            EOF
+            $nvcc -o "$tmpdir/test-cu" "$tmpdir/test-cu.cu"
+            "$tmpdir/test-cu"
+
+update:
+  # No release-monitoring support for the multi-arch "enterprise" driver, only
+  # for x86-only consumer release train.
+  enabled: false
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check

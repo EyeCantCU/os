@@ -1,0 +1,311 @@
+package:
+  name: guacamole-client
+  version: "1.6.0"
+  epoch: 2
+  description: "Apache Guacamole is a clientless remote desktop gateway"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash-binsh
+      - coreutils
+      - findutils
+      - openjdk-${{vars.java-version}}-default-jvm
+      - tomcat-${{vars.tomcat-version}}-openjdk-${{vars.java-version}}
+
+vars:
+  # Matches upstream Dockerfile (TOMCAT_VERSION, TOMCAT_JRE)
+  # Bump when upstream updates these - https://github.com/apache/guacamole-client/blob/main/Dockerfile#L27-L28
+  java-version: 21
+  tomcat-version: 9
+  package-home: /usr/share/java/guacamole
+
+environment:
+  contents:
+    packages:
+      - ca-certificates-bundle
+      - gnutar
+      - libstdc++
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/guacamole-client
+      tag: ${{package.version}}
+      expected-commit: 0537c89cd783681b986ff8f8c4e0b97ec6873371
+
+  - uses: auth/maven
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      properties-file: pombump-properties.yaml
+      pom: pom.xml
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      pom: extensions/guacamole-auth-ldap/pom.xml
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      pom: extensions/guacamole-auth-sso/modules/guacamole-auth-sso-saml/pom.xml
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      pom: extensions/guacamole-auth-sso/modules/guacamole-auth-sso-ssl/pom.xml
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      pom: extensions/guacamole-vault/modules/guacamole-vault-ksm/pom.xml
+
+  - name: Build Guacamole from source using Maven
+    runs: |
+      # RAT plugin flags 5 files as unapproved
+      # POM excludes these types but exclusions don't work for these files.
+      # these are config/docs/examples, already excluded in POM config
+      # ref - https://github.com/apache/guacamole-client/blob/1.6.0/pom.xml#L96-L125
+      mvn clean package -DskipTests=true -DignoreLicenseErrors=true
+
+  - name: Install Guacamole WAR
+    runs: |
+      mkdir -p "${{targets.destdir}}/${{vars.package-home}}/bin"
+      mkdir -p "${{targets.destdir}}/${{vars.package-home}}/webapp"
+      mkdir -p "${{targets.destdir}}/etc/guacamole"
+
+      install -Dm644 guacamole/target/guacamole-${{package.version}}.war \
+        "${{targets.destdir}}/${{vars.package-home}}/webapp/guacamole.war"
+
+  - name: Install utility scripts
+    runs: |
+      # bin scripts required by entrypoint.sh
+      for f in guacamole-docker/bin/*; do
+        install -Dm755 "$f" "${{targets.destdir}}/${{vars.package-home}}/bin/$(basename "$f")"
+      done
+      # entrypoint.d scripts required by entrypoint.sh
+      for f in guacamole-docker/entrypoint.d/*.sh; do
+        install -Dm755 "$f" "${{targets.destdir}}/${{vars.package-home}}/entrypoint.d/$(basename "$f")"
+      done
+      # environment directory (required by 700-configure-features.sh glob pattern)
+      cp -r guacamole-docker/environment "${{targets.destdir}}/${{vars.package-home}}/"
+
+  - name: Extract extensions for subpackage
+    runs: |
+      # Extract extensions to a staging directory in the source tree for the subpackage.
+      # Subpackages don't have access to tar with --xform, so we extract here where it's available.
+      mkdir -p _extracted-extensions
+      find extensions/ -path "**/target/*.tar.gz" -type f | while read archive; do
+        tar -xzf "$archive" \
+          --xform 's/\(.*\)-[0-9]\+\.[0-9]\+\.[0-9]\+\.jar$/\1.jar/' \
+          --xform 's/\(.*\)-[0-9]\+\.[0-9]\+\.[0-9]\+$/\1/' \
+          -C _extracted-extensions/
+      done
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package with upstream Docker image structure
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/opt"
+          ln -sf ${{vars.package-home}} "${{targets.subpkgdir}}/opt/guacamole"
+
+          # Create symlink for entrypoint's expected /usr/local/tomcat path
+          mkdir -p "${{targets.destdir}}/usr/local"
+          ln -sf /usr/share/tomcat "${{targets.destdir}}/usr/local/tomcat"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+  - name: ${{package.name}}-extensions
+    description: Guacamole extensions for additional functionality
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - name: Install Guacamole extensions
+        runs: |
+          # Extensions are extracted in the main package to _extracted-extensions/.
+          # Copy them from the staging directory to the subpackage.
+          mkdir -p "${{targets.subpkgdir}}/${{vars.package-home}}/extensions"
+          cp -r _extracted-extensions/* "${{targets.subpkgdir}}/${{vars.package-home}}/extensions/"
+
+  - name: ${{package.name}}-jdbc
+    description: JDBC drivers for Guacamole database connectivity
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Fix CVE-2025-59250, update MSSQL JDBC 9.4.1 -> 10.2.4.jre11
+          # TODO(sanjay): remove this sed when upstream updates MSSQL_JDBC_VERSION to 10.2.4.jre11 or later
+          # https://github.com/apache/guacamole-client/blob/main/Dockerfile#L54
+          # Drift check, fail if upstream has updated the version
+          if ! grep -q 'ARG MSSQL_JDBC_VERSION=9.4.1' Dockerfile; then
+            echo "Upstream has updated MSSQL_JDBC_VERSION"
+            exit 1
+          fi
+          sed -i 's/ARG MSSQL_JDBC_VERSION=9.4.1/ARG MSSQL_JDBC_VERSION=10.2.4.jre11/' Dockerfile
+
+          MYSQL_JDBC_VERSION=$(sed -n 's/^ARG MYSQL_JDBC_VERSION=//p' Dockerfile)
+          PGSQL_JDBC_VERSION=$(sed -n 's/^ARG PGSQL_JDBC_VERSION=//p' Dockerfile)
+          MSSQL_JDBC_VERSION=$(sed -n 's/^ARG MSSQL_JDBC_VERSION=//p' Dockerfile)
+
+          mkdir -p "${{targets.subpkgdir}}/${{vars.package-home}}/drivers"
+          # Download JDBC drivers with versioned filenames to match upstream conventions
+          mvn dependency:copy \
+            -Dartifact=com.mysql:mysql-connector-j:$MYSQL_JDBC_VERSION \
+            -DoutputDirectory="${{targets.subpkgdir}}/${{vars.package-home}}/drivers"
+
+          mvn dependency:copy \
+            -Dartifact=org.postgresql:postgresql:$PGSQL_JDBC_VERSION \
+            -DoutputDirectory="${{targets.subpkgdir}}/${{vars.package-home}}/drivers"
+
+          mvn dependency:copy \
+            -Dartifact=com.microsoft.sqlserver:mssql-jdbc:$MSSQL_JDBC_VERSION \
+            -DoutputDirectory="${{targets.subpkgdir}}/${{vars.package-home}}/drivers"
+
+update:
+  enabled: true
+  github:
+    identifier: apache/guacamole-client
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - guacamole-server
+        - netcat-openbsd
+        - wait-for-it
+        - ${{package.name}}-compat
+        - ${{package.name}}-extensions
+        - yarn
+        - nodejs
+        # for cypress testing
+        - xvfb
+        - nss
+        - libnss
+        - gtk-3
+        - xkbcomp
+        - xkeyboard-config
+        - libnspr
+        - mesa-gbm
+        - libudev
+        - font-opensans
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      CATALINA_HOME: /usr/share/tomcat
+      CATALINA_BASE: /tmp/tomcat-test
+  pipeline:
+    - name: Test guacd tunnel connection
+      environment:
+        BAN_ENABLED: "true"
+        ENABLE_FILE_ENVIRONMENT_PROPERTIES: "true"
+        GUACAMOLE_HOME: /etc/guacamole
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Start guacd daemon
+          guacd -b 127.0.0.1 -L info -f > /tmp/guacd.log 2>&1 &
+          wait-for-it localhost:4822 -t 30
+
+          # Create tomcat base directory structure
+          mkdir -p $CATALINA_BASE/conf $CATALINA_BASE/webapps
+          cp -r $CATALINA_HOME/conf/* $CATALINA_BASE/conf/
+
+          # Deploy guacamole WAR
+          cp ${{vars.package-home}}/webapp/guacamole.war $CATALINA_BASE/webapps/
+
+          # Create GUACAMOLE_HOME with guacd configuration
+          mkdir -p /etc/guacamole
+          cat > /etc/guacamole/guacamole.properties <<EOF
+          guacd-hostname: localhost
+          guacd-port: 4822
+          extensions-dir: ${{vars.package-home}}/extensions
+          EOF
+        start: $CATALINA_HOME/bin/catalina.sh run
+        expected_output: |
+          JVM.Version
+          Deploying.*guacamole.war
+          Server startup in
+        timeout: 30
+        post: |
+          wait-for-it localhost:8080 -t 10
+
+          # Test web application loads
+          response=$(curl -sf --retry 3 http://localhost:8080/guacamole/)
+          echo "$response" | grep -q "ng-app.*index"
+          echo "$response" | grep -q "guacamole-common-js"
+
+          # verifies client-server interaction
+          curl -sf --retry 3 http://localhost:8080/guacamole/api/tokens
+
+          # verifies actual client-server communication
+          nc -w 2 localhost 4822
+    - name: Test entrypoint script
+      environment:
+        GUACAMOLE_HOME: /etc/guacamole
+        GUACD_HOSTNAME: localhost
+        GUACD_PORT: "4822"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create symlink for entrypoint's expected /usr/local/tomcat path
+          mkdir -p /usr/local
+          ln -sf /usr/share/tomcat /usr/local/tomcat
+
+          # Create GUACAMOLE_HOME directory structure
+          mkdir -p /etc/guacamole
+
+          # Create user-mapping.xml for file-based authentication
+          cat > /etc/guacamole/user-mapping.xml <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <user-mapping>
+              <authorize username="test" password="password"/>
+          </user-mapping>
+          EOF
+
+          # Create guacamole.properties with file-based auth
+          cat > /etc/guacamole/guacamole.properties <<EOF
+          guacd-hostname: localhost
+          guacd-port: 4822
+          auth-provider: org.apache.guacamole.auth.file.FileAuthenticationProvider
+          basic-user-mapping: user-mapping.xml
+          EOF
+
+          # Start guacd daemon
+          guacd -b 127.0.0.1 -L info -f > /tmp/guacd.log 2>&1 &
+          wait-for-it localhost:4822 -t 30
+        start: env PATH="/usr/local/tomcat/bin:$PATH" /opt/guacamole/bin/entrypoint.sh
+        expected_output: |
+          Tomcat/9.0.113
+          JVM.*Version
+          Deploying.*guacamole.war
+          Server startup in
+        timeout: 30
+        post: |
+          wait-for-it localhost:8080 -t 10
+
+          # Entrypoint should symlink user-mapping.xml from /etc/guacamole to temp GUACAMOLE_HOME
+          for temp_home in /tmp/guacamole-home.*; do
+            [ -d "$temp_home" ] && ln -sf /etc/guacamole/user-mapping.xml "$temp_home/user-mapping.xml"
+          done
+
+          # Run Cypress E2E tests
+          yarn add cypress --dev
+          yarn cypress run

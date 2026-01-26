@@ -1,0 +1,118 @@
+package:
+  name: dbt-snowflake
+  version: "1.10.4"
+  epoch: 0
+  description: dbt Snowflake adapter - data transformation tool for Snowflake
+  copyright:
+    - license: Apache-2.0
+  options:
+    # Don't resolve dependencies from libraries bundled in the virtual environment
+    no-depends: true
+    # Don't provide libraries bundled in the virtual environment to other packages
+    no-provides: true
+  dependencies:
+    provides:
+      - cmd:dbt
+    runtime:
+      - python-${{vars.python-version}}
+
+vars:
+  venv-home: '/opt/chainguard/dbt-snowflake'
+  python-version: '3.12'
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - python-${{vars.python-version}}
+      - python-${{vars.python-version}}-dev
+      - uv
+
+pipeline:
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  - runs: |
+      # Create virtual environment
+      uv venv "${{vars.venv-home}}" --system-site-packages
+      source "${{vars.venv-home}}/bin/activate"
+
+      # Install dbt-snowflake (automatically includes dbt-core)
+      uv pip install dbt-snowflake==${{package.version}}
+
+      # Remove pip and virtualenv from virtual environment
+      # pip doesn't need to be present in the virtual environment,
+      # the venv can be managed via a system installed package manager
+      # virtualenv vendors an outdated and unused pip wheel
+      uv pip uninstall pip virtualenv
+
+      # Install virtual environment to package
+      mkdir -p "${{targets.contextdir}}/opt/chainguard"
+      cp -a "${{vars.venv-home}}" "${{targets.contextdir}}/opt/chainguard/"
+
+      # Symlink dbt to /usr/bin for easy CLI access
+      mkdir -p "${{targets.contextdir}}/usr/bin"
+      ln -sf "${{vars.venv-home}}/bin/dbt" "${{targets.contextdir}}/usr/bin/dbt"
+
+      # Remove uv lockfile (world-writable, triggers linter)
+      rm -f "${{targets.contextdir}}/${{vars.venv-home}}/.lock"
+
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    description: OCI entrypoint for dbt-snowflake images (drop-in replacement for official dbt images)
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - bash
+    pipeline:
+      - runs: |
+          # Create working directory matching official dbt images
+          mkdir -p "${{targets.contextdir}}/usr/app/dbt"
+
+          # Create profiles directory
+          mkdir -p "${{targets.contextdir}}/root/.dbt"
+
+          # Create entrypoint script - /usr/bin/dbt already handles venv activation
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'set -euo pipefail' \
+            'exec dbt "$@"' \
+            > "${{targets.contextdir}}/usr/local/bin/dbt-entrypoint"
+          chmod +x "${{targets.contextdir}}/usr/local/bin/dbt-entrypoint"
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/local/bin/dbt-entrypoint
+            stat /usr/app/dbt
+            stat /root/.dbt
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - 'rc\d+$'
+    - 'b\d+$'
+    - 'a\d+$'
+  github:
+    identifier: dbt-labs/dbt-snowflake
+    use-tag: true
+    tag-filter-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+  pipeline:
+    - runs: |
+        set -euo pipefail
+        # /usr/bin/dbt symlink handles venv activation
+        dbt --version
+        # Verify snowflake adapter is available
+        dbt --version | grep -F "snowflake"
+    - uses: test/tw/pip-check
+      with:
+        python: ${{vars.venv-home}}/bin/python${{vars.python-version}}
+    - uses: test/tw/ldd-check

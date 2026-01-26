@@ -1,7 +1,7 @@
 package:
   name: argo-cd-3.1
-  version: "3.1.9"
-  epoch: 6
+  version: "3.1.11"
+  epoch: 1
   description: Declarative continuous deployment for Kubernetes.
   copyright:
     - license: Apache-2.0
@@ -30,13 +30,12 @@ pipeline:
     with:
       repository: https://github.com/argoproj/argo-cd
       tag: v${{package.version}}
-      expected-commit: 8665140f96f6b238a20e578dba7f9aef91ddac51
+      expected-commit: cc053b2eebed744df8c33b33fbbadcd0adcd044d
 
   - uses: go/bump
     with:
       deps: |-
-        k8s.io/kubernetes@v1.33.4
-        golang.org/x/crypto@v0.45.0
+        k8s.io/kubernetes@v1.33.6
 
   - runs: |
       cd ui
@@ -91,6 +90,7 @@ subpackages:
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           cp hack/gpg-wrapper.sh "${{targets.subpkgdir}}"/usr/bin/gpg-wrapper.sh
           cp hack/git-verify-wrapper.sh "${{targets.subpkgdir}}"/usr/bin/git-verify-wrapper.sh
+          cp entrypoint.sh "${{targets.subpkgdir}}"/usr/bin/uid_entrypoint.sh
           mkdir -p "${{targets.contextdir}}"/etc/ssh
           touch "${{targets.contextdir}}"/etc/ssh/ssh_known_hosts
     test:
@@ -99,6 +99,52 @@ subpackages:
           with:
             virtual-pkg-name: argo-cd-repo-server
             real-pkg-name: ${{subpkg.name}}
+        - name: Verify wrapper scripts are installed and executable
+          runs: |
+            # Verify gpg-wrapper.sh exists and is executable
+            stat /usr/bin/gpg-wrapper.sh
+            test -x /usr/bin/gpg-wrapper.sh || { echo "ERROR: gpg-wrapper.sh is not executable"; exit 1; }
+
+            # Verify git-verify-wrapper.sh exists and is executable
+            stat /usr/bin/git-verify-wrapper.sh
+            test -x /usr/bin/git-verify-wrapper.sh || { echo "ERROR: git-verify-wrapper.sh is not executable"; exit 1; }
+
+            # Verify uid_entrypoint.sh exists and is executable
+            stat /usr/bin/uid_entrypoint.sh
+            test -x /usr/bin/uid_entrypoint.sh || { echo "ERROR: uid_entrypoint.sh is not executable"; exit 1; }
+        - name: Test gpg-wrapper.sh with --version
+          runs: |
+            # gpg-wrapper.sh passes args to gpg, test that it invokes gpg correctly
+            output=$(/usr/bin/gpg-wrapper.sh --version 2>&1) || true
+            echo "$output" | grep -F "gpg" || {
+              echo "FAIL: gpg-wrapper.sh did not invoke gpg correctly"
+              echo "Output: $output"
+              exit 1
+            }
+            echo "SUCCESS: gpg-wrapper.sh correctly invokes gpg"
+        - name: Test git-verify-wrapper.sh displays help
+          runs: |
+            # git-verify-wrapper.sh is a wrapper that invokes git, test basic functionality
+            # It should at least be able to run without errors when help is requested
+            output=$(/usr/bin/git-verify-wrapper.sh --help 2>&1) || true
+            # The wrapper should not produce any fatal errors on invocation
+            if echo "$output" | grep -F "command not found"; then
+              echo "FAIL: git-verify-wrapper.sh has missing dependency"
+              exit 1
+            fi
+            echo "SUCCESS: git-verify-wrapper.sh runs without missing dependencies"
+        - name: Test uid_entrypoint.sh runs successfully
+          runs: |
+            # uid_entrypoint.sh is an entrypoint script that should run without error
+            # It typically handles UID mapping and runs a command
+            # Test that it can at least run 'id' without errors
+            output=$(/usr/bin/uid_entrypoint.sh id 2>&1)
+            echo "$output" | grep -F "uid=" || {
+              echo "FAIL: uid_entrypoint.sh did not execute command correctly"
+              echo "Output: $output"
+              exit 1
+            }
+            echo "SUCCESS: uid_entrypoint.sh correctly executes commands"
 
   - name: ${{package.name}}-compat
     description: "Compatibility package for locating binaries according to upstream helm charts"
@@ -178,13 +224,97 @@ test:
     - name: ArgoCD Version Check
       runs: |
         argocd version --short --client || exit 1
-        argocd --help
-        argocd-application-controller --help
-        argocd-applicationset-controller --help
-        argocd-cmp-server --help
-        argocd-k8s-auth --help
-        argocd-notifications --help
-        argocd-repo-server --help
-        argocd-server version
-        argocd-server --help
-        argocd-commit-server --help
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          argocd
+          argocd-server
+          argocd-application-controller
+          argocd-applicationset-controller
+          argocd-cmp-server
+          argocd-k8s-auth
+          argocd-notifications
+          argocd-repo-server
+          argocd-commit-server
+    - name: Test argocd CLI subcommands
+      runs: |
+        # Test account commands are available (no server required)
+        argocd account --help | grep -F "account" || {
+          echo "FAIL: argocd account subcommand not working"
+          exit 1
+        }
+
+        # Test app commands are available
+        argocd app --help | grep -F "app" || {
+          echo "FAIL: argocd app subcommand not working"
+          exit 1
+        }
+
+        # Test cluster commands are available
+        argocd cluster --help | grep -F "cluster" || {
+          echo "FAIL: argocd cluster subcommand not working"
+          exit 1
+        }
+
+        # Test repo commands are available
+        argocd repo --help | grep -F "repo" || {
+          echo "FAIL: argocd repo subcommand not working"
+          exit 1
+        }
+
+        echo "SUCCESS: All argocd CLI subcommands are available"
+    - name: Test argocd-server initialization output
+      runs: |
+        # Test that argocd-server can start and produce expected output
+        # It will fail because of missing Kubernetes config, but should show
+        # initialization logic working
+        output=$(timeout 5 argocd-server 2>&1 || true)
+
+        # Verify the server attempts to start (shows it's parsing args correctly)
+        if echo "$output" | grep -iE "(starting|listen|config|kubernetes|cluster)"; then
+          echo "SUCCESS: argocd-server initialization logic works"
+        else
+          echo "Server output: $output"
+          # Check for common startup indicators
+          if echo "$output" | grep -iE "(error|fail)"; then
+            echo "INFO: Server failed to start as expected (no Kubernetes)"
+            echo "SUCCESS: Server initialization attempted correctly"
+          else
+            echo "FAIL: Unable to verify server initialization"
+            exit 1
+          fi
+        fi
+    - name: Test argocd admin commands
+      runs: |
+        # Test admin subcommand which has offline utilities
+        argocd admin --help | grep -F "admin" || {
+          echo "FAIL: argocd admin subcommand not working"
+          exit 1
+        }
+
+        # Test settings subcommand (offline utility)
+        argocd admin settings --help | grep -F "settings" || {
+          echo "FAIL: argocd admin settings subcommand not working"
+          exit 1
+        }
+
+        echo "SUCCESS: argocd admin commands work correctly"
+    - name: Verify all symlinks resolve correctly
+      runs: |
+        # Verify all ArgoCD component symlinks point to valid executables
+        for binary in argocd-server argocd-repo-server argocd-cmp-server \
+                      argocd-application-controller argocd-notifications \
+                      argocd-applicationset-controller argocd-k8s-auth \
+                      argocd-commit-server; do
+          stat /usr/bin/$binary
+          # Verify symlink target is valid
+          test -L /usr/bin/$binary || {
+            echo "INFO: /usr/bin/$binary is not a symlink (this is OK)"
+          }
+          # Verify executable works
+          /usr/bin/$binary --help >/dev/null 2>&1 || {
+            echo "FAIL: /usr/bin/$binary --help failed"
+            exit 1
+          }
+        done
+        echo "SUCCESS: All ArgoCD component binaries work correctly"

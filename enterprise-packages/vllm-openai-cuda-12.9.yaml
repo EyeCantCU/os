@@ -1,7 +1,8 @@
+#nolint:valid-pipeline-git-checkout-tag
 package:
   name: vllm-openai-cuda-12.9
-  version: 0.11.2
-  epoch: 2
+  version: "0.13.0"
+  epoch: 1 # CVE-2025-69223, CVE-2025-68131, CVE-2026-21441
   description: A high-throughput and memory-efficient inference and serving engine for LLMs
   target-architecture:
     - x86_64
@@ -21,8 +22,8 @@ package:
   # We must explicitly list dependencies for libraries used at runtime to prevent drift on updates.
   # Vendored libraries (with hashes in filename like libavif-850e7649.so) are bundled by PyPI wheels and not listed.
   #
-  # NOTE: Unlike upstream, we do NOT ship XPU (Intel) support. The bitsandbytes XPU library is removed
-  # during build as it requires Intel oneAPI libraries (libsvml.so, libsycl.so.8, etc.) not in our ecosystem.
+  # NOTE: Unlike upstream, we do NOT ship XPU (Intel) or ROCm (AMD) support. The bitsandbytes XPU and ROCm
+  # libraries are removed during build as they require vendor-specific libraries not in our ecosystem.
   dependencies:
     runtime:
       # Package dependencies (for scripts/tools)
@@ -45,6 +46,7 @@ package:
       - nvidia-libnvjitlink-${{vars.cuda-version}} # libnvJitLink.so.12
       # NCCL (from PyTorch libtorch_cuda.so)
       - nvidia-nccl-cuda-${{vars.cuda-version}} # libnccl.so.2
+      - nvidia-nccl-cuda-${{vars.cuda-version}}-dev # nccl.h header for JIT compilation (pynccl_allocator.py)
       - openmpi-cuda-${{vars.cuda-version}} # provides so:libmpi.so.40
       - openpmix # provides so:libpmix.so.2
       - py${{vars.python-version}}-opencv-python-headless # use system OpenCV instead of PyPI wheel to avoid vendored OpenSSL, needed for FIPS
@@ -72,15 +74,18 @@ vars:
   cudnn-major-version: 9
   import: vllm
   pypi-package: vllm
-  flashinfer-cubin-version: "0.5.2"
-  flashinfer-jit-cache-version: "0.5.2"
+  flashinfer-cubin-version: "0.5.3"
+  flashinfer-jit-cache-version: "0.5.3"
   install-kv-connectors: "false" # toggle to true to match upstream kv connectors layer
   # For support of open-ai server, we also fix bitsandbytes version as per upstream and they are different for different archs
   # It is critical for vllm-openai so please change when upstream changes
   # for now we only ship x86_64
   bitsandbytes-x86-version: "0.46.1"
   timm-version: "1.0.17"
+  runai-model-streamer-version: "0.15.3"
   python-version: 3.12
+  # DeepGEMM commit from upstream vLLM 0.13.0 tools/install_deepgemm.sh
+  deepgemm-commit: "594953acce41793ae00a1233eb516044d604bcb6"
 
 var-transforms:
   - from: ${{package.name}}
@@ -137,7 +142,7 @@ pipeline:
     with:
       repository: https://github.com/vllm-project/vllm.git
       tag: v${{package.version}}
-      expected-commit: 275de34170654274616082721348b7edd9741d32
+      expected-commit: 72506c98349d6bcd32b4e33eec7b5513453c1502
 
   - runs: ccache -F 0 -M 0
 
@@ -206,6 +211,30 @@ pipeline:
         exit 1
       fi
 
+      # runai-model-streamer (verify 'runai-model-streamer[s3,gcs]>=<melange>' appears in the Dockerfile)
+      MELANGE_RUNAI="${{vars.runai-model-streamer-version}}"
+      echo "Dockerfile (upstream) runai-model-streamer lines:"
+      grep -n "runai-model-streamer" "$DOCKERFILE"
+      echo "runai-model-streamer -> upstream: see lines above  melange>='${MELANGE_RUNAI}'"
+      if grep -Eq "runai-model-streamer\[s3,gcs\]>=${MELANGE_RUNAI}" "$DOCKERFILE"; then
+        :
+      else
+        echo "runai-model-streamer drift (expected 'runai-model-streamer[s3,gcs]>=${MELANGE_RUNAI}' not found in Dockerfile)"
+        exit 1
+      fi
+
+      # DeepGEMM commit check (from tools/install_deepgemm.sh)
+      MELANGE_DEEPGEMM="${{vars.deepgemm-commit}}"
+      DEEPGEMM_SCRIPT="tools/install_deepgemm.sh"
+      echo "Checking DeepGEMM commit in $DEEPGEMM_SCRIPT:"
+      grep -n "DEEPGEMM_GIT_REF=" "$DEEPGEMM_SCRIPT" | head -1
+      if grep -Fq "${MELANGE_DEEPGEMM}" "$DEEPGEMM_SCRIPT"; then
+        echo "DeepGEMM -> commit ${MELANGE_DEEPGEMM} found"
+      else
+        echo "DeepGEMM drift (expected commit ${MELANGE_DEEPGEMM} not found in $DEEPGEMM_SCRIPT)"
+        exit 1
+      fi
+
       echo "No drift detected."
 
   - name: Install build CUDA dependencies for vLLM wheel
@@ -253,7 +282,7 @@ pipeline:
         accelerate hf_transfer modelscope \
         "bitsandbytes>=${{vars.bitsandbytes-x86-version}}" \
         "timm>=${{vars.timm-version}}" \
-        "runai-model-streamer[s3,gcs]>=0.15.0"
+        "runai-model-streamer[s3,gcs]>=${{vars.runai-model-streamer-version}}"
 
   # FlashInfer — mirror upstream precompiled cubin + JIT cache (no AOT, no git)
   - name: Install FlashInfer cubin + jit-cache
@@ -269,6 +298,31 @@ pipeline:
         --extra-index-url "https://flashinfer.ai/whl/cu${{vars.pytorch-cuda-suffix}}" \
         "flashinfer-jit-cache==${{vars.flashinfer-jit-cache-version}}"
 
+  # DeepGEMM — FP8 GEMM kernels for Hopper/Blackwell (SM 9.0a/10.0a)
+  # Provides ~5.5% throughput improvement, enabled by default in vLLM 0.11+
+  # Upstream pins by commit (not tag), so we use branch+expected-commit with nolint
+  - uses: git-checkout
+    with:
+      repository: https://github.com/deepseek-ai/DeepGEMM.git
+      branch: main
+      expected-commit: ${{vars.deepgemm-commit}}
+      recurse-submodules: true
+      destination: deepgemm
+
+  - name: Build and install DeepGEMM
+    working-directory: deepgemm
+    runs: |
+      set -eux
+
+      # Build for Hopper (9.0a) and Blackwell (10.0a) only - matches upstream
+      export TORCH_CUDA_ARCH_LIST="9.0a 10.0a"
+
+      python3 setup.py bdist_wheel --dist-dir dist
+
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        dist/*.whl
+
   # Install build.txt into runtime for JIT compilation
   - name: Install build-time deps into runtime (for JIT)
     runs: |
@@ -280,24 +334,90 @@ pipeline:
         --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
         -r requirements/build.txt
 
+  # Remediate CVEs in Python dependencies
+  # The scan shows vulnerabilities in transitive dependencies that need explicit upgrades
+  - name: Remediate CVEs in Python dependencies
+    runs: |
+      set -eux
+
+      # Remediate aiohttp CVEs (CVE-2025-69223 High, CVE-2025-69226-69230 Low/Medium)
+      # Fixed in 3.13.3
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "aiohttp>=3.13.3"
+
+      # Remediate CVE-2026-21441 (High) in urllib3
+      # Fixed in 2.6.3
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "urllib3>=2.6.3"
+
+      # Remediate CVE-2025-68131 (Medium) in cbor2
+      # Fixed in 5.8.0
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "cbor2>=5.8.0"
+
+      # Upgrade ray to latest version - vllm requires ray[cgraph]>=2.48.0
+      uv pip install \
+        --system --prefix "${{targets.contextdir}}/usr" \
+        "ray[cgraph]>=2.53.0"
+
+  # Patch ray's vendored dependencies that have CVEs
+  # Ray bundles its own aiohttp and log4j which the scanner detects
+  - name: Patch ray vendored dependencies
+    runs: |
+      set -eux
+
+      SITE_PACKAGES="${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages"
+      RAY_SITE="${SITE_PACKAGES}/ray"
+
+      # Patch ray's vendored aiohttp (CVE-2025-69223, etc.)
+      # Ray bundles aiohttp in ray/_private/runtime_env/agent/thirdparty_files/
+      # Copy the already-installed fixed aiohttp from system site-packages
+      THIRDPARTY_DIR="${RAY_SITE}/_private/runtime_env/agent/thirdparty_files"
+      if [ -d "${THIRDPARTY_DIR}" ]; then
+        # Remove old aiohttp directories (both package and dist-info)
+        for item in "${THIRDPARTY_DIR}"/aiohttp*; do
+          if [ -e "$item" ]; then
+            rm -rf "$item"
+          fi
+        done
+
+        # Copy fixed aiohttp from system site-packages (already installed >=3.13.3)
+        cp -r "${SITE_PACKAGES}"/aiohttp "${THIRDPARTY_DIR}/"
+        cp -r "${SITE_PACKAGES}"/aiohttp-*.dist-info "${THIRDPARTY_DIR}/"
+      fi
+
+      # Patch ray's log4j in ray_dist.jar (CVE-2025-68161)
+      # ray/jars/ray_dist.jar contains log4j-core 2.17.1
+      # vllm doesn't use ray's Java components, so we can remove the vulnerable JAR
+      # to eliminate the CVE. If Java support is needed, this would need to be
+      # rebuilt with updated log4j.
+      if [ -f "${RAY_SITE}/jars/ray_dist.jar" ]; then
+        echo "Removing ray_dist.jar containing vulnerable log4j-core 2.17.1"
+        echo "vllm uses ray for Python-based distributed computing, not Java"
+        rm -f "${RAY_SITE}/jars/ray_dist.jar"
+      fi
+
   - name: Prune incompatible GPU extras
     runs: |
-      # bitsandbytes: drop non-CUDA-12 and XPU artifacts
+      # bitsandbytes: drop non-CUDA-12, XPU, and ROCm artifacts
       # - cuda118/cuda130: incompatible CUDA versions
       # - xpu: requires Intel oneAPI libraries (libsvml.so, libirng.so, libimf.so, libintlc.so.5, libsycl.so.8)
-      #        which are not available in our ecosystem. Unlike upstream, we don't ship XPU support.We will mention in Compat Notes
+      #        which are not available in our ecosystem. Unlike upstream, we don't ship XPU support. We will mention in Compat Notes
+      # - rocm*: requires AMD HIP libraries (libhipblas.so, libhipsparse.so, libhipblaslt.so)
+      #          which are not available in our ecosystem. Unlike upstream, we don't ship ROCm support.
       rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda118.so
       rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda130.so
       rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_xpu.so
+      rm -f ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_rocm*.so
 
       # CuPy and its vendor backends are optional for vLLM; safest is to remove CuPy entirely:
       # upstream also removed but it is optionally used by ray
       # If we ship it then we have to pull in cudnn8 which is not compatible with cudnn9 we ship
       # https://github.com/vllm-project/vllm/pull/3625
       uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" cupy-cuda12x
-
-      # NOTE: torchaudio 2.9 removed torio module (deprecated in 2.8, removed in 2.9).
-      # FFmpeg bindings are no longer shipped - torchaudio now uses TorchCodec.
 
       # Remove PyPI opencv-python-headless in favor of system package (py3.12-opencv-python-headless)
       # The PyPI wheel vendors OpenSSL 1.1 which is not FIPS compliant; our system package uses system OpenSSL
@@ -356,6 +476,8 @@ test:
         # ldd check will fail in absence of libcuda.so, but we can add this only in test pipeline
         # for ref https://github.com/chainguard-dev/extra-packages/pull/2890
         - libcuda-stub-cuda-${{vars.cuda-version}}-dev
+        # Test co-installability: if there are file conflicts between main and -dev packages as dev package is important for image
+        - ${{package.name}}-dev
   pipeline:
     - uses: test/tw/ldd-check
       with:
@@ -382,6 +504,40 @@ test:
           sed -n '1,200p' /tmp/vllm.log
           exit 1
         fi
+    # FIPS compliance: verify no vendored libcrypto, libssl, or libsodium in Python site-packages
+    # PyPI wheels often bundle these which breaks FIPS compliance
+    - name: Verify no vendored crypto libraries (FIPS compliance)
+      runs: |
+        set -euo pipefail
+        SITE_PACKAGES="/usr/lib/python${{vars.python-version}}/site-packages"
+        echo "Scanning $SITE_PACKAGES for vendored crypto libraries..."
+
+        # Find all .so files and check their dependencies
+        # libcrypto and libssl are OpenSSL components; libsodium is used by some packages
+        # Check for libraries linking to non-system crypto libs (vendored copies)
+        CRYPTO_LIBS=$(find "$SITE_PACKAGES" -name "*.so*" -type f -exec ldd {} 2>/dev/null \; | \
+                      grep -E "libcrypto|libssl|libsodium" | grep -v "=> /lib/" | grep -v "=> /usr/lib/" || :)
+
+        if [ -n "$CRYPTO_LIBS" ]; then
+          echo "ERROR: Found vendored crypto libraries in site-packages (breaks FIPS compliance):"
+          echo "$CRYPTO_LIBS"
+          echo ""
+          echo "These libraries must link to system OpenSSL/libsodium, not vendored copies."
+          echo "Check for PyPI wheels that bundle libcrypto.so, libssl.so, or libsodium.so"
+          exit 1
+        fi
+
+        # Also check for embedded crypto .so files (some wheels embed them directly)
+        EMBEDDED_CRYPTO=$(find "$SITE_PACKAGES" -type f \( -name "*libcrypto*" -o -name "*libssl*" -o -name "*libsodium*" \) \
+                          ! -path "*__pycache__*" || :)
+
+        if [ -n "$EMBEDDED_CRYPTO" ]; then
+          echo "ERROR: Found embedded crypto library files in site-packages (breaks FIPS compliance):"
+          echo "$EMBEDDED_CRYPTO"
+          exit 1
+        fi
+
+        echo "OK: No vendored crypto libraries found - FIPS compliance check passed"
 
 update:
   enabled: true

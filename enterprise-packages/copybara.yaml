@@ -1,0 +1,162 @@
+package:
+  name: copybara
+  version: "20260119"
+  epoch: 0
+  description: Tool for transforming and moving code between repositories
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - buildtools-buildifier
+      - buildtools-buildozer
+      - git
+      - mercurial
+      - openjdk-${{vars.java-version}}-default-jvm
+      - quilt
+  resources:
+    cpu: 16
+    memory: 32Gi
+
+# https://github.com/google/copybara/blob/53eddaf1fc13a13d5d3ab6d43a7a9aecdbd23d1e/Dockerfile#L26
+vars:
+  java-version: 21
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bazel-7
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang-19
+      - git
+      - gnutar
+      - llvm-19
+      - openjdk-21-default-jdk
+      - wolfi-baselayout
+      - zip
+  environment:
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+    CC: clang
+    CXX: clang++
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/google/copybara
+      tag: v${{package.version}}
+      expected-commit: 7daccc68a131c9a2d5c4eac42827fe359e4092fd
+
+  # Fix CVE-2024-26308, CVE-2024-25710 (commons-compress) and CVE-2025-48924 (commons-lang3)
+  - runs: |
+      sed -i 's/org.apache.commons:commons-compress:1.25.0/org.apache.commons:commons-compress:1.26.0/g' MODULE.bazel
+      # Add commons-lang3 override for transitive dependency CVE fix - insert after commons-compress line
+      sed -i '/"org.apache.commons:commons-compress:1.26.0",/a\        "org.apache.commons:commons-lang3:3.18.0",' MODULE.bazel
+
+  - runs: |
+      mkdir -p .cache/bazel/_bazel_root
+
+      bazel build --verbose_failures \
+        --java_language_version=${{vars.java-version}} \
+        --tool_java_language_version=${{vars.java-version}} \
+        --java_runtime_version=remotejdk_${{vars.java-version}} \
+        --action_env=CC=clang \
+        --action_env=CXX=clang++ \
+        //java/com/google/copybara:copybara_deploy.jar
+
+      # Inject version info into the JAR
+      echo "Build label=${{package.version}}" > build-data.properties
+      zip -u bazel-bin/java/com/google/copybara/copybara_deploy.jar build-data.properties
+
+      # Install copybara jar
+      mkdir -p "${{targets.contextdir}}"/opt/copybara
+      mv bazel-bin/java/com/google/copybara/copybara_deploy.jar "${{targets.contextdir}}"/opt/copybara/
+
+      # Install copybara wrapper script from source
+      mkdir -p "${{targets.contextdir}}"/usr/bin
+      install -m755 .docker/copybara "${{targets.contextdir}}"/usr/bin/copybara
+
+      # Clean up bazel cache
+      rm -rf .cache/bazel/_bazel_root
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility symlink for upstream copybara Docker image
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
+          ln -sf ../../bin/copybara "${{targets.subpkgdir}}"/usr/local/bin/copybara
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+        - name: Verify compat symlink
+          runs: |
+            set -euo pipefail
+            stat /usr/local/bin/copybara
+            test -L /usr/local/bin/copybara
+            /usr/local/bin/copybara help 2>&1 | grep -F "Copybara"
+
+update:
+  enabled: true
+  github:
+    identifier: google/copybara
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - git
+  pipeline:
+    - name: Verify copybara installation
+      runs: |
+        set -euo pipefail
+        stat /opt/copybara/copybara_deploy.jar
+        stat /usr/bin/copybara
+    - name: Test copybara help
+      runs: |
+        set -euo pipefail
+        copybara help 2>&1 | grep -F "Copybara"
+    - name: Test copybara validate with sample config
+      runs: |
+        set -euo pipefail
+        TEST_DIR=$(mktemp -d)
+        cd "$TEST_DIR"
+
+        # Initialize a sample git repo
+        git init sample-repo
+        cd sample-repo
+        git config user.email "test@example.com"
+        git config user.name "Test User"
+        echo "Hello World" > README.md
+        git add README.md
+        git commit -m "Initial commit"
+
+        cd "$TEST_DIR"
+
+        # Create a sample copybara config
+        tee copy.bara.sky << 'EOF'
+        core.workflow(
+            name = "default",
+            origin = git.origin(
+                url = "file:///tmp/sample-repo",
+                ref = "main",
+            ),
+            destination = folder.destination(),
+            authoring = authoring.pass_thru("Test <test@example.com>"),
+        )
+        EOF
+
+        # Validate the config
+        copybara validate copy.bara.sky 2>&1 | grep -iE "(valid|success|config)"
+
+        # Cleanup
+        cd /
+        rm -rf "$TEST_DIR"

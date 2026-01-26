@@ -1,0 +1,191 @@
+# upstream image: stain/jena-fuseki
+# dockerfile: https://github.com/stain/jena-docker/blob/fa6b9234d0da49a98b6ef2ed626911acad28f240/jena-fuseki/Dockerfile
+package:
+  name: apache-jena-fuseki
+  version: "5.6.0"
+  epoch: 0
+  description: Fuseki is a SPARQL 1.1 server with a web interface, backed by the -Apache Jena TDB RDF triple store.
+  copyright:
+    - license: Apache-2.0 AND (GPL-2.0-with-classpath-exception) AND GPL-3.0-only
+  dependencies:
+    runtime:
+      - bash
+      - busybox
+      - openjdk-${{vars.java-version}}-default-jvm
+
+vars:
+  java-version: "21"
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - curl
+      - libstdc++
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+    FUSEKI_HOME: /jena-fuseki
+    FUSEKI_BASE: /fuseki
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/jena
+      tag: jena-${{package.version}}
+      expected-commit: 99267df18097141bd2ac27e2b14edc96226f0895
+
+  - runs: |
+      # Bump log4j2 to 2.25.3 to fix CVE-2025-68161
+      sed -i 's|<ver.log4j2>2.25.2</ver.log4j2>|<ver.log4j2>2.25.3</ver.log4j2>|' pom.xml
+
+      mvn clean package \
+      -pl jena-fuseki2/apache-jena-fuseki \
+      -am -DskipTests -Dmaven.javadoc.skip=true -Drat.skip=true
+
+      # Extract distribution
+      mkdir -p "${{targets.contextdir}}/${FUSEKI_HOME}"
+      tar -xzf jena-fuseki2/apache-jena-fuseki/target/apache-jena-fuseki-${{package.version}}.tar.gz \
+        --strip-components=1 -C "${{targets.contextdir}}/${FUSEKI_HOME}"
+
+      # Copy webapp UI components
+      mkdir -p "${{targets.contextdir}}/${FUSEKI_HOME}/webapp"
+      cp -r jena-fuseki2/jena-fuseki-ui/target/webapp/* "${{targets.contextdir}}/${FUSEKI_HOME}/webapp/"
+
+      # cleanup
+      rm -f "${{targets.contextdir}}/${FUSEKI_HOME}"/*.bat
+      rm -f "${{targets.contextdir}}/${FUSEKI_HOME}/fuseki.war"
+      chmod 755 "${{targets.contextdir}}/${FUSEKI_HOME}/fuseki-server"
+
+      # Create empty FUSEKI_BASE directory
+      mkdir -p "${{targets.contextdir}}/${FUSEKI_BASE}"
+
+subpackages:
+  # This subpackage provides compatibility with upstream stain/jena-fuseki Docker image.
+  # It fetches the official entrypoint scripts from GitHub and verifies integrity using SHA256.
+  # The entrypoint script handles admin password generation, shiro.ini configuration,
+  # and automatic dataset creation via FUSEKI_DATASET_* environment variables.
+  - name: ${{package.name}}-oci-entrypoint
+    description: OCI entrypoint for Apache Jena Fuseki
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - coreutils
+        - curl
+        - gettext
+        - procps
+        - pwgen
+        - tini
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/jena-fuseki"
+          mkdir -p "${{targets.contextdir}}"
+
+          GITHUB_RAW="https://raw.githubusercontent.com/stain/jena-docker/master/jena-fuseki"
+
+          # Fetch and verify shiro.ini
+          curl -sS -o shiro.ini "$GITHUB_RAW/shiro.ini"
+          echo "712401473f4adc0623866cef4cf28e0968f8ab1aa2410066bf8d2e623a4f22d6  shiro.ini" | sha256sum -c -
+
+          # Configure stateless session manager for v5.6.0, Jetty upgraded in Jena 5.5.0->5.6.0 from 12.0.* to 12.1.*
+          # https://lists.apache.org/thread/9ysc4x87zjpcjd225rlp66zmdpzw3p3z
+          # Must be inserted in [main] section, before [users]
+          sed -i '/^\[users\]/i \
+          # Stateless session configuration\
+          statelessSessionManager = org.apache.shiro.web.session.mgt.DefaultWebSessionManager\
+          statelessSessionManager.sessionValidationSchedulerEnabled = false\
+          statelessSessionManager.sessionIdCookieEnabled = false\
+          statelessSessionManager.sessionIdUrlRewritingEnabled = false\
+          securityManager.sessionManager = $statelessSessionManager\
+          ' shiro.ini
+
+          install -Dm644 shiro.ini "${{targets.contextdir}}/jena-fuseki/shiro.ini"
+
+          # Fetch and verify docker-entrypoint.sh
+          curl -sS -o docker-entrypoint.sh "$GITHUB_RAW/docker-entrypoint.sh"
+          echo "fdd18fc12d4da0ce1fe57652cafcfd266f3120cbf62180971d6784adee8aad80  docker-entrypoint.sh" | sha256sum -c -
+          install -Dm755 docker-entrypoint.sh "${{targets.contextdir}}/docker-entrypoint.sh"
+
+          # Fetch and verify load.sh
+          curl -sS -o load.sh "$GITHUB_RAW/load.sh"
+          echo "a4844289e51bdacd52fecf2cbcd8f8969a82fd9b19063c69c5edfcec8206ed88  load.sh" | sha256sum -c -
+          install -Dm755 load.sh "${{targets.contextdir}}/jena-fuseki/load.sh"
+
+          # Fetch and verify tdbloader
+          curl -sS -o tdbloader "$GITHUB_RAW/tdbloader"
+          echo "87ad63a30592522f43067cb8bff2b467c9a15bb9d739d3c36194150f67f2ac1c  tdbloader" | sha256sum -c -
+          install -Dm755 tdbloader "${{targets.contextdir}}/jena-fuseki/tdbloader"
+
+          # Fetch and verify tdbloader2
+          curl -sS -o tdbloader2 "$GITHUB_RAW/tdbloader2"
+          echo "b79cc22e2e233b718179ba9fc88fbfcf68070db164c577646e735d714aba4800  tdbloader2" | sha256sum -c -
+          install -Dm755 tdbloader2 "${{targets.contextdir}}/jena-fuseki/tdbloader2"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+        environment:
+          JAVA_HOME: /usr/lib/jvm/default-jvm
+          FUSEKI_HOME: /jena-fuseki
+          FUSEKI_BASE: /fuseki
+          ADMIN_PASSWORD: testpassword
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /docker-entrypoint.sh
+              /jena-fuseki/shiro.ini
+              /jena-fuseki/load.sh
+              /jena-fuseki/tdbloader
+              /jena-fuseki/tdbloader2
+        - uses: test/daemon-check-output
+          with:
+            start: /sbin/tini -- sh /docker-entrypoint.sh /jena-fuseki/fuseki-server
+            timeout: 90
+            expected_output: "Fuseki is available"
+            post: |
+              set -euo pipefail
+              curl -sS --fail -u admin:${ADMIN_PASSWORD} 'http://localhost:3030/$/ping'
+
+              # Create dataset first
+              curl -sS --fail -u admin:${ADMIN_PASSWORD} -X POST \
+                'http://localhost:3030/$/datasets' \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                --data 'dbName=ds&dbType=mem'
+
+              # Upload RDF data
+              curl -sS --fail -u admin:${ADMIN_PASSWORD} -X POST \
+                -H "Content-Type: text/turtle" \
+                --data-raw '<http://example.org/s1> <http://example.org/p1> "Object 1" . <http://example.org/s2> <http://example.org/p2> "Object 2" .' \
+                http://localhost:3030/ds/data
+
+              # Verify uploaded data count
+              response=$(curl -sS --fail -u admin:${ADMIN_PASSWORD} -X POST \
+                -H "Accept: application/sparql-results+json" \
+                -H "Content-Type: application/sparql-query" \
+                --data "SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }" \
+                http://localhost:3030/ds/query)
+              echo "$response"
+              echo "$response" | grep -F '"value": "2"'
+
+test:
+  environment:
+    environment:
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      FUSEKI_HOME: /jena-fuseki
+      FUSEKI_BASE: /fuseki
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: /jena-fuseki/fuseki-server
+    - uses: test/tw/ver-check
+      with:
+        bins: /jena-fuseki/fuseki-server
+
+update:
+  enabled: true
+  git:
+    strip-prefix: jena-
+    tag-filter-prefix: jena-

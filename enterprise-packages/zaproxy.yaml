@@ -1,7 +1,7 @@
 package:
   name: zaproxy
-  version: "2.16.1"
-  epoch: 0
+  version: "2.17.0"
+  epoch: 2
   description: The ZAP core project
   copyright:
     - license: Apache-2.0
@@ -47,7 +47,7 @@ pipeline:
     with:
       repository: https://github.com/zaproxy/zaproxy
       tag: v${{package.version}}
-      expected-commit: 9043eb613d6f04c5705240e299a1a9369557fde9
+      expected-commit: 8a1bff313f4d183dba5aa154ecbe89ad751c9153
 
   - runs: |
       # This will discover and download latest plugins available
@@ -95,6 +95,140 @@ update:
     strip-prefix: v
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
   pipeline:
-    - runs: |
+    - name: Verify ZAP installation and basic info
+      runs: |
         /zap/zap.sh -suppinfo
+    - name: Test ZAP daemon mode and API functionality
+      uses: test/daemon-check-output
+      with:
+        expected_output: ZAP is now listening
+        post: |
+          # Verify API responds with version information
+          curl -sf http://localhost:8080/JSON/core/view/version/ | jq -e '.version'
+          if [ $? -eq 0 ]; then
+            echo "SUCCESS: ZAP API is responding"
+          else
+            echo "FAIL: ZAP API did not respond correctly"
+            exit 1
+          fi
+        start: /zap/zap.sh -daemon -port 8080 -config api.disablekey=true
+        timeout: "60"
+    - name: Test core scanning functionality with spider
+      uses: test/daemon-check-output
+      with:
+        expected_output: ZAP is now listening
+        post: |
+          # Wait for ZAP API to be fully ready
+          wait-for-it localhost:8081 -t 10
+
+          # Initiate a spider scan on the local test site
+          echo "Starting spider scan..."
+          scan_response=$(curl -sf "http://localhost:8081/JSON/spider/action/scan/?url=http://localhost:9000/")
+          echo "Scan response: $scan_response"
+
+          # Extract scan ID
+          scan_id=$(echo "$scan_response" | jq -r '.scan')
+          if [ -z "$scan_id" ] || [ "$scan_id" = "null" ]; then
+            echo "FAIL: Could not start spider scan"
+            exit 1
+          fi
+
+          echo "Spider scan started with ID: $scan_id"
+
+          # Wait for scan to complete (poll status)
+          for i in $(seq 1 30); do
+            status=$(curl -sf "http://localhost:8081/JSON/spider/view/status/?scanId=$scan_id" | jq -r '.status')
+            echo "Scan status: $status%"
+            if [ "$status" = "100" ]; then
+              echo "SUCCESS: Spider scan completed"
+              break
+            fi
+            sleep 1
+          done
+
+          # Verify scan found URLs
+          urls_found=$(curl -sf "http://localhost:8081/JSON/spider/view/results/?scanId=$scan_id" | jq '.results | length')
+          if [ "$urls_found" -gt 0 ]; then
+            echo "SUCCESS: Spider found $urls_found URLs"
+          else
+            echo "FAIL: Spider did not find any URLs"
+            exit 1
+          fi
+        setup: |
+          # Create a simple test HTML file to scan
+          mkdir -p /tmp/test-site
+          cat > /tmp/test-site/index.html <<'EOF'
+          <html>
+          <head><title>Test Site</title></head>
+          <body>
+            <h1>Test Page</h1>
+            <a href="page2.html">Link to Page 2</a>
+          </body>
+          </html>
+          EOF
+
+          cat > /tmp/test-site/page2.html <<'EOF'
+          <html>
+          <head><title>Page 2</title></head>
+          <body>
+            <h1>Page 2</h1>
+            <a href="index.html">Back to Home</a>
+          </body>
+          </html>
+          EOF
+
+          # Start a simple HTTP server for ZAP to scan
+          cd /tmp/test-site
+          python3 -m http.server 9000 > /tmp/httpd.log 2>&1 &
+          HTTP_PID=$!
+          echo "Started HTTP server with PID $HTTP_PID"
+
+          # Wait for HTTP server to be ready
+          wait-for-it localhost:9000 -t 10
+        start: /zap/zap.sh -daemon -port 8081 -config api.disablekey=true
+        timeout: "60"
+    - name: Verify essential plugins are loaded
+      uses: test/daemon-check-output
+      with:
+        expected_output: ZAP is now listening
+        post: |
+          # Verify plugin files exist
+          if [ ! -d "/zap/plugin" ]; then
+            echo "FAIL: Plugin directory does not exist"
+            exit 1
+          fi
+
+          plugin_count=$(find /zap/plugin -name '*.zap' | wc -l)
+          if [ "$plugin_count" -eq 0 ]; then
+            echo "FAIL: No plugin files found in /zap/plugin/"
+            exit 1
+          fi
+
+          echo "Found $plugin_count plugin files"
+
+          # Wait for ZAP API to be ready
+          wait-for-it localhost:8082 -t 10
+
+          # Query the alerts API to verify plugins are loaded and providing alert types
+          alerts_response=$(curl -sf "http://localhost:8082/JSON/core/view/alerts/")
+          if [ $? -ne 0 ]; then
+            echo "FAIL: Could not query alerts API"
+            exit 1
+          fi
+
+          # Check if response is valid JSON and contains alerts structure
+          echo "$alerts_response" | jq -e '.alerts' > /dev/null
+          if [ $? -eq 0 ]; then
+            echo "SUCCESS: Plugins loaded and alerts API is functional"
+          else
+            echo "FAIL: Alerts API did not return expected structure"
+            exit 1
+          fi
+        start: /zap/zap.sh -daemon -port 8082 -config api.disablekey=true
+        timeout: "60"

@@ -1,0 +1,640 @@
+package:
+  name: label-studio
+  version: "1.22.0"
+  epoch: 2
+  description: Open source data labeling tool for audio, text, images, videos, and time series data types.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - bash-binsh
+      - coreutils # needed for label-studio app/nginx init scripts
+      - curl
+      - findutils # needed for label-studio app/nginx init scripts
+      - gawk # needed for label-studio app/nginx init scripts
+      - nginx
+      - openssl
+      - python-${{vars.python-version}}
+      - sed # needed for label-studio app/nginx init scripts
+      - tzdata
+
+vars:
+  venv-home: '/usr/share/label-studio/venv'
+  # NOTE: align with py-version required by upstream.
+  # REF: https://github.com/HumanSignal/label-studio/blob/develop/Dockerfile#L3
+  python-version: "3.13"
+  import: "label_studio"
+
+environment:
+  environment:
+    VIRTUAL_ENV: ${{vars.venv-home}}
+    BUILD_NO_SERVER: "true"
+    BUILD_NO_HASH: "true"
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - nodejs-22 # Upstream uses node22 - REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L2
+      - npm # Required for npx (used in postinstall script) - REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/web/package.json#L248
+      - poetry
+      - postgresql-dev
+      - python-${{vars.python-version}}-dev
+      - uv # needed for building with uv and use libraries.cgr.dev
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/HumanSignal/label-studio
+      tag: ${{package.version}}
+      expected-commit: 090298d3adceda6ed516682fcc37e374b13dd051
+      cherry-picks: |
+        develop/ea2462bf042bbf370b79445d02a205fbe547b505: fix: BROS-664: Fix XSS via script injection in custom hotkeys # CVE-2026-22033
+
+  - name: Build frontend
+    working-directory: web
+    runs: |
+      # Install deps
+      # Following upstream cmd - REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L39
+      yarn install --prefer-offline --no-progress --pure-lockfile --frozen-lockfile --ignore-engines --non-interactive --production=false
+
+      # Build frontend
+      yarn run build
+
+      # Run frontend version generator
+      yarn version:libs
+
+  # ============================================================
+  # BACKEND BUILD: UV approach
+  # Upstream project is built w/ Poetry
+  # but using uv for building to include libraries.cgr.dev
+  # Export dependencies and use UV for project installation
+  # ============================================================
+  - name: Export Poetry lock to requirements
+    runs: |
+      # Export dependencies (no dev/test deps, no hashes for uv compatibility)
+      # --no-emit-project prevents including the project itself in requirements
+      uv export --no-dev --no-hashes --no-emit-project > requirements.locked
+
+  - name: "Create venv"
+    runs: uv venv ${{vars.venv-home}}
+
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  - name: Install dependencies
+    runs: |
+      # Install all dependencies from locked requirements
+      uv pip install -r requirements.locked --no-compile
+
+      # Install uwsgi extras (Upstream defines: uwsgi = ['pyuwsgi (==2.0.28.post1)', 'uwsgitop (==0.12)'])
+      # REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/pyproject.toml#L87
+      # REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L100
+      uv pip install --no-compile \
+        "pyuwsgi==2.0.28.post1" \
+        "uwsgitop==0.12"
+
+  - name: Install label-studio package
+    runs: |
+      # Install the package itself
+      uv pip install --no-deps --no-compile -e .
+
+  - name: Remediate CVEs
+    runs: |
+      # ============================================================
+      # CVE REMEDIATION: Upgrade vulnerable packages
+      # ============================================================
+      # IMPORTANT: All upgrades must be in a single command so UV respects
+      # all constraints together. Otherwise Django 6.0 gets installed.
+      #
+      # Remediate CVE-2025-57833, CVE-2025-64459, CVE-2025-59681,
+      # CVE-2025-59682, CVE-2025-64458, CVE-2025-13372, CVE-2025-64460
+      # NOTE: Constrained to <6.0 because Label Studio 1.21.0 is not compatible with Django 6.0
+      #
+      # Remediate CVE-2024-22513, GHSA-5vcc-86wm-547q
+      # Remediate CVE-2025-66471, CVE-2025-66418, GHSA-38jv-5279-wg99
+      uv pip install --upgrade --no-compile \
+        "django>=5.1.15,<6.0" \
+        "djangorestframework-simplejwt>=5.5.1" \
+        "urllib3>=2.6.3"
+
+  - name: Collect static files and generate version files
+    runs: |
+      # Collect static files (matching upstream Dockerfile)
+      # REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L108
+      ${{vars.venv-home}}/bin/python label_studio/manage.py collectstatic --noinput
+
+      # Generate version files (matching upstream Dockerfile py-version-generator stage)
+      # REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L117
+      # This creates version_.py with Git metadata
+      VERSION_OVERRIDE=${{package.version}} ${{vars.venv-home}}/bin/python label_studio/core/version.py
+
+  - name: Finalize virtual environment
+    runs: |
+      # Remove pip
+      uv pip uninstall pip
+
+      # Fix .pth file to point to runtime location instead of build location
+      echo "/label-studio" > ${{vars.venv-home}}/lib/python3.13/site-packages/label_studio.pth
+
+      # Fix Python path in shebangs
+      for f in $(find ${{vars.venv-home}}/bin -type f -executable); do
+        sed -i 's#/home/build/venv/bin/python#${{vars.venv-home}}/bin/python#' $f
+      done
+
+      # Install virtual environment
+      mkdir -p ${{targets.destdir}}/usr/share/${{package.name}}
+      mv ${{vars.venv-home}} ${{targets.destdir}}/usr/share/${{package.name}}/
+      chmod 0755 ${{targets.destdir}}/usr/share/${{package.name}}/venv/.lock
+
+  - name: "Copy over label-studio related files"
+    runs: |
+      # Create directories for generated frontend/backend build files to match upstream
+      # REF: https://github.com/HumanSignal/label-studio/blob/develop/Dockerfile#L157-L163
+      for dir in \
+        /label-studio/label_studio \
+        /label-studio/web ; \
+      do
+        mkdir -p ${{targets.contextdir}}$dir && chmod 0755 ${{targets.contextdir}}$dir;
+      done
+
+      # Frontend build artifacts
+      cp -r web/dist ${{targets.contextdir}}/label-studio/web
+
+      # Backend related files
+      cp -r label_studio/* ${{targets.contextdir}}/label-studio/label_studio
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package with upstream Docker image
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Create directories to match upstream
+          # REF: https://github.com/HumanSignal/label-studio/blob/develop/Dockerfile#L157-L163
+          for dir in \
+            /label-studio/data \
+            /label-studio/deploy \
+            /label-studio/licenses \
+            /var/log/nginx \
+            /opt/heartex/instance-data/etc ; \
+          do
+            mkdir -p ${{targets.contextdir}}$dir && chmod 0755 ${{targets.contextdir}}$dir;
+          done
+
+          # Matching upstream essential files
+          # REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L150-L155
+          for file in LICENSE pyproject.toml poetry.lock README.md; do
+            cp $file ${{targets.contextdir}}/label-studio/$file
+          done
+
+          cp licenses/* ${{targets.contextdir}}/label-studio/licenses
+          cp -r deploy/* ${{targets.contextdir}}/label-studio/deploy
+
+          # Patch the nginx configuration script to use Label Studio's default.conf
+          # instead of the system nginx.conf from the nginx runtime dependency
+          # REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/deploy/docker-entrypoint.d/common/10-configure-nginx.sh#L8
+          sed -i 's|/etc/nginx/nginx.conf|/label-studio/deploy/default.conf|g' \
+          "${{targets.contextdir}}/label-studio/deploy/docker-entrypoint.d/common/10-configure-nginx.sh"
+
+          # Create symlinks
+          # create symlinks
+          # Matching upstream - REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L126
+          ln -sf /usr/share/${{package.name}}/venv/ ${{targets.contextdir}}/label-studio/venv
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - postgresql
+        - postgresql-client
+        - postgresql-contrib # Needed for pg_trgm extension
+        - shadow
+        - sudo-rs
+        - wait-for-it
+        - ${{package.name}}-compat
+    accounts:
+      groups:
+        - groupname: nonroot
+          gid: 1001
+      users:
+        - username: nonroot
+          uid: 1001
+          gid: 1001
+      # sudo must retain permissions
+      # REF: https://github.com/HumanSignal/label-studio/blob/1.21.0/Dockerfile#L150-L163
+      run-as: 0
+    environment:
+      APP_HOST: "localhost"
+      DJANGO_DB: "default"
+      DJANGO_SETTINGS_MODULE: "label_studio.core.settings.label_studio"
+      HOME: /label-studio
+      HTTP_PORT: "8000"
+      NGINX_PORT: "8085"
+      LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED: "true"
+      LABEL_STUDIO_BASE_DATA_DIR: /label-studio/data
+      LS_DIR: /label-studio
+      OPT_DIR: /opt/heartex/instance-data/etc
+      PGDATA: /tmp/test_db
+      PGUSER: wolfi
+      PG_PASS: ""
+      # PostgreSQL connection
+      POSTGRE_HOST: "/tmp"
+      POSTGRE_PORT: "5432"
+      POSTGRE_USER: "wolfi"
+      POSTGRE_PASSWORD: ""
+      POSTGRE_NAME: "testdb"
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: python/import
+      with:
+        python: ${{vars.venv-home}}/bin/python
+        import: ${{vars.import}}
+    - name: Test label-studio binary exists and runs
+      runs: |
+        set -o pipefail
+        export PATH=${{vars.venv-home}}/bin:$PATH
+        label-studio --help
+    - name: "Test label-studio startup and functionality"
+      uses: test/daemon-check-output
+      working-directory: /label-studio
+      with:
+        setup: |-
+          set -euo pipefail
+
+          # Setup postgres
+          useradd $PGUSER
+          sudo -u $PGUSER initdb -D /tmp/test_db
+          sudo -u $PGUSER pg_ctl -D /tmp/test_db -l /tmp/logfile start
+          createdb testdb
+          psql -lqt | cut -d \| -f 1 | grep -qw testdb
+          wait-for-it -t 15 localhost:5432
+        start: |
+          env PATH=${{vars.venv-home}}/bin:$PATH \
+          ./deploy/docker-entrypoint.sh label-studio-uwsgi
+        timeout: 60
+        expected_output: |
+          Looking for init scripts
+          Waiting for postgres...
+          Postgres is up.
+          Do database migrations...
+          Migrations completed.
+          Run label-studio init...
+          Label Studio has been successfully initialized.
+          Starting uWSGI
+        post: |-
+          set -o pipefail
+
+          export PATH=${{vars.venv-home}}/bin:$PATH
+          echo "===================================================="
+          echo "Creating test user...."
+          echo "===================================================="
+          python label_studio/manage.py shell <<'EOF'
+          from django.contrib.auth import get_user_model
+          from users.models import Token
+
+          User = get_user_model()
+
+          # Create or update admin user (use double quotes)
+          user, created = User.objects.update_or_create(
+              username="admin",
+              defaults={
+                  "email": "admin@example.com",
+                  "is_active": True,
+                  "is_staff": True,
+                  "is_superuser": True
+              }
+          )
+          user.set_password("admin123")
+          user.save()
+
+          # Get or create token
+          token, token_created = Token.objects.get_or_create(user=user)
+
+          print("User: {} (created={})".format(user.username, created))
+          print("Token: {} (created={})".format(token.key, token_created))
+          EOF
+
+          echo "===================================================="
+          echo "Grabbing user token...."
+          echo "===================================================="
+          TOKEN=$(python label_studio/manage.py shell <<'EOF' | tail -1
+          from django.contrib.auth import get_user_model
+          from users.models import Token
+
+          User = get_user_model()
+          user = User.objects.get(username="admin")
+          token = Token.objects.get(user=user)
+          print(token.key)
+          EOF
+          )
+
+          # Test1 health endpoint - verify application is UP
+          echo "Testing health endpoint..."
+          curl -sf "http://localhost:${HTTP_PORT}/health" | jq -r '.status' | grep -Fx "UP"
+
+          # Test2 version info endpoint - verify correct version
+          echo "Testing version info endpoint..."
+          curl -sf "http://localhost:${HTTP_PORT}/api/version" | jq -r '.release' | grep -Fx "${{package.version}}"
+
+          # Test frontend is serving
+          echo "Testing frontend UI serving..."
+          curl -sf "http://localhost:${HTTP_PORT}/user/login" | grep -F "<title>Label Studio</title>"
+
+          # Test3 verify admin user was created
+          echo "Testing users endpoint..."
+          curl -sf "http://localhost:${HTTP_PORT}/api/users/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".[] | select(.username == \"admin\") | .username" | grep -Fx "admin"
+
+          # Test4 projects endpoint
+          # Create project
+          echo "Creating movie review sample project..."
+          curl -sf "http://localhost:${HTTP_PORT}/api/projects/" \
+          -H "Authorization: Token ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d @- << 'JSONEOF'
+          {
+            "title": "Movie Review Sentiment Analysis",
+            "description": "Tutorial project for sentiment analysis of movie reviews",
+            "label_config": "<View>\n  <Text name=\"review\" value=\"$text\"/>\n  <Choices name=\"sentiment\" toName=\"review\" choice=\"single\">\n    <Choice value=\"Positive\"/>\n    <Choice value=\"Negative\"/>\n  </Choices>\n</View>"
+          }
+          JSONEOF
+
+          # Verify project created
+          echo ""
+          echo "Testing projects endpoint..."
+          curl -sf "http://localhost:${HTTP_PORT}/api/projects/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".results[] | select(.title == \"Movie Review Sentiment Analysis\") | .title" | grep -Fx "Movie Review Sentiment Analysis"
+
+          # Test5 tasks endpoint
+          # Grab project id
+          PROJECT_ID=$(curl -sf "http://localhost:${HTTP_PORT}/api/projects/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r '.results[0].id')
+
+          # Create tasks
+          echo "Creating tasks with sample movie reviews..."
+          curl -sf "http://localhost:${HTTP_PORT}/api/projects/${PROJECT_ID}/tasks/" \
+          -H "Authorization: Token ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d @- << 'JSONEOF'
+          {
+            "data": {
+              "text": "This movie was absolutely fantastic! The acting was superb and the story kept me engaged throughout."
+            }
+          }
+          JSONEOF
+
+          curl -sf "http://localhost:${HTTP_PORT}/api/projects/${PROJECT_ID}/tasks/" \
+          -H "Authorization: Token ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d @- << 'JSONEOF'
+          {
+            "data": {
+              "text": "Terrible movie. The plot made no sense and the acting was wooden. Would not recommend."
+            }
+          }
+          JSONEOF
+
+          # Verify tasks created
+          echo ""
+          echo "Testing tasks endpoint..."
+          expected_count=2
+          actual_count=$(curl -sf "http://localhost:${HTTP_PORT}/api/projects/${PROJECT_ID}/tasks/" \
+          -H "Authorization: Token ${TOKEN}" | jq -r 'length')
+
+          if [ "${actual_count}" != "${expected_count}" ]; then
+              echo "FAIL: Expected ${expected} tasks for sample project, got ${actual_count}"
+              exit 1
+          fi
+          echo "PASS: sample project has ${actual_count} tasks"
+
+          # Test7 Annotation creation and retrieval
+          echo "Testing annotation creation and retrieval..."
+
+          # Get first task ID
+          TASK_ID=$(curl -sf "http://localhost:${HTTP_PORT}/api/projects/${PROJECT_ID}/tasks/" \
+          -H "Authorization: Token ${TOKEN}" | jq -r ".[] | select(.data.text | contains(\"fantastic\")) | .id")
+
+          echo "Creating annotation for task ${TASK_ID}..."
+          curl -sf "http://localhost:${HTTP_PORT}/api/tasks/${TASK_ID}/annotations/" \
+          -H "Authorization: Token ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d @- << 'JSONEOF'
+          {
+            "result": [
+              {
+                "value": {
+                  "choices": ["Positive"]
+                },
+                "from_name": "sentiment",
+                "to_name": "review",
+                "type": "choices"
+              }
+            ]
+          }
+          JSONEOF
+
+          # Get annotation id
+          ANNOTATION_ID=$(curl -sf "http://localhost:${HTTP_PORT}/api/tasks/${TASK_ID}/annotations/" \
+          -H "Authorization: Token ${TOKEN}" | jq -r ".[] | select(.task == $TASK_ID) | .id")
+
+          # Verify expected annotation data
+          curl -sf "http://localhost:${HTTP_PORT}/api/annotations/${ANNOTATION_ID}/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".result[].value.choices[]" | grep -Fx "Positive"
+
+          # Verify annotation linked to expected task
+          curl -sf "http://localhost:${HTTP_PORT}/api/annotations/${ANNOTATION_ID}/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".task" | grep -Fx "$TASK_ID"
+    - name: Test label-studio nginx startup
+      uses: test/daemon-check-output
+      working-directory: /label-studio
+      with:
+        setup: |-
+          set -euo pipefail
+
+          # Setup nginx user
+          useradd nginx
+
+          # Check PostgreSQL ready
+          wait-for-it -t 15 localhost:5432
+
+          # Start label-studio backend
+          export PATH=${{vars.venv-home}}/bin:$PATH
+          ./deploy/docker-entrypoint.sh label-studio-uwsgi > /tmp/label-studio.log 2>&1 &
+
+          # Wait for label-studio backend to be ready
+          echo "Waiting for label-studio backend on port ${HTTP_PORT}..."
+          wait-for-it -t 15 localhost:${HTTP_PORT}
+          curl -sf --retry 10 "http://localhost:${HTTP_PORT}/health" | jq -r '.status' | grep -Fx "UP"
+
+          # Create test user for API validation
+          python label_studio/manage.py shell <<'EOF'
+          from django.contrib.auth import get_user_model
+          from users.models import Token
+
+          User = get_user_model()
+          user, created = User.objects.update_or_create(
+              username="nginx",
+              defaults={
+                  "email": "nginx@example.com",
+                  "is_active": True,
+                  "is_staff": True,
+                  "is_superuser": True
+              }
+          )
+          user.set_password("nginxtestpass")
+          user.save()
+
+          token, token_created = Token.objects.get_or_create(user=user)
+          print("Token: {}".format(token.key))
+          EOF
+        start: |
+          env PATH=${{vars.venv-home}}/bin:$PATH \
+          ./deploy/docker-entrypoint.sh nginx
+        timeout: 30
+        expected_output: |
+          Copy nginx config file...
+          Configure system resolver...
+          Skipping replace nginx certs.
+          Replacing app endpoint...
+          Successfully replaced app endpoint.
+          Configuration complete; ready for start up
+        post: |-
+          set -o pipefail
+
+          # Verify nginx proxy ready
+          wait-for-it -t 15 localhost:${NGINX_PORT}
+
+          # Get authentication token for API tests
+          export PATH=${{vars.venv-home}}/bin:$PATH
+          TOKEN=$(python label_studio/manage.py shell <<'EOF' | tail -1
+          from django.contrib.auth import get_user_model
+          from users.models import Token
+
+          User = get_user_model()
+          user = User.objects.get(username="nginx")
+          token = Token.objects.get(user=user)
+          print(token.key)
+          EOF
+          )
+
+          # Test 1: Health endpoint through nginx proxy
+          echo "Testing Health endpoint through nginx proxy (port ${NGINX_PORT})..."
+          curl -sf "http://localhost:${NGINX_PORT}/health" | jq -r '.status' | grep -Fx "UP"
+
+          # Test 2: Version endpoint through nginx proxy
+          echo "Testing Version endpoint through nginx proxy (port ${NGINX_PORT})..."
+          curl -sf "http://localhost:${NGINX_PORT}/api/version" | jq -r '.release' | grep -Fx "${{package.version}}"
+
+          # Test frontend is serving
+          echo "Testing frontend UI serving..."
+          curl -sf "http://localhost:${NGINX_PORT}/user/login" | grep -F "<title>Label Studio</title>"
+
+          # Test 3: Authenticated API request through nginx proxy - verify nginx user was created
+          echo "Testing users endpoint uthenticated API request through nginx proxy (port ${NGINX_PORT})..."
+          curl -sf "http://localhost:${NGINX_PORT}/api/users/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".[] | select(.username == \"nginx\") | .username" | grep -Fx "nginx"
+
+          # Test 4: Create and verify a project through nginx proxy
+          echo "Testing projects endpoint through nginx proxy - creating test project..."
+          curl -sf "http://localhost:${NGINX_PORT}/api/projects/" \
+            -H "Authorization: Token ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d @- << 'JSONEOF'
+          {
+            "title": "Nginx Proxy Test Project",
+            "description": "Test project created through nginx proxy"
+          }
+          JSONEOF
+
+          # Verify project created
+          echo ""
+          echo "Verifying nginx proxy test project created..."
+          curl -sf "http://localhost:${NGINX_PORT}/api/projects/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".results[] | select(.title == \"Nginx Proxy Test Project\") | .title" | grep -Fx "Nginx Proxy Test Project"
+
+          # Test 5: Annotation creation and retrieval
+          echo "Testing annotation creation and retrieval..."
+
+          # Get movie project id
+          PROJECT_ID=$(curl -sf "http://localhost:${NGINX_PORT}/api/projects/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".results[] | select(.title == \"Movie Review Sentiment Analysis\") | .id")
+
+          # Get task ID
+          TASK_ID=$(curl -sf "http://localhost:${NGINX_PORT}/api/projects/${PROJECT_ID}/tasks/" \
+          -H "Authorization: Token ${TOKEN}" | jq -r ".[] | select(.data.text | contains(\"Terrible\")) | .id")
+
+          echo "Creating annotation for task ${TASK_ID}..."
+          curl -sf "http://localhost:${NGINX_PORT}/api/tasks/${TASK_ID}/annotations/" \
+          -H "Authorization: Token ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -X POST \
+          -d @- << 'JSONEOF'
+          {
+            "result": [
+              {
+                "value": {
+                  "choices": ["Negative"]
+                },
+                "from_name": "sentiment",
+                "to_name": "review",
+                "type": "choices"
+              }
+            ]
+          }
+          JSONEOF
+
+          # Get annotation id
+          ANNOTATION_ID=$(curl -sf "http://localhost:${NGINX_PORT}/api/tasks/${TASK_ID}/annotations/" \
+          -H "Authorization: Token ${TOKEN}" | jq -r ".[] | select(.task == $TASK_ID) | .id")
+
+          # Verify expected annotation data
+          curl -sf "http://localhost:${NGINX_PORT}/api/annotations/${ANNOTATION_ID}/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".result[].value.choices[]" | grep -Fx "Negative"
+
+          # Verify annotation linked to expected task
+          curl -sf "http://localhost:${NGINX_PORT}/api/annotations/${ANNOTATION_ID}/" \
+          -H "Accept: application/json" \
+          -H "Authorization: TOKEN $TOKEN" | jq -r ".task" | grep -Fx "$TASK_ID"
+
+update:
+  # The upstream repos releases contains a 'nightly' release - exclude it from discovery
+  # Exclude old lse-release branch tags (e.g., 2.2.10-1) - these are 3 years out of date
+  #   REF: https://github.com/HumanSignal/label-studio/releases/tag/2.2.10-1
+  #   NOTE: Remove/update this pattern once upstream releases 2.x again
+  # Exclude legacy v-prefixed tags (e.g., v1.5.0)
+  #   Upstream dropped v-prefixed tags after v1.5.0 release
+  #   REF: https://github.com/HumanSignal/label-studio/releases/tag/v1.5.0
+  # Exclude dev tags (e.g., 1.X.Y.dev)
+  ignore-regex-patterns:
+    - "nightly"
+    - "^2\\..*-\\d+$"
+    - "^v"
+    - ".*\\.dev$"
+  enabled: true
+  git: {}

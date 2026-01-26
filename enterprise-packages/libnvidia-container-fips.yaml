@@ -1,0 +1,118 @@
+package:
+  name: libnvidia-container-fips
+  version: "1.18.2"
+  epoch: 0
+  description: NVIDIA container runtime library (FIPS-enabled)
+  copyright:
+    # Note: This package includes libnvidia-container-go.so which is built with go-fips
+    # for FIPS compliance. The Go shared library is used for cgroup management.
+    - license: Apache-2.0
+    - license: GPL-3.0-only
+    - license: LGPL-3.0-or-later
+
+environment:
+  contents:
+    packages:
+      - automake
+      - bmake
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - coreutils
+      - curl
+      - gcc-14-default
+      - glibc-dev
+      - go-fips
+      - libcap-dev
+      - libseccomp
+      - libseccomp-dev
+      - libtirpc-dev
+      - libtool
+      - linux-headers
+      - lsb-release-minimal
+      - m4
+      - nfs-utils
+      - patch
+      - pkgconf-dev
+      - rpcgen
+  environment:
+    CPATH: /usr/include/tirpc
+    # Use go-fips for building the Go shared library
+    GO: /usr/bin/go
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NVIDIA/libnvidia-container
+      tag: v${{package.version}}
+      expected-commit: 584976abaef996d9466232a9bc7426fcdb0ed1e0
+
+  - runs: |
+      # Fix prefix to /usr instead of /usr/local
+      sed -i 's|export prefix *= */usr/local|export prefix = /usr|' Makefile
+
+      # Remove symbol stripping from nvcgo build to preserve symbols for FIPS compliance check
+      # 1. Remove -s -w from go build ldflags
+      # 2. Remove -Wl,-s from CGO_LDFLAGS
+      sed -i 's|-ldflags "-s -w"|-ldflags ""|' src/nvcgo/Makefile
+      sed -i 's|-Wl,-s||' src/nvcgo/Makefile
+
+  - uses: autoconf/make
+    with:
+      opts: |
+        WITH_TIRPC=yes \
+
+  - uses: autoconf/make-install
+
+  # Strip C binaries but preserve Go shared library symbols for FIPS check
+  - runs: |
+      find "${{targets.destdir}}" -type f \( -name "*.so*" -path "*/libnvidia-container-go*" \) -prune -o \
+        -type f -executable -print | xargs -r strip --strip-unneeded 2>/dev/null || true
+      # Strip the main C library
+      strip --strip-unneeded "${{targets.destdir}}"/usr/lib/libnvidia-container.so.* 2>/dev/null || true
+
+subpackages:
+  - name: ${{package.name}}-dev
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    description: libnvidia-container-fips dev
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+        - uses: test/tw/devpackage
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - rc*
+  github:
+    identifier: NVIDIA/libnvidia-container
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - posix-libc-utils
+        - sudo-rs
+        - shadow
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: nvidia-container-cli
+    - uses: test/tw/ver-check
+      with:
+        bins: nvidia-container-cli
+        version: ${{package.version}}
+    - name: Test nvidia-container-cli with privileged mode
+      runs: |
+        set +e
+        useradd nvidia
+        # This is the expected error since libnvidia-ml.so must be available on the host system
+        sudo -u nvidia nvidia-container-cli --user=nvidia info | grep -qi "load library failed: libnvidia-ml.so.1"

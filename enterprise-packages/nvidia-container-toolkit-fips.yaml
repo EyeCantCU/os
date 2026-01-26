@@ -1,0 +1,109 @@
+package:
+  name: nvidia-container-toolkit-fips
+  version: "1.18.2"
+  epoch: 0
+  description: Build and run containers leveraging NVIDIA GPUs
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - libnvidia-container-fips
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+  environment:
+    # See https://github.com/wolfi-dev/os/issues/34568
+    GCC_SPEC_FILE: /home/build/openssf.spec
+
+vars:
+  generate-openssf-spec-script: |
+    gccdir="$(GCC_SPEC_FILE=/dev/null gcc --print-search-dirs | grep ^install: | cut -d' ' -f2)"
+    sed -r 's/-z now//' < "$gccdir/openssf.spec" > /home/build/openssf.spec
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 9e88ed39710fd94c7e49fbb26d96492c45e574fb
+      repository: https://github.com/NVIDIA/nvidia-container-toolkit
+      tag: v${{package.version}}
+
+  - runs: |
+      ${{vars.generate-openssf-spec-script}}
+
+data:
+  - name: commands
+    items:
+      nvidia-container-runtime-hook: nvidia-container-runtime-hook
+      nvidia-container-runtime-cdi: nvidia-container-runtime.cdi
+      nvidia-container-runtime-legacy: nvidia-container-runtime.legacy
+      nvidia-container-runtime: nvidia-container-runtime
+      nvidia-cdi-hook: nvidia-cdi-hook
+      nvidia-ctk: nvidia-ctk
+      nvidia-ctk-installer: nvidia-ctk-installer
+
+subpackages:
+  - range: commands
+    name: "${{package.name}}-${{range.key}}"
+    pipeline:
+      - uses: go/build
+        with:
+          modroot: .
+          packages: ./cmd/${{range.value}}
+          ldflags: "-extldflags=-Wl,-undefined,dynamic_lookup -X github.com/NVIDIA/nvidia-container-toolkit/internal/info.gitCommit=$(git rev-parse HEAD) -X github.com/NVIDIA/nvidia-container-toolkit/internal/info.version=${{package.version}}"
+          output: ${{range.value}}
+          vendor: true
+          go-package: go-fips
+    test:
+      environment:
+        contents:
+          packages:
+            - runc # runc is just a placeholder, the actual runtime binary is TBD by the user
+      pipeline:
+        - runs: |
+            ${{vars.generate-openssf-spec-script}}
+        - uses: test/go-fips-check
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: ${{range.value}}
+        - uses: test/tw/ver-check
+          with:
+            bins: ${{range.value}}
+            version: ${{package.version}}
+
+  - name: "${{package.name}}-nvidia-toolkit"
+    pipeline:
+      - runs: |
+          # Ref: https://github.com/NVIDIA/nvidia-container-toolkit/blob/v1.15.0/deployments/container/Dockerfile.ubi8#L74
+          mkdir -p ${{targets.contextdir}}/work
+          ln -sf /usr/bin/nvidia-ctk-installer ${{targets.contextdir}}/work/nvidia-toolkit
+          ln -sf /usr/bin/nvidia-ctk-installer ${{targets.contextdir}}/work/nvidia-ctk-installer
+    dependencies:
+      runtime:
+        - ${{package.name}}-nvidia-ctk-installer
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: /work/nvidia-toolkit /work/nvidia-ctk-installer
+        - uses: test/tw/ver-check
+          with:
+            bins: /work/nvidia-toolkit /work/nvidia-ctk-installer
+            version: ${{package.version}}
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -rc
+  github:
+    identifier: NVIDIA/nvidia-container-toolkit
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/emptypackage

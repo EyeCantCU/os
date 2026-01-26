@@ -1,0 +1,299 @@
+package:
+  name: prefect-fips
+  version: "3.6.13"
+  epoch: 0
+  description: Prefect is a workflow orchestration framework for building resilient data pipelines in Python
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  pypi-package: prefect
+  import: prefect
+
+data:
+  - name: py-versions
+    items:
+      3.11:
+      3.12:
+      3.13:
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - py3-supported-build-base-dev
+      - python-3.14-base-dev
+      - rust
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/PrefectHQ/Prefect
+      tag: ${{package.version}}
+      expected-commit: 9eb03a74b91426b564a1aa313670eb08a8b9ece8
+
+subpackages:
+  - range: py-versions
+    name: py${{range.key}}-${{vars.pypi-package}}-fips
+    description: python${{range.key}} version of ${{vars.pypi-package}}
+    dependencies:
+      runtime:
+        - py${{range.key}}-cryptography # Use system cryptography package for FIPS compliance
+        - tzdata
+    pipeline:
+      - uses: auth/uv
+        with:
+          allow-fallback-indexes: true
+      - runs: |
+          # cryptography pulls in cffi and typing-extensions at runtime when we use py3.xy-cryptography
+          # below we exclude cffi, typing-extensions, cryptography as well to avoid conflicts during apk add
+          cat <<EOF >> /tmp/excludes
+          cffi
+          cryptography
+          typing-extensions
+          EOF
+          uv pip install "${{vars.pypi-package}}==${{package.version}}" --system --prefix "${{targets.contextdir}}/usr" --excludes /tmp/excludes --python ${{range.key}}
+      - runs: |
+          # Remove unsupported architecture header files from greenlet
+          rm -f "${{targets.contextdir}}"/usr/lib/python${{range.key}}/site-packages/greenlet/platform/switch_m68k_gcc.h
+          rm -f "${{targets.contextdir}}"/usr/lib/python${{range.key}}/site-packages/greenlet/platform/switch_mips_unix.h
+          rm -f "${{targets.contextdir}}"/usr/lib/python${{range.key}}/site-packages/greenlet/platform/switch_ppc64_aix.h
+          rm -f "${{targets.contextdir}}"/usr/lib/python${{range.key}}/site-packages/greenlet/platform/switch_ppc64_linux.h
+          rm -f "${{targets.contextdir}}"/usr/lib/python${{range.key}}/site-packages/greenlet/platform/switch_riscv_unix.h
+          rm -f "${{targets.contextdir}}"/usr/lib/python${{range.key}}/site-packages/greenlet/platform/switch_s390_unix.h
+          rm -f "${{targets.contextdir}}"/usr/lib/python${{range.key}}/site-packages/greenlet/platform/switch_sparc_sun_gcc.h
+          # Remove uv lockfile (world-writable, triggers linter)
+          rm -f "${{targets.contextdir}}/usr/.lock"
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+      pipeline:
+        - uses: test/tw/pip-check
+        - uses: python/import
+          with:
+            python: python${{range.key}}
+            import: ${{vars.import}}
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: prefect
+        - uses: test/tw/ver-check
+          with:
+            bins: prefect
+        - name: Test prefect CLI subcommands
+          runs: |
+            set -euo pipefail
+            # Test config view command (works without server)
+            prefect config view --show-defaults
+
+            # Test config validate command
+            prefect config validate
+
+            # Test profile commands (work locally)
+            prefect profile ls
+            prefect profile inspect
+
+            # Test CLI help for various subcommands
+            prefect config --help
+            prefect profile --help
+            prefect flow --help
+            prefect deploy --help
+            prefect server --help
+        # Functional test: flow/task execution with subflows
+        - name: Test Prefect flows and tasks
+          runs: |
+            python${{range.key}} <<'EOF'
+            from prefect import flow, task
+
+            @task
+            def add(a, b):
+                return a + b
+
+            @flow
+            def child_flow(x):
+                return x * 2
+
+            @flow
+            def main_flow():
+                result = add(2, 3)
+                subflow_result = child_flow(result)
+                return subflow_result
+
+            # Execute and verify
+            result = main_flow()
+            print(f"Flow result: {result}")
+            assert result == 10
+            print("Flow/task test passed!")
+            EOF
+        # Functional test: task mapping
+        - name: Test Prefect task mapping
+          runs: |
+            python${{range.key}} <<'EOF'
+            from prefect import flow, task
+
+            @task
+            def process(x):
+                return x * 2
+
+            @flow
+            def map_flow():
+                results = process.map([1, 2, 3])
+                return [r.result() if hasattr(r, 'result') else r for r in results]
+
+            results = map_flow()
+            print(f"Map results: {results}")
+            assert results == [2, 4, 6]
+            print("Task mapping test passed!")
+            EOF
+        # Functional test: retries
+        - name: Test Prefect retries
+          runs: |
+            python${{range.key}} <<'EOF'
+            from prefect import flow, task
+
+            attempts = 0
+
+            @task(retries=2, retry_delay_seconds=0.1)
+            def flaky_task():
+                global attempts
+                attempts += 1
+                if attempts < 2:
+                    raise ValueError("fail")
+                return "success"
+
+            @flow
+            def retry_flow():
+                global attempts
+                attempts = 0
+                return flaky_task()
+
+            result = retry_flow()
+            print(f"Retry result: {result}, attempts: {attempts}")
+            assert result == "success"
+            print("Retry test passed!")
+            EOF
+        # Functional test: artifacts
+        - name: Test Prefect artifacts
+          runs: |
+            python${{range.key}} <<'EOF'
+            from prefect import flow
+            from prefect.artifacts import create_markdown_artifact, create_table_artifact
+
+            @flow
+            def artifact_flow():
+                md = create_markdown_artifact(key="test", markdown="# Hello")
+                tbl = create_table_artifact(key="data", table={"a": [1, 2]})
+                return md is not None and tbl is not None
+
+            result = artifact_flow()
+            print(f"Artifacts created: {result}")
+            assert result
+            print("Artifact test passed!")
+            EOF
+        # Functional test: schedules
+        - name: Test Prefect schedules
+          runs: |
+            python${{range.key}} <<'EOF'
+            from prefect.client.schemas.schedules import CronSchedule, IntervalSchedule
+            import datetime
+
+            cron = CronSchedule(cron="0 0 * * *", timezone="UTC")
+            interval = IntervalSchedule(interval=datetime.timedelta(hours=1))
+
+            print(f"Cron: {cron.cron}, Interval: {interval.interval}")
+            assert cron.cron == "0 0 * * *"
+            assert interval.interval.total_seconds() == 3600
+            print("Schedule test passed!")
+            EOF
+        # Functional test: blocks
+        - name: Test Prefect blocks
+          runs: |
+            python${{range.key}} <<'EOF'
+            from prefect.blocks.system import Secret
+            from prefect.filesystems import LocalFileSystem
+
+            secret = Secret(value="my-secret")
+            fs = LocalFileSystem(basepath="/tmp")
+
+            print(f"Secret type: {type(secret).__name__}, FS basepath: {fs.basepath}")
+            assert secret.get() == "my-secret"
+            assert fs.basepath == "/tmp"
+            print("Block test passed!")
+            EOF
+        # Functional test: events
+        - name: Test Prefect events
+          runs: |
+            python${{range.key}} <<'EOF'
+            from prefect import flow
+            from prefect.events import emit_event
+
+            @flow
+            def event_flow():
+                return emit_event(
+                    event="test.completed",
+                    resource={"prefect.resource.id": "test-1"}
+                )
+
+            result = event_flow()
+            print(f"Event emitted: {result is not None}")
+            assert result is not None
+            print("Event test passed!")
+            EOF
+        # Server/UI test: start server and verify API/UI endpoints
+        - name: Test Prefect server and UI
+          uses: test/daemon-check-output
+          with:
+            start: "prefect server start --host 0.0.0.0 --port 4200"
+            timeout: 120
+            expected_output: |
+              dashboard
+            post: |
+              set -euo pipefail
+              curl -sf --retry 5 --retry-delay 2 --retry-all-errors http://localhost:4200/api/health | grep -F "true"
+              curl -sf http://localhost:4200/api/version
+              curl -sf http://localhost:4200/ | grep -F "<html"
+              curl -sf http://localhost:4200/api/flows
+              curl -sf http://localhost:4200/api/flow_runs/filter -X POST -H "Content-Type: application/json" -d '{}'
+              echo "Server and UI tests passed!"
+
+  - name: ${{package.name}}-oci-entrypoint
+    description: oci entrypoint for ${{package.name}}
+    dependencies:
+      runtime:
+        - bash
+        - coreutils # required for env
+        - tini
+        - uv
+    pipeline:
+      - runs: |
+          install -Dm755 ./scripts/entrypoint.sh "${{targets.contextdir}}/usr/bin/entrypoint.sh"
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/entrypoint.sh
+            test -x /usr/bin/entrypoint.sh
+
+  - name: ${{package.name}}-oci-entrypoint-compat
+    description: compat package for ${{package.name}}-oci-entrypoint
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/opt/prefect"
+          ln -s ../../usr/bin/entrypoint.sh "${{targets.contextdir}}/opt/prefect/entrypoint.sh"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-oci-entrypoint
+      pipeline:
+        - uses: test/tw/symlink-check
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+update:
+  enabled: true
+  git: {}

@@ -1,0 +1,102 @@
+package:
+  name: velero-plugin-for-gcp
+  version: "1.13.2"
+  epoch: 0
+  description: Plugins to support Velero on GCP
+  copyright:
+    - license: Apache-2.0
+
+vars:
+  # Velero version compatible with this plugin version
+  # https://github.com/vmware-tanzu/velero-plugin-for-gcp#compatibility
+  velero-version: "1.17.1"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      tag: v${{package.version}}
+      expected-commit: c93122f0dac03363514fe1fe25660884dc48d90a
+      repository: https://github.com/vmware-tanzu/velero-plugin-for-gcp
+
+  - uses: go/build
+    with:
+      packages: ./velero-plugin-for-gcp
+      output: velero-plugin-for-gcp
+
+  - uses: go/build
+    with:
+      packages: ./hack/cp-plugin
+      output: cp-plugin
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream Dockerfile"
+    pipeline:
+      - runs: |
+          # The plugin binary is expected to be in /plugins directory for velero to discover
+          # https://github.com/vmware-tanzu/velero-plugin-for-gcp/blob/v1.13.1/Dockerfile#L30-L31
+          mkdir -p ${{targets.contextdir}}/plugins
+          ln -sf ../../usr/bin/velero-plugin-for-gcp ${{targets.contextdir}}/plugins/velero-plugin-for-gcp
+
+          # /target directory is created to match the Dockerfile entrypoint behavior
+          # https://github.com/vmware-tanzu/velero-plugin-for-gcp/blob/v1.13.1/Dockerfile#L37
+          install -d "${{targets.contextdir}}/target"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -rc\.\d+$
+  github:
+    identifier: vmware-tanzu/velero-plugin-for-gcp
+    strip-prefix: v
+
+# Plugin discovery happens at startup via Go plugin loading.
+# Cannot further validate plugin functionality without cloud credentials
+# (GCS bucket access requires valid GCP credentials).
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - curl
+        - velero
+        - wait-for-it
+  pipeline:
+    - name: Basic plugin binary test
+      runs: |
+        # Test cp-plugin copies the plugin to /target as upstream entrypoint does
+        cp-plugin /plugins/velero-plugin-for-gcp /target/velero-plugin-for-gcp
+        stat /target/velero-plugin-for-gcp
+    - name: Set up KWOK cluster
+      uses: test/kwok/cluster
+    - name: Clone Velero repo to get CRDs
+      uses: git-checkout
+      with:
+        repository: https://github.com/vmware-tanzu/velero
+        tag: v${{vars.velero-version}}
+        destination: /tmp/velero
+        depth: 1
+    - name: Apply Velero CRDs
+      working-directory: /tmp/velero
+      runs: |
+        kubectl create namespace velero
+        kubectl apply -f config/crd/v1/bases/
+        kubectl apply -f config/crd/v2alpha1/bases/
+    - name: Test plugin discovery with Velero
+      uses: test/daemon-check-output
+      with:
+        start: velero server --log-level=debug
+        timeout: 60
+        expected_output: |
+          registering plugin
+          velero.io/gcp
+        post: |
+          # we cannot do further testing due to limited runtime functionality for Velero environment in melange tests
+          wait-for-it localhost:8085 -t 30

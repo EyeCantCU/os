@@ -1,0 +1,185 @@
+package:
+  name: kiali-operator-fips-2.17
+  version: 2.17.0
+  epoch: 1
+  description: Kiali operator that is used to install, manage, and update Kiali deployments.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - kiali-operator-fips=${{package.full-version}}
+    runtime:
+      - ansible-operator-compat
+      - ansible-operator-fips
+      - py${{vars.python-version}}-jmespath
+      - tini
+
+vars:
+  python-version: 3.12
+
+environment:
+  contents:
+    packages:
+      - ansible-operator-fips
+      - busybox
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kiali/kiali-operator
+      tag: v${{package.version}}
+      expected-commit: 59432fb6cce5dded84b657507bd547f2a7ce3eea
+
+  - name: Copy configs / playbooks
+    runs: |
+      kiali_dir=${{targets.contextdir}}/usr/share/kiali-operator
+      mkdir -p $kiali_dir
+      mkdir -p ${{targets.contextdir}}/usr/bin
+
+      # Copy kiali playbooks / roles / watches files
+      cp -R playbooks roles $kiali_dir/
+      cp watches*.yaml $kiali_dir/
+      cp requirements.yml $kiali_dir/
+
+      # Install ansible collections
+      ANSIBLE_HOME=${{package.srcdir}}/.ansible \
+        /usr/share/ansible-operator/bin/ansible-galaxy collection install -r requirements.yml
+
+      # Remove CI/CD and test directories from collections, this gets flagged as malicious content
+      find ${{package.srcdir}}/.ansible -type d -name "tests" -exec rm -rf {} +
+      find ${{package.srcdir}}/.ansible -type d -name ".azure-pipelines" -exec rm -rf {} +
+      find ${{package.srcdir}}/.ansible -type d -name ".github" -exec rm -rf {} +
+      cp -R ${{package.srcdir}}/.ansible $kiali_dir/
+
+      # Copy ansible-operator configs into kiali-operator
+      cp /etc/ansible/ansible.cfg $kiali_dir/ansible-profiler.cfg
+      echo "callbacks_enabled = profile_tasks" >> $kiali_dir/ansible-profiler.cfg
+
+      # Symlink ansible-operator binaries
+      # Skip ansible-runner as it's provided by py3-ansible-runner package
+      for bin in /usr/share/ansible-operator/bin/ansible*
+      do
+        basename_bin=$(basename -- "${bin}")
+        if [ "$basename_bin" = "ansible-runner" ]; then
+          continue
+        fi
+        ln -sf $bin ${{targets.contextdir}}/usr/bin/$basename_bin
+      done
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - kiali-operator-compat-fips=${{package.full-version}}
+    pipeline:
+      - name: Symlink Kiali / Ansible default $HOME dir
+        runs: |
+          mkdir -p ${{targets.contextdir}}/opt
+
+          ln -sf /usr/share/kiali-operator ${{targets.contextdir}}/opt/ansible
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - curl
+        - wait-for-it
+    environment:
+      ANSIBLE_COLLECTIONS_PATH: /opt/ansible/.ansible/collections
+      ANSIBLE_ROLES_PATH: /opt/ansible/roles
+      ANSIBLE_CONFIG: /opt/ansible/ansible-profiler.cfg
+  pipeline:
+    - name: Verify kiali-operator package installation
+      runs: |
+        # Verify critical directories and files exist
+        stat /usr/share/kiali-operator
+        stat /usr/share/kiali-operator/playbooks
+        stat /usr/share/kiali-operator/roles
+        stat /usr/share/kiali-operator/watches-k8s.yaml
+        stat /usr/share/kiali-operator/ansible-profiler.cfg
+
+        # Verify core playbooks
+        stat /usr/share/kiali-operator/playbooks/kiali-deploy.yml
+        stat /usr/share/kiali-operator/playbooks/kiali-remove.yml
+
+        # Verify core roles
+        stat /usr/share/kiali-operator/roles/default/kiali-deploy
+        stat /usr/share/kiali-operator/roles/default/kiali-remove
+
+        # Verify ansible collections
+        stat /usr/share/kiali-operator/.ansible/collections/ansible_collections
+
+        # Verify ansible-operator binary can be executed
+        /usr/local/bin/ansible-operator version
+
+        # Verify configuration in ansible-profiler.cfg
+        grep -F "callbacks_enabled = profile_tasks" /usr/share/kiali-operator/ansible-profiler.cfg
+    - uses: test/kwok/cluster
+    - name: Test operator functionality
+      uses: test/daemon-check-output
+      working-directory: /opt/ansible
+      with:
+        setup: |
+          # Download the Kiali CRD
+          CRD_URL="https://raw.githubusercontent.com/kiali/kiali-operator/v${{package.version}}/crd-docs/crd/kiali.io_kialis.yaml"
+          curl -s -f -L -o /tmp/kiali-crd.yaml "${CRD_URL}"
+
+          kubectl apply -f /tmp/kiali-crd.yaml
+
+          # Wait for CRD to be established
+          kubectl wait --for condition=established --timeout=60s crd/kialis.kiali.io
+
+          # Create a basic Kiali CR for testing
+          tee /tmp/kiali-cr.yaml << 'EOF'
+          apiVersion: kiali.io/v1alpha1
+          kind: Kiali
+          metadata:
+            name: kiali
+            namespace: default
+          spec:
+            auth:
+              strategy: anonymous
+            deployment:
+              cluster_wide_access: false
+              remote_cluster_resources_only: true
+          EOF
+
+          # Deploy the CR
+          kubectl apply -f /tmp/kiali-cr.yaml
+        start: |
+          /usr/local/bin/ansible-operator run \
+            --watches-file=/opt/ansible/watches-k8s.yaml \
+            --reconcile-period=1s \
+            --leader-election-id=kiali-operator \
+            --max-concurrent-reconciles=1
+        expected_output: |
+          Starting to serve
+          KIALI RECONCILIATION START
+          KIALI RECONCILIATION IS DONE
+          failed=0
+        timeout: 120
+        post: |
+          set -o pipefail
+          wait-for-it localhost:6789 -t 15
+          curl -fsS -w "\nHTTP_CODE=%{http_code}\n" http://localhost:6789/healthz | grep -F "HTTP_CODE=200"
+          curl -fsS http://localhost:6789/readyz | grep -F "ok"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - .*-ossm$
+    - -rc.*$
+  github:
+    identifier: kiali/kiali-operator
+    strip-prefix: v
+    tag-filter: v2.17.

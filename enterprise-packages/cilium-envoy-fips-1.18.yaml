@@ -1,8 +1,8 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-envoy-fips-1.18
-  version: "1.18.4"
-  epoch: 1 # CVE-2025-61729
+  version: "1.18.6"
+  epoch: 0
   description: Envoy with additional cilium plugins
   copyright:
     - license: Apache-2.0
@@ -28,23 +28,25 @@ environment:
       - bash
       - bazel-7
       - binutils
-      - boringssl-fips-static-${{vars.boringssl}}-newapi
+      - boringssl-fips-static-${{vars.boringssl}}
       - build-base
       - busybox
       - ca-certificates-bundle
-      - clang-17
+      - clang-18
       - cmake
       - coreutils # for GNU install
       - git
       - glibc-locale-en # Fixes issues with UTF-8 characters in filenames
       - go-fips<1.25
       - isl-dev
-      - libcxx1-17-dev
       - libtool
-      - lld-17
-      - lld-17-dev
-      - llvm-17
-      - llvm-17-dev
+      - linux-headers
+      - llvm-18
+      - llvm-18-dev
+      - llvm-libcxx-18
+      - llvm-libcxx-18-dev
+      - llvm-libcxxabi-18
+      - llvm-lld-18~18
       - openjdk-21-default-jdk
       - patch
       - python3-dev
@@ -52,14 +54,14 @@ environment:
       - wolfi-baselayout
 
 vars:
-  boringssl: "2023042800"
+  boringssl: "20240407"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: afda2aa99d26f190de8944580ceadb64d9d14d38
+      expected-commit: 95896696119f33a0f5d21019182192fcdab3600f
       destination: cilium
 
   - uses: git-checkout
@@ -111,17 +113,25 @@ pipeline:
       # Unregister to use Wolfi's toolchain available in the build env.
       sed 's/register_toolchains/#register_toolchains/g' -i WORKSPACE
 
-      # Create symlink for llvm-ar-17 since the build expects this specific name
-      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-17
+      # Create symlinks for LLVM tools since the build expects version-suffixed names
+      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-18
+      ln -sf /usr/bin/lld /usr/bin/ld.lld-18
+      ln -sf /usr/bin/lld /usr/lib/llvm-18/bin/ld.lld-18
 
-  - runs: |
+  - name: Start Build
+    runs: |
       export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+      export CARGO_BAZEL_REPIN=true
+
       mkdir -p .cache/bazel/_bazel_root
+      mkdir -p ${{targets.destdir}}/usr/bin
 
       ./bazel/setup_clang.sh /usr
 
       # Use libc++ to be consistent with other Wolfi Envoy packages.
       echo "build --config=libc++" >> user.bazelrc
+      echo "build --action_env=CC=clang" >> user.bazelrc
+      echo "build --action_env=CXX=clang++" >> user.bazelrc
 
       # Create symlink for llvm-ar-17 since the build expects this specific name
       ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-17
@@ -136,8 +146,6 @@ pipeline:
       # Use our pre-built boringssl-fips-static
       echo "build --override_repository=boringssl_fips=/usr/lib/boringssl-fips-static" >> user.bazelrc
 
-      mkdir -p ${{targets.destdir}}/usr/bin
-
       bazel build --fission=no --config=clang \
         --discard_analysis_cache \
         --nokeep_state_after_build \
@@ -145,6 +153,8 @@ pipeline:
         --conlyopt="-Wno-strict-prototypes" \
         `# The thread-saftey analysis flagged some issue in upstream code` \
         --cxxopt="-Wno-thread-safety" \
+        --action_env=CC=clang \
+        --action_env=CXX=clang++ \
         --verbose_failures -c opt //:cilium-envoy-starter
       install -m 755 bazel-bin/cilium-envoy-starter ${{targets.destdir}}/usr/bin/cilium-envoy-starter
 
@@ -155,6 +165,8 @@ pipeline:
         --conlyopt="-Wno-strict-prototypes" \
         `# The thread-saftey analysis flagged some issue in upstream code` \
         --cxxopt="-Wno-thread-safety" \
+        --action_env=CC=clang \
+        --action_env=CXX=clang++ \
         --action_env=LIBURING_CFLAGS="-ftrivial-auto-var-init=uninitialized" \
         --verbose_failures -c opt //:cilium-envoy
       install -m 755 bazel-bin/cilium-envoy ${{targets.destdir}}/usr/bin/cilium-envoy
@@ -188,12 +200,10 @@ test:
         envoy_version=$(cilium-envoy --version | sed -n 's|.*/BoringSSL-FIPS-\(.*\)|\1|p')
         [ "$envoy_version" = "${{vars.boringssl}}" ]
         /usr/bin/bssl-test_fips
-        bssl_version=$(/usr/bin/bssl-test_fips | sed -n 's|^Module version: \(.*\)|\1|p')
-        [ "$bssl_version" = "${{vars.boringssl}}" ]
+        /usr/bin/bssl-test_fips | grep "^Module: 'BoringCrypto', version: ${{vars.boringssl}} hash:$"
     - uses: test/cmvp-fips-certification-check
       with:
-        certificate-number: 4953
-        software-version: ${{vars.boringssl}}
+        certificate-number: 5104
     - name: "Verify libcilium.so installation"
       runs: |
         # Check that the library exists

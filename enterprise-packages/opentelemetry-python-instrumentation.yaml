@@ -1,0 +1,148 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: opentelemetry-python-instrumentation
+  description: OpenTelemetry auto-instrumentation for Python
+  version: 0.60.1
+  epoch: 1
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      # Required: https://github.com/open-telemetry/opentelemetry-operator/blob/main/autoinstrumentation/python/Dockerfile#L29
+      - busybox
+  options:
+    no-depends: true
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.(\d+)$
+    replace: ${1}b${2}
+    to: actual_version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - py${{vars.python-version}}-setuptools
+      - py${{vars.python-version}}-wheel
+      - python-${{vars.python-version}}
+      - uv
+      - wolfi-baselayout
+
+vars:
+  # https://github.com/open-telemetry/opentelemetry-operator/blob/main/autoinstrumentation/python/Dockerfile#L12
+  python-version: "3.11"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/open-telemetry/opentelemetry-python-contrib
+      branch: v${{vars.actual_version}}
+      expected-commit: b13d3500174be305f5962b8b2d139b535cb46e3a
+      destination: _opentelemetry-python-contrib
+
+  # We need to checkout to contrib to maintain versioning as upstream, but the requirements.txt that we install is present in opentelemetry-operator repo.
+  - uses: git-checkout
+    with:
+      repository: https://github.com/open-telemetry/opentelemetry-operator
+      branch: main
+      expected-commit: 1a99b2b74d8c9d6d6f537b362d3e6b5d1544feaf
+
+  # If this fails: the requirements file is still not updated to match the package version released by :https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main
+  - name: Verify requirements.txt version matches package version
+    runs: |
+      set -euo pipefail
+      grep -F "opentelemetry-instrumentation==${{vars.actual_version}}" \
+        autoinstrumentation/python/requirements.txt
+
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  - name: Install Python auto-instrumentation packages
+    # Note: upstream also builds /autoinstrumentation-musl for Alpine. Wolfi uses glibc,
+    # so we only build /autoinstrumentation.
+    runs: |
+      set -euo pipefail
+
+      DESTDIR="${{targets.destdir}}/autoinstrumentation"
+      mkdir -p "$DESTDIR"
+
+      uv pip install \
+        --target "$DESTDIR" \
+        --no-cache \
+        --no-compile-bytecode \
+        --python python${{vars.python-version}} \
+        -r autoinstrumentation/python/requirements.txt
+
+      chmod -R go+r,go-w "$DESTDIR"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '^opentelemetry-.*'
+  version-transform:
+    - match: ^(\d+\.\d+)b(\d+)$
+      replace: ${1}.${2}
+  github:
+    identifier: open-telemetry/opentelemetry-python-contrib
+    use-tag: true
+    strip-prefix: v
+    tag-filter-contains: b
+
+test:
+  environment:
+    contents:
+      packages:
+        # Python needed to run instrumentation (simulates target app container)
+        - python-${{vars.python-version}}
+    environment:
+      PYTHONPATH: /autoinstrumentation
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test opentelemetry-bootstrap lists instrumentations
+      runs: |
+        set -euo pipefail
+
+        # Verify bootstrap can discover available instrumentations
+        python${{vars.python-version}} /autoinstrumentation/bin/opentelemetry-bootstrap \
+          --action=requirements \
+          | grep -F "opentelemetry-instrumentation"
+    - name: Test opentelemetry-instrument wraps a script
+      runs: |
+        set -euo pipefail
+
+        # Create a simple test application
+        tee /tmp/app.py << 'EOF'
+        print("instrumented app running")
+        EOF
+
+        # Run with auto-instrumentation (exporters disabled - no backend needed)
+        OTEL_TRACES_EXPORTER=none \
+        OTEL_METRICS_EXPORTER=none \
+        OTEL_LOGS_EXPORTER=none \
+          python${{vars.python-version}} /autoinstrumentation/bin/opentelemetry-instrument \
+            python${{vars.python-version}} /tmp/app.py 2>&1 \
+          | grep -F "instrumented app running"
+    - name: Test OpenTelemetry SDK creates traces
+      runs: |
+        set -euo pipefail
+
+        # Create and export a test span using ConsoleSpanExporter
+        python${{vars.python-version}} << 'EOF' 2>&1 | tee /tmp/trace_output.txt
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+        trace.set_tracer_provider(provider)
+
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span("test-span") as span:
+            span.set_attribute("test.key", "test-value")
+        EOF
+
+        # Verify trace was exported with expected span name and attribute
+        grep -F "test-span" /tmp/trace_output.txt
+        grep -F "test.key" /tmp/trace_output.txt

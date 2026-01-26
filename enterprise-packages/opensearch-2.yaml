@@ -5,7 +5,7 @@
 package:
   name: opensearch-2
   version: "2.19.4"
-  epoch: 0
+  epoch: 7
   description: Open source distributed and RESTful search engine.
   copyright:
     - license: Apache-2.0
@@ -18,19 +18,37 @@ package:
       - openjdk-17-jre
 
 vars:
-  plugin_version_qualifier: "0" # external plugins use the same version as the main package with a qualifier
+  plugin_version_qualifier: "0" # external plugins use the same version as the main package with a qualifier
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
 
 environment:
   contents:
     packages:
       - bash
+      - build-base # Required for k-nn JNI native compilation
       - busybox
       - ca-certificates-bundle
+      - cmake-3
       - curl
+      - gcc-14 # Required for k-nn AVX512_SPR support (needs GCC >= 12.4)
+      - gcc-14-default
+      - gfortran # Required for k-nn Faiss BLAS/LAPACK
+      - git # Required for k-nn submodule fetching (nmslib, faiss)
       - gradle<8.12
+      - libgomp # Required for k-nn Faiss OpenMP support
+      - liblapack
+      - liblapacke
+      - openblas # Required for k-nn Faiss BLAS support
+      - openblas-dev
       - openjdk-17-default-jdk
       - patch
       - unzip
+      - zlib-dev # Required for k-nn native compilation
   environment:
     JAVA_HOME: /usr/lib/jvm/java-17-openjdk
     LANG: "en_US.UTF-8"
@@ -65,6 +83,7 @@ data:
   - name: external-plugins
     items:
       # plugin_name: cve patch list
+      k-nn: ""
       alerting: ""
       anomaly-detection: ""
       asynchronous-search: ""
@@ -73,15 +92,14 @@ data:
       geospatial: ""
       index-management: ""
       job-scheduler: ""
-      k-nn: ""
-      ml-commons: ""
+      ml-commons: "ml-commons-netty.patch"
       neural-search: ""
       notifications: ""
       observability: ""
-      performance-analyzer: ""
+      performance-analyzer: "performance-analyzer-netty.patch"
       reporting: ""
-      security: ""
-      security-analytics: ""
+      security: "security-netty.patch"
+      security-analytics: "security-analytics-netty.patch"
       sql: "sql-commons-io.patch"
 
 pipeline:
@@ -90,6 +108,10 @@ pipeline:
       repository: https://github.com/opensearch-project/OpenSearch
       tag: ${{package.version}}
       expected-commit: e2e89961c9a327daf514a7ce1320a6189bfd08cd
+
+  - uses: patch
+    with:
+      patches: GHSA-3p8m-j85q-pgmj-and-log4j-CVE-2025-68161.patch security-policy-locale-provider.patch
 
   - runs: |
       echo "org.gradle.daemon=false" >> gradle.properties
@@ -146,6 +168,28 @@ subpackages:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/share/opensearch/plugins/opensearch-${{range.key}}
           unzip "./plugins/${{range.key}}/build/distributions/${{range.key}}-${{package.version}}.zip" -d "${{targets.contextdir}}/usr/share/opensearch/plugins/opensearch-${{range.key}}"
+    test:
+      environment:
+        contents:
+          packages:
+            - opensearch-2
+            - openjdk-17-default-jvm
+            - bash
+        environment:
+          JAVA_HOME: /usr/lib/jvm/default-jvm
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            dir: "/usr/share/opensearch/plugins/opensearch-${{range.key}}/"
+            name: "*.jar"
+        - name: Verify plugin is recognized by opensearch-plugin
+          runs: |
+            set -euo pipefail
+            # List installed plugins and verify our plugin appears
+            # Note: opensearch-plugin list shows plugins without the "opensearch-" prefix
+            opensearch-plugin list
+            opensearch-plugin list | grep -F "${{range.key}}"
+            echo "Plugin ${{range.key}} is recognized"
 
   - range: external-plugins
     name: ${{package.name}}-${{range.key}}
@@ -184,7 +228,80 @@ subpackages:
           fi
 
           echo "org.gradle.daemon=false" >> gradle.properties
-          ./gradlew clean assemble -Dbuild.snapshot="false" -Dbuild.version_qualifier="" -Dopensearch.version="${{package.version}}" -x check -x integTest -x javadoc -PfailOnJavadocWarning=false --stacktrace
+
+          # k-nn plugin requires multiple gradle runs for JNI libs, then assemble
+          # https://github.com/opensearch-project/k-NN/blob/2.19.4.0/scripts/build.sh#L103-L133
+          # this plugin needs to treat differently to copy JNI native libraries after build
+          # and needs to set git user config to apply some patches
+          # https://github.com/opensearch-project/k-NN/tree/main/jni/patches
+          if [ "${{range.key}}" = "k-nn" ]; then
+            # Build the Java plugin (assemble)
+            ./gradlew build \
+            --no-daemon \
+            --refresh-dependencies \
+            -Dbuild.snapshot="false" \
+            -Dbuild.version_qualifier="" \
+            -Dopensearch.version="${{package.version}}" \
+            -x check \
+            -x integTest \
+            -x test \
+            -x javadoc \
+            -PfailOnJavadocWarning=false \
+            --stacktrace
+
+
+            # Disable static BLAS linking and use OpenBLAS
+            sed -i 's/set(BLA_STATIC ON)/set(BLA_VENDOR OpenBLAS)\nset(BLA_STATIC OFF)/' ./jni/cmake/init-faiss.cmake
+
+            # Build Faiss base library (opensearchknn_faiss and opensearchknn_common)
+            # This also runs cmake which fetches submodules and applies patches
+            ./gradlew :buildJniLib -Davx512.enabled=false -Davx512_spr.enabled=false -Davx2.enabled=false -Dbuild.lib.commit_patches=false -Dnproc.count=4 --stacktrace
+
+            # Clear CMake cache before building nmslib
+            rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+            # Set NMSLIB_SIMD_FLAGS based on architecture
+            if [ "${{build.arch}}" = "x86_64" ]; then
+              NMSLIB_SIMD_FLAGS="x86-64"
+            else
+              NMSLIB_SIMD_FLAGS="armv8-a"
+            fi
+
+            # Build Nmslib library (separate task in 2.19.x)
+            ./gradlew :buildNmslib -Dnmslib_simd_flags=$NMSLIB_SIMD_FLAGS -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+
+            # AVX variants only for x86_64
+            if [ "${{build.arch}}" = "x86_64" ]; then
+              # Clear CMake cache before building Faiss AVX2
+              rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+              # Build Faiss with AVX2
+              ./gradlew :buildJniLib -Davx2.enabled=true -Davx512.enabled=false -Davx512_spr.enabled=false -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+
+              # Clear CMake cache before building Faiss AVX512
+              rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+              # Build Faiss with AVX512
+              ./gradlew :buildJniLib -Davx512.enabled=true -Davx512_spr.enabled=false -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+
+              # Clear CMake cache before building Faiss AVX512 SPR
+              rm -rf jni/build/CMakeCache.txt jni/build/CMakeFiles
+
+              # Build Faiss with AVX512 Sapphire Rapids
+              ./gradlew :buildJniLib -Davx512_spr.enabled=true -Dbuild.lib.commit_patches=false -Dbuild.lib.apply_patches=false -Dnproc.count=4 --stacktrace
+            fi
+          else
+            # For other plugins, single gradle run
+            ./gradlew clean assemble \
+            -Dbuild.snapshot="false" \
+            -Dbuild.version_qualifier="" \
+            -Dopensearch.version="${{package.version}}" \
+            -x check \
+            -x integTest \
+            -x javadoc \
+            -PfailOnJavadocWarning=false \
+            --stacktrace
+          fi
 
           # useful for finding generated zip file we use to extract into the final apk
           find . -name "*.zip"
@@ -217,6 +334,9 @@ subpackages:
           case "${{range.key}}" in
               "alerting")
                   zip_dir="./alerting"
+                  ;;
+              "k-nn")
+                  zip_dir="."
                   ;;
               "ml-commons"|"sql")
                   zip_dir="./plugin"
@@ -254,7 +374,133 @@ subpackages:
 
           # Unzip the main plugin distribution
           unzip "${zip_dir}/build/distributions/${plugin_name}-${{package.version}}.${{vars.plugin_version_qualifier}}.zip" -d "${destination_base}/plugins/${plugin_name}"
+
+          # Copy k-nn JNI native libraries to the plugin lib directory
+          # https://github.com/opensearch-project/k-NN/blob/2.19.4.0/scripts/build.sh#L135-L154
+          if [ "${{range.key}}" = "k-nn" ]; then
+            mkdir -p "${destination_base}/plugins/${plugin_name}/lib"
+            # Search for all libopensearchknn .so files from root
+            echo "Searching for all libopensearchknn .so files..."
+            find / -name "libopensearchknn*.so" -type f 2>/dev/null
+            # Copy JNI libraries from jni/build/release (build output directory)
+            cp -v ./jni/release/libopensearchknn* "${destination_base}/plugins/${plugin_name}/lib/"
+            # Copy libgomp (OpenMP runtime required by Faiss)
+            cp /usr/lib/libgomp.so* "${destination_base}/plugins/${plugin_name}/lib/"
+          fi
       - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - opensearch-2
+            - openjdk-17-default-jvm
+            - bash
+        environment:
+          JAVA_HOME: /usr/lib/jvm/default-jvm
+      pipeline:
+        - name: Verify k-nn JNI native libraries (if applicable)
+          runs: |
+            # Verify k-nn JNI native libraries are present
+            if [ "${{range.key}}" = "k-nn" ]; then
+              # Common libraries (all architectures)
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_common.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_nmslib.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_util.so
+              stat /usr/share/opensearch/plugins/opensearch-knn/lib/libgomp.so.1
+
+              # x86_64-specific AVX variant libraries
+              if [ "${{build.arch}}" = "x86_64" ]; then
+                stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss_avx2.so
+                stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss_avx512.so
+                stat /usr/share/opensearch/plugins/opensearch-knn/lib/libopensearchknn_faiss_avx512_spr.so
+              fi
+
+              echo "All k-nn JNI native libraries verified"
+            fi
+        - name: Verify plugin is recognized by opensearch-plugin
+          runs: |
+            # Determine the expected plugin name based on the key
+            case "${{range.key}}" in
+              "alerting")
+                EXPECTED_PLUGIN="opensearch-alerting"
+                ;;
+              "anomaly-detection")
+                EXPECTED_PLUGIN="opensearch-anomaly-detection"
+                ;;
+              "asynchronous-search")
+                EXPECTED_PLUGIN="opensearch-asynchronous-search"
+                ;;
+              "cross-cluster-replication")
+                EXPECTED_PLUGIN="opensearch-cross-cluster-replication"
+                ;;
+              "custom-codecs")
+                EXPECTED_PLUGIN="opensearch-custom-codecs"
+                ;;
+              "geospatial")
+                EXPECTED_PLUGIN="opensearch-geospatial"
+                ;;
+              "index-management")
+                EXPECTED_PLUGIN="opensearch-index-management"
+                ;;
+              "job-scheduler")
+                EXPECTED_PLUGIN="opensearch-job-scheduler"
+                ;;
+              "k-nn")
+                EXPECTED_PLUGIN="opensearch-knn"
+                ;;
+              "ml-commons")
+                EXPECTED_PLUGIN="opensearch-ml"
+                ;;
+              "neural-search")
+                EXPECTED_PLUGIN="opensearch-neural-search"
+                ;;
+              "notifications")
+                EXPECTED_PLUGIN="opensearch-notifications"
+                ;;
+              "observability")
+                EXPECTED_PLUGIN="opensearch-observability"
+                ;;
+              "performance-analyzer")
+                EXPECTED_PLUGIN="opensearch-performance-analyzer"
+                ;;
+              "reporting")
+                EXPECTED_PLUGIN="opensearch-reports-scheduler"
+                ;;
+              "security")
+                EXPECTED_PLUGIN="opensearch-security"
+                ;;
+              "security-analytics")
+                EXPECTED_PLUGIN="opensearch-security-analytics"
+                ;;
+              "sql")
+                EXPECTED_PLUGIN="opensearch-sql"
+                ;;
+              *)
+                EXPECTED_PLUGIN="opensearch-${{range.key}}"
+                ;;
+            esac
+
+            echo "Checking for plugin: ${EXPECTED_PLUGIN}"
+            opensearch-plugin list
+
+            # Verify the plugin directory exists
+            if [ -d "/usr/share/opensearch/plugins/${EXPECTED_PLUGIN}" ]; then
+              echo "Plugin directory ${EXPECTED_PLUGIN} exists"
+            else
+              echo "ERROR: Plugin directory ${EXPECTED_PLUGIN} not found"
+              ls -la /usr/share/opensearch/plugins/
+              exit 1
+            fi
+
+            # Verify the plugin is listed
+            if opensearch-plugin list | grep -q "${EXPECTED_PLUGIN}"; then
+              echo "Plugin ${EXPECTED_PLUGIN} is recognized by opensearch-plugin"
+            else
+              echo "ERROR: Plugin ${EXPECTED_PLUGIN} not recognized by opensearch-plugin"
+              opensearch-plugin list
+              exit 1
+            fi
 
   - name: ${{package.name}}-entrypoint-compat
     description: "Compatibility package to ensure that the Docker entrypoint matches upstream"
@@ -264,6 +510,70 @@ subpackages:
           # Opensearch operator requires opensearch-docker-entrypoint.sh to be in /usr/share/opensearch
           # but historically we had it in bin, so also make a symlink to avoid breaking things.
           ln -s /usr/share/opensearch/bin/opensearch-docker-entrypoint.sh ${{targets.subpkgdir}}/usr/share/opensearch/opensearch-docker-entrypoint.sh
+    test:
+      pipeline:
+        - runs: |
+            readlink -v /usr/share/opensearch/opensearch-docker-entrypoint.sh
+
+  - name: ${{package.name}}-iamguarded-compat
+    description: "Compatibility package for iamguarded variant of OpenSearch"
+    dependencies:
+      provides:
+        - opensearch-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - curl
+        - gzip
+        - coreutils
+        - glibc-locale-en
+        - posix-libc-utils
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: opensearch
+          version: ${{vars.major-version}}
+      - runs: |
+          set -euo pipefail
+          mkdir -p /opt/iamguarded/opensearch
+          chmod -R g+rwX /opt/iamguarded
+          mkdir -p /opt/iamguarded/opensearch/config
+          mkdir -p /opt/iamguarded/opensearch/logs
+          mkdir -p /opt/iamguarded/opensearch/data
+          mkdir -p /opt/iamguarded/scripts/opensearch
+          # Create symlinks to the main opensearch installation
+          ln -sf /usr/share/opensearch/bin /opt/iamguarded/opensearch/bin
+          ln -sf /usr/share/opensearch/lib /opt/iamguarded/opensearch/lib
+          ln -sf /usr/share/opensearch/modules /opt/iamguarded/opensearch/modules
+          ln -sf /usr/share/opensearch/plugins /opt/iamguarded/opensearch/plugins
+          cp -r "${{targets.destdir}}/usr/share/opensearch/config/"* /opt/iamguarded/opensearch/config/
+          ln -sf /opt/iamguarded/scripts/opensearch/entrypoint.sh "${{targets.contextdir}}/entrypoint.sh"
+          ln -sf /opt/iamguarded/scripts/opensearch/run.sh "${{targets.contextdir}}/run.sh"
+      - uses: iamguarded/finalize-compat
+        with:
+          package: opensearch
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: opensearch
+            version: ${{vars.major-version}}
+        - name: "Test iamguarded directory structure"
+          runs: |
+            set -euo pipefail
+            stat /opt/iamguarded/opensearch/bin
+            stat /opt/iamguarded/opensearch/lib
+            stat /opt/iamguarded/opensearch/modules
+            test "$(readlink /entrypoint.sh)" = "/opt/iamguarded/scripts/opensearch/entrypoint.sh"
+            test "$(readlink /run.sh)" = "/opt/iamguarded/scripts/opensearch/run.sh"
+        - name: "Test run-script utility"
+          runs: |
+            run-script --version
+            run-script --help
 
 update:
   enabled: true
@@ -276,13 +586,97 @@ update:
 
 test:
   environment:
+    accounts:
+      groups:
+        - groupname: opensearch
+          gid: 1000
+      users:
+        - username: opensearch
+          uid: 1000
+          gid: 1000
+      run-as: 0
     contents:
       packages:
         - openjdk-17-default-jvm
         - bash
+        - curl
+        - sudo
+        - wait-for-it
+    environment:
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      OPENSEARCH_USER: opensearch
   pipeline:
-    - runs: |
+    - name: Verify binaries exist and run
+      runs: |
+        set -euo pipefail
         export JAVA_HOME=/usr/lib/jvm/default-jvm
         opensearch --version
         opensearch-env-from-file --version
         opensearch-env-from-file --help
+    - name: Test OpenSearch server starts and handles REST API requests
+      runs: |
+        set -euo pipefail
+
+        # Create required directories
+        mkdir -p /tmp/opensearch/data /tmp/opensearch/logs
+
+        # Give opensearch user ownership
+        chown -R "${OPENSEARCH_USER}:${OPENSEARCH_USER}" /usr/share/opensearch
+        chown -R "${OPENSEARCH_USER}:${OPENSEARCH_USER}" /tmp/opensearch
+
+        # Configure OpenSearch for single-node testing
+        tee /usr/share/opensearch/config/opensearch.yml <<EOF
+        cluster.name: test-cluster
+        node.name: test-node
+        path.data: /tmp/opensearch/data
+        path.logs: /tmp/opensearch/logs
+        network.host: 127.0.0.1
+        http.port: 9200
+        discovery.type: single-node
+        EOF
+
+        # Start OpenSearch as non-root user in background
+        export OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m"
+        sudo -E -u "${OPENSEARCH_USER}" /usr/share/opensearch/bin/opensearch &
+        OPENSEARCH_PID=$!
+
+        # Wait for HTTP port to be ready
+        echo "Waiting for OpenSearch to start..."
+        wait-for-it 127.0.0.1:9200 -t 120
+
+        # Test cluster health endpoint
+        echo "Testing cluster health..."
+        curl -sf http://127.0.0.1:9200/_cluster/health | grep -F 'cluster_name'
+        echo "Cluster health check passed"
+
+        # Test index creation
+        echo "Creating test index..."
+        curl -sf -X PUT "http://127.0.0.1:9200/test-index" \
+          -H 'Content-Type: application/json' \
+          -d '{"settings": {"number_of_shards": 1, "number_of_replicas": 0}}'
+
+        # Test document indexing
+        echo "Indexing test document..."
+        curl -sf -X POST "http://127.0.0.1:9200/test-index/_doc/1" \
+          -H 'Content-Type: application/json' \
+          -d '{"title": "Test Document", "content": "Hello OpenSearch"}'
+
+        # Refresh to make document searchable
+        curl -sf -X POST "http://127.0.0.1:9200/test-index/_refresh"
+
+        # Test search functionality
+        echo "Testing search..."
+        curl -sf -X GET "http://127.0.0.1:9200/test-index/_search" \
+          -H 'Content-Type: application/json' \
+          -d '{"query": {"match": {"content": "OpenSearch"}}}' | grep -F 'Test Document'
+        echo "Search test passed"
+
+        # Cleanup - delete test index
+        echo "Cleaning up test index..."
+        curl -sf -X DELETE "http://127.0.0.1:9200/test-index"
+
+        # Stop OpenSearch
+        kill "$OPENSEARCH_PID" 2>/dev/null || true
+        wait "$OPENSEARCH_PID" 2>/dev/null || true
+
+        echo "All OpenSearch REST API tests passed"

@@ -1,6 +1,53 @@
 # Claude Code Knowledge Base
 
-This document contains learnings and best practices discovered while working with this repository.
+This document provides guidance to Claude Code (claude.ai/code) when working with this repository. It contains learnings, best practices, and guidelines for packaging, testing, and contributing.
+
+## Commit Guidelines
+- Never commit directly to the main branch; always create a feature branch
+- Each commit should fix one issue or update one package
+- Format: `<package-name>: <concise description of change>`
+- For version updates: `<package-name>/<version> package update`
+- Keep the first line under 72 characters
+- Use the imperative mood ("Add feature" not "Added feature")
+- Describe what changed and why, not how
+- When fixing build failures, explain the cause of the failure and the solution
+- For multiple related packages, separate with commas: `pkg1, pkg2: <description>`
+- Do not include "Co-Authored-By" lines unless specifically requested
+
+## Build Commands
+- Set up QEMU runner (first time): `make fetch-kernel` (only needed once to download kernel files)
+- Enable QEMU environment: `export QEMU_KERNEL_IMAGE=$(pwd)/kernel/boot/vmlinuz; export MELANGE_OPTS="--runner=qemu"`
+- Build a package: `make package/<package-name>`
+- Build with Docker (fallback): `make docker-package/<package-name>`
+- Test a package: `make test/<package-name>`
+- Debug test failures: `make test-debug/<package-name>` (requires a TTY)
+- Lint YAML files: `./lint.sh [filename.yaml]`
+- Run in dev container: `make dev-container`
+- Scan for vulnerabilities: `wolfictl scan ./packages/$(uname -m)/<package-name-and-version>.apk`
+- Explore APK contents: `tar tzv -f packages/$(uname -m)/<package-name-and-version>.apk`
+
+## Code Style Guidelines
+- Package YAML files follow strict formatting (enforced by `yam`)
+- YAML fields: maintain alphabetical order when possible
+- Remove all trailing whitespace from files
+- Ensure consistent indentation (2 spaces for YAML)
+- Package versioning: increment "epoch" when changing a package without version bump
+- Reset "epoch" to 0 for new package versions
+- PR naming: `<package-name>/<version>: <description>`
+- Package updates may contain an `update:` section for automation
+- When patching CVEs: use `<CVE-ID>.patch` naming convention
+- Security fixes must be recorded in the advisories repo
+- Version streams: use version string in package name, provide logical unversioned forms
+- ALWAYS run `./lint.sh <filename.yaml>` after updating any YAML file to ensure proper formatting
+- Avoid removing comments unless they are no longer accurate.
+
+## File Structure & Packages
+
+Package definitions are YAML files with build instructions for Melange. Built apk packages end up in the packages/ subdirectory, with an APKINDEX for each architecture. The file structure inside these can be examined with the `tar` command.
+
+Packages in this repository are used to build container images. When packaging a piece of software, look at existing Dockerfiles in the repository for the piece of software you're packaging to understand what files need to be packaged and how they should be laid out.
+
+Split documentation into a separate subpackage where possible. Try to reuse existing melange pipelines where possible.
 
 ## Packaging Best Practices
 
@@ -46,6 +93,9 @@ dependencies:
 - Including "nice to have" packages that aren't required
 - Development packages at runtime unless required
 - Explicit library dependencies that static code analysis in melange handles automatically
+
+**Never use merged-* packages:**
+The `merged-*` packages (`merged-usrsbin`, `merged-bin`, `merged-sbin`, `merged-lib`) are legacy compatibility packages and should **never** be added as build-time or runtime dependencies for new packages or subpackages. These are automatically handled by the base system when needed.
 
 ### 2. Use variables and data lists appropriately
 If a value is reusable, use a variable. Use clear, descriptive variable names in `vars` section. Use `data` lists only when creating multiple similar subpackages with different names:
@@ -159,7 +209,7 @@ if ! some_command; then
 fi
 ```
 
-### 1. Use `set -euo pipefail` at the start of test scripts
+### 1. Always use `set -euo pipefail` as a single command
 ```bash
 set -euo pipefail
 ```
@@ -169,15 +219,32 @@ set -euo pipefail
 
 This ensures tests fail fast and don't mask errors.
 
-**IMPORTANT:** Always add `set -o pipefail` at the start of `post:` blocks in `test/daemon-check-output` to catch pipeline failures:
+**CRITICAL:** Always use `set -euo pipefail` as a single combined command. **NEVER** use separate commands like `set -e` or `set -o pipefail` alone:
+
+```bash
+# Good - always use the full combined form
+set -euo pipefail
+
+# Bad - never use separate set commands
+set -e
+set -u
+set -o pipefail
+```
+
+**IMPORTANT:** Always add `set -euo pipefail` at the start of `post:` blocks in `test/daemon-check-output` to catch pipeline failures and handle unset variables:
 
 ```yaml
-# Good
+# Good - full set -euo pipefail
+post: |-
+  set -euo pipefail
+  curl -sf http://localhost:8080/metrics | grep -F "uptime"
+
+# Bad - incomplete, only pipefail
 post: |-
   set -o pipefail
   curl -sf http://localhost:8080/metrics | grep -F "uptime"
 
-# Bad - failures may be masked
+# Bad - no shell options set, failures may be masked
 post: |-
   curl -sf http://localhost:8080/metrics | grep -F "uptime"
 ```
@@ -226,13 +293,13 @@ echo "$RESPONSE" | jq -e '.keys | length > 0'
 ### 5. Use test pipelines
 Use specialized test pipelines for different package types to ensure proper validation:
 
-**`test/docs`** - For documentation subpackages:
+**`test/tw/docs`** - For documentation subpackages:
 ```yaml
 subpackages:
   - name: ${{package.name}}-doc
     test:
       pipeline:
-        - uses: test/docs
+        - uses: test/tw/docs
 ```
 Validates that doc packages contain readable documentation (man pages, info pages, or text files) and aren't empty.
 
@@ -285,6 +352,152 @@ test:
     - uses: test/tw/ldd-check
 ```
 Checks that all binaries have their library dependencies satisfied and no missing shared objects.
+
+**`test/tw/debugpackage`** - For packages providing debug symbols:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/debugpackage
+```
+Check that the package structure matches debug package requirements and contains appropriate debug information files.
+
+**`test/tw/help-check`** - For CLI tools:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: ${{package.name}}
+        # Optional: verify help output contains specific strings
+        expect-contains: "Usage Options"
+```
+Verifies binaries respond to help flags (--help, -h, etc.) and optionally validates help content.
+
+**`test/tw/ver-check`** - For version validation:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/ver-check
+      with:
+        bins: ${{package.name}}
+        version: ${{package.version}}
+```
+Verifies binaries report the correct version matching package metadata.
+
+**`test/tw/header-check`** - For C/C++ development packages:
+```yaml
+subpackages:
+  - name: ${{package.name}}-dev
+    test:
+      pipeline:
+        - uses: test/tw/header-check
+          # Optional: specify custom compiler flags
+          with:
+            configure-opts: "-DENABLE_FEATURE_X"
+```
+Validates that C/C++ header files can be successfully included and compiled.
+
+**`test/tw/devpackage`** - For development packages:
+```yaml
+subpackages:
+  - name: ${{package.name}}-dev
+    test:
+      pipeline:
+        - uses: test/tw/devpackage
+```
+Validates that a package contains appropriate development files (headers, static libraries, pkg-config files).
+
+**`test/tw/staticpackage`** - For static library packages:
+```yaml
+subpackages:
+  - name: ${{package.name}}-static
+    test:
+      pipeline:
+        - uses: test/tw/staticpackage
+```
+Validates that a package contains only static libraries (.a files).
+
+**`test/tw/byproductpackage`** - For by-product packages:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/byproductpackage
+```
+Validates automatically generated packages created during the build process.
+
+**`test/tw/emptypackage`** - For empty packages:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/emptypackage
+```
+Validates that a package is intentionally empty.
+
+**`test/tw/verify-service`** - For systemd service files:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/verify-service
+      # Optional: skip specific files or include doc tests
+      with:
+        skip-files: "legacy.service"
+        man: "true"
+```
+Validates systemd service files are properly formatted and follow best practices.
+
+**`test/tw/contains-files`** - For verifying file presence:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /usr/bin/myapp
+          /etc/myapp/config.yaml
+```
+Checks for the presence of specific files or patterns in a package.
+
+**`test/tw/no-docs`** - For packages without documentation:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/no-docs
+```
+Ensures a package contains no documentation files (useful for runtime-only packages).
+
+**`test/tw/symlink-check`** - For symlink validation:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/symlink-check
+      # Optional: allow specific symlink types
+      with:
+        allow-dangling: false
+        allow-absolute: false
+```
+Verifies all symlinks point to valid targets and meet policy requirements.
+
+**`test/tw/gem-check`** - For Ruby gems:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/gem-check
+      # Optional: specify gem name if different from package
+      with:
+        require: "activesupport"
+```
+Validates that a Ruby gem can be properly required and loaded.
+
+**`test/tw/pip-check`** - For Python packages:
+```yaml
+test:
+  pipeline:
+    - uses: test/tw/pip-check
+      # Optional: specify Python version
+      with:
+        python: python3.11
+```
+Validates Python package dependencies are correctly installed using pip check.
 
 ### 6. Functional testing patterns
 Tests should validate actual functionality, not just version/help output. For examples of comprehensive functional tests, see packages like:
@@ -455,93 +668,7 @@ Benefits of using `tee`:
 
 **Note:** `tee` writes to both the file and stdout by default. This is desired behavior for test visibility.
 
-### 14. Avoid single quotes in `test/daemon-check-output` setup and post scripts
-The `test/daemon-check-output` pipeline has a shell quoting limitation: it wraps the `setup` and `post` parameters in single quotes internally. If your script content contains single quotes, the shell parsing will break with errors like `/bin/sh: /something: not found`.
-
-**The problem:**
-```yaml
-# Bad - single quotes in content break shell parsing
-post: |
-  echo 'create /test "data"' | zkCli.sh -server localhost:2181
-  echo 'get /test' | zkCli.sh -server localhost:2181
-```
-
-When this gets processed by the pipeline, it becomes:
-```bash
-post='#!/bin/sh -ex
-echo 'create /test "data"' | zkCli.sh'
-```
-
-The single quote after `echo` closes the opening quote after `post=`, breaking the string and causing the shell to try executing parts as commands.
-
-**Another common example - quotes inside strings:**
-```yaml
-# Bad - single quotes inside the echo string
-post: |
-  if [ "${consumed_message}" = "Hello Kafka" ]; then
-    echo "SUCCESS: Message verification passed"
-  else
-    echo "FAIL: Expected 'Hello Kafka' but got '${consumed_message}'"
-    exit 1
-  fi
-```
-
-This produces bizarre errors like:
-```
-/bin/sh: Kafka but got "
-  exit 1
-fi
-echo "Kafka functional test completed successfully": not found
-```
-
-**Solutions:**
-
-1. **Use double quotes with escaped inner quotes:**
-```yaml
-# Good - use double quotes
-post: |
-  echo "create /test \"data\"" | zkCli.sh -server localhost:2181
-  echo "get /test" | zkCli.sh -server localhost:2181
-```
-
-2. **Use heredocs for complex strings:**
-```yaml
-# Good - use heredoc without quotes on delimiter
-post: |
-  zkCli.sh -server localhost:2181 << ZKCMD
-  create /test "data"
-  get /test
-  ZKCMD
-```
-
-3. **Avoid quotes when possible:**
-```yaml
-# Good - no quotes needed if data has no spaces
-post: |
-  echo create /test data | zkCli.sh -server localhost:2181
-```
-
-4. **Remove single quotes from message strings:**
-```yaml
-# Good - removed single quotes from error message
-post: |
-  if [ "${consumed_message}" = "Hello Kafka" ]; then
-    echo "SUCCESS: Message verification passed"
-  else
-    echo "FAIL: Expected Hello Kafka but got ${consumed_message}"
-    exit 1
-  fi
-```
-
-This limitation exists in the pipeline implementation of `pipelines/test/daemon-check-output.yaml` where it assigns:
-```bash
-setup='${{inputs.setup}}'
-post='${{inputs.post}}'
-```
-
-**Tip:** If you see shell errors that show fragments of your script being executed as commands, check for single quotes in your `setup` or `post` content.
-
-### 15. Use `stat` instead of `test -f` for file existence checks
+### 14. Use `stat` instead of `test -f` for file existence checks
 When verifying files exist in tests, use `stat` instead of `test -f` or `test -x`. The `test` builtin only returns exit code 1 on failure with no error message, making it hard to diagnose failures in logs:
 
 ```bash
@@ -572,3 +699,106 @@ For checking executability specifically, combine `stat` with a follow-up check:
 stat /usr/bin/myapp
 test -x /usr/bin/myapp || { echo "ERROR: /usr/bin/myapp is not executable"; exit 1; }
 ```
+
+## Ruby Package Guidelines
+
+When working with Ruby packages:
+
+- Always increment the epoch when updating a package
+- When adding a test, add it to all Ruby version variants (e.g., ruby3.2-*, ruby3.3-*, ruby3.4-*)
+- Test environment should include ruby-${{vars.rubyMM}} and any direct dependencies
+- Use the test/tw/gem-check pipeline step when appropriate to verify gem installation
+- Implement thorough testing for gem functionality, not just loading
+
+### Testing Ruby Packages
+
+#### Basic Testing Structure
+```yaml
+test:
+  environment:
+    contents:
+      packages:
+        - ruby-${{vars.rubyMM}}
+  pipeline:
+    - uses: test/tw/gem-check  # Verify gem installation
+    - name: Verify library loading
+      runs: |
+        ruby -e "require 'gem_name'; puts 'Successfully loaded gem'"
+    - name: Test basic functionality
+      runs: |
+        ruby <<-EOF
+        require 'gem_name'
+
+        begin
+          # Actual functionality tests with sample inputs and expected outputs
+          # Use raise to fail the test on unexpected results
+          puts "All tests passed!"
+        rescue => e
+          puts "Test failed: \#{e.message}"
+          exit 1
+        end
+        EOF
+```
+
+#### Testing Best Practices
+- Always read `pipelines/test` to learn what test pipelines are available.
+- CRITICAL: Always test the ACTUAL PACKAGE that is being built, not just its dependencies
+- Ensure tests exercise the main functionality that users of the gem would use
+- Include comprehensive tests that verify actual gem functionality, not just loading
+- Test with realistic inputs and verify expected outputs
+- Use begin/rescue blocks to handle errors and provide informative failure messages
+- Test edge cases and parameter variations where applicable
+- For CLI tools, verify command execution (e.g., `rspec --version`)
+- Group related tests into logical sections with clear pass/fail messages
+- If a gem has optional parameters (like bias, ignore flags), test those too when possible
+- Use exit code 1 to indicate test failures
+- Validate that key classes, methods, and constants from the package are present and working
+- Write tests that verify command behavior, not just execution
+- When adding tests, always review existing tests and avoid creating redundant tests.
+- When a command is expected to fail, explicitly check for an error code and fail if the command passes.
+- Use your understanding of the package under test to determine the core functionality to validate
+- All shell code should be compatible with busybox, not bash-specific features
+- When including multiple shell commands, organize them into semantic groupings with comments (if logical grouping exists) or sort them alphabetically
+- For shell condition checks, use direct comparison with `[ "$OUTPUT" = "expected" ]` style
+- The test environment is ephemeral, any non-zero exit code indicates a failure, you do not need to explicitly validate exit codes unless they are relevant to the test
+- For numeric outputs, use appropriate numeric comparisons like `[ "$COUNT" -eq 3 ]`
+- When matching patterns in complex outputs, use variable expansion with grep but without the error exit: `[ "$(echo "$OUTPUT" | grep "pattern")" != "" ]`
+
+### Avoiding Fragile Tests
+- For version checks, simply run `--version` without validating the output at all
+- Never validate specific version numbers in tests, even when using `${{package.version}}` interpolation
+  - Version number formats may change (e.g., from "1.2" to "v1.2.0")
+  - Additional information may be added to version outputs between releases
+  - Patch releases may include suffixes or build information that break exact matches
+- When testing CLI programs, focus only on successful execution of commands
+- For version and help commands, verify:
+  - The command runs successfully (non-zero exit code would fail the test naturally)
+  - For extremely important elements, check their presence very loosely with pattern matching
+- Focus exclusively on testing behavior and functionality, not output format or content
+- For help text, at most verify that key commands appear somewhere in the output
+- If you must check for output content, use very minimal pattern matching looking for single keywords
+
+#### Common Testing Mistakes to Avoid
+- Testing a dependency instead of the actual package being built
+- Only testing that a gem can be loaded without testing any functionality
+- Missing required dependencies in the test environment
+- Testing trivial aspects while ignoring core functionality
+- Failing to handle errors or provide useful error messages
+
+#### Dependencies
+- For dependencies, check if they actually need to be specified in the test environment or if they are already included via package dependencies
+- Common issue: missing gem dependencies often result in loading errors at test time
+- Test that expected dependencies are present and correctly loaded
+
+## Debugging
+
+When debugging failed builds, try cloning the source code from the melange file locally to a directory here to study the build system.
+
+## Other General Notes
+
+Follow the previously mentioned notes as a baseline, and then also consider these additional notes:
+- Certain packages are a bit weird, like Java and Python. Make sure to check existing examples, but especially note the following:
+  - Use py3.x-supported-y packages whenever possible
+  - Use a modern and supported JVM/JDK version (making sure to pick the right packages as well) and loading the environment variables properly
+  - Avoid using obsolete package versions
+- It is worthwhile to search for similar packages to use as working examples over generating something entirely new.

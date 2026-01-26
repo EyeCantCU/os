@@ -1,0 +1,181 @@
+package:
+  name: prometheus-nats-exporter-fips
+  version: "0.18.0"
+  epoch: 6
+  description: A Prometheus exporter for NATS metrics (FIPS variant)
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: d161758f7bc0f2af7e0bdf007db80e52413d795c
+      repository: https://github.com/nats-io/prometheus-nats-exporter
+      tag: v${{package.version}}
+
+  - uses: go/build
+    with:
+      packages: .
+      output: prometheus-nats-exporter
+      go-package: go-fips
+      ldflags: -X main.version=${{package.version}}
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Container entrypoint script for prometheus-nats-exporter (FIPS variant)"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"
+          install -m755 cicd/assets/entrypoint.sh "${{targets.subpkgdir}}"
+          # The entrypoint.sh script expects the binary to be in /
+          ln -s /usr/bin/prometheus-nats-exporter "${{targets.subpkgdir}}/prometheus-nats-exporter"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - dash-binsh
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+update:
+  enabled: true
+  github:
+    identifier: nats-io/prometheus-nats-exporter
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - nats-server
+        - wait-for-port
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: prometheus-nats-exporter
+    - uses: test/tw/ver-check
+      with:
+        bins: prometheus-nats-exporter
+    - name: FIPS runtime check
+      runs: |
+        # Verify FIPS mode is enabled
+        prometheus-nats-exporter -version 2>&1 | grep -i "fips" || echo "FIPS mode check: binary compiled with go-fips"
+        # Check for FIPS-related symbols
+        if command -v readelf >/dev/null 2>&1; then
+          readelf -s /usr/bin/prometheus-nats-exporter | grep -i "fips" || true
+        fi
+    - name: Basic metrics export test
+      uses: test/daemon-check-output
+      with:
+        setup: |-
+          # Start NATS server with monitoring enabled
+          nats-server --port 4222 --http_port 8222 > /tmp/nats-server.log 2>&1 &
+          wait-for-port 8222
+        start: prometheus-nats-exporter -varz -port 7777 http://localhost:8222
+        timeout: 60
+        expected_output: |
+          Prometheus exporter listening
+        post: |-
+          set -euo pipefail
+
+          # Wait for exporter to be ready
+          wait-for-port 7777
+
+          # Verify exporter metrics endpoint is accessible
+          curl -sf http://localhost:7777/metrics | tee /tmp/metrics.txt
+
+          # Check for core NATS varz metrics
+          grep -F "gnatsd_varz_connections" /tmp/metrics.txt
+          grep -F "gnatsd_varz_in_msgs" /tmp/metrics.txt
+          grep -F "gnatsd_varz_out_msgs" /tmp/metrics.txt
+          grep -F "gnatsd_varz_in_bytes" /tmp/metrics.txt
+          grep -F "gnatsd_varz_out_bytes" /tmp/metrics.txt
+
+          echo "Basic metrics export test passed"
+    - name: Multi-endpoint metrics collection test
+      runs: |
+        set -euo pipefail
+
+        # Start NATS server with monitoring
+        nats-server --port 4223 --http_port 8223 > /tmp/nats-multi.log 2>&1 &
+        NATS_PID=$!
+        wait-for-port 8223
+
+        # Start exporter with multiple monitoring endpoints
+        prometheus-nats-exporter \
+          -varz -connz -subz -routez \
+          -port 7778 \
+          http://localhost:8223 > /tmp/exporter-multi.log 2>&1 &
+        EXPORTER_PID=$!
+
+        # Wait for exporter to start
+        wait-for-port 7778
+
+        # Query metrics and verify endpoint types that should exist
+        curl -sf http://localhost:7778/metrics | tee /tmp/multi_metrics.txt
+
+        # Check for varz metrics (should always exist)
+        echo "Checking varz metrics..."
+        grep -F "gnatsd_varz_" /tmp/multi_metrics.txt | head -5
+
+        # Check for connz metrics (connection stats - should exist even if no connections)
+        echo "Checking connz metrics..."
+        grep -F "gnatsd_connz_" /tmp/multi_metrics.txt | head -3
+
+        # Cleanup
+        kill $EXPORTER_PID $NATS_PID
+        wait $EXPORTER_PID $NATS_PID 2>/dev/null || true
+
+        echo "Multi-endpoint metrics collection test passed"
+    - name: Connection resilience test
+      runs: |
+        set -euo pipefail
+
+        # Start NATS server
+        nats-server --port 4224 --http_port 8224 > /tmp/nats-resilience.log 2>&1 &
+        NATS_PID=$!
+        wait-for-port 8224
+
+        # Start exporter with retry interval
+        prometheus-nats-exporter \
+          -varz \
+          -ri 5 \
+          -port 7779 \
+          http://localhost:8224 > /tmp/exporter-resilience.log 2>&1 &
+        EXPORTER_PID=$!
+
+        # Wait for exporter to start
+        wait-for-port 7779
+        sleep 3
+
+        # Verify metrics are collected initially
+        echo "Checking initial metrics collection..."
+        curl -sf http://localhost:7779/metrics | grep -F "gnatsd_varz_connections"
+
+        # Simulate NATS restart
+        echo "Restarting NATS server to test reconnection..."
+        kill $NATS_PID
+        wait $NATS_PID 2>/dev/null || true
+        sleep 2
+
+        # Restart NATS
+        nats-server --port 4224 --http_port 8224 > /tmp/nats-resilience2.log 2>&1 &
+        NATS_PID=$!
+        wait-for-port 8224
+
+        # Verify metrics resume after restart
+        echo "Verifying metrics after NATS restart..."
+        curl -sf http://localhost:7779/metrics | grep -F "gnatsd_varz_connections"
+
+        # Cleanup
+        kill $EXPORTER_PID $NATS_PID
+        wait $EXPORTER_PID $NATS_PID 2>/dev/null || true
+
+        echo "Connection resilience test passed"

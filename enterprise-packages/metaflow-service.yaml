@@ -1,0 +1,169 @@
+package:
+  name: metaflow-service
+  version: "2.5.0"
+  epoch: 2
+  description: "Metadata tracking and UI service for Metaflow"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      # System Python for migration_service
+      - python-${{vars.python-version}}
+
+vars:
+  python-version: "3.11"
+  venv-home: "/opt/latest"
+
+environment:
+  environment:
+    UI_ENABLED: 1
+    UI_VERSION: "v1.3.13"
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - libffi-dev
+      - python-${{vars.python-version}}-dev
+      - uv
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/Netflix/metaflow-service
+      tag: v${{package.version}}
+      expected-commit: 9e47d2d85e127d2673d457dde7ae535a3341de0f
+
+  - name: "Create virtual environment"
+    runs: uv venv ${{vars.venv-home}}
+
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: true
+
+  - name: "Install metaflow-service"
+    runs: |
+      # requires EPOCH to be later than 1980
+      export SOURCE_DATE_EPOCH=315532800
+
+      # Activate virtual environment
+      source ${{vars.venv-home}}/bin/activate
+
+      # Install services to /root/services/ (upstream layout)
+      mkdir -p ${{targets.destdir}}/root/services
+      cp services/__init__.py ${{targets.destdir}}/root/services/
+      cp services/data/service_configs.py ${{targets.destdir}}/root/services/
+      cp -r services/data ${{targets.destdir}}/root/services/
+      cp -r services/metadata_service ${{targets.destdir}}/root/services/
+      cp -r services/ui_backend_service ${{targets.destdir}}/root/services/
+      cp -r services/utils ${{targets.destdir}}/root/services/
+
+      # Install setup files and run_goose.py to /root/
+      cp setup.py setup.cfg run_goose.py ${{targets.destdir}}/root/
+
+      # Install metaflow-service package
+      uv pip install .
+
+      # Install migration_service
+      cp -r services/migration_service ${{targets.destdir}}/root/services/
+      chmod 755 ${{targets.destdir}}/root/services/migration_service/run_script.py
+
+      # Install virtual environment
+      mkdir -p ${{targets.destdir}}/opt
+      mv ${{vars.venv-home}} ${{targets.destdir}}/opt/latest
+
+      # Remove uv lock file (world-writable, triggers linter)
+      rm -f ${{targets.destdir}}/opt/latest/.lock
+
+  - name: Install UI
+    runs: |
+      ./services/ui_backend_service/download_ui.sh
+
+      cp ./services/ui_backend_service/ui/asset-manifest.json ${{targets.contextdir}}/root/services/ui_backend_service/ui/asset-manifest.json
+      cp ./services/ui_backend_service/ui/favicon.ico  ${{targets.contextdir}}/root/services/ui_backend_service/ui/favicon.ico
+      cp ./services/ui_backend_service/ui/index.html  ${{targets.contextdir}}/root/services/ui_backend_service/ui/index.html
+      cp ./services/ui_backend_service/ui/manifest.json  ${{targets.contextdir}}/root/services/ui_backend_service/ui/manifest.json
+      cp ./services/ui_backend_service/ui/robots.txt  ${{targets.contextdir}}/root/services/ui_backend_service/ui/robots.txt
+      cp -r ./services/ui_backend_service/ui/static/* ${{targets.contextdir}}/root/services/ui_backend_service/ui/static/
+
+  - name: "Provide python dependencies for main python env"
+    runs: |
+      uv pip install -r services/migration_service/requirements.txt --prefix=${{targets.contextdir}}/usr
+
+      # Remove uv lock file (world-writable, triggers linter)
+      rm -f ${{targets.destdir}}/usr/.lock
+
+  - uses: strip
+
+test:
+  environment:
+    contents:
+      packages:
+        - goose
+        - postgresql
+        - postgresql-client
+        - shadow
+        - sudo-rs
+        - wait-for-it
+        - curl
+    accounts:
+      groups:
+        - groupname: metaflow
+          gid: 1000
+      users:
+        - username: metaflow
+          uid: 1000
+          gid: 1000
+      run-as: 0
+    environment:
+      PGDATA: /tmp/test_db
+      PGUSER: wolfi
+      MF_METADATA_DB_HOST: 127.0.0.1
+      MF_METADATA_DB_PORT: "5432"
+      MF_METADATA_DB_USER: wolfi
+      MF_METADATA_DB_NAME: metaflow
+      MF_METADATA_DB_PSWD: ""
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test Python imports
+      runs: |
+        set -euo pipefail
+        export PATH=/opt/latest/bin:$PATH
+
+        python3 -c "
+        import aiohttp
+        import aiopg
+        import psycopg2
+        import boto3
+        print('Core imports successful')
+        "
+    - name: "Start PostgreSQL and create database"
+      runs: |
+        useradd $PGUSER
+        sudo -u $PGUSER initdb -D $PGDATA
+        sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
+        createdb $MF_METADATA_DB_NAME
+        psql -lqt | cut -d \| -f 1 | grep -qw metaflow
+        wait-for-it -t 10 localhost:5432
+    - name: Test metadata service startup
+      uses: test/daemon-check-output
+      with:
+        start: |
+          env PATH=/opt/latest/bin:$PATH \
+          metadata_service
+        timeout: 60
+        expected_output: |
+          Connection established
+        post: |
+          set -euo pipefail
+          # Test ping endpoint
+          curl -sf http://localhost:8080/ping | grep -F "pong"
+
+          # Test version endpoint
+          curl -sf http://localhost:8080/version
+
+update:
+  enabled: true
+  github:
+    identifier: Netflix/metaflow-service
+    strip-prefix: v

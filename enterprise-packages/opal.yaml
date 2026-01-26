@@ -1,0 +1,299 @@
+package:
+  name: opal
+  description: OPAL is an administration layer for Policy Engines
+  version: "0.9.3"
+  epoch: 0
+  copyright:
+    - license: Apache-2.0
+  options:
+    no-provides: true # opal should not provide any of the python libraries it installs
+
+vars:
+  # Opal image is built with Python 3.10
+  # https://github.com/permitio/opal/blob/858a808ecf18effce7badfbe1dffe38f5b501279/docker/Dockerfile#L4
+  python-version: "3.10"
+
+environment:
+  environment:
+    # Need to use system python instead of venv so opal-client binary has the correct python shebang
+    UV_SYSTEM_PYTHON: "true"
+  contents:
+    packages:
+      - build-base
+      - git
+      - http-parser-dev
+      - libffi-dev
+      - libgit2-dev
+      - libssh2-dev
+      - openssh-keyscan
+      - openssl-dev
+      - py${{vars.python-version}}-build-base-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/permitio/opal
+      tag: ${{package.version}}
+      expected-commit: 858a808ecf18effce7badfbe1dffe38f5b501279
+
+  - uses: auth/uv
+    with:
+      allow-fallback-indexes: "true"
+
+  - name: "Set version"
+    runs: |
+      # opal generates version info dynamically during CI builds, so we need to set it here
+      # https://github.com/permitio/opal/blob/858a808ecf18effce7badfbe1dffe38f5b501279/packages/__packaging__.py#L12
+      sed -i "s/^__version__ = VERSION_STRING/__version__ = '${{package.version}}'/" ./packages/__packaging__.py
+
+  - name: "Install requirements"
+    runs: |
+      # ddtrace needs a patch in order to build it from source
+      # This work has been done already in our python libraries:
+      # https://github.com/chainguard-dev/ecosystems-packages/pull/699/
+      # Let's use that wheel instead of building from source here
+      uv pip install \
+        --prefix=${{targets.contextdir}}/usr \
+        --only-binary ddtrace \
+        -r ./packages/requires.txt \
+        -r ./packages/opal-common/requires.txt \
+        -r ./packages/opal-client/requires.txt \
+        -r ./packages/opal-server/requires.txt
+      rm ${{targets.contextdir}}/usr/.lock
+
+subpackages:
+  - name: opal-common
+    description: OPAL common
+    dependencies:
+      runtime:
+        - python-${{vars.python-version}}
+        - opal
+    pipeline:
+      - name: "Install opal-common package"
+        runs: |
+          uv pip install \
+            --no-deps \
+            --prefix=${{targets.contextdir}}/usr \
+            ./packages/opal-common
+          rm ${{targets.contextdir}}/usr/.lock
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: opal-client
+    description: OPAL client
+    dependencies:
+      runtime:
+        - opal-common
+        - opa
+    pipeline:
+      - name: "Install opal-client package"
+        runs: |
+          uv pip install \
+            --no-deps \
+            --prefix=${{targets.contextdir}}/usr \
+            ./packages/opal-client
+          rm ${{targets.contextdir}}/usr/.lock
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+            - curl
+            - wait-for-it
+      pipeline:
+        - uses: test/tw/help-check
+          with:
+            bins: opal-client
+        - uses: test/tw/ver-check
+          with:
+            bins: opal-client
+        - runs: |
+            opal-client print-config | grep -F '"CLIENT_API_SERVER_PORT": "7000"'
+        - uses: test/daemon-check-output
+          with:
+            start: opal-client run
+            expected_output: |
+              Open-Policy Administration Layer - client
+              Launching policy updater
+              Trying to connect
+            timeout: "30"
+            post: |
+              #!/bin/sh -e
+              wait-for-it localhost:7000 --timeout=60
+              # client without server should be unavailable
+              curl localhost:7000/healthcheck | jq -e ".status == \"unavailable\""
+
+  - name: opal-server
+    description: OPAL server
+    dependencies:
+      runtime:
+        - opal-common
+        - libgit2
+        - git
+        - openssh-client
+        - libssh2
+    pipeline:
+      - name: "Install opal-server package"
+        runs: |
+          uv pip install \
+            --no-deps \
+            --prefix=${{targets.contextdir}}/usr \
+            ./packages/opal-server
+          rm ${{targets.contextdir}}/usr/.lock
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+            - curl
+            - wait-for-it
+      pipeline:
+        - uses: test/tw/help-check
+          with:
+            bins: opal-server
+        - uses: test/tw/ver-check
+          with:
+            bins: opal-server
+        - runs: |
+            opal-server print-config | grep -F '"SERVER_BIND_PORT": "7002"'
+        - uses: test/daemon-check-output
+          with:
+            start: opal-server run
+            expected_output: |
+              Open-Policy Administration Layer - server
+              OPAL Server Startup
+            timeout: "30"
+            post: |
+              set -euo pipefail
+              wait-for-it localhost:7002 --timeout=60
+              curl -f localhost:7002/healthcheck | jq -e ".status == \"ok\""
+
+  - name: opal-oci-entrypoint
+    description: OPAL shared scripts for client and server containers
+    dependencies:
+      runtime:
+        - bash
+        - bash-binsh
+        - coreutils
+        - jq
+        - netcat-openbsd
+        - sed
+        - wget
+    pipeline:
+      - runs: |
+          for script in scripts/*.sh; do
+            install -Dm755 "$script" "${{targets.contextdir}}/opal/$(basename "$script")"
+          done
+          install -Dm644 -t ${{targets.contextdir}}/opal \
+            scripts/gunicorn_conf.py \
+            README.md
+          mkdir -p ${{targets.contextdir}}/usr
+          ln -sf opal/start.sh ${{targets.contextdir}}/start.sh
+          ln -sf ../../opal/wait-for.sh ${{targets.contextdir}}/usr/wait-for.sh
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+        - runs: |
+            set -euo pipefail
+            # opal client and server share the same entrypoint scripts
+            # the entrypoint scripts are tested in the respective compat packages
+            stat /opal/gunicorn_conf.py
+            stat /opal/README.md
+            stat /opal/start.sh
+            test -x /opal/start.sh
+            stat /opal/wait-for.sh
+            test -x /opal/wait-for.sh
+
+  - name: opal-client-compat
+    description: OPAL client container compatibility files
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/opal
+          ln -sf ../usr/bin/opa ${{targets.contextdir}}/opal/opa
+    test:
+      environment:
+        contents:
+          packages:
+            - opal-client
+            - opal-oci-entrypoint
+            - curl
+            - jq
+            - wait-for-it
+        environment:
+          UVICORN_ASGI_APP: "opal_client.main:app"
+          UVICORN_NUM_WORKERS: "1"
+          UVICORN_PORT: "7000"
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/daemon-check-output
+          with:
+            start: sh -c 'cd /opal && ./start.sh'
+            expected_output: |
+              Starting gunicorn
+              Launching policy updater
+              Trying to connect
+            timeout: "30"
+            post: |
+              #!/bin/sh -e
+              wait-for-it localhost:7000 --timeout=60
+              # client without server should be unavailable
+              curl localhost:7000/healthcheck | jq -e ".status == \"unavailable\""
+
+  - name: opal-server-compat
+    description: OPAL server container compatibility files
+    pipeline:
+      - runs: |
+          # Required by opal-server to clone git policy repos
+          # Reference: https://github.com/permitio/opal/blob/858a808ecf18effce7badfbe1dffe38f5b501279/docker/Dockerfile#L361
+          # Explanation: https://github.com/permitio/opal/blob/858a808ecf18effce7badfbe1dffe38f5b501279/docker/Dockerfile#L193
+          mkdir -p ${{targets.contextdir}}/home/opal
+          cat > ${{targets.contextdir}}/home/opal/.gitconfig <<EOF
+          [core]
+          symlinks = false
+          EOF
+          mkdir -p ${{targets.contextdir}}/home/opal/.ssh
+          chmod 0700 ${{targets.contextdir}}/home/opal/.ssh
+          ssh-keyscan -t rsa "github.com" >> ${{targets.contextdir}}/home/opal/.ssh/known_hosts
+    test:
+      environment:
+        contents:
+          packages:
+            - opal-server
+            - opal-oci-entrypoint
+            - curl
+            - jq
+            - wait-for-it
+        environment:
+          UVICORN_ASGI_APP: "opal_server.main:app"
+          UVICORN_NUM_WORKERS: "1"
+          UVICORN_PORT: "7000"
+      pipeline:
+        - runs: |
+            stat /home/opal/.gitconfig
+            stat /home/opal/.ssh/known_hosts
+        - uses: test/daemon-check-output
+          with:
+            start: sh -c 'cd /opal && ./start.sh'
+            expected_output: |
+              Starting gunicorn
+              OPAL Server Startup
+            timeout: "30"
+            post: |
+              set -euo pipefail
+              wait-for-it localhost:7000 --timeout=60
+              curl -f localhost:7000/healthcheck | jq -e ".status == \"ok\""
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - .*-rc.*
+    - .*-beta.*
+    - .*-eopa.*
+  github:
+    identifier: permitio/opal
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check

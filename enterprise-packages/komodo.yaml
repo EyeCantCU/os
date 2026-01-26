@@ -1,0 +1,670 @@
+package:
+  name: komodo
+  version: "1.19.5"
+  epoch: 1
+  description: Build and deploy software across multiple servers - DevOps platform
+  copyright:
+    - license: GPL-3.0-or-later
+
+environment:
+  contents:
+    packages:
+      # Rust build dependencies
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cargo-auditable
+      # Frontend build dependencies (nodejs-24 is latest LTS)
+      - nodejs-24
+      - openssl-dev
+      # Rust 1.90+ breaks due to stricter temporary lifetime rules in Rust 2024 edition (RFC 3606).
+      # Upstream code uses format_args! in if-else tail expressions which triggers E0716.
+      # See: https://doc.rust-lang.org/edition-guide/rust-2024/temporary-tail-expr-scope.html
+      - rust-1.89
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/moghtech/komodo
+      tag: v${{package.version}}
+      expected-commit: 34a9f8eb9ef305103b678c1b46782700313f637f
+
+  # Fix CVE-2026-21895 (GHSA-9c48-w39g-hm26) in rsa crate
+  - uses: rust/cargobump
+
+subpackages:
+  - name: komodo-core
+    description: Komodo Core API server
+    dependencies:
+      runtime:
+        - ca-certificates-bundle
+        # Runtime deps matching upstream core image
+        - curl
+        - deno
+        - git
+        - iproute2
+        - komodo-cli
+        - komodo-frontend
+        - starship
+    pipeline:
+      - runs: |
+          cargo auditable build --release -p komodo_core
+          mkdir -p "${{targets.contextdir}}/usr/bin"
+          cp target/release/core "${{targets.contextdir}}/usr/bin/komodo-core"
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+            - mongod
+            - mongosh
+            - wait-for-it
+        accounts:
+          groups:
+            - groupname: mongodb
+              gid: 999
+          users:
+            - username: mongodb
+              uid: 999
+              gid: 999
+          run-as: 0
+        environment:
+          KOMODO_PORT: "9120"
+          KOMODO_HOST: "http://localhost:9120"
+          KOMODO_PASSKEY: "test-passkey-for-testing"
+          KOMODO_JWT_SECRET: "test-jwt-secret-for-testing-only"
+          KOMODO_LOCAL_AUTH: "true"
+          KOMODO_ENABLE_NEW_USERS: "true"
+          KOMODO_DATABASE_ADDRESS: "localhost:27017"
+          KOMODO_DATABASE_DB_NAME: "komodo_test"
+          KOMODO_FRONTEND_PATH: "/usr/share/komodo/frontend"
+          KOMODO_LOGGING_LEVEL: "info"
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: Setup MongoDB for Komodo Core
+          runs: |
+            set -euo pipefail
+            # Create data directory for MongoDB
+            mkdir -p /data/db
+            chown -R mongodb:mongodb /data/db
+
+            # Start MongoDB in background
+            mongod --dbpath /data/db --bind_ip_all --fork --logpath /var/log/mongod.log
+
+            # Wait for MongoDB to be ready
+            wait-for-it localhost:27017 -t 30
+
+            # Verify MongoDB is running
+            mongosh --eval "db.runCommand({ ping: 1 })"
+        - name: Test Komodo Core startup and API
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              echo "Using frontend at /usr/share/komodo/frontend"
+            start: komodo-core
+            timeout: 120
+            expected_output: |
+              Komodo Core version: v${{package.version}}
+              Creating init system resources
+              Komodo Core starting on
+            post: |
+              set -euo pipefail
+              wait-for-it localhost:9120 -t 30
+
+              # Test that reading the frontend works via the server
+              echo "Testing frontend serving..."
+              curl -sf http://localhost:9120/ | grep -F "DOCTYPE"
+
+              # Test login options endpoint
+              echo "Testing /auth/GetLoginOptions endpoint..."
+              LOGIN_OPTIONS=$(curl -sf -X POST http://localhost:9120/auth/GetLoginOptions \
+                -H "Content-Type: application/json" \
+                -d '{}')
+              echo "Login options: $LOGIN_OPTIONS"
+              echo "$LOGIN_OPTIONS" | jq -e '.local == true'
+
+              # Create a new user via local auth API
+              echo "Creating test user via local auth..."
+              CREATE_USER_RESPONSE=$(curl -s -X POST http://localhost:9120/auth/SignUpLocalUser \
+                -H "Content-Type: application/json" \
+                -d '{"username": "testuser", "password": "TestPassword123!"}')
+
+              # Verify user was created (response should contain jwt and user_id)
+              if ! echo "$CREATE_USER_RESPONSE" | jq -e '.jwt and .user_id' > /dev/null 2>&1; then
+                echo "ERROR: User creation failed"
+                exit 1
+              fi
+              echo "User created successfully"
+
+              # Login with the created user
+              echo "Authenticating test user..."
+              LOGIN_RESPONSE=$(curl -s -X POST http://localhost:9120/auth/LoginLocalUser \
+                -H "Content-Type: application/json" \
+                -d '{"username": "testuser", "password": "TestPassword123!"}')
+
+              # Verify JWT token was returned in login response (without printing token)
+              if ! echo "$LOGIN_RESPONSE" | jq -e '.jwt and .user_id' > /dev/null 2>&1; then
+                echo "ERROR: Login failed - no JWT token returned"
+                exit 1
+              fi
+              echo "Login successful"
+
+              # Verify we can login again with the same credentials (proves user was persisted)
+              echo "Verifying user persistence by logging in again..."
+              LOGIN_RESPONSE2=$(curl -s -X POST http://localhost:9120/auth/LoginLocalUser \
+                -H "Content-Type: application/json" \
+                -d '{"username": "testuser", "password": "TestPassword123!"}')
+              if ! echo "$LOGIN_RESPONSE2" | jq -e '.jwt' > /dev/null 2>&1; then
+                echo "ERROR: Second login failed - user not persisted"
+                exit 1
+              fi
+              echo "User persistence verified"
+
+              echo "Komodo Core functional tests passed"
+
+  - name: komodo-core-compat
+    description: Compat package for Komodo Core Docker image
+    pipeline:
+      - runs: |
+          # Create compat symlinks matching upstream Docker image
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+          ln -s ../../bin/komodo-core "${{targets.contextdir}}/usr/local/bin/core"
+          ln -s ../../bin/km "${{targets.contextdir}}/usr/local/bin/km"
+          # Create config directory
+          mkdir -p "${{targets.contextdir}}/config"
+          # Create action-cache directory for Deno scripts
+          mkdir -p "${{targets.contextdir}}/action-cache/deno"
+          # Install starship configuration from upstream source
+          cp bin/core/starship.toml "${{targets.contextdir}}/starship.toml"
+          # Configure starship in bashrc
+          mkdir -p "${{targets.contextdir}}/root"
+          echo 'export STARSHIP_CONFIG=/starship.toml' >> "${{targets.contextdir}}/root/.bashrc"
+          echo 'eval "$(starship init bash)"' >> "${{targets.contextdir}}/root/.bashrc"
+    test:
+      environment:
+        contents:
+          packages:
+            - komodo-core
+      pipeline:
+        - uses: test/tw/symlink-check
+
+  - name: komodo-periphery
+    description: Komodo Periphery agent for managed servers
+    dependencies:
+      runtime:
+        - ca-certificates-bundle
+        # Runtime deps matching upstream periphery image
+        - curl
+        - docker-cli
+        - docker-cli-buildx
+        - docker-compose
+        - git
+        - wget
+        - starship
+    pipeline:
+      - runs: |
+          cargo auditable build --release -p komodo_periphery
+          mkdir -p "${{targets.contextdir}}/usr/bin"
+          cp target/release/periphery "${{targets.contextdir}}/usr/bin/komodo-periphery"
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - wait-for-it
+        environment:
+          PERIPHERY_PORT: "8120"
+          PERIPHERY_PASSKEYS: "test-passkey-for-testing"
+          PERIPHERY_ROOT_DIRECTORY: "/tmp/komodo"
+          PERIPHERY_LOGGING_LEVEL: "info"
+          # Disable SSL for testing
+          PERIPHERY_SSL_ENABLED: "false"
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: Test Komodo Periphery startup and API
+          runs: |
+            set -euo pipefail
+
+            # Create required directories for periphery
+            mkdir -p /tmp/komodo/repos
+            mkdir -p /tmp/komodo/stacks
+            mkdir -p /tmp/komodo/builds
+            mkdir -p /etc/komodo
+
+            # Start periphery in background
+            komodo-periphery > /tmp/periphery.log 2>&1 &
+            PID=$!
+            echo "Started periphery with PID $PID"
+
+            # Wait for periphery to start
+            wait-for-it localhost:8120 -t 30
+
+            # Verify startup output contains expected strings
+            grep -F "Komodo Periphery version: v${{package.version}}" /tmp/periphery.log
+            grep -F "Komodo Periphery starting on" /tmp/periphery.log
+
+            # Test that periphery is responding to HTTP requests
+            # The root endpoint should return some response (even if 404)
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/)
+            echo "HTTP response code: $HTTP_CODE"
+            # Any HTTP response (even 404) proves the server is running
+            if [ "$HTTP_CODE" -eq "000" ]; then
+              echo "ERROR: Server not responding"
+              exit 1
+            fi
+
+            # Clean up - send SIGTERM to gracefully stop periphery
+            # The process should still be running at this point
+            if [ -d "/proc/$PID" ]; then
+              kill -TERM $PID
+              sleep 1
+            fi
+            echo "Periphery test passed"
+
+  - name: komodo-periphery-compat
+    description: Compat package for Komodo Periphery Docker image
+    pipeline:
+      - runs: |
+          # Create compat symlink matching upstream Docker image
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+          ln -s ../../bin/komodo-periphery "${{targets.contextdir}}/usr/local/bin/periphery"
+          # Install starship configuration from upstream source
+          cp bin/periphery/starship.toml "${{targets.contextdir}}/starship.toml"
+          # Configure starship in bashrc
+          mkdir -p "${{targets.contextdir}}/root"
+          echo 'export STARSHIP_CONFIG=/starship.toml' >> "${{targets.contextdir}}/root/.bashrc"
+          echo 'eval "$(starship init bash)"' >> "${{targets.contextdir}}/root/.bashrc"
+    test:
+      environment:
+        contents:
+          packages:
+            - komodo-periphery
+      pipeline:
+        - uses: test/tw/symlink-check
+
+  - name: komodo-cli
+    description: Komodo CLI tool (km)
+    dependencies:
+      runtime:
+        - ca-certificates-bundle
+    pipeline:
+      - runs: |
+          cargo auditable build --release -p komodo_cli
+          mkdir -p "${{targets.contextdir}}/usr/bin"
+          cp target/release/km "${{targets.contextdir}}/usr/bin/km"
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - mongod
+            - mongosh
+            - wait-for-it
+            - komodo-core
+        accounts:
+          groups:
+            - groupname: mongodb
+              gid: 999
+          users:
+            - username: mongodb
+              uid: 999
+              gid: 999
+          run-as: 0
+        environment:
+          KOMODO_PORT: "9120"
+          KOMODO_HOST: "http://localhost:9120"
+          KOMODO_PASSKEY: "test-passkey-for-testing"
+          KOMODO_JWT_SECRET: "test-jwt-secret-for-testing-only"
+          KOMODO_LOCAL_AUTH: "true"
+          KOMODO_ENABLE_NEW_USERS: "true"
+          KOMODO_DATABASE_ADDRESS: "localhost:27017"
+          KOMODO_DATABASE_DB_NAME: "komodo_cli_test"
+          KOMODO_FRONTEND_PATH: "/usr/share/komodo/frontend"
+          KOMODO_LOGGING_LEVEL: "info"
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: km
+        - name: Verify CLI basic functionality
+          runs: |
+            set -euo pipefail
+            # Verify binary exists and is executable
+            stat /usr/bin/km
+
+            # Test version output matches package version
+            km --version | grep -F "${{package.version}}"
+
+            # Verify key subcommands exist (help check already done by test/tw/help-check)
+            km execute --help > /dev/null
+            km list --help > /dev/null
+            km config --help > /dev/null
+            echo "CLI subcommands verified"
+        - name: Test CLI with live server
+          runs: |
+            set -euo pipefail
+
+            # Setup MongoDB
+            mkdir -p /data/db
+            chown -R mongodb:mongodb /data/db
+            mongod --dbpath /data/db --bind_ip_all --fork --logpath /var/log/mongod.log
+            wait-for-it localhost:27017 -t 30
+            mongosh --eval "db.runCommand({ ping: 1 })"
+
+            # Start komodo-core in background
+            komodo-core > /tmp/core.log 2>&1 &
+            CORE_PID=$!
+            echo "Started komodo-core with PID $CORE_PID"
+
+            # Wait for server
+            wait-for-it localhost:9120 -t 60
+            echo "Server is ready"
+
+            # Create a config file for the CLI pointing to the server
+            # Note: CLI authentication requires cli_key/cli_secret which must be created
+            # via the Komodo UI settings. We test that CLI can connect and report auth errors.
+            mkdir -p ~/.config/komodo
+            tee ~/.config/komodo/config.toml << CONFIGEOF
+            url = "http://localhost:9120"
+            CONFIGEOF
+
+            # Test CLI commands that query the server
+            echo "Testing km with live server..."
+
+            # Test listing resources - expect auth error since we don't have cli_key/cli_secret
+            # This proves the CLI binary works and can connect to the server
+            echo "Testing km list servers (expecting auth error)..."
+            # Use subshell to capture exit code without stopping script
+            set +e
+            CLI_OUTPUT=$(km list servers 2>&1)
+            CLI_EXIT=$?
+            set -e
+            echo "CLI output: $CLI_OUTPUT"
+            echo "CLI exit code: $CLI_EXIT"
+
+            # Verify we get the expected auth error (proves CLI is working and connecting)
+            # The CLI should fail (non-zero exit) with a message about cli_key
+            if [ "$CLI_EXIT" -ne 0 ] && echo "$CLI_OUTPUT" | grep -qF "cli_key"; then
+              echo "CLI correctly reports missing credentials - connection working"
+            else
+              echo "ERROR: Unexpected CLI behavior"
+              echo "Expected: non-zero exit with cli_key error"
+              echo "Got exit code: $CLI_EXIT"
+              echo "Output: $CLI_OUTPUT"
+              exit 1
+            fi
+
+            # Test config subcommand (doesn't require auth, prints current config)
+            km config
+            echo "CLI config command works"
+
+            # Clean up
+            if [ -d "/proc/$CORE_PID" ]; then
+              kill -TERM $CORE_PID
+              sleep 2
+            fi
+
+            echo "CLI functional tests passed"
+
+  - name: komodo-cli-compat
+    description: Compat package for Komodo CLI Docker image
+    pipeline:
+      - runs: |
+          # Create compat symlink matching upstream Docker image
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+          ln -s ../../bin/km "${{targets.contextdir}}/usr/local/bin/km"
+    test:
+      environment:
+        contents:
+          packages:
+            - komodo-cli
+      pipeline:
+        - uses: test/tw/symlink-check
+
+  - name: komodo-frontend
+    description: Komodo web UI - React/TypeScript frontend
+    pipeline:
+      - name: Build TypeScript client
+        working-directory: client/core/ts
+        runs: |
+          yarn install --frozen-lockfile
+          yarn build
+          yarn link
+      - name: Build frontend
+        working-directory: frontend
+        runs: |
+          yarn link komodo_client
+          yarn install --frozen-lockfile
+          yarn build
+      - name: Install frontend assets
+        runs: |
+          mkdir -p "${{targets.contextdir}}/usr/share/komodo/frontend"
+          cp -r frontend/dist/* "${{targets.contextdir}}/usr/share/komodo/frontend/"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - jq
+            - nodejs-24
+            - npm
+            - yarn
+            - wait-for-it
+            # Cypress dependencies
+            - xvfb
+            - nss
+            - libnss
+            - gtk-3
+            - xkbcomp
+            - xkeyboard-config
+            - libnspr
+            - mesa-gbm
+            - libudev
+            - font-opensans
+            - libdrm
+            - libxcb
+            - libxkbcommon
+            - alsa-lib
+            - at-spi2-core
+        environment:
+          FRONTEND_PORT: "8080"
+          # Cypress settings
+          DISPLAY: ":99"
+          CYPRESS_CACHE_FOLDER: "/tmp/.cache/Cypress"
+      pipeline:
+        - name: Verify frontend assets structure
+          runs: |
+            set -euo pipefail
+            # Verify main HTML file
+            stat /usr/share/komodo/frontend/index.html
+            grep -F "<!DOCTYPE html>" /usr/share/komodo/frontend/index.html
+
+            # Verify assets directory exists with JS and CSS files
+            stat /usr/share/komodo/frontend/assets
+
+            # Count JS files - must have at least one
+            JS_COUNT=$(find /usr/share/komodo/frontend/assets -name "*.js" -type f | wc -l)
+            echo "Found ${JS_COUNT} JavaScript files"
+            if [ "${JS_COUNT}" -lt 1 ]; then
+              echo "ERROR: No JavaScript files found in assets"
+              exit 1
+            fi
+
+            # Count CSS files - must have at least one
+            CSS_COUNT=$(find /usr/share/komodo/frontend/assets -name "*.css" -type f | wc -l)
+            echo "Found ${CSS_COUNT} CSS files"
+            if [ "${CSS_COUNT}" -lt 1 ]; then
+              echo "ERROR: No CSS files found in assets"
+              exit 1
+            fi
+        - name: Test frontend with Cypress E2E
+          runs: |
+            set -euo pipefail
+
+            # Start Xvfb for headless browser testing
+            Xvfb :99 -screen 0 1280x1024x24 &
+            XVFB_PID=$!
+            sleep 2
+
+            # Start HTTP server for frontend
+            npx http-server /usr/share/komodo/frontend -p ${FRONTEND_PORT} &
+            SERVER_PID=$!
+            wait-for-it -t 30 localhost:${FRONTEND_PORT}
+            echo "Frontend server started"
+
+            # Setup Cypress test project
+            mkdir -p /tmp/cypress-tests
+            cd /tmp/cypress-tests
+
+            # Initialize minimal package.json
+            tee package.json << 'EOF'
+            {
+              "name": "komodo-frontend-tests",
+              "version": "1.0.0",
+              "devDependencies": {
+                "cypress": "^13.0.0"
+              }
+            }
+            EOF
+
+            # Install Cypress
+            yarn install --frozen-lockfile
+
+            # Create Cypress config
+            tee cypress.config.js << EOF
+            const { defineConfig } = require('cypress')
+            module.exports = defineConfig({
+              e2e: {
+                baseUrl: 'http://localhost:${FRONTEND_PORT}',
+                supportFile: false,
+                specPattern: 'cypress/e2e/**/*.cy.js',
+                video: false,
+                screenshotOnRunFailure: false,
+              },
+            })
+            EOF
+
+            # Create E2E test specs
+            mkdir -p cypress/e2e
+
+            # Test 1: Basic page load and structure
+            tee cypress/e2e/basic.cy.js << 'CYEOF'
+            describe('Komodo Frontend Basic Tests', () => {
+              it('loads the main page', () => {
+                cy.visit('/')
+                cy.get('html').should('exist')
+                cy.get('body').should('exist')
+              })
+
+              it('has proper HTML structure', () => {
+                cy.visit('/')
+                cy.document().its('doctype').should('exist')
+                cy.get('head').should('exist')
+                cy.get('body').should('exist')
+              })
+
+              it('loads CSS stylesheets', () => {
+                cy.visit('/')
+                cy.get('link[rel="stylesheet"], style').should('exist')
+              })
+
+              it('loads JavaScript', () => {
+                cy.visit('/')
+                cy.get('script').should('exist')
+              })
+            })
+            CYEOF
+
+            # Test 2: Navigation and routing (SPA)
+            tee cypress/e2e/navigation.cy.js << 'CYEOF'
+            describe('Komodo Frontend Navigation', () => {
+              it('handles SPA routing', () => {
+                cy.visit('/')
+                // React SPA should render a root div
+                cy.get('#root, #app, [data-reactroot]').should('exist')
+              })
+
+              it('returns index.html for any path (SPA fallback)', () => {
+                // Access a non-existent path - SPA should still serve index.html
+                cy.request({
+                  url: '/some/nested/path',
+                  failOnStatusCode: false
+                }).then((response) => {
+                  // Either 200 with index.html or 404 is acceptable for static server
+                  expect([200, 404]).to.include(response.status)
+                })
+              })
+            })
+            CYEOF
+
+            # Test 3: Assets loading
+            tee cypress/e2e/assets.cy.js << 'CYEOF'
+            describe('Komodo Frontend Assets', () => {
+              it('loads main JavaScript bundle', () => {
+                cy.visit('/')
+                cy.window().should('exist')
+              })
+
+              it('fetches assets without errors', () => {
+                cy.visit('/', {
+                  onBeforeLoad(win) {
+                    cy.spy(win.console, 'error').as('consoleError')
+                  }
+                })
+                // Allow page to fully load
+                cy.wait(2000)
+                // Check no critical errors (some warnings may be OK)
+              })
+
+              it('serves static assets correctly', () => {
+                cy.request('/index.html').then((response) => {
+                  expect(response.status).to.eq(200)
+                  expect(response.body).to.include('<!DOCTYPE html>')
+                })
+              })
+            })
+            CYEOF
+
+            # Run Cypress tests
+            echo "Running Cypress E2E tests..."
+            yarn cypress run --browser electron --headless
+
+            # Cleanup
+            kill $SERVER_PID 2>/dev/null || true
+            kill $XVFB_PID 2>/dev/null || true
+
+            echo "Cypress E2E tests passed"
+
+  - name: komodo-frontend-compat
+    description: Compat package for Komodo frontend Docker image
+    pipeline:
+      - runs: |
+          # Create compat paths matching upstream Docker image
+          mkdir -p "${{targets.contextdir}}/app"
+          ln -s ../usr/share/komodo/frontend "${{targets.contextdir}}/app/frontend"
+          mkdir -p "${{targets.contextdir}}/frontend"
+          ln -s ../usr/share/komodo/frontend "${{targets.contextdir}}/frontend/dist"
+    test:
+      environment:
+        contents:
+          packages:
+            - komodo-frontend
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  github:
+    identifier: moghtech/komodo
+    strip-prefix: v
+    use-tag: true
+  ignore-regex-patterns:
+    - ".*-dev.*"
+    - ".*-rc.*"
+    - ".*-beta.*"
+
+test:
+  pipeline:
+    - uses: test/tw/emptypackage

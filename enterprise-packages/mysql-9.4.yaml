@@ -1,7 +1,7 @@
 package:
   name: mysql-9.4
   version: "9.4.0"
-  epoch: 3
+  epoch: 5
   description: "The MySQL open source relational database"
   copyright:
     - license: GPL-2.0-only # https://downloads.mysql.com/docs/licenses/mysqld-9.0-gpl-en.pdf
@@ -130,11 +130,24 @@ subpackages:
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mv "${{targets.destdir}}"/usr/bin/mysql "${{targets.subpkgdir}}"/usr/bin/
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
       pipeline:
         - uses: test/virtualpackage
           with:
             virtual-pkg-name: mysql-client
             real-pkg-name: ${{subpkg.name}}
+        # Verify mysql binary works
+        - uses: test/tw/ver-check
+          with:
+            bins: mysql
+        # Simple connectivity test
+        - name: Test mysql client help
+          runs: |
+            mysql --help | grep -F "mysql  Ver"
+            echo "SUCCESS: mysql client binary works"
 
   - name: "${{package.name}}-oci-entrypoint"
     description: Entrypoint for MySQL in OCI containers
@@ -151,9 +164,73 @@ subpackages:
           cp docker-entrypoint.sh ${{targets.subpkgdir}}/usr/bin/
           chmod +x ${{targets.subpkgdir}}/usr/bin/docker-entrypoint.sh
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - ${{package.name}}-client
+            - pwgen
+            - gosu
+        environment:
+          MYSQL_ROOT_PASSWORD: TestP4ssw0rd
+          MYSQL_DATABASE: testdb
+          MYSQL_USER: testuser
+          MYSQL_PASSWORD: testpass
+          MYSQL_INITDB_SKIP_TZINFO: "1"
       pipeline:
-        - runs: |
-            test /usr/bin/docker-entrypoint.sh
+        # Verify entrypoint script exists and is executable
+        - name: Verify entrypoint script is executable
+          runs: |
+            stat /usr/bin/docker-entrypoint.sh
+            test -x /usr/bin/docker-entrypoint.sh || {
+              echo "ERROR: docker-entrypoint.sh is not executable"
+              exit 1
+            }
+            echo "SUCCESS: docker-entrypoint.sh is executable"
+        # Test entrypoint functionality - database/user creation and init scripts
+        - name: Test OCI entrypoint functionality
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # Create mysql user and group that the entrypoint script expects
+              addgroup -g 1001 mysql
+              adduser -u 1001 -D -S -G mysql mysql
+
+              mkdir -p /var/lib/mysql /run/mysqld /var/tmp /docker-entrypoint-initdb.d
+              chown -R mysql:mysql /var/lib/mysql /run/mysqld
+
+              # Create init script to test entrypoint executes it
+              tee /docker-entrypoint-initdb.d/01-init.sql << 'EOF'
+              CREATE TABLE IF NOT EXISTS test_init (
+                id INT PRIMARY KEY,
+                name VARCHAR(50)
+              );
+              INSERT INTO test_init VALUES (1, 'init-script-executed');
+              EOF
+            start: /usr/bin/docker-entrypoint.sh mysqld
+            expected_output: |
+              MySQL init process done
+              ready for connections
+            timeout: 120
+            post: |
+              set -euo pipefail
+              # Wait for server to settle
+              sleep 2
+
+              # Test 1: Verify root password was set
+              mysqladmin --user=root -p$MYSQL_ROOT_PASSWORD ping
+
+              # Test 2: Verify custom database was created
+              echo "SHOW DATABASES;" | mysql -u$MYSQL_USER -p$MYSQL_PASSWORD | grep -F "$MYSQL_DATABASE"
+
+              # Test 3: Verify custom user can connect
+              echo "SELECT 'user-works' AS result;" | mysql -u$MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE | grep -F "user-works"
+
+              # Test 4: Verify init script was executed
+              result=$(echo "SELECT name FROM test_init WHERE id=1;" | mysql -u$MYSQL_USER -p$MYSQL_PASSWORD $MYSQL_DATABASE)
+              echo "$result" | grep -F "init-script-executed"
+
+              echo "SUCCESS: Entrypoint properly created database, user, and executed init scripts"
 
   - name: "${{package.name}}-oci-entrypoint-compat"
     pipeline:
@@ -184,6 +261,12 @@ subpackages:
           mkdir -p "${{targets.subpkgdir}}"/usr/lib/systemd/system
           mv "${{targets.destdir}}"/usr/lib/systemd/system/* "${{targets.subpkgdir}}"/usr/lib/systemd/system
           rmdir -p --ignore-fail-on-non-empty "${{targets.destdir}}"/usr/lib/systemd/system
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            dir: "/usr/lib/systemd/system/"
+            name: "*.service"
 
   - name: ${{package.name}}-iamguarded-compat
     dependencies:

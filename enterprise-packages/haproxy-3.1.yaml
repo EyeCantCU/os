@@ -1,7 +1,7 @@
 package:
   name: haproxy-3.1
-  version: "3.1.10"
-  epoch: 1
+  version: "3.1.12"
+  epoch: 2
   description: "A TCP/HTTP reverse proxy for high availability environments"
   copyright:
     - license: GPL-2.0-or-later
@@ -36,22 +36,11 @@ environment:
       - pcre2-dev
 
 pipeline:
-  # Using this git to get the correct version using GitMonitor
   - uses: git-checkout
     with:
       repository: https://git.haproxy.org/git/haproxy-${{vars.major-minor-version}}.git
       tag: v${{package.version}}
-      expected-commit: 1b2cb49a0a3663ba8ac170ac5ca68001f6129275
-      destination: /home/build/nothing
-
-  - runs: rm -rf /home/build/nothing # we do not use this source to build
-
-  # We have to use fetch, as there are issues cloning from: 'https://git.haproxy.org/git/haproxy-3.0.git'.
-  # Namely: 'failed to validate pipeline git-checkout: failed to list refs for https://git.haproxy.org/git/haproxy-3.0.git/: pkt-line 1: invalid hash text: encoding/hex: invalid byte'
-  - uses: fetch
-    with:
-      uri: https://www.haproxy.org/download/${{vars.major-minor-version}}/src/haproxy-${{package.version}}.tar.gz
-      expected-sha256: d5e0be0f5949e725cac512f9ed81a740e8f3c22f6c69deede0480389960356c2
+      expected-commit: 768679d4292c01e4daad78600ef88f3f9e564a0f
 
   - uses: autoconf/make
     with:
@@ -99,7 +88,13 @@ subpackages:
             bins: /usr/bin/haproxy
         - name: Test there are no capabilities present
           runs: |
-            if [ $(getcap /usr/bin/haproxy | wc -l ) -ne 0 ]; then exit 1; fi
+            set -euo pipefail
+            output=$(getcap /usr/bin/haproxy)
+            if [ -n "$output" ]; then
+              echo "ERROR: haproxy-nocaps should not have capabilities, but found: $output"
+              exit 1
+            fi
+            echo "SUCCESS: haproxy has no capabilities"
 
   - name: "${{package.name}}-doc"
     description: "haproxy documentation"
@@ -136,6 +131,14 @@ subpackages:
           with:
             virtual-pkg-name: haproxy-oci-entrypoint
             real-pkg-name: ${{subpkg.name}}
+        - name: Verify docker-entrypoint.sh exists and is executable
+          runs: |
+            set -euo pipefail
+            stat /usr/local/bin/docker-entrypoint.sh
+            test -x /usr/local/bin/docker-entrypoint.sh || { echo "ERROR: /usr/local/bin/docker-entrypoint.sh is not executable"; exit 1; }
+            # Verify the script has valid shell syntax by checking for shebang
+            head -1 /usr/local/bin/docker-entrypoint.sh | grep -F '#!'
+            echo "docker-entrypoint.sh exists and is executable"
 
   - name: ${{package.name}}-iamguarded-compat
     dependencies:
@@ -187,9 +190,60 @@ test:
     contents:
       packages:
         - libcap-utils
+        - curl
   pipeline:
     - runs: |
         haproxy -v
     - name: Test file capabilities
       runs: |
-        getcap /usr/bin/haproxy | cut -d ' ' -f2 | grep -q -E '^cap_net_bind_service=eip$'
+        set -euo pipefail
+        getcap /usr/bin/haproxy | cut -d ' ' -f2 | grep -E '^cap_net_bind_service=eip$'
+    - name: Test HAProxy configuration validation and startup
+      runs: |
+        set -euo pipefail
+        mkdir -p /tmp/haproxy /var/lib/haproxy
+
+        # Create a minimal HAProxy configuration
+        tee /tmp/haproxy/haproxy.cfg <<'EOF'
+        global
+            maxconn 256
+        defaults
+            mode tcp
+            timeout connect 5s
+            timeout client  30s
+            timeout server  30s
+        listen test_listener
+            bind 127.0.0.1:18080
+        EOF
+
+        # Test 1: Validate configuration
+        haproxy -c -f /tmp/haproxy/haproxy.cfg
+        echo "Configuration validation: PASS"
+
+        # Test 2: Start HAProxy and verify it's running
+        haproxy -f /tmp/haproxy/haproxy.cfg -D -p /tmp/haproxy.pid
+        sleep 1
+
+        # Verify HAProxy is listening
+        if netstat -ln | grep -F "127.0.0.1:18080"; then
+          echo "HAProxy is listening on port 18080: PASS"
+        else
+          echo "ERROR: HAProxy is not listening on expected port"
+          exit 1
+        fi
+
+        # Verify process is running
+        if [ -f /tmp/haproxy.pid ]; then
+          PID=$(cat /tmp/haproxy.pid)
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "HAProxy process is running (PID: $PID): PASS"
+            kill "$PID"
+            echo "HAProxy test completed successfully"
+          else
+            echo "ERROR: HAProxy process not running"
+            exit 1
+          fi
+        else
+          echo "ERROR: HAProxy PID file not found"
+          exit 1
+        fi

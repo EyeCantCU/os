@@ -1,0 +1,140 @@
+package:
+  name: camunda-8.8
+  version: "8.8.9"
+  epoch: 1 # Bump netty to 4.1.130.Final
+  description: Process Orchestration Framework
+  copyright:
+    - license: Apache-2.0
+    - license: LicenseRef-Camunda-License-1.0
+      license-path: licenses/CAMUNDA-LICENSE-1.0.txt
+    - license: LicenseRef-Clarification-On-gRPC-Code-Generation
+      license-path: licenses/Clarification-on-gRPC-code-generation.txt
+  dependencies:
+    provides:
+      - camunda=${{package.full-version}}
+    runtime:
+      - libstdc++
+      - openjdk-${{vars.java-version}}-default-jvm
+
+vars:
+  java-version: "21" # https://github.com/camunda/camunda/blob/fd6c4fedfe9dda5b1855650f189e04ab51e6a726/Dockerfile#L9
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - protoc
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/camunda/camunda
+      tag: ${{package.version}}
+      expected-commit: 6e7e242c2c19bf69c56abf1b28cdf1fd4d586ec7
+
+  - uses: maven/pombump
+    with:
+      pom: parent/pom.xml
+
+  # NOTE: this fix is inconsistent with other camunda releases.
+  # This will need manual reviews later :-(
+  - name: "fix wrong artifact versioning"
+    runs: sed -i 's/8.8.10-SNAPSHOT/${{package.version}}/' optimize/pom.xml
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mkdir -p ${{targets.destdir}}/usr/share/java/camunda
+
+      ./mvnw -B -am -pl dist package -T1C -DskipChecks -DskipTests
+
+      tar -xzf dist/target/camunda-zeebe-*.tar.gz --strip-components=1 \
+        -C ${{targets.destdir}}/usr/share/java/camunda
+      # symlink every file in the bin directory to /usr/bin
+      for file in "${{targets.destdir}}"/usr/share/java/camunda/bin/*; do
+        name="$(basename "$file")"
+        ln -sf "../share/java/camunda/bin/$name" "${{targets.destdir}}/usr/bin/$name"
+      done
+
+      # Remove windows jar/DLLs from boringssl
+      find ${{targets.destdir}}/usr/share/java/camunda -name '*boringssl*windows*' -delete
+      # Remove macos netty jars
+      find ${{targets.destdir}}/usr/share/java/camunda \( -name "*netty.*osx" -o -name "*netty.*macos" \) -delete
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Provides compatibility with Camunda's upstream image
+    dependencies:
+      provides:
+        - camunda-compat=${{package.full-version}}
+      runtime:
+        - tini
+        - glibc-locale-en
+        - bash
+        - coreutils
+        - bash-binsh
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/local/
+          ln -sf ../share/java/camunda ${{targets.contextdir}}/usr/local/camunda
+    test:
+      environment:
+        contents:
+          packages:
+            - camunda=${{package.full-version}}
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/tw/virtualpackage
+          with:
+            virtual-pkg-name: camunda-compat
+        - runs: readlink -v /usr/local/camunda
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - "operate-"
+  github:
+    identifier: camunda/camunda
+    tag-filter: 8.8.
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+  pipeline:
+    - uses: test/tw/virtualpackage
+      with:
+        virtual-pkg-name: camunda
+    - uses: test/tw/symlink-check
+    - runs: |
+        # Camunda will try to create schemas in ElasticSearch by default: we
+        # don't have an ES version that uses the same version of Java as this
+        # package, so installing it isn't practical
+        sed -i "s/'elasticsearch'/'none'/" /usr/local/camunda/config/application.yaml
+    - name: "test gateway"
+      uses: test/daemon-check-output
+      with:
+        start: "/usr/local/camunda/bin/gateway"
+        timeout: "60"
+        expected_output: |
+          Started StandaloneGateway
+          started on port
+    - name: "test broker"
+      uses: test/daemon-check-output
+      with:
+        start: "/usr/local/camunda/bin/broker"
+        timeout: "60"
+        expected_output: |
+          Started messaging service bound to
+          Started cluster membership service
+          Started messaging service
+          Server successfully bootstrapped
+          All partitions are installed
+    - name: "test restore"
+      runs: |
+        set -e
+        /usr/local/camunda/bin/restore | grep "No backup store configured, cannot restore from backup."

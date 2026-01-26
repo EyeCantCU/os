@@ -1,7 +1,7 @@
 package:
   name: packer-fips
   version: "1.14.3"
-  epoch: 2 # CVE-2025-61729
+  epoch: 3 # CVE-2025-61729
   copyright:
     - license: BUSL-1.1
 
@@ -38,9 +38,88 @@ update:
 
 test:
   pipeline:
-    - name: Verison Check
+    - name: Version Check
       runs: |
         packer version
         packer --version
         packer --help
     - uses: test/go-fips-check
+    - name: Test template validation
+      runs: |
+        # Create a valid Packer template using the null builder
+        tee /tmp/valid.pkr.hcl <<'EOF'
+        packer {
+          required_version = ">= 1.7.0"
+        }
+
+        source "null" "test" {
+          communicator = "none"
+        }
+
+        build {
+          sources = ["source.null.test"]
+        }
+        EOF
+
+        # Validate the template parses correctly
+        packer validate /tmp/valid.pkr.hcl
+        echo "Template validation passed"
+    - name: Test template syntax checking with init
+      runs: |
+        # Create a template directory for init
+        mkdir -p /tmp/packer-test
+        tee /tmp/packer-test/main.pkr.hcl <<'EOF'
+        packer {
+          required_version = ">= 1.7.0"
+        }
+
+        source "null" "example" {
+          communicator = "none"
+        }
+
+        build {
+          sources = ["source.null.example"]
+        }
+        EOF
+
+        # Test packer init (downloads plugins if needed, validates config)
+        cd /tmp/packer-test
+        packer init .
+        echo "Packer init succeeded"
+    - name: Test null builder build
+      runs: |
+        # Create a minimal template using the null builder
+        tee /tmp/build.pkr.hcl <<'EOF'
+        source "null" "functional-test" {
+          communicator = "none"
+        }
+
+        build {
+          sources = ["source.null.functional-test"]
+
+          provisioner "shell-local" {
+            inline = ["echo 'Packer build completed successfully'"]
+          }
+        }
+        EOF
+
+        # Run a full build with the null builder to prove image-building functionality works
+        packer build /tmp/build.pkr.hcl 2>&1 | tee /tmp/build-output.txt
+
+        # Verify the build completed successfully
+        grep -F "Packer build completed successfully" /tmp/build-output.txt
+        echo "Null builder build test passed - core functionality verified"
+    - name: Test invalid template detection
+      runs: |
+        # Create an invalid template to test error detection
+        tee /tmp/invalid.pkr.hcl <<'EOF'
+        source "null" "invalid" {
+          # Missing required closing brace
+        EOF
+
+        # Packer should fail to validate invalid templates
+        if packer validate /tmp/invalid.pkr.hcl 2>/dev/null; then
+          echo "ERROR: Packer should have rejected invalid template"
+          exit 1
+        fi
+        echo "Invalid template detection works correctly"

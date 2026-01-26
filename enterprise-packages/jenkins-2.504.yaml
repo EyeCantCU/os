@@ -1,19 +1,16 @@
 package:
   name: jenkins-2.504
   version: "2.504.3"
-  epoch: 5 # GHSA-8v5q-rhf3-jphm
+  epoch: 8 # GHSA-mmxm-8w33-wc4h
   description:
   copyright:
     - license: MIT
-  dependencies:
-    runtime:
-      # Jenkins requires both bash and busybox.
-      - bash
-      - busybox
-      - coreutils
-      - glibc-locale-en
-      - ttf-dejavu
-      - tzdata
+
+data:
+  - name: openjdk-versions
+    items:
+      17: "/usr/lib/jvm/java-17-openjdk"
+      21: "/usr/lib/jvm/java-21-openjdk"
 
 environment:
   contents:
@@ -28,7 +25,8 @@ environment:
       - git
       - glibc-locale-en
       - maven
-      - openjdk-17-default-jdk
+      - openjdk-17
+      - openjdk-21
       - openssh-client
       - patch
       - tini
@@ -41,29 +39,98 @@ pipeline:
       repository: https://github.com/jenkinsci/jenkins
       tag: jenkins-${{package.version}}
       expected-commit: be8bec65854aa572bd2492c933c4ca77e4ac2db2
+      cherry-picks: |
+        master/efa1816322026f2b9235a27eee814bcc7ba0a764: CVE-2025-67635
+        master/3ee7380c5e167fab865f58b52a81ef01c24b9eb2: CVE-2025-67636
+        master/4710d65339251aaf1d1599f19545db99be24d981: [CVE-2025-67637,CVE-2025-67638]
+
+  - uses: maven/pombump
 
   - uses: patch
     with:
       patches: bump-commons-lang3-api-GHSA-j288-q9x7-2f5v.patch
 
-  - uses: maven/pombump
+subpackages:
+  - range: openjdk-versions
+    name: ${{package.name}}-openjdk-${{range.key}}
+    dependencies:
+      provides:
+        - jenkins-openjdk-${{range.key}}=${{package.full-version}}
+      runtime:
+        # The entrypoint script is pulled from a separate repo, which we'e packaged.
+        - bash
+        - busybox
+        - coreutils
+        - glibc-locale-en
+        - ttf-dejavu
+        - tzdata
+        - openjdk-${{range.key}}-default-jvm
+    pipeline:
+      - uses: maven/pombump
+      - runs: |
+          # Use commit timestamp as build date to satisfy Jenkins in-place upgrade functionality (.war file needs to match release date)
+          echo "Setting SOURCE_DATE_EPOCH"
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct)
+          echo "JAVA_HOME is ${{range.value}}"
+          export JAVA_HOME=${{range.value}}
+          mvn spotless:apply
+      - runs: |
+          # Use commit timestamp as build date to satisfy Jenkins in-place upgrade functionality (.war file needs to match release date)
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct)
+          export JAVA_HOME=${{range.value}}
+          export PATH="$JAVA_HOME/bin:$PATH"
+          export LANG=en_US.UTF-8
 
-  - runs: mvn spotless:apply
+          export MAVEN_OPTS="-DforkCount=2"
 
-  - runs: |
-      # Use commit timestamp as build date to satisfy Jenkins in-place upgrade functionality (.war file needs to match release date)
-      export SOURCE_DATE_EPOCH=$(git show -s --format=%ct)
+          # All tests take ~1.5 hours to run and have passed 100% since the initial addition of Jenkins, let's skip them and save time + resources
+          # But run tests for cherry picked patches
+          # Security1809Test: CVE-2025-67636, Security3630Test: CVE-2025-67635, BuildAuthorizationTokenMigrationTest: CVE-2025-67637,CVE-2025-67638
+          mvn install -Dtest=Security1809Test,Security3630Test,BuildAuthorizationTokenMigrationTest -Dspotbugs.maxAllowedViolations=1
 
-      export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
-      export LANG=en_US.UTF-8
-
-      export MAVEN_OPTS="-DforkCount=2"
-
-      # tests take ~1.5 hours to run and have passed 100% since the initial addition of Jenkins, let's skip them and save time + resources
-      mvn install -DskipTests=true -Dspotbugs.maxAllowedViolations=1
-
-      mkdir -p ${{targets.destdir}}/usr/share/java/jenkins
-      mv war/target/jenkins.war ${{targets.destdir}}/usr/share/java/jenkins/
+          mkdir -p ${{targets.contextdir}}/usr/share/java/jenkins
+          mv war/target/jenkins.war ${{targets.contextdir}}/usr/share/java/jenkins/
+    test:
+      environment:
+        contents:
+          packages:
+            - openjdk-${{range.key}}-default-jvm
+            - jenkins-compat
+            - jenkins-entrypoint
+      pipeline:
+        - name: "Check .war timestamp is being set correctly (not zero)"
+          runs: |
+            WAR_TIME=$(stat -c %Y /usr/share/java/jenkins/jenkins.war)
+            if [ "$WAR_TIME" -eq 0 ]; then
+            echo "WAR file timestamp is zero"
+            exit 1
+            fi
+        - runs: |
+            cleanup() {
+              echo "Cleaning up..."
+              kill $JENKINS_PID
+            }
+            trap cleanup EXIT
+            /usr/bin/java -Duser.home=/var/jenkins_home -jar /usr/share/java/jenkins/jenkins.war --version
+            echo "Launching Jenkins and performing log validation..."
+            /usr/bin/java -Duser.home=/var/jenkins_home -jar /usr/share/java/jenkins/jenkins.war > jenkins.log 2>&1 &
+            JENKINS_PID=$!
+            TIMEOUT=60
+            while ! grep -q "Jenkins is fully up and running" jenkins.log && [ $TIMEOUT -gt 0 ]; do
+              sleep 1
+              TIMEOUT=$((TIMEOUT-1))
+            done
+            # Check for timeout without Jenkins being fully up
+            if [ $TIMEOUT -eq 0 ]; then
+              echo "Attempted to launch Jenkins in melange test, but log validation failed."
+              exit 1
+            fi
+            # Perform checks for FAIL in the logs
+            if grep -Eq "FAIL|FAILURE|ERROR" jenkins.log; then
+              echo "Successfully launched Jenkins in melange tests, but errors where found in the logs."
+              exit 1
+            fi
+        - uses: test/no-docs
 
 update:
   ignore-regex-patterns:
@@ -73,43 +140,7 @@ update:
     strip-prefix: jenkins-
     tag-filter-prefix: jenkins-2.504
 
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
 test:
-  environment:
-    contents:
-      packages:
-        - openjdk-17-default-jvm
-        - jenkins-compat
-        - jenkins-entrypoint
   pipeline:
-    - name: "Check .war timestamp is being set correctly (not zero)"
-      runs: |
-        WAR_TIME=$(stat -c %Y /usr/share/java/jenkins/jenkins.war)
-        if [ "$WAR_TIME" -eq 0 ]; then
-        echo "WAR file timestamp is zero"
-        exit 1
-        fi
-    - runs: |
-        cleanup() {
-          echo "Cleaning up..."
-          kill $JENKINS_PID
-        }
-        trap cleanup EXIT
-        /usr/bin/java -Duser.home=/var/jenkins_home -jar /usr/share/java/jenkins/jenkins.war --version
-        echo "Launching Jenkins and performing log validation..."
-        /usr/bin/java -Duser.home=/var/jenkins_home -jar /usr/share/java/jenkins/jenkins.war > jenkins.log 2>&1 &
-        JENKINS_PID=$!
-        TIMEOUT=60
-        while ! grep -q "Jenkins is fully up and running" jenkins.log && [ $TIMEOUT -gt 0 ]; do
-          sleep 1
-          TIMEOUT=$((TIMEOUT-1))
-        done
-        # Check for timeout without Jenkins being fully up
-        if [ $TIMEOUT -eq 0 ]; then
-          echo "Attempted to launch Jenkins in melange test, but log validation failed."
-          exit 1
-        fi
-        # Perform checks for FAIL in the logs
-        if grep -Eq "FAIL|FAILURE|ERROR" jenkins.log; then
-          echo "Successfully launched Jenkins in melange tests, but errors where found in the logs."
-          exit 1
-        fi
+    - uses: test/emptypackage

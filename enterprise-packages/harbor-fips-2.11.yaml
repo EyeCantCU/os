@@ -1,7 +1,7 @@
 package:
   name: harbor-fips-2.11
   version: 2.11.2
-  epoch: 27 # CVE-2025-61729
+  epoch: 30
   description: An open source trusted cloud native registry project that stores, signs, and scans content
   copyright:
     - license: Apache-2.0
@@ -11,9 +11,18 @@ package:
     runtime:
       - ca-certificates-bundle
 
+# To be updated as upstream harbor distribution requirements, when drift check fails for harbor-distribution subpackage.
+vars:
+  # https://github.com/goharbor/harbor/blob/main/make/photon/prepare/Pipfile#L15
+  python-version: "3.13"
+  custom-distribution-version: 2.8.3
+  harbor-distribution-expected-commit: 4772604ae973031ab32dd9805a4bccf61d94909f # needs to be updated with each package release
+
 environment:
   environment:
     GCC_SPEC_FILE: "no-hardening.spec"
+    DISTRIBUTION_PKG: "github.com/docker/distribution"
+    DISTRIBUTION_DIR: "/usr/lib/go/src/github.com/docker/distribution"
   contents:
     packages:
       - nodejs
@@ -289,6 +298,136 @@ subpackages:
         - runs: |
             stat /usr/bin/docker-healthcheck
             stat /etc/redis.conf
+
+  - name: ${{package.name}}-prepare
+    description: Harbor prepare - configuration generator for Harbor deployment
+    dependencies:
+      provides:
+        - harbor-prepare-fips=${{package.full-version}}
+      runtime:
+        - apache2-utils
+        # entrypoint script needs busybox because it uses /usr/bin/which, also needs bash
+        - bash
+        - busybox
+        - openssl-config-fipshardened
+        - py${{vars.python-version}}-click
+        - py${{vars.python-version}}-jinja2
+        - py${{vars.python-version}}-packaging
+        - py${{vars.python-version}}-setuptools
+        - py${{vars.python-version}}-pyyaml
+        - python-${{vars.python-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/src/app"
+          mkdir -p "${{targets.subpkgdir}}/harbor_make"
+          cp -rf ./make/photon/prepare/* "${{targets.subpkgdir}}/usr/src/app/"
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: /usr/src/app/main.py
+        - runs: |
+            cd /usr/src/app && python3 main.py --help | grep -F "Commands"
+        - uses: test/tw/pip-check
+
+  # Sub-package to serve harbor-registry/distribution version from goharbor/distribution repo(Harbor's Fork for distribution)
+  # To be updated when the drift check fails.
+  # If the drift check test fails, this means that the upstream images no longer use older Distribution version and have succesfully migrated to using the next release branch.
+  - name: ${{package.name}}-photon-registry
+    description: harbor registry custom package built using Distribution v2.8.3
+    dependencies:
+      provides:
+        - harbor-photon-registry-fips=${{package.full-version}}
+    pipeline:
+      - name: "Drift Check"
+        runs: |
+          # https://github.com/goharbor/harbor/blob/v2.11.2/Makefile#L111
+          grep -qF "REGISTRY_SRC_TAG=v${{vars.custom-distribution-version}}" Makefile
+      - name: "Add entrypoint scripts to match upstream"
+        runs: |
+          # As per upstream: https://github.com/goharbor/harbor/blob/v2.11.2/make/photon/registry/Dockerfile#L5-L6
+          # This script basically triggers option install_cert.sh script which will be skipped if the OS is not Photon and run registry binary
+          mkdir -p ${{targets.subpkgdir}}/home/harbor
+          cp ./make/photon/common/install_cert.sh ${{targets.subpkgdir}}/home/harbor/install_cert.sh
+          cp ./make/photon/registry/entrypoint.sh ${{targets.subpkgdir}}/home/harbor/entrypoint.sh
+      - uses: git-checkout
+        with:
+          repository: https://github.com/goharbor/distribution
+          tag: "v${{vars.custom-distribution-version}}"
+          expected-commit: ${{vars.harbor-distribution-expected-commit}} # needs to be updated with each package release
+      - name: "Build"
+        runs: |
+          # distribution v2.8.3 does not have go.mod file and therefore, it's not supported by Melange's go/build pipelines
+          set -eux
+          # GOPATH-style build
+          # We can't use melange's go/build pipeline because it primarily requires go.mod file which does not exist in source code for Distribution v2.8.3
+          install_dir="${{targets.subpkgdir}}/usr/bin"
+          mkdir -p "${install_dir}"
+
+          # Set up GOPATH structure for old-style Go build
+          # GOPATH is already configured, create symlink to expected location
+          mkdir -p ${GOPATH}/src/github.com/docker
+          ln -sf $(pwd) ${GOPATH}/src/${DISTRIBUTION_PKG}
+
+          # As per upstream: https://github.com/goharbor/distribution/blob/release/2.8/Makefile#L5-L6
+          REVISION=$(git rev-parse HEAD)$(if ! git diff --no-ext-diff --quiet --exit-code; then echo .m; fi)
+          VERSION=$(git describe --match 'v[0-9]*' --dirty='.m' --always)
+
+          GO111MODULE="off" go build \
+            -tags "include_oss,include_gcs" \
+            -ldflags "-w -X ${DISTRIBUTION_PKG}/version.Version=${VERSION} -X ${DISTRIBUTION_PKG}/version.Revision=${REVISION} -X ${DISTRIBUTION_PKG}/version.Package=${DISTRIBUTION_PKG}" \
+            -o "${install_dir}/harbor-registry" \
+            ./cmd/registry
+      - uses: strip
+      - name: "Add components for registry"
+        runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mkdir -p ${{targets.subpkgdir}}/etc/registry
+          # Create compatibility symlink for legacy registry binary name
+          ln -sf /usr/bin/harbor-registry ${{targets.subpkgdir}}/usr/bin/registry_DO_NOT_USE_GC
+          # Use example config as registry config
+          cp ./cmd/registry/config-example.yml ${{targets.subpkgdir}}/etc/registry/config.yml
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - wait-for-it
+      pipeline:
+        - uses: test/go-fips-check
+        - name: "Basic checks"
+          runs: |
+            # Basic version and help validation
+            harbor-registry --version | grep -qF ${{vars.custom-distribution-version}}
+            harbor-registry --help | grep -qF "Available Commands"
+
+            # Test compatibility symlink
+            [ "$(readlink -f /usr/bin/registry_DO_NOT_USE_GC)" = "/usr/bin/harbor-registry" ]
+            registry_DO_NOT_USE_GC --version | grep -q ${{vars.custom-distribution-version}}
+            registry_DO_NOT_USE_GC --help | grep -q "Available Commands"
+        - name: "Check Entrypoint files"
+          runs: |
+            stat /home/harbor/install_cert.sh
+            stat /home/harbor/entrypoint.sh
+        - uses: test/daemon-check-output
+          with:
+            start: "harbor-registry serve /etc/registry/config.yml"
+            expected_output: |
+              level=info
+              service=registry
+              listening on
+            post: |
+              set -o pipefail
+              wait-for-it localhost:5000 -t 10
+              curl -fsSL -I localhost:5000 | grep -q "HTTP/1.1 200"
+
+  - name: ${{package.name}}-trivy-adapter
+    description: Use Trivy as a plug-in vulnerability scanner in the Harbor registry
+    dependencies:
+      runtime:
+        - harbor-scanner-trivy-fips
+      provides:
+        - harbor-trivy-adapter-fips=${{package.full-version}}
 
 test:
   pipeline:
