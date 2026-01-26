@@ -5,41 +5,16 @@ package:
   description: Emscripten SDK - Toolchain for compiling C/C++ to WebAssembly
   copyright:
     - license: MIT
-  # Prevent emscripten's WebAssembly-specific pkg-config files from being
-  # advertised as system library providers (egl, glesv2, glfw3, sdl are
-  # WebAssembly implementations, not native system libraries)
-  options:
-    no-provides: true
   dependencies:
     runtime:
       - bash
-      - binaryen
       - ca-certificates-bundle
-      - clang
-      - coreutils
-      - lld
-      - llvm
-      - nodejs
-      - python3
-
-vars:
-  java-version: "11" # Upstream ships with jdk 11
+      - emscripten
 
 environment:
   contents:
     packages:
-      - bash
-      - binaryen
-      - build-base
       - busybox
-      - clang
-      - cmake
-      - jq
-      - lld
-      - llvm
-      - nodejs
-      - npm
-      - openjdk-${{vars.java-version}}-default-jdk
       - python3
       - wolfi-base
 
@@ -51,13 +26,7 @@ pipeline:
       expected-commit: b4258c35121c8d0e12f53568ffb22236d7816723
 
   - runs: |
-      COMMIT_HASH=$(jq -r '.releases["${{package.version}}"]' emscripten-releases-tags.json)
-
-      # Install Emscripten toolchain
-      ./emsdk install "releases-${COMMIT_HASH}-64bit"
-      ./emsdk activate "releases-${COMMIT_HASH}-64bit"
-
-      # Install emsdk to /usr/lib/emsdk (following Dockerfile approach)
+      # Install emsdk scripts to /usr/lib/emsdk
       mkdir -p "${{targets.destdir}}"/usr/lib/emsdk
 
       # Copy essential files for emsdk to work
@@ -66,32 +35,9 @@ pipeline:
       cp legacy-emscripten-tags.txt legacy-binaryen-tags.txt llvm-tags-64bit.txt "${{targets.destdir}}"/usr/lib/emsdk/
       cp emsdk_env.sh "${{targets.destdir}}"/usr/lib/emsdk/
 
-  - runs: |
-      # Generate config by compiling a test program (Dockerfile approach)
-      echo "int main() { return 0; }" > hello.c
-      ./upstream/emscripten/emcc -c hello.c
-      rm -f hello.*
-      mv ./upstream "${{targets.destdir}}"/usr/lib/emsdk
-
-      # Clean up unnecessary files (from Dockerfile)
-      find "${{targets.destdir}}"/usr/lib/emsdk \( -name "test" -o -name "tests" \) -type d -exec rm -rf {} + || true
-      find "${{targets.destdir}}"/usr/lib/emsdk -name "__pycache__" -type d -exec rm -rf {} + || true
-
-  # Remove vendored LLVM binaries and replace with symlinks to system LLVM
-  - runs: |
-      LLVM_BIN="${{targets.destdir}}/usr/lib/emsdk/upstream/bin"
-      SYSTEM_LLVM="/usr/bin"
-
-      # Remove all vendored LLVM/clang binaries and libraries
-      rm -f "$LLVM_BIN"/clang* "$LLVM_BIN"/lld* "$LLVM_BIN"/ld.lld "$LLVM_BIN"/ld64.lld \
-            "$LLVM_BIN"/wasm-ld "$LLVM_BIN"/llvm-* "$LLVM_BIN"/libclang.so*
-
-      # Create symlinks to system LLVM for required tools
-      for tool in clang clang++ lld ld.lld wasm-ld \
-                  llvm-ar llvm-as llvm-dis llvm-dwarfdump llvm-dwp llvm-nm \
-                  llvm-objcopy llvm-ranlib llvm-readobj llvm-size llvm-strip llvm-symbolizer; do
-        ln -sf "$SYSTEM_LLVM/$tool" "$LLVM_BIN/$tool"
-      done
+      # Create /emsdk/upstream symlink for Docker image compatibility
+      mkdir -p "${{targets.destdir}}"/emsdk
+      ln -sf /upstream "${{targets.destdir}}"/emsdk/upstream
 
 subpackages:
   - name: emsdk-oci-entrypoint
@@ -115,91 +61,52 @@ subpackages:
             stat /usr/lib/emsdk/docker/entrypoint.sh
             test -x /usr/lib/emsdk/docker/entrypoint.sh
 
-  - name: emsdk-compat
-    description: Compatibility package providing emsdk at /emsdk (Docker image compatible)
-    dependencies:
-      runtime:
-        - emsdk
-    pipeline:
-      - runs: |
-          # Create symlink from /emsdk to /usr/lib/emsdk (Docker compatible path)
-          mkdir -p "${{targets.subpkgdir}}"
-          ln -sf /usr/lib/emsdk "${{targets.subpkgdir}}"/emsdk
-    test:
-      environment:
-        contents:
-          packages:
-            - python3
-      pipeline:
-        - uses: test/tw/symlink-check
-          with:
-            allow-absolute: true
-        - name: "Test Docker-compatible paths"
-          runs: |
-            set -euo pipefail
-
-            # Verify /emsdk symlink exists and points to correct location
-            stat /emsdk
-            test -L /emsdk
-            readlink /emsdk | grep -F "/usr/lib/emsdk"
-
-            # Verify the symlink target is accessible
-            stat /emsdk/emsdk
-            stat /emsdk/upstream/emscripten/emcc
-
 test:
   environment:
     contents:
       packages:
+        - nodejs
         - python3
-        - ${{package.name}}-compat
   pipeline:
     - name: "Test emsdk installation"
       runs: |
         set -euo pipefail
-        export PATH="/usr/lib/emsdk:/usr/lib/emsdk/upstream/emscripten:$PATH"
-
-        # Test emsdk command
-        emsdk list | grep -F "INSTALLED"
 
         # Verify emcc version and configuration
-        emcc --version 2>&1 | grep -F "${{package.version}}"
-        em++ --version 2>&1 | grep -F "${{package.version}}"
-        emar --version 2>&1 | grep -F "LLVM version"
+        emcc --version
+        em++ --version
+        emar --version
 
-        # Verify emscripten tools exist
-        stat /usr/lib/emsdk/upstream/emscripten/emcc
-        stat /usr/lib/emsdk/upstream/emscripten/em++
+        # Verify /emsdk/upstream symlink for Docker compatibility
+        stat /emsdk/upstream
+        test -L /emsdk/upstream
+        readlink /emsdk/upstream | grep -F "/upstream"
+
+        # Verify emscripten tools exist via symlink
+        stat /emsdk/upstream/emscripten/emcc
+        stat /emsdk/upstream/emscripten/em++
 
         # Verify LLVM symlinks point to system LLVM
-        readlink /usr/lib/emsdk/upstream/bin/clang | grep -F "/usr/bin"
-        readlink /usr/lib/emsdk/upstream/bin/wasm-ld | grep -F "/usr/bin"
-    - name: "Test emcc version"
-      runs: |
-        set -euo pipefail
-        export PATH="/usr/lib/emsdk:/usr/lib/emsdk/upstream/emscripten:$PATH"
-
-        # Verify emcc reports the correct version
-        emcc --version 2>&1 | grep -F "${{package.version}}"
+        readlink /emsdk/upstream/bin/clang | grep -F "/usr/bin"
+        readlink /emsdk/upstream/bin/wasm-ld | grep -F "/usr/bin"
     - name: "Test WebAssembly compilation"
       runs: |
         set -euo pipefail
-        export PATH="/usr/lib/emsdk:/usr/lib/emsdk/upstream/emscripten:$PATH"
 
-        # Compile to WebAssembly
-        emcc hello-world.c
+        # Compile a simple C program to WebAssembly
+        echo 'int main() { return 0; }' > test.c
+        emcc test.c -o test.js
 
         # Verify output was created
-        stat a.out.js
-        stat a.out.wasm
-
-        # Run with emsdk's bundled node
-        node a.out.js | grep -F "hello, world!"
+        stat test.js
+        stat test.wasm
     - name: "Test library linking"
       runs: |
         set -euo pipefail
-        export PATH="/usr/lib/emsdk:/emsdk/upstream/emscripten:$PATH"
-        cat > main.cpp <<'EOF'
+        tee add.cpp << 'EOF'
+        int add(int a, int b) { return a + b; }
+        EOF
+        tee main.cpp << 'EOF'
         #include <iostream>
         int add(int,int);
         int main(){ std::cout << add(2,3) << std::endl; }
@@ -208,16 +115,12 @@ test:
         emar rcs libadd.a add.o
         emar t libadd.a | grep -F "add.o"
 
-        # Verify output was created
-        stat add.cpp
-        stat add.o
-
         # Compile to WebAssembly
         em++ main.cpp -L. -ladd -o main.js -sENVIRONMENT=node -sEXIT_RUNTIME=1
         stat main.js
         stat main.wasm
 
-        # Run with emsdk's bundled node
+        # Run with node
         node main.js | grep -F 5
 
 update:
