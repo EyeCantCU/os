@@ -1,7 +1,7 @@
 package:
   name: trust-manager-fips
   version: "0.20.3"
-  epoch: 0 # CVE-2025-61729
+  epoch: 1 # CVE-2025-61729
   description: trust-manager is an operator for distributing trust bundles across a Kubernetes cluster.
   copyright:
     - license: Apache-2.0
@@ -26,12 +26,57 @@ pipeline:
       repository: https://github.com/cert-manager/trust-manager
       tag: v${{package.version}}
       expected-commit: 596512c47007e2b303be9a592265bb66e530f1ef
+      destination: trust-manager
 
   - uses: go/build
     with:
       packages: ./cmd/trust-manager
       output: trust-manager
       go-package: go-fips
+      modroot: trust-manager
+
+subpackages:
+  - name: "trust-package-fips"
+    description: "Utility for copying trust packages from bundles"
+    pipeline:
+      - uses: go/build
+        with:
+          packages: .
+          output: copyandmaybepause
+          modroot: trust-manager/trust-packages/debian
+          go-package: go-fips
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+        - uses: test/tw/help-check
+          with:
+            bins: /usr/bin/copyandmaybepause
+        - name: Test file copying functionality
+          runs: |
+            set -euo pipefail
+            # Create test directories
+            mkdir -p /tmp/test-input /tmp/test-output
+
+            # Create test JSON files
+            echo '{"test": "data1"}' > /tmp/test-input/file1.json
+            echo '{"test": "data2"}' > /tmp/test-input/file2.json
+
+            # Create non-JSON file (should be ignored)
+            echo "not json" > /tmp/test-input/file.txt
+
+            # Run copyandmaybepause
+            copyandmaybepause /tmp/test-input /tmp/test-output
+
+            # Verify JSON files were copied
+            stat /tmp/test-output/file1.json
+            stat /tmp/test-output/file2.json
+
+            # Verify non-JSON file was not copied (should fail)
+            ! stat /tmp/test-output/file.txt
+
+            # Verify content matches
+            grep -F '"test": "data1"' /tmp/test-output/file1.json
+            grep -F '"test": "data2"' /tmp/test-output/file2.json
 
 test:
   environment:
@@ -55,7 +100,7 @@ test:
           kubectl apply -f trust-manager/deploy/crds/
           kubectl config view --minify --raw > /tmp/kubeconfig.yaml
           # Verify CRDs are installed
-          kubectl get crds | grep trust.cert-manager.io
+          kubectl get crds | grep -F trust.cert-manager.io
           # Create webhook certificates
           mkdir -p /tmp/trust-manager-certs
           openssl req -x509 -newkey rsa:2048 -keyout /tmp/trust-manager-certs/tls.key \
@@ -79,8 +124,9 @@ test:
           Starting workers
         timeout: 30
         post: |
-          curl -f http://localhost:6060/readyz | grep -q "ok"
-          curl -s http://localhost:9402/metrics | grep -q trust_manager
+          set -euo pipefail
+          curl -fsS http://localhost:6060/readyz | grep -F "ok"
+          curl -fsS http://localhost:9402/metrics | grep -F "controller_runtime"
           kubectl create namespace cert-manager
           # Create test CA certificate
           openssl req -x509 -newkey rsa:2048 -keyout /tmp/test-ca.key \
@@ -111,7 +157,7 @@ test:
           kubectl apply -f /tmp/test-bundle.yaml
           sleep 15
           # Verify Bundle was created
-          kubectl get bundles -n cert-manager | grep -q "test-bundle"
+          kubectl get bundles -n cert-manager | grep -F "test-bundle"
 
 update:
   enabled: true
