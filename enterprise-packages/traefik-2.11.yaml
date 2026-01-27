@@ -1,7 +1,7 @@
 package:
   name: traefik-2.11
   version: "2.11.35"
-  epoch: 0 # GHSA-j5w8-q4qc-rx2x
+  epoch: 1 # GHSA-j5w8-q4qc-rx2x
   description: The Cloud Native Application Proxy
   copyright:
     - license: MIT
@@ -33,12 +33,19 @@ update:
     tag-filter-prefix: v2.11.
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - python3
   pipeline:
-    - runs: |
-        set -o pipefail
-        traefik version | grep ${{package.version}}
-        traefik --help
-    - name: Run and test traefik
+    - uses: test/tw/ver-check
+      with:
+        bins: traefik
+    - uses: test/tw/help-check
+      with:
+        bins: traefik
+    - name: Run and test traefik with ping and API verification
       uses: test/daemon-check-output
       with:
         start: traefik --ping=true --ping.entryPoint=traefik --api.insecure=true --log.level=DEBUG
@@ -46,3 +53,79 @@ test:
         expected_output: |
           Creating middleware
           Setting up redirection
+        post: |
+          # Wait for Traefik to be fully ready
+          wait-for-it localhost:8080 -t 30
+
+          # Verify ping endpoint responds
+          curl -f http://localhost:8080/ping || {
+            echo "ERROR: Ping endpoint did not respond"
+            exit 1
+          }
+          echo "SUCCESS: Ping endpoint is working"
+
+          # Verify API endpoint responds
+          curl -f http://localhost:8080/api/overview || {
+            echo "ERROR: API endpoint did not respond"
+            exit 1
+          }
+          echo "SUCCESS: API endpoint is working"
+    - name: Test reverse proxy functionality
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create backend server directory
+          mkdir -p /tmp/backend
+          echo "Hello from backend" > /tmp/backend/index.html
+
+          # Start Python HTTP server as backend on port 9000
+          cd /tmp/backend
+          python3 -m http.server 9000 > /tmp/backend.log 2>&1 &
+
+          # Wait for backend to be ready
+          wait-for-it localhost:9000 -t 10
+
+          # Create Traefik static configuration
+          mkdir -p /tmp/traefik
+          tee /tmp/traefik/traefik.yml <<'EOF'
+          entryPoints:
+            web:
+              address: ":8081"
+          providers:
+            file:
+              filename: /tmp/traefik/dynamic.yml
+          log:
+            level: DEBUG
+          EOF
+
+          # Create dynamic configuration with router to backend
+          tee /tmp/traefik/dynamic.yml <<'EOF'
+          http:
+            routers:
+              backend:
+                rule: "PathPrefix(`/`)"
+                service: backend-service
+                entryPoints:
+                  - web
+            services:
+              backend-service:
+                loadBalancer:
+                  servers:
+                    - url: "http://localhost:9000"
+          EOF
+        start: traefik --configFile=/tmp/traefik/traefik.yml
+        timeout: 30
+        expected_output: |
+          Starting provider
+        post: |
+          # Wait for Traefik entrypoint to be ready
+          wait-for-it localhost:8081 -t 30
+
+          # Test that request through Traefik reaches the backend
+          response=$(curl -sf http://localhost:8081/)
+          echo "$response" | grep -F "Hello from backend" || {
+            echo "ERROR: Expected backend response through proxy"
+            echo "Got: $response"
+            exit 1
+          }
+          echo "SUCCESS: Traefik reverse proxy is working"
