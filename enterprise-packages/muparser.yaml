@@ -1,0 +1,162 @@
+package:
+  name: muparser
+  version: 2.3.5
+  epoch: 0
+  description: Fast math parser library
+  copyright:
+    - license: BSD-2-Clause
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cmake
+      - samurai
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/beltoforion/muparser
+      tag: v${{package.version}}
+      expected-commit: fbafd7f8774af2b53f4d2de07c57353fcfc09216
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DBUILD_SHARED_LIBS=True \
+        -DENABLE_SAMPLES=OFF \
+        -DENABLE_OPENMP=OFF
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - uses: strip
+
+subpackages:
+  - name: muparser-dev
+    description: muparser development headers
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - muparser
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  github:
+    identifier: beltoforion/muparser
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - build-base
+        - cmake
+        - muparser-dev
+        - samurai
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Compile and Execute Test
+      runs: |
+        cat << 'EOF' > test.cpp
+        #include <muParser.h>
+        #include <iostream>
+        #include <cmath>
+        #include <string>
+
+        int main() {
+            mu::Parser parser;
+
+            // Test 1: Basic arithmetic
+            parser.SetExpr("1 + 2 * 3");
+            if (std::abs(parser.Eval() - 7.0) > 0.001) {
+                std::cerr << "Test 1 failed" << std::endl;
+                return 1;
+            }
+
+            // Test 2: Variables and constants
+            double x = 2.0;
+            parser.DefineVar("x", &x);
+            parser.DefineConst("pi", M_PI);
+            parser.SetExpr("sin(pi * x)");
+
+            if (std::abs(parser.Eval()) > 0.001) {
+                std::cerr << "Test 2 failed" << std::endl;
+                return 1;
+            }
+
+            // Test 3: Complex expressions
+            parser.SetExpr("sqrt(x^2 + 3*x + 4)");  // sqrt(16 + 12 + 4) = sqrt(32) = 5.657...
+            x = 4.0;
+            double result = parser.Eval();
+            double expected = sqrt(32.0);
+            if (std::abs(result - expected) > 0.001) {
+                std::cerr << "Test 3 failed: Expected " << expected << ", got " << result << std::endl;
+                return 1;
+            }
+
+            // Test 4: Functions
+            parser.SetExpr("max(x, 5) + min(x, 3)");
+            x = 4.0;
+            result = parser.Eval();
+            if (std::abs(result - 8.0) > 0.001) {  // max(4,5) + min(4,3) = 5 + 3 = 8
+                std::cerr << "Test 4 failed: Expected 8.0, got " << result << std::endl;
+                return 1;
+            }
+
+            // Test 5: Multiple variables
+            double y = 3.0;
+            parser.DefineVar("y", &y);
+            parser.SetExpr("x * y + sqrt(x + y)");
+            x = 4.0;
+            result = parser.Eval();
+            expected = 4.0 * 3.0 + sqrt(4.0 + 3.0);  // 12 + 2.646 = 14.646
+            if (std::abs(result - expected) > 0.001) {
+                std::cerr << "Test 5 failed: Expected " << expected << ", got " << result << std::endl;
+                return 1;
+            }
+        }
+        EOF
+
+        g++ -o test test.cpp -lmuparser
+        ./test
+    - name: Verify library versioning
+      runs: |
+        stat /usr/lib/libmuparser.so.${{package.version}}
+        stat /usr/lib/libmuparser.so.2
+        stat /usr/lib/libmuparser.so
+    - name: Test CMake integration
+      runs: |
+        cat << 'EOF' > CMakeLists.txt
+        cmake_minimum_required(VERSION 3.10)
+        project(muparser_test)
+
+        find_package(muparser REQUIRED)
+
+        add_executable(cmake_test test.cpp)
+        target_link_libraries(cmake_test muparser::muparser)
+        EOF
+
+        cat << 'EOF' > test.cpp
+        #include <muParser.h>
+        #include <iostream>
+
+        int main() {
+            mu::Parser parser;
+            parser.SetExpr("2 + 2");
+            std::cout << "2 + 2 = " << parser.Eval() << std::endl;
+            return (parser.Eval() == 4.0) ? 0 : 1;
+        }
+        EOF
+
+        cmake -B build .
+        cmake --build build
+        ./build/cmake_test | grep -F "2 + 2 = 4"
