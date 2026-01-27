@@ -1,0 +1,132 @@
+package:
+  name: ory-kratos-fips
+  version: "25.4.0"
+  epoch: 0
+  description: Identity and user management service for cloud applications (FIPS)
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - go-fips
+      - openssl-dev
+      - sqlite-dev
+  environment:
+    CGO_ENABLED: "1"
+    CGO_CPPFLAGS: "-DSQLITE_DEFAULT_FILE_PERMISSIONS=0600"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ory/kratos
+      tag: v${{package.version}}
+      expected-commit: 64e04ace9aaf0d577b66ab9b5ae5189a4f66cc9e
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.45.0
+      modroot: oryx
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.45.0
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/var/lib/sqlite
+
+  - uses: go/build
+    with:
+      packages: .
+      output: kratos
+      tags: sqlite
+      ldflags: |
+        -X 'github.com/ory/kratos/driver/config.Version=${{package.version}}'
+        -X 'github.com/ory/kratos/driver/config.Date=$(TZ=UTC date -u -d "@$SOURCE_DATE_EPOCH" "+%Y-%m-%dT%H:%M:%SZ")'
+        -X 'github.com/ory/kratos/driver/config.Commit=$(git rev-parse HEAD)'
+      go-package: go-fips
+
+update:
+  enabled: true
+  github:
+    identifier: ory/kratos
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    environment:
+      DSN: memory
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - uses: test/go-fips-check
+    - runs: |
+        set -ex
+        kratos version | grep ${{package.version}}
+        kratos help
+    - name: "Test migrate command"
+      runs: |
+        kratos migrate sql up -e --yes
+    - name: "Create minimal config for server test"
+      runs: |
+        cat > /tmp/kratos-test.yml <<EOF
+        version: v1.3.1
+
+        dsn: memory
+
+        serve:
+          public:
+            base_url: http://localhost:4433/
+          admin:
+            base_url: http://localhost:4434/
+
+        selfservice:
+          default_browser_return_url: http://localhost:4433/
+          allowed_return_urls:
+            - http://localhost:4433
+
+          methods:
+            password:
+              enabled: true
+
+        identity:
+          default_schema_id: default
+          schemas:
+            - id: default
+              url: base64://ewogICIkaWQiOiAiaHR0cHM6Ly9zY2hlbWFzLm9yeS5zaC9wcmVzZXRzL2tyYXRvcy9pZGVudGl0eS5lbWFpbC5zY2hlbWEuanNvbiIsCiAgIiRzY2hlbWEiOiAiaHR0cDovL2pzb24tc2NoZW1hLm9yZy9kcmFmdC0wNy9zY2hlbWEjIiwKICAidGl0bGUiOiAiUGVyc29uIiwKICAidHlwZSI6ICJvYmplY3QiLAogICJwcm9wZXJ0aWVzIjogewogICAgInRyYWl0cyI6IHsKICAgICAgInR5cGUiOiAib2JqZWN0IiwKICAgICAgInByb3BlcnRpZXMiOiB7CiAgICAgICAgImVtYWlsIjogewogICAgICAgICAgInR5cGUiOiAic3RyaW5nIiwKICAgICAgICAgICJmb3JtYXQiOiAiZW1haWwiLAogICAgICAgICAgInRpdGxlIjogIkUtTWFpbCIsCiAgICAgICAgICAib3J5LnNoL2tyYXRvcyI6IHsKICAgICAgICAgICAgImNyZWRlbnRpYWxzIjogewogICAgICAgICAgICAgICJwYXNzd29yZCI6IHsKICAgICAgICAgICAgICAgICJpZGVudGlmaWVyIjogdHJ1ZQogICAgICAgICAgICAgIH0KICAgICAgICAgICAgfQogICAgICAgICAgfQogICAgICAgIH0KICAgICAgfSwKICAgICAgInJlcXVpcmVkIjogWwogICAgICAgICJlbWFpbCIKICAgICAgXSwKICAgICAgImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjogZmFsc2UKICAgIH0KICB9Cn0=
+
+        log:
+          level: info
+
+        secrets:
+          cookie:
+            - PLEASE-CHANGE-ME-I-AM-VERY-INSECURE
+          cipher:
+            - 32-LONG-SECRET-NOT-SECURE-AT-ALL
+
+        hashers:
+          algorithm: bcrypt
+          bcrypt:
+            cost: 8
+
+        ciphers:
+          algorithm: xchacha20-poly1305
+        EOF
+    - name: "Start server and test"
+      uses: test/daemon-check-output
+      with:
+        start: kratos serve --dev --config /tmp/kratos-test.yml
+        timeout: "30"
+        expected_output: |
+          Starting the public httpd
+        post: |
+          sleep 2
+          curl -sf http://localhost:4433/health/alive || echo "Public endpoint not ready"
+          curl -sf http://localhost:4434/health/alive || echo "Admin endpoint not ready"
