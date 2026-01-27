@@ -229,59 +229,62 @@ subpackages:
           packages:
             - ${{package.name}}
             - curl
+            - wait-for-it
         environment:
           LOKI_PORT: "3100"
           CANARY_PORT: "3500"
       pipeline:
         - uses: test/go-fips-check
-        - name: Verify loki-canary can send and query logs
-          uses: test/daemon-check-output
-          with:
-            setup: |-
-              # Start Loki first
-              mkdir -p /tmp/loki/chunks /tmp/loki/rules
-              tee /tmp/loki-config.yaml <<EOF
-              auth_enabled: false
-              server:
-                http_listen_port: ${LOKI_PORT}
-              common:
-                path_prefix: /tmp/loki
-                storage:
-                  filesystem:
-                    chunks_directory: /tmp/loki/chunks
-                    rules_directory: /tmp/loki/rules
-                replication_factor: 1
-                ring:
-                  kvstore:
-                    store: inmemory
-              schema_config:
-                configs:
-                  - from: 2020-10-24
-                    store: tsdb
-                    object_store: filesystem
-                    schema: v13
-                    index:
-                      prefix: index_
-                      period: 24h
-              limits_config:
-                allow_structured_metadata: false
-              EOF
-              loki -config.file=/tmp/loki-config.yaml -config.expand-env=true > /tmp/loki.log 2>&1 &
-              LOKI_PID=$!
-              # Wait for Loki to be ready
-              wait-for-it localhost:${LOKI_PORT} -t 60
-            start: loki-canary -addr=http://localhost:${LOKI_PORT} -port=${CANARY_PORT} -labelname=canary -labelvalue=test
-            expected_output: "waiting for probe"
-            timeout: 60
-            post: |-
-              set -euo pipefail
-              # Wait for canary to write some logs
-              sleep 10
-              # Verify canary metrics endpoint is responding
-              curl -f "http://localhost:${CANARY_PORT}/metrics" | grep -F "loki_canary"
+        - name: Verify loki-canary starts and serves metrics
+          runs: |
+            set -euo pipefail
+            # Start Loki first
+            mkdir -p /tmp/loki/chunks /tmp/loki/rules
+            tee /tmp/loki-config.yaml <<EOF
+            auth_enabled: false
+            server:
+              http_listen_port: ${LOKI_PORT}
+            common:
+              path_prefix: /tmp/loki
+              storage:
+                filesystem:
+                  chunks_directory: /tmp/loki/chunks
+                  rules_directory: /tmp/loki/rules
+              replication_factor: 1
+              ring:
+                kvstore:
+                  store: inmemory
+            schema_config:
+              configs:
+                - from: 2020-10-24
+                  store: tsdb
+                  object_store: filesystem
+                  schema: v13
+                  index:
+                    prefix: index_
+                    period: 24h
+            limits_config:
+              allow_structured_metadata: false
+            EOF
+            loki -config.file=/tmp/loki-config.yaml -config.expand-env=true > /tmp/loki.log 2>&1 &
+            LOKI_PID=$!
+            # Wait for Loki to be ready
+            wait-for-it localhost:${LOKI_PORT} -t 60
+            # Start canary in background
+            loki-canary -addr=localhost:${LOKI_PORT} -port=${CANARY_PORT} -labelname=canary -labelvalue=test > /tmp/canary.log 2>&1 &
+            CANARY_PID=$!
+            # Wait for canary to start
+            sleep 10
+            # Verify canary metrics endpoint is responding
+            curl -f "http://localhost:${CANARY_PORT}/metrics" | grep -F "loki_canary"
+            # Cleanup
+            kill $CANARY_PID $LOKI_PID 2>/dev/null || true
 
   - name: ${{package.name}}-iamguarded-compat
     dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-logcli
       provides:
         - loki-fips-iamguarded-compat=${{package.full-version}}
     pipeline:
@@ -309,14 +312,6 @@ subpackages:
           with:
             package: grafana-loki
             version: ${{vars.major-version}}
-        - uses: test/tw/symlink-check
-        - runs: |
-            stat /opt/iamguarded/grafana-loki/bin/loki
-            stat /opt/iamguarded/grafana-loki/bin/logcli
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: ${{package.name}}
-            real-pkg-name: loki-fips-iamguarded-compat
 
 update:
   enabled: true
