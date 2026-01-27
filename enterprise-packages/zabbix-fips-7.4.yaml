@@ -1,7 +1,7 @@
 package:
-  name: zabbix-6.0-fips
-  version: "6.0.43"
-  epoch: 0
+  name: zabbix-fips-7.4
+  version: "7.4.6"
+  epoch: 2
   description: FIPS-enabled Zabbix monitoring system - server and proxy components
   copyright:
     - license: AGPL-3.0-only
@@ -13,11 +13,11 @@ package:
 
 vars:
   # PostgreSQL version matches upstream zabbix-docker images:
-  # https://github.com/zabbix/zabbix-docker/blob/6.0.43/Dockerfiles/server-pgsql/alpine/Dockerfile
+  # https://github.com/zabbix/zabbix-docker/blob/7.4.6/Dockerfiles/server-pgsql/alpine/Dockerfile
   postgres-version: "17"
   # PHP version matches upstream zabbix-docker images:
-  # https://github.com/zabbix/zabbix-docker/blob/6.0.43/Dockerfiles/web-nginx-pgsql/alpine/Dockerfile
-  php-version: "8.3"
+  # https://github.com/zabbix/zabbix-docker/blob/7.4.6/Dockerfiles/web-nginx-pgsql/alpine/Dockerfile
+  php-version: "8.4"
   # Common configure options shared between server and proxy builds
   common-opts: |
     --enable-ipv6 \
@@ -71,16 +71,13 @@ environment:
       - sqlite-dev
       - unixodbc-dev
       - zlib-dev
-  environment:
-    # Zabbix 6.0's autoconf doesn't properly detect libxml2 include path
-    CPPFLAGS: "-I/usr/include/libxml2"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/zabbix/zabbix
       tag: ${{package.version}}
-      expected-commit: 86407b843e224d91a22f5925fca84c259ebf9890
+      expected-commit: 626d2b8a4820a424efe8fd39df3b706468f1e5d4
 
   # Generate configure script from configure.ac
   - runs: ./bootstrap.sh
@@ -176,7 +173,7 @@ pipeline:
       mkdir -p "${{targets.destdir}}/usr/lib/zabbix/externalscripts"
 
 subpackages:
-  - name: zabbix-server-pgsql-${{vars.major-minor}}-fips
+  - name: zabbix-server-pgsql-fips-${{vars.major-minor}}
     description: FIPS-enabled Zabbix Server with PostgreSQL database - central monitoring server for distributed monitoring
     dependencies:
       provides:
@@ -240,7 +237,17 @@ subpackages:
           runs: |
             # Verify server reports correct version
             zabbix_server -V 2>&1 | grep -F "zabbix_server (Zabbix) ${{package.version}}"
-        # Note: Zabbix 6.0 doesn't support -T flag for config validation (added in later versions)
+        - name: Test configuration validation
+          runs: |
+            # Create minimal valid config for testing
+            tee /etc/zabbix/zabbix_server.conf << 'EOF'
+            DBHost=localhost
+            DBName=zabbix
+            DBUser=zabbix
+            LogType=console
+            EOF
+            # Validate configuration syntax using -T flag (returns 0 on valid config)
+            zabbix_server -c /etc/zabbix/zabbix_server.conf -T
         - name: Verify PostgreSQL schema files
           runs: |
             # Verify PostgreSQL schema files are installed
@@ -298,8 +305,41 @@ subpackages:
             # Stop PostgreSQL
             su postgres -c "pg_ctl -D /var/lib/postgresql/data stop"
             echo "PostgreSQL database initialization test passed"
+        - name: Test server process types configuration
+          runs: |
+            # Test configuration with various server process types (multi-process architecture)
+            tee /tmp/server_processes.conf << 'EOF'
+            DBHost=localhost
+            DBName=zabbix
+            DBUser=zabbix
+            LogType=console
+            StartPollers=5
+            StartPollersUnreachable=1
+            StartTrappers=5
+            StartPingers=1
+            StartDiscoverers=1
+            StartHTTPPollers=1
+            StartTimers=1
+            StartEscalators=1
+            StartAlerters=3
+            EOF
+            zabbix_server -c /tmp/server_processes.conf -T
+            echo "Server process types configuration validated"
+        - name: Test alerting configuration
+          runs: |
+            # Test configuration with alerting settings (alert management feature)
+            tee /tmp/alerting.conf << 'EOF'
+            DBHost=localhost
+            DBName=zabbix
+            DBUser=zabbix
+            LogType=console
+            AlertScriptsPath=/usr/lib/zabbix/alertscripts
+            StartAlerters=5
+            EOF
+            zabbix_server -c /tmp/alerting.conf -T
+            echo "Alerting configuration validated"
 
-  - name: zabbix-server-pgsql-${{vars.major-minor}}-fips-compat
+  - name: zabbix-server-pgsql-fips-${{vars.major-minor}}-compat
     description: Compatibility package for FIPS-enabled Zabbix Server PostgreSQL Docker image
     dependencies:
       provides:
@@ -310,7 +350,7 @@ subpackages:
         - gzip
         - merged-usrsbin # docker-entrypoint.sh expects /usr/sbin/zabbix_server
         - net-snmp-tools
-        - zabbix-server-pgsql-${{vars.major-minor}}-fips
+        - zabbix-server-pgsql-fips-${{vars.major-minor}}
     pipeline:
       - uses: git-checkout
         with:
@@ -322,9 +362,17 @@ subpackages:
           install -Dm755 zabbix-docker/Dockerfiles/server-pgsql/alpine/docker-entrypoint.sh \
             "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
 
-          # Zabbix 7.0 docker images don't have separate config_templates - the entrypoint
-          # modifies the default config file at runtime using update_config_var function.
-          # The default config file is already installed by the zabbix-server-pgsql package.
+          # Install config files from upstream zabbix-docker repository
+          # These config files use ${ZBX_*} environment variable references which
+          # zabbix_server natively expands at runtime. The entrypoint exports these
+          # variables (e.g., ZBX_DB_HOST) and the config files reference them.
+          mkdir -p "${{targets.contextdir}}/etc/zabbix"
+          for conf in zabbix-docker/config_templates/server/*.conf; do
+            install -Dm644 "$conf" "${{targets.contextdir}}/etc/zabbix/$(basename "$conf")"
+          done
+
+          # Install the full config reference template (contains all options with documentation)
+          install -Dm644 conf/zabbix_server.conf "${{targets.contextdir}}/etc/zabbix/zabbix_server.conf_template"
 
           # Create combined schema file at expected location for docker-entrypoint.sh
           # The upstream entrypoint expects /usr/share/doc/zabbix-server-postgresql/create.sql.gz
@@ -347,7 +395,7 @@ subpackages:
             stat /usr/share/doc/zabbix-server-postgresql/create.sql.gz
             zcat /usr/share/doc/zabbix-server-postgresql/create.sql.gz > /dev/null
 
-  - name: zabbix-proxy-sqlite3-${{vars.major-minor}}-fips
+  - name: zabbix-proxy-sqlite3-fips-${{vars.major-minor}}
     description: FIPS-enabled Zabbix Proxy with SQLite3 database - distributed monitoring proxy
     dependencies:
       provides:
@@ -405,7 +453,17 @@ subpackages:
               exit 1
             fi
             echo "Verified: no non-FIPS crypto libraries linked"
-        # Note: Zabbix 6.0 doesn't support -T flag for config validation (added in later versions)
+        - name: Test configuration validation
+          runs: |
+            # Create minimal valid config for testing
+            tee /etc/zabbix/zabbix_proxy.conf << 'EOF'
+            Server=127.0.0.1
+            Hostname=test-proxy
+            DBName=/var/lib/zabbix/zabbix_proxy.db
+            LogType=console
+            EOF
+            # Validate configuration syntax using -T flag (returns 0 on valid config)
+            zabbix_proxy -c /etc/zabbix/zabbix_proxy.conf -T
         - name: Verify SQLite3 schema file
           runs: |
             # Verify SQLite3 schema file is installed
@@ -428,8 +486,25 @@ subpackages:
             # Clean up
             rm -f /var/lib/zabbix/test_proxy.db
             echo "SQLite3 database initialization test passed"
+        - name: Test proxy process types configuration
+          runs: |
+            # Test configuration with various proxy process types
+            tee /tmp/proxy_processes.conf << 'EOF'
+            Server=127.0.0.1
+            Hostname=test-proxy
+            DBName=/var/lib/zabbix/zabbix_proxy.db
+            LogType=console
+            StartPollers=5
+            StartPollersUnreachable=1
+            StartTrappers=5
+            StartPingers=1
+            StartDiscoverers=1
+            StartHTTPPollers=1
+            EOF
+            zabbix_proxy -c /tmp/proxy_processes.conf -T
+            echo "Proxy process types configuration validated"
 
-  - name: zabbix-proxy-sqlite3-${{vars.major-minor}}-fips-compat
+  - name: zabbix-proxy-sqlite3-fips-${{vars.major-minor}}-compat
     description: Compatibility package for FIPS-enabled Zabbix Proxy SQLite3 Docker image
     dependencies:
       provides:
@@ -440,7 +515,7 @@ subpackages:
         - gzip
         - merged-usrsbin
         - net-snmp-tools
-        - zabbix-proxy-sqlite3-${{vars.major-minor}}-fips
+        - zabbix-proxy-sqlite3-fips-${{vars.major-minor}}
     pipeline:
       - uses: git-checkout
         with:
@@ -452,9 +527,17 @@ subpackages:
           install -Dm755 zabbix-docker/Dockerfiles/proxy-sqlite3/alpine/docker-entrypoint.sh \
             "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
 
-          # Zabbix 6.0 docker images don't have separate config_templates - the entrypoint
-          # modifies the default config file at runtime using update_config_var function.
-          # The default config file is already installed by the zabbix-proxy-sqlite3 package.
+          # Install config files from upstream zabbix-docker repository
+          # These config files use ${ZBX_*} environment variable references which
+          # zabbix_proxy natively expands at runtime. The entrypoint exports these
+          # variables (e.g., ZBX_SERVER_HOST) and the config files reference them.
+          mkdir -p "${{targets.contextdir}}/etc/zabbix"
+          for conf in zabbix-docker/config_templates/proxy/*.conf; do
+            install -Dm644 "$conf" "${{targets.contextdir}}/etc/zabbix/$(basename "$conf")"
+          done
+
+          # Install the full config reference template (contains all options with documentation)
+          install -Dm644 conf/zabbix_proxy.conf "${{targets.contextdir}}/etc/zabbix/zabbix_proxy.conf_template"
     test:
       pipeline:
         - runs: |
@@ -469,7 +552,7 @@ subpackages:
   # Zabbix Agent Utilities (zabbix_get and zabbix_sender)
   # These are lightweight client tools with no database dependencies
   # =============================================================
-  - name: zabbix-get-${{vars.major-minor}}-fips
+  - name: zabbix-get-fips-${{vars.major-minor}}
     description: FIPS-enabled Zabbix client utility for retrieving data from Zabbix agents
     dependencies:
       provides:
@@ -508,7 +591,7 @@ subpackages:
             # Test TLS options are available
             zabbix_get --help 2>&1 | grep -F "tls"
 
-  - name: zabbix-sender-${{vars.major-minor}}-fips
+  - name: zabbix-sender-fips-${{vars.major-minor}}
     description: FIPS-enabled Zabbix client utility for sending values to Zabbix server
     dependencies:
       provides:
@@ -554,7 +637,7 @@ subpackages:
   # =============================================================
   # Zabbix Web Interface with Nginx and PostgreSQL
   # =============================================================
-  - name: zabbix-web-nginx-pgsql-${{vars.major-minor}}-fips
+  - name: zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}
     description: FIPS-enabled Zabbix Web Interface with Nginx and PostgreSQL database
     dependencies:
       provides:
@@ -638,7 +721,7 @@ subpackages:
             php -m | grep -F SimpleXML
             php -m | grep -F sockets
 
-  - name: zabbix-web-nginx-pgsql-${{vars.major-minor}}-fips-nginx-config
+  - name: zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}-nginx-config
     description: Nginx configuration for FIPS-enabled Zabbix Web Interface
     dependencies:
       provides:
@@ -694,7 +777,7 @@ subpackages:
             stat /etc/zabbix/nginx.conf
             stat /etc/zabbix/nginx_ssl.conf
 
-  - name: zabbix-web-nginx-pgsql-${{vars.major-minor}}-fips-compat
+  - name: zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}-compat
     description: Compatibility package for FIPS-enabled Zabbix Web Nginx PostgreSQL Docker image
     dependencies:
       provides:
@@ -708,8 +791,8 @@ subpackages:
         - busybox
         - curl
         - supervisor
-        - zabbix-web-nginx-pgsql-${{vars.major-minor}}-fips
-        - zabbix-web-nginx-pgsql-${{vars.major-minor}}-fips-nginx-config
+        - zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}
+        - zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}-nginx-config
     pipeline:
       - uses: git-checkout
         with:
@@ -717,12 +800,6 @@ subpackages:
           tag: ${{package.version}}
           destination: zabbix-docker
       - runs: |
-          # Fix git merge conflict in upstream 6.0.43 release by keeping the HEAD side
-          # (removing the entire conflicting section that references undefined escape_spec_char function)
-          # See https://github.com/zabbix/zabbix-docker/blob/6.0.43/Dockerfiles/web-nginx-pgsql/alpine/docker-entrypoint.sh#L212
-          sed -i '/^<<<<<<< HEAD$/,/^>>>>>>> .*$/d' \
-            zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/docker-entrypoint.sh
-
           # Install docker-entrypoint.sh from upstream zabbix-docker repository
           install -Dm755 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/docker-entrypoint.sh \
             "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
@@ -750,12 +827,12 @@ subpackages:
           install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/supervisor/conf.d/supervisord_zabbix.conf \
             "${{targets.contextdir}}/etc/supervisor/conf.d/supervisord_zabbix.conf"
 
-          # Create php-fpm83 symlink for Alpine compatibility
-          # The supervisor config uses %(program_name)s which substitutes to php-fpm83,
+          # Create php-fpm84 symlink for Alpine compatibility
+          # The supervisor config uses %(program_name)s which substitutes to php-fpm84,
           # but Wolfi's binary is named php-fpm (no version suffix).
           # Path compatibility is handled by existing symlinks:
           # - /usr/sbin → /usr/bin (wolfi-baselayout)
-          # - /etc/php83 → /etc/php (created above)
+          # - /etc/php84 → /etc/php (created above)
           ln -sf php-fpm "${{targets.contextdir}}/usr/bin/php-fpm${{vars.php-version-dotless}}"
 
           # Install Zabbix web configuration files
@@ -845,7 +922,7 @@ update:
   github:
     identifier: zabbix/zabbix
     use-tag: true
-    tag-filter-prefix: "6.0."
+    tag-filter-prefix: "7.4."
 
 test:
   pipeline:
