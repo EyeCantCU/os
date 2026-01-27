@@ -1,0 +1,929 @@
+package:
+  name: zabbix-fips-7.4
+  version: "7.4.6"
+  epoch: 2
+  description: FIPS-enabled Zabbix monitoring system - server and proxy components
+  copyright:
+    - license: AGPL-3.0-only
+  dependencies:
+    provides:
+      - zabbix-fips=${{package.full-version}}
+    runtime:
+      - openssl-config-fipshardened
+
+vars:
+  # PostgreSQL version matches upstream zabbix-docker images:
+  # https://github.com/zabbix/zabbix-docker/blob/7.4.6/Dockerfiles/server-pgsql/alpine/Dockerfile
+  postgres-version: "17"
+  # PHP version matches upstream zabbix-docker images:
+  # https://github.com/zabbix/zabbix-docker/blob/7.4.6/Dockerfiles/web-nginx-pgsql/alpine/Dockerfile
+  php-version: "8.4"
+  # Common configure options shared between server and proxy builds
+  common-opts: |
+    --enable-ipv6 \
+    --with-openssl \
+    --with-net-snmp \
+    --with-openipmi \
+    --with-ssh \
+    --with-ldap \
+    --with-libcurl \
+    --with-unixodbc \
+    --with-libpcre2 \
+    --with-libxml2=/usr \
+    --with-ares \
+    --with-libmodbus \
+    --with-libevent \
+    --sysconfdir=/etc/zabbix
+
+var-transforms:
+  - from: ${{package.version}}
+    match: (\d+\.\d+)\.\d+
+    replace: $1
+    to: major-minor
+  - from: ${{vars.php-version}}
+    match: (\d+)\.(\d+)
+    replace: $1$2
+    to: php-version-dotless
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - c-ares-dev
+      - composer
+      - curl-dev
+      - libevent-dev
+      - libmodbus-dev
+      - libssh-dev
+      - libtool
+      - libxml2-dev
+      - linux-headers
+      - net-snmp-dev
+      - openipmi-dev
+      - openldap-dev
+      - openssl-dev
+      - pcre2-dev
+      - php-${{vars.php-version}}
+      - php-${{vars.php-version}}-curl
+      - pkgconf
+      - postgresql-${{vars.postgres-version}}-dev
+      - sqlite-dev
+      - unixodbc-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/zabbix/zabbix
+      tag: ${{package.version}}
+      expected-commit: 626d2b8a4820a424efe8fd39df3b706468f1e5d4
+
+  # Generate configure script from configure.ac
+  - runs: ./bootstrap.sh
+
+  # =============================================================
+  # Phase 1: Build server with PostgreSQL and generate all schemas
+  # =============================================================
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --enable-server \
+        --with-postgresql \
+        ${{vars.common-opts}}
+
+  # Generate database schema files for all backends (postgresql, sqlite3, etc.)
+  - runs: make -j$(nproc) dbschema
+
+  - uses: autoconf/make
+
+  - runs: |
+      # Save server binary and generated schemas to /tmp (preserved across make clean)
+      cp src/zabbix_server/zabbix_server /tmp/zabbix_server
+      cp -r database/postgresql /tmp/postgresql_schema
+      cp -r database/sqlite3 /tmp/sqlite3_schema
+
+      make clean
+
+  # =============================================================
+  # Phase 2: Build proxy with SQLite3
+  # =============================================================
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --enable-proxy \
+        --with-sqlite3 \
+        ${{vars.common-opts}}
+
+  - uses: autoconf/make
+
+  - runs: |
+      # Restore server binary and schema files to source tree
+      cp /tmp/zabbix_server src/zabbix_server/zabbix_server
+      cp -r /tmp/postgresql_schema/* database/postgresql/
+      cp -r /tmp/sqlite3_schema/* database/sqlite3/
+
+      # Save proxy binary and schema files to /tmp (preserved across make clean)
+      cp src/zabbix_proxy/zabbix_proxy /tmp/zabbix_proxy
+      # Re-save schema files (they were already in /tmp but make clean in Phase 1 may have modified)
+      cp -r database/postgresql /tmp/postgresql_schema_final
+      cp -r database/sqlite3 /tmp/sqlite3_schema_final
+
+      make clean
+
+  # =============================================================
+  # Phase 3: Build agent utilities (zabbix_get and zabbix_sender)
+  # These are lightweight client tools with no database dependencies
+  # Use minimal configure options - these tools only need OpenSSL and pcre2
+  # =============================================================
+  - uses: autoconf/configure
+    with:
+      opts: |
+        --enable-agent \
+        --enable-ipv6 \
+        --with-openssl \
+        --with-libpcre2 \
+        --sysconfdir=/etc/zabbix
+
+  - runs: |
+      # Build the required libraries first, then build zabbix_get and zabbix_sender
+      # These tools depend on various internal Zabbix libraries (zbxcomms, zbxjson, etc.)
+      make -j$(nproc) -C src/libs
+      make -j$(nproc) -C src/zabbix_get
+      make -j$(nproc) -C src/zabbix_sender
+
+      # Restore proxy binary and schema files from /tmp
+      cp /tmp/zabbix_proxy src/zabbix_proxy/zabbix_proxy
+      cp -r /tmp/postgresql_schema_final/* database/postgresql/
+      cp -r /tmp/sqlite3_schema_final/* database/sqlite3/
+
+  # =============================================================
+  # Create shared runtime directories (used by both server and proxy)
+  # =============================================================
+  - runs: |
+      mkdir -p "${{targets.destdir}}/etc/zabbix"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/enc"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/mibs"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/modules"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/snmptraps"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/ssh_keys"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/ssl/certs"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/ssl/keys"
+      mkdir -p "${{targets.destdir}}/var/lib/zabbix/ssl/ssl_ca"
+      mkdir -p "${{targets.destdir}}/usr/lib/zabbix/externalscripts"
+
+subpackages:
+  - name: zabbix-server-pgsql-fips-${{vars.major-minor}}
+    description: FIPS-enabled Zabbix Server with PostgreSQL database - central monitoring server for distributed monitoring
+    dependencies:
+      provides:
+        - zabbix-server-pgsql-fips=${{package.full-version}}
+      runtime:
+        - fping
+        - iputils
+        - net-snmp-agent-libs
+        - nmap
+        - postgresql-${{vars.postgres-version}}-client
+        - tzdata
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Install the server binary
+          install -Dm755 src/zabbix_server/zabbix_server "${{targets.contextdir}}/usr/bin/zabbix_server"
+
+          # Create server-specific directories
+          mkdir -p "${{targets.contextdir}}/etc/zabbix"
+          mkdir -p "${{targets.contextdir}}/usr/lib/zabbix/alertscripts"
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix/dbscripts"
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix/enc_internal"
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix/export"
+
+          # Install default configuration template
+          install -Dm644 conf/zabbix_server.conf "${{targets.contextdir}}/etc/zabbix/zabbix_server.conf"
+
+          # Install PostgreSQL database schema files
+          mkdir -p "${{targets.contextdir}}/usr/share/zabbix/database/postgresql"
+          install -Dm644 database/postgresql/schema.sql "${{targets.contextdir}}/usr/share/zabbix/database/postgresql/schema.sql"
+          install -Dm644 database/postgresql/images.sql "${{targets.contextdir}}/usr/share/zabbix/database/postgresql/images.sql"
+          install -Dm644 database/postgresql/data.sql "${{targets.contextdir}}/usr/share/zabbix/database/postgresql/data.sql"
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - netcat-openbsd
+            - postgresql-${{vars.postgres-version}}
+            - postgresql-${{vars.postgres-version}}-client
+            - procps
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/ver-check
+          with:
+            bins: zabbix_server
+            version: ${{package.version}}
+        - uses: test/tw/help-check
+          with:
+            bins: zabbix_server
+        - name: Verify no non-FIPS crypto libraries
+          runs: |
+            # Verify the binary does NOT link against non-FIPS crypto libraries
+            # These libraries are not CMVP certified and would break FIPS compliance
+            if ldd /usr/bin/zabbix_server | grep -E "(libsodium|libgcrypt|libgnutls)"; then
+              echo "ERROR: zabbix_server should not link to non-FIPS crypto libraries"
+              exit 1
+            fi
+            echo "Verified: no non-FIPS crypto libraries linked"
+        - name: Test version and feature output
+          runs: |
+            # Verify server reports correct version
+            zabbix_server -V 2>&1 | grep -F "zabbix_server (Zabbix) ${{package.version}}"
+        - name: Test configuration validation
+          runs: |
+            # Create minimal valid config for testing
+            tee /etc/zabbix/zabbix_server.conf << 'EOF'
+            DBHost=localhost
+            DBName=zabbix
+            DBUser=zabbix
+            LogType=console
+            EOF
+            # Validate configuration syntax using -T flag (returns 0 on valid config)
+            zabbix_server -c /etc/zabbix/zabbix_server.conf -T
+        - name: Verify PostgreSQL schema files
+          runs: |
+            # Verify PostgreSQL schema files are installed
+            stat /usr/share/zabbix/database/postgresql/schema.sql
+            stat /usr/share/zabbix/database/postgresql/images.sql
+            stat /usr/share/zabbix/database/postgresql/data.sql
+            # Verify schema files have content
+            test -s /usr/share/zabbix/database/postgresql/schema.sql || { echo "ERROR: schema.sql is empty"; exit 1; }
+            test -s /usr/share/zabbix/database/postgresql/data.sql || { echo "ERROR: data.sql is empty"; exit 1; }
+            echo "PostgreSQL schema files verified"
+        - name: Test PostgreSQL database initialization
+          runs: |
+            # Create postgres user and group for testing (if not exists)
+            if ! getent group postgres >/dev/null 2>&1; then
+              addgroup -S postgres
+            fi
+            if ! getent passwd postgres >/dev/null 2>&1; then
+              adduser -S -D -H -h /var/lib/postgresql -s /bin/sh -G postgres postgres
+            fi
+
+            # Initialize PostgreSQL database for testing
+            mkdir -p /var/lib/postgresql/data
+            mkdir -p /run/postgresql
+            chown -R postgres:postgres /var/lib/postgresql /run/postgresql
+
+            # Initialize database cluster
+            su postgres -c "initdb -D /var/lib/postgresql/data"
+
+            # Start PostgreSQL
+            su postgres -c "pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/logfile start"
+
+            # Wait for PostgreSQL to be ready
+            for i in $(seq 1 30); do
+              if su postgres -c "pg_isready" >/dev/null 2>&1; then
+                echo "PostgreSQL is ready"
+                break
+              fi
+              sleep 1
+            done
+
+            # Create zabbix database and user
+            su postgres -c "psql -c \"CREATE USER zabbix WITH PASSWORD 'zabbix';\""
+            su postgres -c "psql -c \"CREATE DATABASE zabbix OWNER zabbix;\""
+
+            # Import schema (this validates the SQL files are correct)
+            su postgres -c "psql -d zabbix -f /usr/share/zabbix/database/postgresql/schema.sql"
+            su postgres -c "psql -d zabbix -f /usr/share/zabbix/database/postgresql/images.sql"
+            su postgres -c "psql -d zabbix -f /usr/share/zabbix/database/postgresql/data.sql"
+
+            # Verify tables were created
+            table_count=$(su postgres -c "psql -d zabbix -t -c \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';\"" | tr -d ' ')
+            echo "Database created with $table_count tables"
+            test "$table_count" -gt 100 || { echo "ERROR: Expected >100 tables, got $table_count"; exit 1; }
+
+            # Stop PostgreSQL
+            su postgres -c "pg_ctl -D /var/lib/postgresql/data stop"
+            echo "PostgreSQL database initialization test passed"
+        - name: Test server process types configuration
+          runs: |
+            # Test configuration with various server process types (multi-process architecture)
+            tee /tmp/server_processes.conf << 'EOF'
+            DBHost=localhost
+            DBName=zabbix
+            DBUser=zabbix
+            LogType=console
+            StartPollers=5
+            StartPollersUnreachable=1
+            StartTrappers=5
+            StartPingers=1
+            StartDiscoverers=1
+            StartHTTPPollers=1
+            StartTimers=1
+            StartEscalators=1
+            StartAlerters=3
+            EOF
+            zabbix_server -c /tmp/server_processes.conf -T
+            echo "Server process types configuration validated"
+        - name: Test alerting configuration
+          runs: |
+            # Test configuration with alerting settings (alert management feature)
+            tee /tmp/alerting.conf << 'EOF'
+            DBHost=localhost
+            DBName=zabbix
+            DBUser=zabbix
+            LogType=console
+            AlertScriptsPath=/usr/lib/zabbix/alertscripts
+            StartAlerters=5
+            EOF
+            zabbix_server -c /tmp/alerting.conf -T
+            echo "Alerting configuration validated"
+
+  - name: zabbix-server-pgsql-fips-${{vars.major-minor}}-compat
+    description: Compatibility package for FIPS-enabled Zabbix Server PostgreSQL Docker image
+    dependencies:
+      provides:
+        - zabbix-server-pgsql-fips-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox
+        - gzip
+        - merged-usrsbin # docker-entrypoint.sh expects /usr/sbin/zabbix_server
+        - net-snmp-tools
+        - zabbix-server-pgsql-fips-${{vars.major-minor}}
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/zabbix/zabbix-docker
+          tag: ${{package.version}}
+          destination: zabbix-docker
+      - runs: |
+          # Install docker-entrypoint.sh from upstream zabbix-docker repository
+          install -Dm755 zabbix-docker/Dockerfiles/server-pgsql/alpine/docker-entrypoint.sh \
+            "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
+
+          # Install config files from upstream zabbix-docker repository
+          # These config files use ${ZBX_*} environment variable references which
+          # zabbix_server natively expands at runtime. The entrypoint exports these
+          # variables (e.g., ZBX_DB_HOST) and the config files reference them.
+          mkdir -p "${{targets.contextdir}}/etc/zabbix"
+          for conf in zabbix-docker/config_templates/server/*.conf; do
+            install -Dm644 "$conf" "${{targets.contextdir}}/etc/zabbix/$(basename "$conf")"
+          done
+
+          # Install the full config reference template (contains all options with documentation)
+          install -Dm644 conf/zabbix_server.conf "${{targets.contextdir}}/etc/zabbix/zabbix_server.conf_template"
+
+          # Create combined schema file at expected location for docker-entrypoint.sh
+          # The upstream entrypoint expects /usr/share/doc/zabbix-server-postgresql/create.sql.gz
+          mkdir -p "${{targets.contextdir}}/usr/share/doc/zabbix-server-postgresql"
+
+          # Concatenate schema files in correct order and compress
+          cat database/postgresql/schema.sql \
+              database/postgresql/images.sql \
+              database/postgresql/data.sql | gzip -9 > \
+              "${{targets.contextdir}}/usr/share/doc/zabbix-server-postgresql/create.sql.gz"
+    test:
+      pipeline:
+        - runs: |
+            # Verify docker-entrypoint.sh exists and is executable
+            stat /usr/bin/docker-entrypoint.sh
+            test -x /usr/bin/docker-entrypoint.sh || { echo "ERROR: /usr/bin/docker-entrypoint.sh is not executable"; exit 1; }
+            # Verify /usr/sbin/zabbix_server works via merged-usrsbin symlink
+            /usr/sbin/zabbix_server --help
+            # Verify combined schema file exists and is valid gzip
+            stat /usr/share/doc/zabbix-server-postgresql/create.sql.gz
+            zcat /usr/share/doc/zabbix-server-postgresql/create.sql.gz > /dev/null
+
+  - name: zabbix-proxy-sqlite3-fips-${{vars.major-minor}}
+    description: FIPS-enabled Zabbix Proxy with SQLite3 database - distributed monitoring proxy
+    dependencies:
+      provides:
+        - zabbix-proxy-sqlite3-fips=${{package.full-version}}
+      runtime:
+        - fping
+        - iputils
+        - net-snmp-agent-libs
+        - nmap
+        - sqlite-libs
+        - tzdata
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Install the proxy binary
+          install -Dm755 src/zabbix_proxy/zabbix_proxy "${{targets.contextdir}}/usr/bin/zabbix_proxy"
+
+          # Create proxy-specific directories
+          mkdir -p "${{targets.contextdir}}/etc/zabbix"
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix/db_data"
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix/enc_internal"
+
+          # Install default configuration template
+          install -Dm644 conf/zabbix_proxy.conf "${{targets.contextdir}}/etc/zabbix/zabbix_proxy.conf"
+
+          # Install SQLite3 database schema file
+          mkdir -p "${{targets.contextdir}}/usr/share/zabbix/database/sqlite3"
+          install -Dm644 database/sqlite3/schema.sql "${{targets.contextdir}}/usr/share/zabbix/database/sqlite3/schema.sql"
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - openssl-fips-test
+            - procps
+            - sqlite
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/ver-check
+          with:
+            bins: zabbix_proxy
+            version: ${{package.version}}
+        - uses: test/tw/help-check
+          with:
+            bins: zabbix_proxy
+        - name: Check FIPS OpenSSL
+          runs: |
+            openssl-fips-test
+        - name: Verify no non-FIPS crypto libraries
+          runs: |
+            # Verify the binary does NOT link against non-FIPS crypto libraries
+            # These libraries are not CMVP certified and would break FIPS compliance
+            if ldd /usr/bin/zabbix_proxy | grep -E "(libsodium|libgcrypt|libgnutls)"; then
+              echo "ERROR: zabbix_proxy should not link to non-FIPS crypto libraries"
+              exit 1
+            fi
+            echo "Verified: no non-FIPS crypto libraries linked"
+        - name: Test configuration validation
+          runs: |
+            # Create minimal valid config for testing
+            tee /etc/zabbix/zabbix_proxy.conf << 'EOF'
+            Server=127.0.0.1
+            Hostname=test-proxy
+            DBName=/var/lib/zabbix/zabbix_proxy.db
+            LogType=console
+            EOF
+            # Validate configuration syntax using -T flag (returns 0 on valid config)
+            zabbix_proxy -c /etc/zabbix/zabbix_proxy.conf -T
+        - name: Verify SQLite3 schema file
+          runs: |
+            # Verify SQLite3 schema file is installed
+            stat /usr/share/zabbix/database/sqlite3/schema.sql
+            # Verify schema file has content
+            test -s /usr/share/zabbix/database/sqlite3/schema.sql || { echo "ERROR: schema.sql is empty"; exit 1; }
+        - name: Test SQLite3 database initialization
+          runs: |
+            # Create test database directory
+            mkdir -p /var/lib/zabbix
+
+            # Initialize SQLite database with schema
+            sqlite3 /var/lib/zabbix/test_proxy.db < /usr/share/zabbix/database/sqlite3/schema.sql
+
+            # Verify tables were created
+            table_count=$(sqlite3 /var/lib/zabbix/test_proxy.db "SELECT COUNT(*) FROM sqlite_master WHERE type='table';")
+            echo "Database created with $table_count tables"
+            test "$table_count" -gt 50 || { echo "ERROR: Expected >50 tables, got $table_count"; exit 1; }
+
+            # Clean up
+            rm -f /var/lib/zabbix/test_proxy.db
+            echo "SQLite3 database initialization test passed"
+        - name: Test proxy process types configuration
+          runs: |
+            # Test configuration with various proxy process types
+            tee /tmp/proxy_processes.conf << 'EOF'
+            Server=127.0.0.1
+            Hostname=test-proxy
+            DBName=/var/lib/zabbix/zabbix_proxy.db
+            LogType=console
+            StartPollers=5
+            StartPollersUnreachable=1
+            StartTrappers=5
+            StartPingers=1
+            StartDiscoverers=1
+            StartHTTPPollers=1
+            EOF
+            zabbix_proxy -c /tmp/proxy_processes.conf -T
+            echo "Proxy process types configuration validated"
+
+  - name: zabbix-proxy-sqlite3-fips-${{vars.major-minor}}-compat
+    description: Compatibility package for FIPS-enabled Zabbix Proxy SQLite3 Docker image
+    dependencies:
+      provides:
+        - zabbix-proxy-sqlite3-fips-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox
+        - gzip
+        - merged-usrsbin
+        - net-snmp-tools
+        - zabbix-proxy-sqlite3-fips-${{vars.major-minor}}
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/zabbix/zabbix-docker
+          tag: ${{package.version}}
+          destination: zabbix-docker
+      - runs: |
+          # Install docker-entrypoint.sh from upstream zabbix-docker repository
+          install -Dm755 zabbix-docker/Dockerfiles/proxy-sqlite3/alpine/docker-entrypoint.sh \
+            "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
+
+          # Install config files from upstream zabbix-docker repository
+          # These config files use ${ZBX_*} environment variable references which
+          # zabbix_proxy natively expands at runtime. The entrypoint exports these
+          # variables (e.g., ZBX_SERVER_HOST) and the config files reference them.
+          mkdir -p "${{targets.contextdir}}/etc/zabbix"
+          for conf in zabbix-docker/config_templates/proxy/*.conf; do
+            install -Dm644 "$conf" "${{targets.contextdir}}/etc/zabbix/$(basename "$conf")"
+          done
+
+          # Install the full config reference template (contains all options with documentation)
+          install -Dm644 conf/zabbix_proxy.conf "${{targets.contextdir}}/etc/zabbix/zabbix_proxy.conf_template"
+    test:
+      pipeline:
+        - runs: |
+            # Verify docker-entrypoint.sh exists and is executable
+            stat /usr/bin/docker-entrypoint.sh
+            test -x /usr/bin/docker-entrypoint.sh || { echo "ERROR: /usr/bin/docker-entrypoint.sh is not executable"; exit 1; }
+            # Verify directories from zabbix-proxy-sqlite3 package exist
+            stat /var/lib/zabbix/db_data
+            stat /var/lib/zabbix/enc_internal
+
+  # =============================================================
+  # Zabbix Agent Utilities (zabbix_get and zabbix_sender)
+  # These are lightweight client tools with no database dependencies
+  # =============================================================
+  - name: zabbix-get-fips-${{vars.major-minor}}
+    description: FIPS-enabled Zabbix client utility for retrieving data from Zabbix agents
+    dependencies:
+      provides:
+        - zabbix-get-fips=${{package.full-version}}
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          install -Dm755 src/zabbix_get/zabbix_get "${{targets.contextdir}}/usr/bin/zabbix_get"
+    test:
+      environment:
+        contents:
+          packages:
+            - openssl-fips-test
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: zabbix_get
+        - name: Check FIPS OpenSSL
+          runs: |
+            openssl-fips-test
+        - name: Verify no non-FIPS crypto libraries
+          runs: |
+            # Verify the binary does NOT link against non-FIPS crypto libraries
+            if ldd /usr/bin/zabbix_get | grep -E "(libsodium|libgcrypt|libgnutls)"; then
+              echo "ERROR: zabbix_get should not link to non-FIPS crypto libraries"
+              exit 1
+            fi
+            echo "Verified: no non-FIPS crypto libraries linked"
+        - name: Test version output
+          runs: |
+            zabbix_get -V 2>&1 | grep -F "zabbix_get (Zabbix)"
+        - name: Test basic functionality
+          runs: |
+            # Test TLS options are available
+            zabbix_get --help 2>&1 | grep -F "tls"
+
+  - name: zabbix-sender-fips-${{vars.major-minor}}
+    description: FIPS-enabled Zabbix client utility for sending values to Zabbix server
+    dependencies:
+      provides:
+        - zabbix-sender-fips=${{package.full-version}}
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          install -Dm755 src/zabbix_sender/zabbix_sender "${{targets.contextdir}}/usr/bin/zabbix_sender"
+    test:
+      environment:
+        contents:
+          packages:
+            - openssl-fips-test
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: zabbix_sender
+        - name: Check FIPS OpenSSL
+          runs: |
+            openssl-fips-test
+        - name: Verify no non-FIPS crypto libraries
+          runs: |
+            # Verify the binary does NOT link against non-FIPS crypto libraries
+            if ldd /usr/bin/zabbix_sender | grep -E "(libsodium|libgcrypt|libgnutls)"; then
+              echo "ERROR: zabbix_sender should not link to non-FIPS crypto libraries"
+              exit 1
+            fi
+            echo "Verified: no non-FIPS crypto libraries linked"
+        - name: Test version output
+          runs: |
+            zabbix_sender -V 2>&1 | grep -F "zabbix_sender (Zabbix)"
+        - name: Test basic functionality
+          runs: |
+            # Test TLS options are available
+            zabbix_sender --help 2>&1 | grep -F "tls"
+            # Test input file format validation (create empty temp file)
+            touch /tmp/test_input.txt
+            # zabbix_sender should accept -i flag for input files
+            zabbix_sender --help 2>&1 | grep -F -- "-i"
+
+  # =============================================================
+  # Zabbix Web Interface with Nginx and PostgreSQL
+  # =============================================================
+  - name: zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}
+    description: FIPS-enabled Zabbix Web Interface with Nginx and PostgreSQL database
+    dependencies:
+      provides:
+        - zabbix-web-nginx-pgsql-fips=${{package.full-version}}
+      runtime:
+        - php-${{vars.php-version}}
+        - php-${{vars.php-version}}-bcmath
+        - php-${{vars.php-version}}-ctype
+        - php-${{vars.php-version}}-curl
+        - php-${{vars.php-version}}-dom
+        - php-${{vars.php-version}}-fileinfo
+        - php-${{vars.php-version}}-fpm
+        - php-${{vars.php-version}}-gd
+        - php-${{vars.php-version}}-gettext
+        - php-${{vars.php-version}}-ldap
+        - php-${{vars.php-version}}-mbstring
+        - php-${{vars.php-version}}-openssl
+        - php-${{vars.php-version}}-pgsql
+        - php-${{vars.php-version}}-simplexml
+        - php-${{vars.php-version}}-sockets
+        - php-${{vars.php-version}}-xmlreader
+        - php-${{vars.php-version}}-xmlwriter
+        - postgresql-${{vars.postgres-version}}-client
+        - tzdata
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Update vendored PHP dependencies to get security fixes.
+          # There's no composerbump tool (like gobump for Go), so we update all deps for now.
+          cd ui
+          # Zabbix pins onelogin/php-saml to exact 4.0.0 which has CVE-2025-66475 (critical,
+          # authentication bypass via signature wrapping). Relax the constraint to ^4.0 so
+          # composer can pull in 4.3.1 which includes the fix (xmlseclibs 3.1.4).
+          sed -i 's/"onelogin\/php-saml": "4.0"/"onelogin\/php-saml": "^4.0"/' composer.json
+          composer update --no-dev --no-interaction
+          cd ..
+
+          # Install the Zabbix web UI files
+          mkdir -p "${{targets.contextdir}}/usr/share/zabbix"
+          cp -r ui/* "${{targets.contextdir}}/usr/share/zabbix/"
+
+          # Remove tests directory (not needed at runtime, matches upstream Docker image)
+          rm -rf "${{targets.contextdir}}/usr/share/zabbix/tests"
+
+          # Create required directories for web interface
+          mkdir -p "${{targets.contextdir}}/etc/zabbix/web"
+          mkdir -p "${{targets.contextdir}}/etc/zabbix/web/certs"
+          mkdir -p "${{targets.contextdir}}/var/lib/php/session"
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix/enc_internal"
+          mkdir -p "${{targets.contextdir}}/var/log/nginx"
+
+          # Set permissions for session directory (writable by PHP-FPM)
+          chmod 1733 "${{targets.contextdir}}/var/lib/php/session"
+    test:
+      pipeline:
+        - name: Verify web UI files
+          runs: |
+            # Verify essential UI files exist
+            stat /usr/share/zabbix/index.php
+            stat /usr/share/zabbix/api_jsonrpc.php
+            stat /usr/share/zabbix/setup.php
+            # Verify directories
+            stat /usr/share/zabbix/app
+            stat /usr/share/zabbix/include
+            stat /usr/share/zabbix/conf
+        - name: Verify PHP syntax
+          runs: |
+            # Check PHP syntax for main entry points
+            php -l /usr/share/zabbix/index.php
+            php -l /usr/share/zabbix/api_jsonrpc.php
+            php -l /usr/share/zabbix/setup.php
+        - name: Verify required PHP extensions
+          runs: |
+            # Verify all required PHP extensions are available
+            php -m | grep -F bcmath
+            php -m | grep -F ctype
+            php -m | grep -F gettext
+            php -m | grep -F mbstring
+            php -m | grep -F openssl
+            php -m | grep -F pgsql
+            php -m | grep -F SimpleXML
+            php -m | grep -F sockets
+
+  - name: zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}-nginx-config
+    description: Nginx configuration for FIPS-enabled Zabbix Web Interface
+    dependencies:
+      provides:
+        - zabbix-web-nginx-pgsql-fips-nginx-config=${{package.full-version}}
+        - nginx-config=0.${{package.full-version}}
+      replaces:
+        - nginx-mainline-config
+      runtime:
+        - nginx
+        - nginx-fastcgi-params
+        - nginx-mime-types
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/zabbix/zabbix-docker
+          tag: ${{package.version}}
+          destination: zabbix-docker
+      - runs: |
+          # Install main nginx configuration
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/nginx/nginx.conf \
+            "${{targets.contextdir}}/etc/nginx/nginx.conf"
+
+          # Install zabbix virtual host configurations
+          mkdir -p "${{targets.contextdir}}/etc/zabbix"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/zabbix/nginx.conf \
+            "${{targets.contextdir}}/etc/zabbix/nginx.conf"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/zabbix/nginx_ssl.conf \
+            "${{targets.contextdir}}/etc/zabbix/nginx_ssl.conf"
+
+          # Create http.d directory for virtual host symlinks
+          mkdir -p "${{targets.contextdir}}/etc/nginx/http.d"
+
+          # Create SSL certificate directory
+          mkdir -p "${{targets.contextdir}}/etc/ssl/nginx"
+
+          # Create log directory symlinks to stdout/stderr for container logging
+          mkdir -p "${{targets.contextdir}}/var/log/nginx"
+          ln -sf /dev/stdout "${{targets.contextdir}}/var/log/nginx/access.log"
+          ln -sf /dev/stderr "${{targets.contextdir}}/var/log/nginx/error.log"
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: nginx-config
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/tw/symlink-check
+          with:
+            # Allow absolute symlinks for /dev/stdout and /dev/stderr (container logging)
+            allow-absolute: "true"
+        - name: Verify nginx configs
+          runs: |
+            stat /etc/nginx/nginx.conf
+            stat /etc/zabbix/nginx.conf
+            stat /etc/zabbix/nginx_ssl.conf
+
+  - name: zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}-compat
+    description: Compatibility package for FIPS-enabled Zabbix Web Nginx PostgreSQL Docker image
+    dependencies:
+      provides:
+        - zabbix-web-nginx-pgsql-fips-compat=${{package.full-version}}
+        # Provide php-fpm-config since we install our own Zabbix-specific config
+        - php-${{vars.php-version}}-fpm-config=0.${{package.full-version}}
+      replaces:
+        - php-${{vars.php-version}}-fpm-config
+      runtime:
+        - bash
+        - busybox
+        - curl
+        - supervisor
+        - zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}
+        - zabbix-web-nginx-pgsql-fips-${{vars.major-minor}}-nginx-config
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/zabbix/zabbix-docker
+          tag: ${{package.version}}
+          destination: zabbix-docker
+      - runs: |
+          # Install docker-entrypoint.sh from upstream zabbix-docker repository
+          install -Dm755 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/docker-entrypoint.sh \
+            "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
+
+          # Install PHP-FPM configuration files
+          # Wolfi PHP uses /etc/php/ while Alpine uses /etc/php${{vars.php-version-dotless}}/
+          mkdir -p "${{targets.contextdir}}/etc/php"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/php${{vars.php-version-dotless}}/php-fpm.conf \
+            "${{targets.contextdir}}/etc/php/php-fpm.conf"
+
+          mkdir -p "${{targets.contextdir}}/etc/php/php-fpm.d"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/php${{vars.php-version-dotless}}/php-fpm.d/zabbix.conf \
+            "${{targets.contextdir}}/etc/php/php-fpm.d/zabbix.conf"
+
+          # Create symlink from Alpine's /etc/php${{vars.php-version-dotless}} to Wolfi's /etc/php for compatibility
+          # This allows scripts that reference /etc/php${{vars.php-version-dotless}}/ to work without modification
+          ln -sf /etc/php "${{targets.contextdir}}/etc/php${{vars.php-version-dotless}}"
+
+          # Install supervisor configuration
+          mkdir -p "${{targets.contextdir}}/etc/supervisor"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/supervisor/supervisord.conf \
+            "${{targets.contextdir}}/etc/supervisor/supervisord.conf"
+
+          mkdir -p "${{targets.contextdir}}/etc/supervisor/conf.d"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/supervisor/conf.d/supervisord_zabbix.conf \
+            "${{targets.contextdir}}/etc/supervisor/conf.d/supervisord_zabbix.conf"
+
+          # Create php-fpm84 symlink for Alpine compatibility
+          # The supervisor config uses %(program_name)s which substitutes to php-fpm84,
+          # but Wolfi's binary is named php-fpm (no version suffix).
+          # Path compatibility is handled by existing symlinks:
+          # - /usr/sbin → /usr/bin (wolfi-baselayout)
+          # - /etc/php84 → /etc/php (created above)
+          ln -sf php-fpm "${{targets.contextdir}}/usr/bin/php-fpm${{vars.php-version-dotless}}"
+
+          # Install Zabbix web configuration files
+          # These PHP files configure database connection and maintenance mode from environment variables
+          mkdir -p "${{targets.contextdir}}/etc/zabbix/web"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/zabbix/web/zabbix.conf.php \
+            "${{targets.contextdir}}/etc/zabbix/web/zabbix.conf.php"
+          install -Dm644 zabbix-docker/Dockerfiles/web-nginx-pgsql/alpine/conf/etc/zabbix/web/maintenance.inc.php \
+            "${{targets.contextdir}}/etc/zabbix/web/maintenance.inc.php"
+
+          # Create symlinks from web config to zabbix UI conf directory
+          # The Zabbix UI expects these config files in /usr/share/zabbix/conf/
+          # but Docker images configure them via /etc/zabbix/web/
+          mkdir -p "${{targets.contextdir}}/usr/share/zabbix/conf"
+          ln -sf /etc/zabbix/web/zabbix.conf.php "${{targets.contextdir}}/usr/share/zabbix/conf/zabbix.conf.php"
+          ln -sf /etc/zabbix/web/maintenance.inc.php "${{targets.contextdir}}/usr/share/zabbix/conf/maintenance.inc.php"
+
+          # Create directories expected by the entrypoint
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix"
+          mkdir -p "${{targets.contextdir}}/var/lib/zabbix/enc_internal"
+          mkdir -p "${{targets.contextdir}}/var/lib/nginx"
+          mkdir -p "${{targets.contextdir}}/var/lib/nginx/logs"
+    test:
+      environment:
+        contents:
+          packages:
+            - bash
+            - curl
+            - php-${{vars.php-version}}-fpm
+            - wait-for-it
+        environment:
+          # Environment variables needed by docker-entrypoint.sh (normally set in Dockerfile)
+          DB_SERVER_HOST: localhost
+          POSTGRES_USER: zabbix
+          POSTGRES_PASSWORD: zabbix
+          ZABBIX_CONF_DIR: /etc/zabbix
+          ZABBIX_USER_HOME_DIR: /var/lib/zabbix
+          ZABBIX_WWW_ROOT: /usr/share/zabbix
+        accounts:
+          groups:
+            - groupname: nginx
+              gid: 101
+          users:
+            - username: nginx
+              uid: 101
+              gid: 101
+          run-as: 0
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            # Allow absolute symlinks for compatibility with Alpine path layout
+            allow-absolute: "true"
+        - name: Verify file structure
+          runs: |
+            # Verify docker-entrypoint.sh exists and is executable
+            stat /usr/bin/docker-entrypoint.sh
+            test -x /usr/bin/docker-entrypoint.sh || { echo "ERROR: /usr/bin/docker-entrypoint.sh is not executable"; exit 1; }
+            # Verify PHP-FPM config exists
+            stat /etc/php/php-fpm.conf
+            stat /etc/php/php-fpm.d/zabbix.conf
+            # Verify supervisor config exists
+            stat /etc/supervisor/supervisord.conf
+            stat /etc/supervisor/conf.d/supervisord_zabbix.conf
+            # Verify Zabbix web config files exist
+            stat /etc/zabbix/web/zabbix.conf.php
+            stat /etc/zabbix/web/maintenance.inc.php
+            # Verify Alpine compatibility symlink works
+            stat /etc/php${{vars.php-version-dotless}}/php-fpm.conf
+        - uses: test/daemon-check-output
+          with:
+            setup: |
+              # Remove the database connectivity check since we're only testing nginx/php-fpm
+              sed -i '/^check_db_connect$/d' /usr/bin/docker-entrypoint.sh
+            start: /usr/bin/docker-entrypoint.sh
+            expected_output: |
+              Deploying Zabbix web-interface
+              Executing supervisord
+            timeout: 60
+            post: |
+              # Wait for nginx to be ready
+              wait-for-it --host=localhost --port=8080 --timeout=30
+              # Test PHP-FPM ping endpoint (verifies nginx can talk to PHP-FPM)
+              curl -sfm 10 http://127.0.0.1:8080/ping | grep -F "pong"
+
+update:
+  enabled: true
+  github:
+    identifier: zabbix/zabbix
+    use-tag: true
+    tag-filter-prefix: "7.4."
+
+test:
+  pipeline:
+    - uses: test/tw/emptypackage
