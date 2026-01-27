@@ -1,1 +1,1 @@
-../enterprise-packages/CLAUDE.md
+../CLAUDE.md
