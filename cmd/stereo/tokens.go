@@ -145,18 +145,20 @@ func isLibrariesPipeline(uses string) bool {
 func generateGitHubToken(ctx context.Context, sourceDir string) error {
 	log.Printf("creating github token in %s", sourceDir)
 	dest := filepath.Join(sourceDir, ".github.token")
+	prog := "chainctl"
 	args := []string{"auth", "octo-sts", "--identity=guarded-package-repos", "--scope=chainguard-dev"}
-	return writeToken(ctx, dest, args)
+	return writeToken(ctx, dest, prog, args)
 }
 
 func generateLibrariesToken(ctx context.Context, sourceDir string) error {
 	log.Printf("creating libraries token in %s", sourceDir)
 	dest := filepath.Join(sourceDir, ".libraries.token")
+	prog := "chainctl"
 	args := []string{"auth", "token", "--audience", "libraries.cgr.dev"}
-	return writeToken(ctx, dest, args)
+	return writeToken(ctx, dest, prog, args)
 }
 
-func writeToken(ctx context.Context, dest string, args []string) error {
+func writeToken(ctx context.Context, dest string, prog string, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("create token directory: %w", err)
 	}
@@ -171,14 +173,13 @@ func writeToken(ctx context.Context, dest string, args []string) error {
 		_ = os.Remove(tmp.Name())
 	}()
 
-	cmd := exec.CommandContext(ctx, "chainctl", args...)
+	cmd := exec.CommandContext(ctx, prog, args...)
 	cmd.Stdout = tmp
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 
 	if err := cmd.Run(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chainctl failed to create token: %w", err)
+		return fmt.Errorf("%s failed to create token: %w", prog, err)
 	}
 
 	if err := tmp.Close(); err != nil {
