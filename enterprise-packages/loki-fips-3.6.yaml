@@ -118,7 +118,7 @@ subpackages:
                   ]
                 }'
               # Verify logcli can connect
-              logcli --addr="http://localhost:${LOKI_PORT}" --version
+              logcli --addr="http://localhost:${LOKI_PORT}" query '{job=~".+"}' --limit=10 | grep "test log message from logcli test"
 
   - name: ${{package.name}}-promtail
     pipeline:
@@ -229,49 +229,53 @@ subpackages:
       pipeline:
         - uses: test/go-fips-check
         - name: Verify loki-canary starts and serves metrics
-          runs: |
-            set -euo pipefail
-            # Start Loki first
-            mkdir -p /tmp/loki/chunks /tmp/loki/rules
-            tee /tmp/loki-config.yaml <<EOF
-            auth_enabled: false
-            server:
-              http_listen_port: ${LOKI_PORT}
-            common:
-              path_prefix: /tmp/loki
-              storage:
-                filesystem:
-                  chunks_directory: /tmp/loki/chunks
-                  rules_directory: /tmp/loki/rules
-              replication_factor: 1
-              ring:
-                kvstore:
-                  store: inmemory
-            schema_config:
-              configs:
-                - from: 2020-10-24
-                  store: tsdb
-                  object_store: filesystem
-                  schema: v13
-                  index:
-                    prefix: index_
-                    period: 24h
-            limits_config:
-              allow_structured_metadata: false
-            EOF
-            loki -config.file=/tmp/loki-config.yaml -config.expand-env=true > /tmp/loki.log 2>&1 &
-            LOKI_PID=$!
-            # Wait for Loki to be ready
-            wait-for-it localhost:${LOKI_PORT} -t 60
-            # Start canary in background
-            loki-canary -addr=localhost:${LOKI_PORT} -port=${CANARY_PORT} -labelname=canary -labelvalue=test > /tmp/canary.log 2>&1 &
-            CANARY_PID=$!
-            # Wait for canary to start
-            sleep 10
-            # Verify canary metrics endpoint is responding
-            curl -f "http://localhost:${CANARY_PORT}/metrics" | grep -F "loki_canary"
-            # Cleanup
-            kill $CANARY_PID $LOKI_PID 2>/dev/null || true
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              set -euo pipefail
+              # Start Loki first
+              mkdir -p /tmp/loki/chunks /tmp/loki/rules
+              tee /tmp/loki-config.yaml <<EOF
+              auth_enabled: false
+              server:
+                http_listen_port: ${LOKI_PORT}
+              common:
+                path_prefix: /tmp/loki
+                storage:
+                  filesystem:
+                    chunks_directory: /tmp/loki/chunks
+                    rules_directory: /tmp/loki/rules
+                replication_factor: 1
+                ring:
+                  kvstore:
+                    store: inmemory
+              schema_config:
+                configs:
+                  - from: 2020-10-24
+                    store: tsdb
+                    object_store: filesystem
+                    schema: v13
+                    index:
+                      prefix: index_
+                      period: 24h
+              limits_config:
+                allow_structured_metadata: false
+              EOF
+              loki -config.file=/tmp/loki-config.yaml -config.expand-env=true > /tmp/loki.log 2>&1 &
+              LOKI_PID=$!
+              # Wait for Loki to be ready
+              wait-for-it localhost:${LOKI_PORT} -t 60
+            start: loki-canary -addr=localhost:${LOKI_PORT} -port=${CANARY_PORT} -labelname=canary -labelvalue=test
+            expected_output: "Querying loki for metric count with query"
+            timeout: 60
+            post: |-
+              CANARY_PID=$!
+              # Wait for canary to start
+              wait-for-it localhost:${CANARY_PORT} -t 60
+              # Verify canary metrics endpoint is responding
+              curl -f "http://localhost:${CANARY_PORT}/metrics" | grep -F "loki_canary"
+              # Cleanup
+              kill $CANARY_PID $LOKI_PID 2>/dev/null || true
 
   - name: ${{package.name}}-iamguarded-compat
     dependencies:
