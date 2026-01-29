@@ -1,6 +1,6 @@
 package:
   name: litellm
-  version: "1.80.15.0"
+  version: "1.81.0.0"
   epoch: 1
   description: OpenAI Proxy Server (LLM Gateway) to call 100+ LLMs in a unified interface & track spend, set budgets per virtual key/user
   copyright:
@@ -67,7 +67,7 @@ pipeline:
     with:
       repository: https://github.com/BerriAI/litellm
       tag: ${{vars.git-tag}}
-      expected-commit: 17c8d8d109b5d10c8a691108c47b9ce39f2f2646
+      expected-commit: 790a5ce0b323c1eefa70c2df25b2780097aa3f80
 
   - uses: auth/uv
     with:
@@ -76,7 +76,7 @@ pipeline:
   - runs: |
       mkdir -p ${{targets.contextdir}}/usr/bin
       mkdir -p ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages
-      mkdir -p ${{targets.contextdir}}/usr/share/litellm
+      mkdir -p ${{targets.contextdir}}/usr/share/litellm/proxy
       mkdir -p ${{targets.contextdir}}/usr/share/prisma-cli
 
       # Clean package build artifacts
@@ -90,30 +90,30 @@ pipeline:
       # Remove enterprise-only dependencies since we don't include enterprise directory
       sed -i '/litellm-enterprise/d' requirements.txt
       sed -i '/nodejs-wheel-binaries/d' requirements.txt
-      uv pip install dist/*.whl --no-build-isolation
+      # Already a requirement of litellm
+      sed -i '/tokenizers/d' requirements.txt
       uv pip install -r requirements.txt --no-build-isolation
-
       uv pip install aurelio-sdk semantic_router
+
+      uv pip install dist/*.whl --no-build-isolation
 
       # Fix CVE-2025-67221 / GHSA-hx9q-6w63-j58v by upgrading orjson to 3.11.5+
       uv pip install --upgrade orjson>=3.11.5
 
       # Generate Prisma client
+      export PRISMA_BINARY_CACHE_DIR=${{targets.contextdir}}/usr/share/prisma-cli
       prisma generate
 
+      prisma migrate diff --from-empty --to-schema-datamodel ./schema.prisma --script > /dev/null 2>&1 || true
+
       # Pre-cache the Node.js Prisma CLI and engine binaries
-      export PRISMA_BINARY_CACHE_DIR=${{targets.contextdir}}/usr/share/prisma-cli
       python${{vars.python-version}} -c "import prisma.cli.prisma as p; p.ensure_cached()"
 
-      # Copy missing query-engine binary that ensure_cached() skips
-      cp $HOME/.cache/prisma-python/binaries/*/*/node_modules/@prisma/engines/query-engine-* \
-         ${{targets.contextdir}}/usr/share/prisma-cli/node_modules/@prisma/engines/
-
-      # Create symlink for query engine discovery
-      for engine in ${{targets.contextdir}}/usr/share/prisma-cli/node_modules/@prisma/engines/query-engine-*; do
+      # Create symlink for prisma query engine discovery
+      for engine in $PRISMA_BINARY_CACHE_DIR/node_modules/@prisma/engines/query-engine-*; do
         if [ -f "$engine" ]; then
           engine_name=$(basename "$engine")
-          ln -sf ./node_modules/@prisma/engines/"$engine_name" ${{targets.contextdir}}/usr/share/prisma-cli/query-engine
+          ln -sf "./node_modules/@prisma/engines/$engine_name" ${{targets.contextdir}}/usr/share/prisma-cli/query-engine
           break
         fi
       done
@@ -136,12 +136,7 @@ pipeline:
         ${{targets.contextdir}}/usr/bin/
 
       # Install application files
-      cp -r litellm \
-        mcp_servers.json \
-        model_prices_and_context_window.json \
-        provider_endpoints_support.json \
-        schema.prisma \
-        ${{targets.contextdir}}/usr/share/litellm/
+      cp -r model_prices_and_context_window.json schema.prisma ${{targets.contextdir}}/usr/share/litellm/
 
       # Remove enterprise symlink since we don't include enterprise directory
       rm -f ${{targets.contextdir}}/usr/share/litellm/litellm/proxy/enterprise
@@ -190,11 +185,16 @@ subpackages:
     pipeline:
       - runs: |
           mkdir -p ${{targets.contextdir}}/app/docker
+          mkdir -p ${{targets.contextdir}}/app/litellm/proxy
+          mkdir -p ${{targets.contextdir}}/app/litellm-proxy-extras
           mkdir -p ${{targets.contextdir}}/etc
 
-          for link in litellm mcp_servers.json model_prices_and_context_window.json provider_endpoints_support.json schema.prisma; do
+          for link in model_prices_and_context_window.json schema.prisma; do
             ln -sf ../usr/share/litellm/$link ${{targets.contextdir}}/app/$link
           done
+
+          ln -sf ../../../usr/lib/python${{vars.python-version}}/site-packages/litellm/proxy/prisma_migration.py ${{targets.contextdir}}/app/litellm/proxy/prisma_migration.py
+          ln -sf ../../usr/lib/python${{vars.python-version}}/site-packages/litellm_proxy_extras ${{targets.contextdir}}/app/litellm-proxy-extras/
 
           install -Dm755 docker/entrypoint.sh ${{targets.contextdir}}/app/docker/docker-entrypoint.sh
           install -Dm755 docker/prod_entrypoint.sh ${{targets.contextdir}}/app/docker/prod_entrypoint.sh
@@ -260,7 +260,7 @@ subpackages:
                 database_url: null
                 master_key: $LITELLM_MASTER_KEY
               EOF
-            start: docker/prod_entrypoint.sh --config config.yaml --port 4001
+            start: /app/docker/prod_entrypoint.sh --config config.yaml --port 4001
             expected_output: |
               Started server process
               Application startup complete
