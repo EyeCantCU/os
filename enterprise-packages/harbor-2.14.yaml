@@ -1,7 +1,7 @@
 package:
-  name: harbor-2.12
-  version: "2.12.4"
-  epoch: 18
+  name: harbor-2.14
+  version: "2.14.2"
+  epoch: 2
   description: An open source trusted cloud native registry project that stores, signs, and scans content
   copyright:
     - license: Apache-2.0
@@ -14,11 +14,12 @@ vars:
   # https://github.com/goharbor/harbor/blob/main/make/photon/prepare/Pipfile#L15
   python-version: "3.13"
   custom-distribution-version: 2.8.3
-  harbor-distribution-expected-commit: 4772604ae973031ab32dd9805a4bccf61d94909f # needs to be updated with each package release
+  harbor-distribution-release-branch: 2.8
+  harbor-distribution-expected-commit: 0c62ec3ec8df7ea91c819448236a67f0777f929f # needs to be updated with each package release
 
 # Create a new major-minor-version variable that contains only the major version
 # to use in the iamguarded/{build|finalize|test}-compat pipeline to find out the correct folder for the image.
-# e.g. 2.12.4 will create a new var major-minor-version=2.12
+# e.g. 2.14.2 will create a new var major-minor-version=2.14
 var-transforms:
   - from: ${{package.version}}
     match: ^(\d+\.\d+)\.\d+$
@@ -32,13 +33,13 @@ var-transforms:
 environment:
   contents:
     packages:
-      - go~1.24
       - nginx-config
       - nodejs
       - npm
       - py3-setuptools
       - python3
       - shadow
+      - swagger<0.33
   environment:
     CGO_ENABLED: "0"
     DISTRIBUTION_PKG: "github.com/docker/distribution"
@@ -49,15 +50,12 @@ pipeline:
     with:
       repository: https://github.com/goharbor/harbor
       tag: v${{package.version}}
-      expected-commit: 6b4981d4dd46a20481be5a3a7cdf435bc20f4dcb
+      expected-commit: 3a2df66dc30b9e6b2c100fcd2c6047889e553072
 
   - runs: |
-      # Harbor swagger generation is broken with the latest swagger use the version below for now
-      # Remove this once harbor starts working with the latest version
-      go install github.com/go-swagger/go-swagger/cmd/swagger@v0.30.5
-      mv $(go env GOPATH)/bin/swagger /usr/bin/swagger
+      # Fixes CVE-2025-24358, can not use go/bump block doing so from modroot of dependency breaks build.
+      sed -i 's|\(github.com/gorilla/csrf \)v1\.7\.2|\1v1.7.3|' src/go.mod
 
-  - runs: |
       mkdir -p ${{targets.destdir}}/harbor
       # Copy views, migrations, and icons
       cp -rf ./src/core/views ${{targets.destdir}}/harbor/views
@@ -70,9 +68,6 @@ pipeline:
   - uses: go/bump
     with:
       deps: |-
-        golang.org/x/oauth2@v0.27.0
-        github.com/gorilla/csrf@v1.7.3
-        helm.sh/helm/v3@v3.18.5
         golang.org/x/crypto@v0.45.0
       modroot: ./src
 
@@ -386,15 +381,6 @@ subpackages:
             # in the post step; so we used tini in the start command instead of setup.
             start: /sbin/tini -s -- sh -c 'cd /harbor && ./harbor_core & exec bash -x /opt/iamguarded/scripts/harbor-jobservice/entrypoint.sh /opt/iamguarded/scripts/harbor-jobservice/run.sh'
             timeout: 60
-            # Harbor 2.12 has a bug where it logs "[ERROR] failed to create audit log, error dial tcp:
-            # missing address" even when no audit log forward endpoint is configured. This was fixed in
-            # Harbor 2.13+ by only logging the error when len(logEndpoint) > 0. Since this error is
-            # non-fatal (falls back to stdout) and cannot be disabled via environment variable, we
-            # exclude ERROR from the error_strings list.
-            # See: https://github.com/goharbor/harbor/blob/v2.13.0/src/pkg/audit/forward.go#L44
-            error_strings: |
-              FAIL
-              FATAL
             expected_output: |
               Validating harbor-jobservice settings
               harbor-jobservice setup finished
@@ -454,10 +440,8 @@ subpackages:
       pipeline:
         - runs: |
             useradd nginx
-            mkdir -p /var/lib/nginx/logs
-            mkdir -p /var/lib/nginx/tmp
             # The endpoint created by nginx is forbidden in CI
-            nginx -g "daemon off;" & sleep 5; kill $!
+            nginx -g "daemon off;" & sleep 5; kill $! 2>&1
 
   - name: ${{package.name}}-portal-nginx-config
     description: nginx config for harbor portal
@@ -477,16 +461,6 @@ subpackages:
           # And access logs to stdout
           sed -i 's/#access_log.*;$/access_log  \/dev\/stdout;/' /etc/nginx/nginx.conf
           cp -rf /etc/nginx/* ${{targets.subpkgdir}}/etc/nginx/
-    test:
-      pipeline:
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: harbor-portal-nginx-config
-            real-pkg-name: ${{subpkg.name}}
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: nginx-config
-            real-pkg-name: ${{subpkg.name}}
 
   - name: ${{package.name}}-portal-iamguarded-compat
     description: "compat package with iamguarded harbor-portal image"
@@ -584,6 +558,25 @@ subpackages:
         - runs: |
             harbor-registryctl --help
 
+  - name: ${{package.name}}-redis-compat
+    description: Compat package for running redis with harbor
+    dependencies:
+      provides:
+        - harbor-redis-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/bin
+          mkdir -p ${{targets.subpkgdir}}/etc
+
+          cp ./make/photon/redis/docker-healthcheck ${{targets.subpkgdir}}/usr/bin/
+          cp ./make/photon/redis/redis.conf ${{targets.subpkgdir}}/etc/
+    test:
+      pipeline:
+        - runs: |
+            set -e
+            stat /usr/bin/docker-healthcheck
+            stat /etc/redis.conf
+
   - name: ${{package.name}}-exporter
     description: harbor exporter
     dependencies:
@@ -623,24 +616,6 @@ subpackages:
             expected_output: |
               artifact annotation version v1alpha1 registered
               Registering database: type-PostgreSQL
-
-  - name: ${{package.name}}-redis-compat
-    description: Compat package for running redis with harbor
-    dependencies:
-      provides:
-        - harbor-redis-compat=${{package.full-version}}
-    pipeline:
-      - runs: |
-          mkdir -p ${{targets.subpkgdir}}/usr/bin
-          mkdir -p ${{targets.subpkgdir}}/etc
-
-          cp ./make/photon/redis/docker-healthcheck ${{targets.subpkgdir}}/usr/bin/
-          cp ./make/photon/redis/redis.conf ${{targets.subpkgdir}}/etc/
-    test:
-      pipeline:
-        - runs: |
-            stat /usr/bin/docker-healthcheck
-            stat /etc/redis.conf
 
   - name: ${{package.name}}-prepare
     description: Harbor prepare - configuration generator for Harbor deployment
@@ -684,11 +659,11 @@ subpackages:
     pipeline:
       - name: "Drift Check"
         runs: |
-          # https://github.com/goharbor/harbor/blob/v2.12.4/Makefile#L111
-          grep -qF "REGISTRY_SRC_TAG=v${{vars.custom-distribution-version}}" Makefile
+          # https://github.com/goharbor/harbor/blob/main/Makefile#L113
+          grep -qF "REGISTRY_SRC_TAG=release/${{vars.harbor-distribution-release-branch}}" Makefile
       - name: "Add entrypoint scripts to match upstream"
         runs: |
-          # As per upstream: https://github.com/goharbor/harbor/blob/v2.11.2/make/photon/registry/Dockerfile#L5-L6
+          # As per upstream: https://github.com/goharbor/harbor/blob/v2.14.1/make/photon/registry/Dockerfile#L5-L6
           # This script basically triggers option install_cert.sh script which will be skipped if the OS is not Photon and run registry binary
           mkdir -p ${{targets.subpkgdir}}/home/harbor
           cp ./make/photon/common/install_cert.sh ${{targets.subpkgdir}}/home/harbor/install_cert.sh
@@ -696,7 +671,7 @@ subpackages:
       - uses: git-checkout
         with:
           repository: https://github.com/goharbor/distribution
-          tag: "v${{vars.custom-distribution-version}}"
+          branch: release/${{vars.harbor-distribution-release-branch}}
           expected-commit: ${{vars.harbor-distribution-expected-commit}} # needs to be updated with each package release
       - name: "Build"
         runs: |
@@ -804,13 +779,18 @@ subpackages:
           version: ${{vars.major-minor-version}}
     test:
       pipeline:
-        - uses: test/tw/symlink-check
-          with:
-            allow-absolute: true
+        - uses: test/tw/ldd-check
         - uses: test/virtualpackage
           with:
             virtual-pkg-name: harbor-adapter-trivy-iamguarded-compat
             real-pkg-name: ${{subpkg.name}}
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - uses: iamguarded/test-compat
+          with:
+            package: harbor-adapter-trivy
+            version: ${{vars.major-minor-version}}
         - uses: test/daemon-check-output
           with:
             start: /opt/iamguarded/scripts/harbor-adapter-trivy/entrypoint.sh /opt/iamguarded/scripts/harbor-adapter-trivy/run.sh
@@ -1016,5 +996,5 @@ update:
   github:
     identifier: goharbor/harbor
     strip-prefix: v
-    tag-filter-prefix: v2.12.
+    tag-filter-prefix: v2.14.
     use-tag: true
