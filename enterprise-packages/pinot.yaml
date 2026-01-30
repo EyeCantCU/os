@@ -1,0 +1,351 @@
+package:
+  name: pinot
+  version: "1.4.0"
+  epoch: 0
+  description: Apache Pinot - A realtime distributed OLAP datastore
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - coreutils
+      - curl
+      - grep
+      - procps
+      - wget
+      - zstd
+
+vars:
+  # Java 11 is required by upstream - see https://github.com/apache/pinot/blob/master/docker/images/pinot/Dockerfile
+  # ARG PINOT_BASE_IMAGE_TAG=11-amazoncorretto and ARG JDK_VERSION=11
+  java-version: "11"
+  jmx-prometheus-javaagent-version: "0.18.0"
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - corretto-${{vars.java-version}}-default-jdk
+      - curl
+      - libudev
+      - maven
+      - nodejs
+      - npm
+      - protobuf
+      - protoc
+      - thrift-dev
+      - udev
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/pinot
+      tag: release-${{package.version}}
+      expected-commit: 3a56c9db545e3b403863d8319055ea9be8eae771
+
+  - name: Check Java version drift
+    runs: |
+      set -euo pipefail
+      EXPECTED_VERSION="${{vars.java-version}}"
+      DOCKERFILE_VERSION=$(grep -E '^ARG JDK_VERSION=' docker/images/pinot/Dockerfile | sed 's/ARG JDK_VERSION=//')
+      echo "Expected Java version: $EXPECTED_VERSION"
+      echo "Dockerfile Java version: $DOCKERFILE_VERSION"
+      if [ "$EXPECTED_VERSION" != "$DOCKERFILE_VERSION" ]; then
+        echo "ERROR: Java version drift detected!"
+        echo "Please update java-version to $DOCKERFILE_VERSION"
+        exit 1
+      fi
+      echo "Java version check passed"
+
+  - name: Check JMX Prometheus Java Agent version drift
+    runs: |
+      set -euo pipefail
+      EXPECTED_VERSION="${{vars.jmx-prometheus-javaagent-version}}"
+      DOCKERFILE_VERSION=$(grep 'jmx_prometheus_javaagent-' docker/images/pinot/Dockerfile | sed 's/.*jmx_prometheus_javaagent-\([0-9.]*\)\.jar.*/\1/' | head -1)
+      echo "Expected version: $EXPECTED_VERSION"
+      echo "Dockerfile version: $DOCKERFILE_VERSION"
+      if [ "$EXPECTED_VERSION" != "$DOCKERFILE_VERSION" ]; then
+        echo "ERROR: JMX Prometheus Java Agent version drift detected!"
+        echo "Please update jmx-prometheus-javaagent-version to $DOCKERFILE_VERSION"
+        exit 1
+      fi
+      echo "Version check passed"
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+      patch-file: pombump-deps.yaml
+
+  - name: Build Pinot distribution
+    runs: |
+      mvn install package -DskipTests -Drat.skip=true -Dlicense.skip=true -Pbin-dist -Djdk.version=${{vars.java-version}} -T$(nproc)C
+
+  - name: Create directory structure and install files
+    runs: |
+      mkdir -p "${{targets.destdir}}/usr/share/java/pinot"
+      mkdir -p "${{targets.destdir}}/usr/share/java/pinot/configs"
+      mkdir -p "${{targets.destdir}}/usr/share/java/pinot/data"
+      cp -r build/* "${{targets.destdir}}/usr/share/java/pinot/"
+      chmod +x "${{targets.destdir}}"/usr/share/java/pinot/bin/*.sh
+
+      # Install docker scripts with proper permissions
+      for script in docker/images/pinot/bin/*.sh; do
+        install -Dm755 "$script" "${{targets.destdir}}/usr/share/java/pinot/bin/$(basename "$script")"
+      done
+
+      cp -r docker/images/pinot/etc/ "${{targets.destdir}}/usr/share/java/pinot/etc"
+      cp -r docker/images/pinot/examples/ "${{targets.destdir}}/usr/share/java/pinot/examples"
+
+  - name: Clean up Windows scripts
+    runs: |
+      rm -f "${{targets.destdir}}"/usr/share/java/pinot/bin/*.cmd
+      rm -f "${{targets.destdir}}"/usr/share/java/pinot/bin/*.bat
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-jmx-prometheus-javaagent
+    description: JMX Prometheus Java Agent for Pinot metrics
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: fetch
+        with:
+          uri: https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/${{vars.jmx-prometheus-javaagent-version}}/jmx_prometheus_javaagent-${{vars.jmx-prometheus-javaagent-version}}.jar
+          expected-sha256: fb569b5cb18494c22561a1eec10cb26e6117f057f6a5ac0ffe53dc16213a1dde
+          extract: false
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/share/java/pinot/etc/jmx_prometheus_javaagent"
+          mv jmx_prometheus_javaagent-${{vars.jmx-prometheus-javaagent-version}}.jar "${{targets.subpkgdir}}/usr/share/java/pinot/etc/jmx_prometheus_javaagent/"
+          ln -s jmx_prometheus_javaagent-${{vars.jmx-prometheus-javaagent-version}}.jar "${{targets.subpkgdir}}/usr/share/java/pinot/etc/jmx_prometheus_javaagent/jmx_prometheus_javaagent.jar"
+    test:
+      pipeline:
+        - runs: |
+            set -euo pipefail
+            stat /usr/share/java/pinot/etc/jmx_prometheus_javaagent/jmx_prometheus_javaagent-${{vars.jmx-prometheus-javaagent-version}}.jar
+            stat /usr/share/java/pinot/etc/jmx_prometheus_javaagent/jmx_prometheus_javaagent.jar
+
+  - name: ${{package.name}}-compat
+    description: Compatibility package providing /opt/pinot symlinks
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/opt"
+          ln -sf /usr/share/java/pinot "${{targets.subpkgdir}}/opt/pinot"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - uuidgen
+        - ${{package.name}}-compat
+        - wait-for-it
+        - corretto-${{vars.java-version}}-default-jdk
+    environment:
+      JAVA_HOME: "/usr/lib/jvm/default-jvm"
+  pipeline:
+    - uses: test/daemon-check-output
+      with:
+        setup: |-
+          export JAVA_OPTS="-Xms512M -Xmx2G"
+          # Start Zookeeper
+          /opt/pinot/bin/pinot-admin.sh StartZookeeper -zkPort 2191 > /tmp/pinot-zk.log 2>&1 &
+          wait-for-it -t 30 localhost:2191
+          # Start Controller (must be before Broker)
+          /opt/pinot/bin/pinot-admin.sh StartController -zkAddress localhost:2191 -controllerPort 9000 > /tmp/pinot-controller.log 2>&1 &
+          wait-for-it -t 60 localhost:9000
+          # Start Broker
+          /opt/pinot/bin/pinot-admin.sh StartBroker -zkAddress localhost:2191 > /tmp/pinot-broker.log 2>&1 &
+          wait-for-it -t 60 localhost:8099
+        start: |-
+          /opt/pinot/bin/pinot-admin.sh StartServer -zkAddress localhost:2191 > /tmp/pinot-server.log 2>&1
+        timeout: "120"
+        expected_output: |
+          Started Pinot
+          [SERVER]
+          instance
+        error_strings: |
+          FATAL
+        post: |-
+          set -euo pipefail
+          # Wait for services to stabilize
+          # Test Controller health
+          curl -sf --max-time 15 http://localhost:9000/health | grep -F 'OK'
+          # Test Broker health
+
+          ## Test cluster info
+
+          # ## List tenants
+          curl -sf --max-time 25 http://localhost:9000/tenants | jq -e '. | length >= 0'
+
+          ## Test cluster info
+          curl -sf --max-time 25 http://localhost:9000/cluster/info | jq -e '.clusterName == "PinotCluster"'
+
+          # Poll Broker health until ready
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 5 http://localhost:8099/health | grep -F 'OK'; then
+              echo "Broker health check passed"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Broker health check failed after 30 attempts"
+              exit 1
+            fi
+            echo "Waiting for broker health... ($i/30)"
+            sleep 1
+          done
+
+          TEST_TABLE="test_table_$(uuidgen | tr -d '-' | head -c 8)"
+
+          tee /tmp/schema.json << 'SCHEMAEOF'
+          {
+            "schemaName": "TABLENAME_PLACEHOLDER",
+            "dimensionFieldSpecs": [
+              {
+                "name": "studentID",
+                "dataType": "INT"
+              },
+              {
+                "name": "firstName",
+                "dataType": "STRING"
+              },
+              {
+                "name": "lastName",
+                "dataType": "STRING"
+              }
+            ],
+            "metricFieldSpecs": [
+              {
+                "name": "score",
+                "dataType": "FLOAT"
+              }
+            ],
+            "dateTimeFieldSpecs": [
+              {
+                "name": "timestampInEpoch",
+                "dataType": "LONG",
+                "format": "1:MILLISECONDS:EPOCH",
+                "granularity": "1:MILLISECONDS"
+              }
+            ]
+          }
+          SCHEMAEOF
+
+          sed -i "s/TABLENAME_PLACEHOLDER/${TEST_TABLE}/g" /tmp/schema.json
+
+          echo "Uploading schema..."
+          curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/schema.json \
+            http://localhost:9000/schemas
+
+          echo "Verifying schema..."
+          curl -sf --max-time 5 http://localhost:9000/schemas/${TEST_TABLE} | jq -e '.schemaName == "'${TEST_TABLE}'"'
+
+          # Create table
+          echo "Creating table..."
+          tee /tmp/table.json << 'TABLEEOF'
+          {
+            "tableName": "TABLENAME_PLACEHOLDER",
+            "tableType": "OFFLINE",
+            "segmentsConfig": {
+              "replication": "1"
+            },
+            "tenants": {
+              "broker": "DefaultTenant",
+              "server": "DefaultTenant"
+            },
+            "tableIndexConfig": {
+              "loadMode": "MMAP"
+            },
+            "metadata": {}
+          }
+          TABLEEOF
+
+          sed -i "s/TABLENAME_PLACEHOLDER/${TEST_TABLE}/g" /tmp/table.json
+
+          curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/table.json \
+            http://localhost:9000/tables
+
+          curl -sf --max-time 5 http://localhost:9000/tables/${TEST_TABLE} | jq -e '.OFFLINE.tableName == "'${TEST_TABLE}_OFFLINE'"'
+
+          mkdir -p /tmp/pinot-data /tmp/pinot-segments
+          tee /tmp/pinot-data/test_data.csv << 'CSVEOF'
+          studentID,firstName,lastName,score,timestampInEpoch
+          1,John,Doe,85.5,1640000000000
+          2,Jane,Smith,92.3,1640000001000
+          3,Bob,Johnson,78.9,1640000002000
+          CSVEOF
+
+          /opt/pinot/bin/pinot-admin.sh CreateSegment \
+            -tableConfigFile /tmp/table.json \
+            -schemaFile /tmp/schema.json \
+            -dataDir /tmp/pinot-data \
+            -format CSV \
+            -outDir /tmp/pinot-segments
+
+          # Find the generated segment directory
+          SEGMENT_DIR=$(ls -d /tmp/pinot-segments/${TEST_TABLE}_* | head -1)
+
+          # Create tar.gz from segment directory
+          SEGMENT_NAME=$(basename "$SEGMENT_DIR")
+          tar -czf "/tmp/pinot-segments/${SEGMENT_NAME}.tar.gz" -C /tmp/pinot-segments "$SEGMENT_NAME"
+
+          curl -sf --max-time 15 -X POST \
+            -F "segment=@/tmp/pinot-segments/${SEGMENT_NAME}.tar.gz" \
+            http://localhost:9000/segments
+
+          for i in $(seq 1 15); do
+            SEGMENT_STATUS=$(curl -sf --max-time 5 http://localhost:9000/tables/${TEST_TABLE}/segments/${SEGMENT_NAME} 2>/dev/null || echo '{}')
+            if echo "$SEGMENT_STATUS" | jq -e '.OFFLINE' >/dev/null 2>&1; then
+              echo "Segment loaded successfully"
+              break
+            fi
+            echo "Waiting for segment... ($i/15)"
+            sleep 2
+          done
+
+          QUERY_RESPONSE=$(curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"sql":"SELECT studentID, firstName, lastName, score FROM '${TEST_TABLE}' ORDER BY studentID LIMIT 10"}' \
+            http://localhost:8099/query/sql)
+
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows | length == 3'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[0][0] == 1'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[0][1] == "John"'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[1][1] == "Jane"'
+          echo "$QUERY_RESPONSE" | jq -e '.resultTable.rows[2][1] == "Bob"'
+          echo "✓ Data insertion and query passed"
+
+          AGG_RESPONSE=$(curl -sf --max-time 10 -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"sql":"SELECT COUNT(*) FROM '${TEST_TABLE}'"}' \
+            http://localhost:8099/query/sql)
+
+          echo "$AGG_RESPONSE" | jq -e '.resultTable.rows[0][0] == 3'
+
+          # Test table deletion
+          curl -sf --max-time 10 -X DELETE \
+            http://localhost:9000/tables/${TEST_TABLE}
+
+update:
+  enabled: true
+  github:
+    identifier: apache/pinot
+    strip-prefix: release-

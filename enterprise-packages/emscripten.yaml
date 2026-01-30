@@ -1,0 +1,133 @@
+package:
+  name: emscripten
+  version: "5.0.0"
+  epoch: 2 # go/enterprise-rsc/emscripten
+  description: Emscripten compiler - C/C++ to WebAssembly
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - binaryen
+      - clang
+      - lld
+      - llvm
+      - nodejs
+      - python3
+  resources:
+    cpu: "1"
+    memory: 6Gi
+
+## There might be some discrepancy between the version of the package and the version of the binaries in the package
+## Here https://github.com/emscripten-core/emscripten/blob/5.0.0/emscripten-version.txt.
+## The next release should update this
+environment:
+  contents:
+    packages:
+      - binaryen
+      - busybox
+      - clang
+      - git
+      - lld
+      - llvm
+      - nodejs
+      - npm
+      - python3
+      - wolfi-base
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/emscripten-core/emscripten
+      tag: ${{package.version}}
+      expected-commit: be68a767ff3937d97ffc7996a24bd3d7e7f9c849
+
+  - runs: |
+      # Run bootstrap for npm dependencies
+      python3 bootstrap.py
+
+      # Fix CVE-2025-5889 in brace-expansion
+      npm install brace-expansion@4.0.1 --depth=10
+
+      # Update google-closure-compiler-java to fix CVE-2022-3510, CVE-2024-7254,
+      # CVE-2022-3509, CVE-2022-3171 (protobuf-java vulns in bundled JAR)
+      npm install google-closure-compiler-java@20260121.0.0
+      # Also update nested dependency under google-closure-compiler
+      rm -rf node_modules/google-closure-compiler/node_modules/google-closure-compiler-java
+      cp -r node_modules/google-closure-compiler-java node_modules/google-closure-compiler/node_modules/
+
+      # Create directory structure matching emsdk upstream layout:
+      # /upstream/bin/        - LLVM tools
+      # /upstream/emscripten/ - Emscripten compiler
+      mkdir -p "${{targets.destdir}}"/upstream/bin
+      mkdir -p "${{targets.destdir}}"/upstream/emscripten
+
+      # Copy Python entry points to emscripten subdirectory
+      for f in emcc.py em++.py emar.py emranlib.py emcmake.py \
+               emconfigure.py emmake.py emrun.py embuilder.py emsize.py; do
+        cp "$f" "${{targets.destdir}}"/upstream/emscripten/
+      done
+
+      # Copy version and other required files
+      cp emscripten-version.txt "${{targets.destdir}}"/upstream/emscripten/
+
+      # Copy required directories
+      cp -r tools src system third_party node_modules \
+        "${{targets.destdir}}"/upstream/emscripten/
+
+  - runs: |
+      # Create config file pointing to system LLVM/Binaryen
+      tee "${{targets.destdir}}"/upstream/emscripten/.emscripten << 'EOF'
+      import os
+      LLVM_ROOT = '/upstream/bin'
+      BINARYEN_ROOT = '/usr'
+      NODE_JS = '/usr/bin/node'
+      CACHE = os.path.expanduser('~/.cache/emscripten')
+      EOF
+
+  - runs: |
+      # Create wrapper scripts in emscripten subdirectory (SDK expected format)
+      for tool in emcc em++ emar emranlib emcmake emconfigure emmake emrun embuilder emsize; do
+        tee "${{targets.destdir}}"/upstream/emscripten/${tool} << WRAPPER
+      #!/bin/sh
+      export EM_CONFIG=/upstream/emscripten/.emscripten
+      exec python3 /upstream/emscripten/${tool}.py "\$@"
+      WRAPPER
+        chmod +x "${{targets.destdir}}"/upstream/emscripten/${tool}
+      done
+
+      # Create symlinks in /usr/bin for PATH convenience
+      mkdir -p "${{targets.destdir}}"/usr/bin
+      for tool in emcc em++ emar emranlib emcmake emconfigure emmake emrun embuilder emsize; do
+        ln -sf /upstream/emscripten/${tool} "${{targets.destdir}}"/usr/bin/${tool}
+      done
+
+  - runs: |
+      # Create symlinks to system LLVM in bin directory
+      for tool in clang clang++ lld ld.lld wasm-ld \
+                  llvm-ar llvm-as llvm-dis llvm-dwarfdump llvm-dwp llvm-nm \
+                  llvm-objcopy llvm-ranlib llvm-readobj llvm-size llvm-strip llvm-symbolizer; do
+        ln -sf /usr/bin/${tool} "${{targets.destdir}}"/upstream/bin/${tool}
+      done
+
+test:
+  pipeline:
+    - name: Verify emscripten binary version
+      runs: |
+        ## The ver-check pipeline will look for binaries versioned same as the package
+        ## But due to the versions defined in /upstream/emscripten/emscripten-version.txt
+        emcc --version
+        em++ --version
+        emar --version
+    - name: "Test WebAssembly compilation"
+      runs: |
+        set -euo pipefail
+        echo 'int main() { return 0; }' > test.c
+        emcc test.c -o test.js
+        stat test.js
+        stat test.wasm
+
+update:
+  enabled: true
+  github:
+    identifier: emscripten-core/emscripten
+    use-tag: true
