@@ -147,7 +147,7 @@ func generateGitHubToken(ctx context.Context, sourceDir string) error {
 	dest := filepath.Join(sourceDir, ".github.token")
 	prog := "chainctl"
 	args := []string{"auth", "octo-sts", "--identity=guarded-package-repos", "--scope=chainguard-dev"}
-	return writeToken(ctx, dest, prog, args)
+	return atomicCmdOutToFile(ctx, dest, prog, args)
 }
 
 func generateLibrariesToken(ctx context.Context, sourceDir string) error {
@@ -155,17 +155,17 @@ func generateLibrariesToken(ctx context.Context, sourceDir string) error {
 	dest := filepath.Join(sourceDir, ".libraries.token")
 	prog := "chainctl"
 	args := []string{"auth", "token", "--audience", "libraries.cgr.dev"}
-	return writeToken(ctx, dest, prog, args)
+	return atomicCmdOutToFile(ctx, dest, prog, args)
 }
 
-func writeToken(ctx context.Context, dest string, prog string, args []string) error {
+func atomicCmdOutToFile(ctx context.Context, dest string, prog string, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("create token directory: %w", err)
+		return fmt.Errorf("create directory: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+".tmp")
 	if err != nil {
-		return fmt.Errorf("create temp token file: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
 
 	defer func() {
@@ -179,15 +179,15 @@ func writeToken(ctx context.Context, dest string, prog string, args []string) er
 	cmd.Stdin = os.Stdin
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s failed to create token: %w", prog, err)
+		return fmt.Errorf("%s failed to create file: %w", prog, err)
 	}
 
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("failed to close temp token file: %w", err)
+		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
 	if err := os.Rename(tmp.Name(), dest); err != nil {
-		return fmt.Errorf("failed to rename token file: %w", err)
+		return fmt.Errorf("failed to rename file: %w", err)
 	}
 
 	return nil
