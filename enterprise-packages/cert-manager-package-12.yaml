@@ -1,0 +1,182 @@
+# Provides Debian CA certificates for cert-manager's trust-manager to inject into pods.
+# How it works: Extracts ca-certificates from Debian repos, converts to JSON, packages with
+# copyandmaybepause binary. trust-manager runs this as init container to inject CA bundles
+# into application containers, enabling them to trust the same CAs as Debian systems.
+# This reverse-engineers upstream's GitHub Actions build process.
+# Ref: https://github.com/cert-manager/trust-manager/tree/main/trust-packages
+package:
+  name: cert-manager-package-12
+  version: 20230311.12.1.3 # Debian 12 (Bookworm) ca-certificates (20230311-deb12u1.X)
+  epoch: 0
+  description: Debian 12 CA bundle for cert-manager trust-manager init containers
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - tini
+      - trust-package # Provides copyandmaybepause binary
+
+var-transforms:
+  # K8s pod labels cannot contain '+', transform numeric version to Debian format
+  - from: ${{package.version}}
+    match: '^(\d+)\.(\d+)\.(\d+)\.(\d+)$'
+    replace: '${1}-deb${2}u${3}.${4}'
+    to: debian-version
+
+environment:
+  contents:
+    packages:
+      - binutils
+      - busybox
+      - curl
+      - gnutar
+      - jq
+      - xz
+
+pipeline:
+  # Symlink copyandmaybepause at root
+  - runs: |
+      mkdir -p ${{targets.destdir}}
+      ln -s /usr/bin/copyandmaybepause ${{targets.destdir}}/copyandmaybepause
+
+  # Replicate upstream's exact process from make/debian-trust-package-fetch.sh
+  # Source: https://github.com/cert-manager/trust-manager/blob/main/make/debian-trust-package-fetch.sh
+  - name: Process Debian CA certificates
+    runs: |
+      set -euo pipefail
+
+      # Create the debian-package directory
+      mkdir -p "${{targets.destdir}}/debian-package"
+
+      # Replicate upstream script variables
+      # Production always uses ACTION="exact" - see:
+      # https://github.com/cert-manager/trust-manager/blob/main/make/debian-bookworm-trust-package.mk#L24
+      ACTION="exact"  # Production uses "exact" not "latest"
+      # Convert hyphen to plus for Debian package format
+      TARGET_DEBIAN_BUNDLE_VERSION=$(echo "${{vars.debian-version}}" | sed 's/-deb/+deb/')  # e.g., 20230311+deb12u1.3
+      target_ca_certificates_version="${TARGET_DEBIAN_BUNDLE_VERSION%.*}"  # e.g., 20230311+deb12u1
+
+      # Create temporary build directory
+      BUILD_DIR=$(mktemp -d)
+      cd "$BUILD_DIR"
+
+      # Download and extract Debian ca-certificates
+      DEB_URL="https://deb.debian.org/debian/pool/main/c/ca-certificates/ca-certificates_${target_ca_certificates_version}_all.deb"
+      echo "Fetching Debian ca-certificates from: $DEB_URL"
+      curl -fLO "$DEB_URL"
+
+      # Extract the .deb package using ar
+      ar x "ca-certificates_${target_ca_certificates_version}_all.deb"
+      tar -xf data.tar.xz
+
+      # Concatenate all mozilla certificates Debian default
+      > ca-bundle.crt
+      for cert in usr/share/ca-certificates/mozilla/*.crt; do
+        [ -f "$cert" ] && cat "$cert" >> ca-bundle.crt
+      done
+
+      installed_version="${target_ca_certificates_version}"
+
+      # Build JSON package with upstream version logic
+      PACKAGE_NAME="cert-manager-debian-bookworm"
+      # https://github.com/cert-manager/trust-manager/blob/main/make/debian-trust-package-fetch.sh#L113
+      version_suffix=".0"  # ACTION="exact" keeps .0
+      json_version="${installed_version}${version_suffix}"  # 20230311+deb12u1.0
+
+      echo "Creating JSON bundle with version: $json_version"
+      echo "{}" | jq \
+        --rawfile bundle ca-bundle.crt \
+        --arg name "$PACKAGE_NAME" \
+        --arg version "$json_version" \
+        '.name = $name | .bundle = $bundle | .version = $version' \
+        > "${{targets.destdir}}/debian-package/cert-manager-package-debian.json"
+
+      # Cleanup temporary build directory
+      cd /
+      rm -rf "$BUILD_DIR"
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 388190
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+        - openssl # For certificate validation
+        - git
+        - go
+  pipeline:
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
+    # Build trust-manager's validator tool (not part of our package) to verify
+    # our JSON bundle format matches what trust-manager expects in production
+    # Source: https://github.com/cert-manager/trust-manager/blob/main/cmd/validate-trust-package/main.go
+    - name: Validate with trust-manager validator
+      runs: |
+        set -euo pipefail
+        # Clone and build external validator tool for testing only
+        git clone --depth 1 --branch main https://github.com/cert-manager/trust-manager /tmp/trust-manager
+        cd /tmp/trust-manager
+
+        go build -o /tmp/validate-trust-package ./cmd/validate-trust-package
+        /tmp/validate-trust-package < /debian-package/cert-manager-package-debian.json
+
+        rm -rf /tmp/trust-manager /tmp/validate-trust-package
+    - name: Verify JSON bundle structure
+      runs: |
+        set -euo pipefail
+
+        # Check the JSON file exists
+        stat /debian-package/cert-manager-package-debian.json
+
+        # Validate JSON structure
+        jq -e '.name == "cert-manager-debian-bookworm"' /debian-package/cert-manager-package-debian.json
+        # Verify version exists and matches expected format (numbers with dots or plus)
+        jq -e '.version | test("^[0-9]+[+\\.]")' /debian-package/cert-manager-package-debian.json
+    - name: Validate CA certificates content
+      runs: |
+        set -euo pipefail
+
+        # Extract and validate certificates
+        jq -r '.bundle' /debian-package/cert-manager-package-debian.json > /tmp/ca-bundle.crt
+
+        # Ensure certificates exist
+        grep -F "BEGIN CERTIFICATE" /tmp/ca-bundle.crt
+
+        # Validate certificate format
+        openssl crl2pkcs7 -nocrl -certfile /tmp/ca-bundle.crt | openssl pkcs7 -print_certs -noout
+    - name: Test copyandmaybepause functionality
+      runs: |
+        set -euo pipefail
+
+        # Test the copy functionality
+        mkdir -p /tmp/source /tmp/dest
+        cp /debian-package/cert-manager-package-debian.json /tmp/source/
+
+        # Run copyandmaybepause
+        /copyandmaybepause /tmp/source /tmp/dest
+
+        # Verify the file was copied
+        stat /tmp/dest/cert-manager-package-debian.json
+
+        # Verify content is identical
+        diff /tmp/source/cert-manager-package-debian.json /tmp/dest/cert-manager-package-debian.json
+    - name: Integration test - Package deployment simulation
+      runs: |
+        set -euo pipefail
+
+        # Simulate an init container scenario
+        mkdir -p /tmp/packages
+
+        # Use copyandmaybepause as an init container would
+        /copyandmaybepause /debian-package /tmp/packages
+
+        # Verify the package was copied correctly
+        stat /tmp/packages/cert-manager-package-debian.json
+
+        # Validate the copied JSON
+        jq -e '.name and .version and .bundle' /tmp/packages/cert-manager-package-debian.json
