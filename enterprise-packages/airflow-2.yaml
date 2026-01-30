@@ -1,7 +1,7 @@
 package:
   name: airflow-2
   version: "2.11.0"
-  epoch: 22
+  epoch: 24 # GHSA-63vm-454h-vhhq
   description: Platform to programmatically author, schedule, and monitor workflows
   options:
     #  There is a dependency on libarrow.so although it
@@ -90,6 +90,7 @@ pipeline:
         marshmallow==3.26.2 # GHSA-428g-f7cq-pgp5
         azure-core==1.38.0 # GHSA-jm66-cg57-jjv5
         setuptools==80.10.1 # GHSA-58pv-8j8x-9vj2
+        pyasn1==0.6.2 # GHSA-63vm-454h-vhhq
 
   - runs: |
       # By default, the airflow celery provider is not built, but running the upstream helm chart requires it
@@ -99,12 +100,14 @@ pipeline:
 
   - uses: patch
     with:
-      patches: cryptography.patch requests.patch urllib3.patch
+      patches: cryptography.patch requests.patch urllib3.patch CVE-2025-12758.patch
 
   - working-directory: ./airflow/www
     runs: |
       # front-end build
-      yarn install --frozen-lockfile
+      # CVE patches modify package.json, so regenerate yarn.lock
+      rm -rf yarn.lock
+      yarn install
       # Update BrowsersList regularly: https://github.com/browserslist/update-db#readme
       npx update-browserslist-db@latest
       yarn run build
@@ -134,7 +137,7 @@ pipeline:
       # gcloud-aio-auth>=4.0.0,<5.0.0 . gcloud-aio-auth 4 is backlevel and has
       # setuptools in it's pyproject.toml 'tool.poetry.dependencies'
       # The tldr; For that case it is not needed in runtime.
-      pip3.12 uninstall --yes setuptools
+      pip${{vars.python-version}} uninstall --yes setuptools
 
   - runs: find . -name '__pycache__' -exec rm -rf {} +
 
@@ -145,7 +148,7 @@ pipeline:
       # The first time you run Airflow, it will create a file called `airflow.cfg` in
       # `$AIRFLOW_HOME` directory
       # However, for production case it is advised to generate the configuration
-      export PYTHONPATH=${{targets.destdir}}/opt/airflow/lib/python3.12/site-packages
+      export PYTHONPATH=${{targets.destdir}}/opt/airflow/lib/python${{vars.python-version}}/site-packages
 
       ${{targets.destdir}}/opt/airflow/bin/airflow config list --defaults > ${{targets.destdir}}/"airflow.cfg"
 
@@ -280,12 +283,12 @@ test:
   pipeline:
     - runs: |
         export PATH=/opt/airflow/bin:$PATH
-        export PYTHONPATH=/opt/airflow/lib/python3.12/site-packages
+        export PYTHONPATH=/opt/airflow/lib/python${{vars.python-version}}/site-packages
         HOME=/home/build airflow version
-        python3.12 -c "import airflow"
+        python${{vars.python-version}} -c "import airflow"
 
         # Test paramiko version and SFTP provider imports
-        python3.12 - <<'PY'
+        python${{vars.python-version}} - <<'PY'
         import paramiko
         print("paramiko", paramiko.__version__)
 
@@ -299,4 +302,114 @@ test:
 
         print(f"✓ paramiko version {paramiko.__version__} is compatible (< 4.0.0)")
         PY
+    - name: "Test database initialization with airflow db migrate"
+      runs: |
+        export PATH=/opt/airflow/bin:$PATH
+        export PYTHONPATH=/opt/airflow/lib/python${{vars.python-version}}/site-packages
+        export HOME=/tmp/airflow-home
+        export AIRFLOW_HOME=$HOME
+
+        # Create a clean home directory for airflow
+        mkdir -p $AIRFLOW_HOME
+
+        # Initialize the database using SQLite (default)
+        airflow db migrate
+
+        # Verify database file was created
+        stat $AIRFLOW_HOME/airflow.db
+
+        # Verify tables were created by checking db version
+        airflow db check
+        echo "SUCCESS: Database initialized and verified"
+    - name: "Test DAG parsing with a simple DAG"
+      runs: |
+        export PATH=/opt/airflow/bin:$PATH
+        export PYTHONPATH=/opt/airflow/lib/python${{vars.python-version}}/site-packages
+        export HOME=/tmp/airflow-home
+        export AIRFLOW_HOME=$HOME
+
+        mkdir -p $AIRFLOW_HOME/dags
+
+        # Create a simple test DAG
+        tee $AIRFLOW_HOME/dags/test_dag.py <<'EOF'
+        from datetime import datetime
+        from airflow import DAG
+        from airflow.operators.bash import BashOperator
+
+        with DAG(
+            dag_id="test_dag",
+            start_date=datetime(2024, 1, 1),
+            schedule=None,
+            catchup=False,
+        ) as dag:
+            task1 = BashOperator(
+                task_id="echo_task",
+                bash_command="echo 'Hello from Airflow'",
+            )
+        EOF
+
+        # Parse and list DAGs to verify the DAG is recognized
+        airflow dags list 2>&1 | tee /tmp/dag_list.txt
+
+        # Verify our test DAG is in the list
+        if ! grep -F "test_dag" /tmp/dag_list.txt; then
+          echo "FAIL: test_dag not found in DAG list"
+          exit 1
+        fi
+
+        echo "SUCCESS: DAG parsed and listed correctly"
+    - name: "Test task execution with BashOperator"
+      runs: |
+        export PATH=/opt/airflow/bin:$PATH
+        export PYTHONPATH=/opt/airflow/lib/python${{vars.python-version}}/site-packages
+        export HOME=/tmp/airflow-home
+        export AIRFLOW_HOME=$HOME
+
+        # Execute the test task directly using airflow tasks test
+        # This runs the task without scheduling
+        output=$(airflow tasks test test_dag echo_task 2024-01-01 2>&1)
+        echo "$output"
+
+        # Verify the task executed and produced expected output
+        if ! echo "$output" | grep -F "Hello from Airflow"; then
+          echo "FAIL: Task execution did not produce expected output"
+          exit 1
+        fi
+
+        echo "SUCCESS: Task executed correctly"
+    - name: "Test provider imports work correctly"
+      runs: |
+        export PATH=/opt/airflow/bin:$PATH
+        export PYTHONPATH=/opt/airflow/lib/python${{vars.python-version}}/site-packages
+
+        # Test that providers can be imported (verify at least core provider functionality)
+        python${{vars.python-version}} <<'EOF'
+        # Test BashOperator is importable and functional
+        from airflow.operators.bash import BashOperator
+        print("BashOperator imported successfully")
+
+        # Test PythonOperator
+        from airflow.operators.python import PythonOperator
+        print("PythonOperator imported successfully")
+
+        # Test Celery provider (installed based on build config comments)
+        try:
+            from airflow.providers.celery.executors.celery_executor import CeleryExecutor
+            print("CeleryExecutor imported successfully")
+        except ImportError as e:
+            print(f"Note: Celery provider not available - {e}")
+
+        # Test file sensor (common workflow component)
+        from airflow.sensors.filesystem import FileSensor
+        print("FileSensor imported successfully")
+
+        # Verify we can create a simple DAG programmatically
+        from airflow import DAG
+        from datetime import datetime
+        test_dag = DAG(dag_id="provider_test", start_date=datetime(2024, 1, 1), schedule=None)
+        assert test_dag is not None
+        print("DAG creation works correctly")
+
+        print("SUCCESS: Provider imports verified")
+        EOF
     - uses: test/tw/ldd-check

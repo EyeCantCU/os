@@ -1,7 +1,7 @@
 package:
   name: grafana-alloy-fips
   version: "1.12.2"
-  epoch: 0 # GHSA-cfpf-hrx2-8rv6
+  epoch: 1
   description: OpenTelemetry Collector distribution with programmable pipelines
   copyright:
     - license: Apache-2.0
@@ -18,6 +18,12 @@ environment:
       - systemd-dev
       - tzdata
       - yarn
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
 
 pipeline:
   - uses: git-checkout
@@ -54,14 +60,92 @@ pipeline:
       mkdir -p ${{targets.contextdir}}/etc/alloy/
       install -m644 -D example-config.alloy ${{targets.contextdir}}/etc/alloy/config.alloy
 
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: grafana-alloy
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p "/opt/iamguarded/grafana-alloy/bin/"
+          ln -sf "../../../../usr/bin/alloy" "/opt/iamguarded/grafana-alloy/bin/alloy"
+      - uses: iamguarded/finalize-compat
+        with:
+          package: grafana-alloy
+          version: ${{vars.major-minor-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: grafana-alloy
+            version: ${{vars.major-minor-version}}
+        - uses: test/tw/symlink-check
+        - runs: |
+            stat /opt/iamguarded/grafana-alloy/bin/alloy
+
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - wait-for-it
+        - prometheus
+    environment:
+      HTTP_PORT: "12345"
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
+    - name: Verify binary works
+      runs: |
+        set -euo pipefail
         alloy --version
-        alloy --help
-    - runs: |
-        /usr/bin/alloy --version
+    - name: Test with minimal config
+      runs: |
+        set -euo pipefail
+        tee /tmp/alloy-config.alloy << 'EOF'
+        logging {
+          level = "info"
+          format = "logfmt"
+        }
+
+        prometheus.exporter.self "default" {}
+
+        prometheus.scrape "self" {
+          targets = prometheus.exporter.self.default.targets
+          forward_to = [prometheus.remote_write.default.receiver]
+        }
+
+        prometheus.remote_write "default" {
+          endpoint {
+            url = "http://localhost:9999/api/v1/push"
+          }
+        }
+        EOF
+        alloy fmt -w /tmp/alloy-config.alloy
+    - uses: test/daemon-check-output
+      with:
+        setup: |-
+          tee /tmp/alloy-test.alloy << 'EOF'
+          logging {
+            level = "info"
+            format = "logfmt"
+          }
+
+          prometheus.exporter.self "default" {}
+          EOF
+        start: alloy run --server.http.listen-addr=0.0.0.0:${HTTP_PORT} --storage.path=/tmp/alloy /tmp/alloy-test.alloy
+        timeout: 60
+        expected_output: |
+          now listening for http traffic
+        post: |-
+          set -euo pipefail
+          wait-for-it localhost:${HTTP_PORT} -t 10
+          curl -sfSL http://localhost:${HTTP_PORT}/metrics | promtool check metrics --extended --lint=none
+          curl -sfSL http://localhost:${HTTP_PORT}/-/ready
+          curl -sfSL http://localhost:${HTTP_PORT}/-/healthy
 
 update:
   enabled: true

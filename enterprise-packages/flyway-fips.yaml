@@ -1,0 +1,573 @@
+package:
+  name: flyway-fips
+  version: "12.0.0"
+  epoch: 0
+  description: "FIPS-compliant Flyway database migration tool"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-jre
+      - openssl-config-fipshardened
+
+vars:
+  java-version: "17"
+  flyway-base: "/usr/share/java/flyway"
+  # =============================================================================
+  # Core library JARs (lib/)
+  # These are general utility libraries used by Flyway core functionality.
+  # All libraries listed here use JSSE/JCA for crypto, delegating to JVM providers.
+  # =============================================================================
+  lib-core: "accessors-smart commons-text content-type gson jackson jansi jcip-annotations jna json-smart lang-tag msal4j-persistence-extension nimbus-jose-jwt oauth2-oidc-sdk slf4j-nop stax2-api woodstox-core"
+  # =============================================================================
+  # Azure Active Directory authentication libraries (lib/aad/)
+  # Used for Azure AD authentication. All use JSSE for TLS.
+  # =============================================================================
+  lib-aad: "azure msal4j reactive-streams reactor slf4j-api"
+  # =============================================================================
+  # JDBC Drivers - Core (drivers/)
+  #
+  # INCLUDED (FIPS-compliant):
+  # - aws-secretsmanager-jdbc: Uses AWS SDK v2 which uses JSSE for TLS, delegating to JVM JCA providers
+  # - h2: Uses JSSE via SSLSocketFactory.getDefault() for TLS; internal crypto is SHA-256/AES-128
+  # - hsqldb: Uses JSSE via SSLSocketFactory.getDefault() for TLS
+  # - jffi: No crypto - pure JNI FFI library with no runtime dependencies
+  # - mariadb-java-client: Uses SSLContext.getInstance("TLS") from JSSE; BYO BouncyCastle (we provide BCFIPS)
+  # - mssql-jdbc: Uses JSSE for TLS; BYO BouncyCastle (we provide BCFIPS)
+  # - ojdbc11: Uses JSSE for TLS with default SunJSSE provider
+  # - postgresql: Uses JSSE for TLS
+  # - singlestore-jdbc-client: Based on MariaDB connector, uses JSSE for TLS
+  # - sqlite-jdbc: No crypto - embedded database with no networking dependencies
+  #
+  # EXCLUDED (NOT FIPS-compliant or requires recompilation):
+  # - databricks-jdbc: Bundles bcprov (non-FIPS BouncyCastle) and directly imports
+  #   org.bouncycastle.* classes in JwtPrivateKeyClientCredentials.java. Cannot simply
+  #   swap in BCFIPS as the imports are hardcoded to non-FIPS package names.
+  #   Reference: https://github.com/databricks/databricks-jdbc/blob/main/pom.xml#L541-L544
+  #
+  # - jaybird (Firebird JDBC): Uses javax.crypto.Cipher with ARCFOUR algorithm which is
+  #   a broken/weak crypto algorithm not approved for FIPS 140-2/3 compliance.
+  #   Reference: https://github.com/FirebirdSQL/jaybird/blob/master/src/main/org/firebirdsql/gds/ng/wire/crypt/arc4/Arc4EncryptionPlugin.java#L32
+  #
+  # - jtds (jTDS for SQL Server): Depends on jcifs which bundles bcprov and directly
+  #   imports non-FIPS BouncyCastle classes. Would require recompilation from source
+  #   with jcifs dependency removed or patched.
+  #   Reference: https://github.com/codelibs/jcifs/blob/master/src/main/java/org/codelibs/jcifs/smb/util/Crypto.java#L29
+  #
+  # - google-cloud-storage: FIPSABLE but requires runtime flag -Dio.netty.handler.ssl.noOpenSsl=true
+  #   to disable bundled BoringSSL in grpc-netty-shaded. Excluding until we build google-cloud-storage java library
+  #   Reference: https://github.com/grpc/grpc-java/blob/master/SECURITY.md
+  #
+  # - snowflake-jdbc (standard): Shades non-FIPS BouncyCastle internally. Using
+  #   snowflake-jdbc-fips variant instead (see snowflake-jdbc-fips-version below).
+  #   Reference: https://mvnrepository.com/artifact/net.snowflake/snowflake-jdbc-fips
+  # =============================================================================
+  drivers-core: "aws-secretsmanager-jdbc h2 hsqldb jffi mariadb-java-client mssql-jdbc ojdbc11 postgresql singlestore-jdbc-client sqlite-jdbc"
+  # =============================================================================
+  # Snowflake JDBC FIPS variant
+  # The standard snowflake-jdbc shades non-FIPS BouncyCastle internally and cannot
+  # be made FIPS-compliant. Snowflake provides a separate FIPS-compliant variant
+  # (snowflake-jdbc-fips) that uses bc-fips instead.
+  # Reference: https://github.com/snowflakedb/snowflake-jdbc/blob/master/parent-pom.xml#L540
+  # =============================================================================
+  # renovate: datasource=maven depName=net.snowflake:snowflake-jdbc-fips versioning=maven
+  # =============================================================================
+  # Cassandra Drivers (drivers/cassandra/)
+  #
+  # All Cassandra driver components are FIPS-compliant:
+  # - asm: Pure Java bytecode library, no crypto
+  # - caffeine: Pure in-memory caching library, no crypto
+  # - cassandra-driver-kerberos: Uses JDK's GSS-API (javax.security.auth/sasl) for Kerberos
+  # - cassandra-jdbc-wrapper: Depends on java-driver-core for connectivity
+  # - commons-collections4: Pure Java collection utilities, no crypto
+  # - commons-io: Pure Java IO utilities, no crypto
+  # - commons-lang3: Pure Java utility library, no crypto
+  # - config: Pure Java config library; URL loading uses java.net.URLConnection (JSSE)
+  # - HdrHistogram: Pure Java histogram library, no crypto
+  # - java-driver-core: Uses JSSE via SSLContext.getInstance("SSL") for TLS
+  #   Reference: https://docs.datastax.com/en/developer/java-driver/4.0/manual/core/ssl/
+  # - java-driver-shaded: Shades Netty/Jackson for networking/serialization (not crypto);
+  #   uses JSSE via DefaultSslEngineFactory with SSLContext.getInstance()
+  # - jnr: JNR (Java Native Runtime) FFI libraries, no crypto
+  # - jsr305: Pure Java annotations library, no crypto
+  # - metrics-core: Pure Java metrics library, no crypto
+  # - native-protocol: Pure Java protocol codec library, no crypto
+  # - semver4j: Pure Java semver library, no crypto
+  # =============================================================================
+  drivers-cassandra: "asm caffeine cassandra-driver-kerberos cassandra-jdbc-wrapper commons-collections4 commons-io commons-lang3 config HdrHistogram java-driver-core java-driver-shaded jnr jsr305 metrics-core native-protocol semver4j"
+  # GCP Spanner/Cloud Drivers - EXCLUDED ENTIRELY
+  # The GCP driver stack is excluded from the FIPS build for the following reasons:
+  # 1. conscrypt-openjdk-uber: NOT FIPS-compliant (bundles BoringSSL, no JVM JCA)
+  #    Reference: https://github.com/google/conscrypt/issues/805
+  # 2. grpc-netty-shaded: Bundles BoringSSL; needs -Dio.netty.handler.ssl.noOpenSsl=true
+  #    Reference: https://github.com/grpc/grpc-java/blob/master/SECURITY.md
+  # TODO: Re-enable when noOpenSsl flag is validated for Flyway GCS usage
+  # =============================================================================
+  # MongoDB Drivers (drivers/mongo/)
+  #
+  # All MongoDB driver components are FIPS-compliant:
+  # - bson: Pure BSON serialization library, no crypto (networking handled by driver-core)
+  # - flyway-database-nc-mongodb: Depends on mongodb-driver-sync for connectivity
+  # - mongodb-driver-core: Uses JSSE via SSLContext.getDefault() for TLS
+  #   Reference: https://www.mongodb.com/docs/drivers/java/sync/current/security/tls/
+  # - mongodb-driver-sync: Uses SSLContext.getDefault() from JSSE; v5.2+ delegates
+  #   SCRAM authentication to JCA providers enabling FIPS-compliant auth
+  #   Reference: https://github.com/mongodb/mongo-java-driver/releases/tag/r5.2.0
+  # =============================================================================
+  drivers-mongo: "bson flyway-database-nc-mongodb mongodb-driver-core mongodb-driver-sync"
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bouncycastle-fips~2.1
+      - build-base
+      - busybox
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - wolfi-base
+  environment:
+    LANG: en_US.UTF-8
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/flyway/flyway
+      tag: flyway-${{package.version}}
+      expected-commit: d003178d29f9d19a8381f70d4f0a44fdae08dd34
+
+  - uses: maven/pombump
+    with:
+      pom: flyway-commandline/pom.xml
+
+  - name: Build Flyway excluding non-FIPS crypto dependencies
+    runs: |
+      # =============================================================================
+      # Maven build with FIPS exclusions
+      #
+      # Excluded artifacts (-DexcludeArtifactIds):
+      # - netty-tcnative-boringssl-static: Bundles BoringSSL native crypto (NOT FIPS)
+      # - conscrypt-openjdk-uber: Bundles BoringSSL for all crypto ops (NOT FIPS)
+      # - snowflake-jdbc: Shades non-FIPS BouncyCastle internally; using -fips variant instead
+      # - databricks-jdbc: Bundles bcprov and directly imports non-FIPS BC classes
+      # - jaybird: Uses ARCFOUR (RC4) which is a weak/broken algorithm not FIPS-approved
+      # - jtds: Depends on jcifs which bundles bcprov and imports non-FIPS BC classes
+      #
+      # Excluded modules (-pl !module):
+      # - flyway-database-mongodb: Excluded to avoid pulling in non-FIPS transitive deps;
+      #   MongoDB support is provided separately via drivers/mongo/ with FIPS-compliant JARs
+      # =============================================================================
+      ./mvnw -B clean dependency:copy-dependencies package -e --file pom.xml -DskipTests \
+        -pl !flyway-database/flyway-database-mongodb \
+        -DexcludeArtifactIds=netty-tcnative-boringssl-static,conscrypt-openjdk-uber,snowflake-jdbc,databricks-jdbc,jaybird,jtds
+
+  - name: Create directories and move scripts
+    runs: |
+      # =============================================================================
+      # Flyway FIPS directory layout
+      #
+      # /usr/share/java/flyway/              # Flyway base installation directory
+      # ├── flyway                           # Main launcher script (modified for FIPS)
+      # ├── flyway.cmd                       # Windows launcher (unchanged)
+      # ├── README.txt                       # Flyway readme
+      # ├── conf/                            # Configuration files
+      # │   └── flyway.toml.example          # Example TOML config
+      # ├── lib/                             # Core libraries
+      # │   ├── *.jar                        # Core utility JARs (vars.lib-core)
+      # │   ├── aad/                         # Azure AD auth JARs (vars.lib-aad)
+      # │   ├── flyway/                      # Flyway core JARs (flyway-* prefix)
+      # │   ├── netty/                       # Netty networking JARs (netty-* prefix)
+      # │   │                                # NOTE: netty-tcnative-boringssl excluded
+      # │   └── fips/                        # BCFIPS JARs (symlinked from system)
+      # │                                    # Provides FIPS-validated crypto for:
+      # │                                    # - msal4j (Azure auth)
+      # │                                    # - snowflake-jdbc-fips
+      # │                                    # - Any driver with BYO BC support
+      # ├── drivers/                         # JDBC drivers
+      # │   ├── *.jar                        # Core drivers (vars.drivers-core)
+      # │   ├── snowflake-jdbc-fips-*.jar    # FIPS Snowflake driver
+      # │   ├── cassandra/                   # Cassandra drivers (vars.drivers-cassandra)
+      # │   └── mongo/                       # MongoDB drivers (vars.drivers-mongo)
+      # │                                    # NOTE: GCP drivers excluded (conscrypt/BoringSSL)
+      # └── licenses/                        # License files
+      # =============================================================================
+
+      # Create directories based on the layout
+      mkdir -p "${{targets.contextdir}}/${{vars.flyway-base}}"
+      for dir in lib lib/aad lib/flyway lib/netty lib/fips conf drivers drivers/cassandra drivers/mongo licenses; do
+        mkdir -p "${{targets.contextdir}}/${{vars.flyway-base}}/$dir"
+      done
+
+      # Move over flyway related cmd scripts, license info, etc.
+      cd flyway-commandline/src/main/assembly/
+
+      mv flyway flyway.cmd README.txt "${{targets.contextdir}}/${{vars.flyway-base}}/"
+      # Setup permissions
+      chmod 0755 "${{targets.contextdir}}/${{vars.flyway-base}}/flyway" "${{targets.contextdir}}/${{vars.flyway-base}}/flyway.cmd"
+
+      mv flyway.toml.example "${{targets.contextdir}}/${{vars.flyway-base}}/conf"
+      mv put-your-jdbc-drivers-here.txt "${{targets.contextdir}}/${{vars.flyway-base}}/drivers"
+      mv LICENSE.md LICENSES-THIRD-PARTY.txt "${{targets.contextdir}}/${{vars.flyway-base}}/licenses"
+
+  - name: Move flyway lib jars
+    runs: |
+      # Install core utility JARs to lib/ directory
+      # These are general-purpose libraries (JSON, logging, etc.) that use JCA for any crypto
+      for dep in ${{vars.lib-core}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/lib"
+      done
+
+      echo "=== Core library JARs in flyway/lib ==="
+      echo "Total files: $(ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib" | wc -l)"
+      ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib" | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/aad jars
+    runs: |
+      # Install Azure AD authentication JARs to lib/aad/
+      # These libraries use JSSE for TLS and delegate crypto to JVM providers
+      for dep in ${{vars.lib-aad}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/lib/aad"
+      done
+
+      echo "=== Azure AD JARs in flyway/lib/aad ==="
+      echo "Total files: $(ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib/aad" | wc -l)"
+      ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib/aad" | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/flyway jars
+    runs: |
+      # Install Flyway core JARs to lib/flyway/
+      mv flyway-commandline/target/flyway-commandline-${{package.version}}.jar "${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway"
+      mv flyway-commandline/target/dependency/flyway-*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway"
+
+      # flyway-database-nc-mongodb-*.jar was matched by the wildcard above but belongs
+      # in drivers/mongo/. Move it back so the mongo step can place it correctly.
+      mv "${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway/flyway-database-nc-mongodb-"*.jar flyway-commandline/target/dependency/ || true
+
+      echo "=== Flyway core JARs in flyway/lib/flyway ==="
+      echo "Total files: $(ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway" | wc -l)"
+      ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib/flyway" | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway lib/netty jars
+    runs: |
+      # Install Netty networking JARs to lib/netty/
+      # NOTE: netty-tcnative-boringssl-static is excluded via -DexcludeArtifactIds
+      # to prevent bundled BoringSSL from being used instead of JSSE/BCFIPS
+      mv flyway-commandline/target/dependency/netty-*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty"
+
+      # Remove netty-nio-client which is an AWS SDK component, not needed for Flyway
+      rm -f "${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty/netty-nio-client-"*.jar
+
+      echo "=== Netty JARs in flyway/lib/netty ==="
+      echo "Total files: $(ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty" | wc -l)"
+      ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/lib/netty" | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway drivers jars
+    runs: |
+      # Install FIPS-compliant JDBC drivers to drivers/
+      # See vars.drivers-core comments for FIPS compliance details of each driver
+      for dep in ${{vars.drivers-core}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/drivers"
+      done
+
+      echo "=== Core JDBC drivers in flyway/drivers ==="
+      echo "Total files: $(ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/drivers" | wc -l)"
+      ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/drivers" | sed 's/^/  /'
+      echo "==="
+
+  - name: Download snowflake-jdbc-fips from Maven Central
+    runs: |
+      # =============================================================================
+      # Snowflake JDBC FIPS variant
+      #
+      # The standard snowflake-jdbc driver shades (bundles) non-FIPS BouncyCastle
+      # internally, making it impossible to swap in BCFIPS at runtime.
+      #
+      # Snowflake provides a separate FIPS-compliant variant (snowflake-jdbc-fips)
+      # that expects BCFIPS JARs to be provided at runtime. We satisfy this
+      # requirement via the lib/fips/ symlinks to system BCFIPS JARs.
+      #
+      # Reference: https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-fips
+      # =============================================================================
+      mvn dependency:copy \
+        -Dartifact=net.snowflake:snowflake-jdbc-fips:RELEASE \
+        -DoutputDirectory="${{targets.contextdir}}/${{vars.flyway-base}}/drivers"
+
+      echo "=== Downloaded snowflake-jdbc-fips ==="
+      ls -la "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/snowflake-jdbc-fips-"*.jar
+      echo "==="
+
+  - name: Move flyway drivers/cassandra jars
+    runs: |
+      # Install Cassandra JDBC drivers to drivers/cassandra/
+      # All Cassandra drivers use JSSE for TLS - see vars.drivers-cassandra comments
+      for dep in ${{vars.drivers-cassandra}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/cassandra"
+      done
+
+      echo "=== Cassandra JDBC drivers in flyway/drivers/cassandra ==="
+      echo "Total files: $(ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/cassandra" | wc -l)"
+      ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/cassandra" | sed 's/^/  /'
+      echo "==="
+
+  - name: Move flyway drivers/mongo jars
+    runs: |
+      # Install MongoDB drivers to drivers/mongo/
+      # MongoDB drivers use JSSE for TLS and JCA for SCRAM auth (v5.2+)
+      # See vars.drivers-mongo comments for FIPS compliance details
+      for dep in ${{vars.drivers-mongo}}; do
+        mv flyway-commandline/target/dependency/$dep-*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/mongo"
+      done
+
+      echo "=== MongoDB drivers in flyway/drivers/mongo ==="
+      echo "Total files: $(ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/mongo" | wc -l)"
+      ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/mongo" | sed 's/^/  /'
+      echo "==="
+
+  - name: Replace non-FIPS BouncyCastle JARs with FIPS versions
+    runs: |
+      # =============================================================================
+      # Remove any non-FIPS BouncyCastle JARs that may have been pulled in
+      # as transitive dependencies
+      #
+      # Non-FIPS BC packages use different class names (org.bouncycastle.*)
+      # than BCFIPS (org.bouncycastle.* but different internal implementation).
+      # Having both on the classpath can cause conflicts and security issues.
+      #
+      # JARs removed:
+      # - bcprov-jdk*.jar: BouncyCastle Provider (non-FIPS crypto implementations)
+      # - bcpkix-jdk*.jar: BouncyCastle PKIX (certificate handling)
+      # - bcutil-jdk*.jar: BouncyCastle Utilities
+      # - bcmail-jdk*.jar: BouncyCastle S/MIME
+      # - bcpg-jdk*.jar: BouncyCastle OpenPGP
+      # - bctls-jdk*.jar: BouncyCastle TLS
+      # =============================================================================
+      find "${{targets.contextdir}}" -type f \( \
+          -name "bcprov-jdk*.jar" -o \
+          -name "bcpkix-jdk*.jar" -o \
+          -name "bcutil-jdk*.jar" -o \
+          -name "bcmail-jdk*.jar" -o \
+          -name "bcpg-jdk*.jar" -o \
+          -name "bctls-jdk*.jar" \) -delete
+
+      # =============================================================================
+      # Link BCFIPS JARs to Flyway lib/fips/ directory
+      #
+      # BCFIPS (BouncyCastle FIPS) provides FIPS 140-2/3 validated cryptographic
+      # implementations. By symlinking from the system location, we ensure:
+      # 1. Single source of truth for BCFIPS version
+      # 2. Automatic updates when system BCFIPS is updated
+      # 3. Proper FIPS validation chain
+      #
+      # Drivers that use BCFIPS:
+      # - snowflake-jdbc-fips: Explicitly requires BCFIPS at runtime
+      # - msal4j: Azure auth with BYO BouncyCastle support
+      # - mssql-jdbc: BYO BouncyCastle support
+      # - mariadb-java-client: BYO BouncyCastle support
+      # =============================================================================
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar "${{targets.contextdir}}/${{vars.flyway-base}}/lib/fips/"
+
+      echo "=== FIPS JARs linked in flyway/lib/fips ==="
+      ls -la "${{targets.contextdir}}/${{vars.flyway-base}}/lib/fips/"
+      echo "==="
+
+  - name: Update flyway script to include FIPS JARs in classpath
+    runs: |
+      # =============================================================================
+      # Modify the Flyway launcher script to prepend FIPS JARs to the classpath
+      #
+      # BCFIPS JARs must be loaded BEFORE any application code to ensure:
+      # 1. FIPS crypto provider is registered first
+      # 2. No non-FIPS crypto code is accidentally loaded
+      # 3. Security policy can be enforced from startup
+      #
+      # The flyway script uses CP= (not CLASSPATH=) for its runtime classpath.
+      # We prepend "$INSTALLDIR/lib/fips/*:" to ensure BCFIPS is loaded first.
+      # =============================================================================
+      sed -i 's|CP="\$CLASSPATH:|CP="$INSTALLDIR/lib/fips/*:$CLASSPATH:|' "${{targets.contextdir}}/${{vars.flyway-base}}/flyway"
+
+  - name: Create symlinks for flyway
+    runs: |
+      # Create convenience symlinks for container compatibility
+      ln -sf /usr/share/java/flyway "${{targets.destdir}}/flyway"
+
+      # Create JDK symlinks at /opt/java/openjdk for compatibility with
+      # applications expecting JDK at this location
+      mkdir -p "${{targets.destdir}}/opt/java/openjdk"
+      for item in bin conf legal lib release; do
+        ln -sf /usr/lib/jvm/java-${{vars.java-version}}-openjdk/$item "${{targets.destdir}}/opt/java/openjdk"
+      done
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: flyway/flyway
+    strip-prefix: flyway-
+
+test:
+  environment:
+    contents:
+      packages:
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - openjdk-${{vars.java-version}}-default-jdk
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - name: Test CLI basics
+      runs: |
+        set -euo pipefail
+        export PATH=$PATH:/usr/share/java/flyway
+        flyway -h
+        flyway --version
+        flyway list-engines
+    - name: Verify FIPS JARs are present
+      runs: |
+        set -euo pipefail
+        stat /usr/share/java/flyway/lib/fips
+        ls -la /usr/share/java/flyway/lib/fips/ | grep -F "bc-fips"
+    - name: Verify non-FIPS BouncyCastle JARs are removed
+      runs: |
+        set -euo pipefail
+        # Ensure no non-FIPS BC jars exist anywhere in the Flyway installation
+        if find /usr/share/java/flyway -name "bcprov-jdk*.jar" | grep -q .; then
+          echo "ERROR: Found non-FIPS bcprov JARs"
+          find /usr/share/java/flyway -name "bcprov-jdk*.jar"
+          exit 1
+        fi
+        if find /usr/share/java/flyway -name "bcpkix-jdk*.jar" | grep -q .; then
+          echo "ERROR: Found non-FIPS bcpkix JARs"
+          find /usr/share/java/flyway -name "bcpkix-jdk*.jar"
+          exit 1
+        fi
+        if find /usr/share/java/flyway -name "bcutil-jdk*.jar" | grep -q .; then
+          echo "ERROR: Found non-FIPS bcutil JARs"
+          find /usr/share/java/flyway -name "bcutil-jdk*.jar"
+          exit 1
+        fi
+        if find /usr/share/java/flyway -name "bctls-jdk*.jar" | grep -q .; then
+          echo "ERROR: Found non-FIPS bctls JARs"
+          find /usr/share/java/flyway -name "bctls-jdk*.jar"
+          exit 1
+        fi
+        echo "No non-FIPS BouncyCastle JARs found - PASS"
+    - name: Verify conscrypt is not present
+      runs: |
+        set -euo pipefail
+        # conscrypt bundles BoringSSL and is NOT FIPS-compliant
+        if find /usr/share/java/flyway -name "conscrypt*.jar" | grep -q .; then
+          echo "ERROR: Found conscrypt JARs - not FIPS compliant"
+          find /usr/share/java/flyway -name "conscrypt*.jar"
+          exit 1
+        fi
+        echo "No conscrypt JARs found - PASS"
+    - name: Verify BoringSSL is not present
+      runs: |
+        set -euo pipefail
+        # BoringSSL is Google's fork of OpenSSL and is NOT FIPS-validated in most distributions
+        if find /usr/share/java/flyway -name "*boringssl*.jar" | grep -q .; then
+          echo "ERROR: Found BoringSSL JARs - not FIPS compliant"
+          find /usr/share/java/flyway -name "*boringssl*.jar"
+          exit 1
+        fi
+        echo "No BoringSSL JARs found - PASS"
+    - name: Verify excluded non-FIPS drivers are not present
+      runs: |
+        set -euo pipefail
+        # Verify drivers excluded for FIPS non-compliance are not present
+
+        # databricks-jdbc: bundles bcprov, directly imports non-FIPS BC
+        if find /usr/share/java/flyway -name "databricks-jdbc*.jar" | grep -q .; then
+          echo "ERROR: Found databricks-jdbc JAR - not FIPS compliant"
+          exit 1
+        fi
+
+        # jaybird: uses ARCFOUR (RC4) broken crypto
+        if find /usr/share/java/flyway -name "jaybird*.jar" | grep -q .; then
+          echo "ERROR: Found jaybird JAR - uses non-FIPS ARCFOUR crypto"
+          exit 1
+        fi
+
+        # jtds: depends on jcifs which bundles bcprov
+        if find /usr/share/java/flyway -name "jtds*.jar" | grep -q .; then
+          echo "ERROR: Found jtds JAR - depends on jcifs with non-FIPS BC"
+          exit 1
+        fi
+
+        echo "No excluded non-FIPS drivers found - PASS"
+    - name: Verify snowflake-jdbc-fips is present and standard snowflake-jdbc is not
+      runs: |
+        set -euo pipefail
+        # Verify FIPS variant is present
+        if ! find /usr/share/java/flyway/drivers -name "snowflake-jdbc-fips-*.jar" | grep -q .; then
+          echo "ERROR: snowflake-jdbc-fips JAR not found"
+          exit 1
+        fi
+        echo "snowflake-jdbc-fips found - PASS"
+
+        # Verify standard (non-FIPS) variant is not present
+        # Pattern: snowflake-jdbc-X.Y.Z.jar (not snowflake-jdbc-fips-X.Y.Z.jar)
+        if find /usr/share/java/flyway/drivers -name "snowflake-jdbc-[0-9]*.jar" | grep -q .; then
+          echo "ERROR: Found non-FIPS snowflake-jdbc JAR"
+          find /usr/share/java/flyway/drivers -name "snowflake-jdbc-[0-9]*.jar"
+          exit 1
+        fi
+        echo "No non-FIPS snowflake-jdbc found - PASS"
+    - name: Verify FIPS JARs are first in classpath
+      runs: |
+        set -euo pipefail
+        # Verify the flyway script has FIPS JARs at the start of CP (the runtime classpath)
+        # The flyway script uses CP= not CLASSPATH= for the actual java -cp argument
+        if ! grep -F 'CP="$INSTALLDIR/lib/fips/*:' /usr/share/java/flyway/flyway; then
+          echo "ERROR: FIPS JARs not prepended to CP in flyway script"
+          grep "^CP=" /usr/share/java/flyway/flyway
+          exit 1
+        fi
+        echo "FIPS JARs correctly prepended to classpath - PASS"
+    - name: Test basic migration with H2 database
+      runs: |
+        set -euo pipefail
+        export PATH=$PATH:/usr/share/java/flyway
+
+        # Create migrations dir
+        mkdir -p /tmp/migrations
+
+        # Create flyway.toml config
+        tee /usr/share/java/flyway/conf/flyway.toml << 'EOF'
+        [flyway]
+        locations = ["filesystem:/tmp/migrations"]
+
+        [environments.default]
+        locations = ["filesystem:/tmp/migrations"]
+        url = "jdbc:h2:mem:db"
+        user = ""
+        password = ""
+        EOF
+
+        # Create migration files
+        tee /tmp/migrations/V1__Create_person_table.sql << 'EOF'
+        create table PERSON (
+            ID int not null,
+            NAME varchar(100) not null
+        );
+        EOF
+
+        tee /tmp/migrations/V2__add_people.sql << 'EOF'
+        insert into PERSON (ID, NAME) values (1, 'Axel');
+        insert into PERSON (ID, NAME) values (2, 'Mr. Foo');
+        insert into PERSON (ID, NAME) values (3, 'Ms. Bar');
+        EOF
+
+        # Test migration - this validates BCFIPS is loaded correctly
+        flyway migrate
+        flyway info
