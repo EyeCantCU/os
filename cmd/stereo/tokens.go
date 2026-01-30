@@ -195,7 +195,7 @@ func atomicCmdOutToFile(ctx context.Context, dest string, prog string, args []st
 
 func cleanupTokens(dir, pkg string) error {
 	pkgDir := filepath.Join(dir, pkg)
-	matches, err := filepath.Glob(filepath.Join(pkgDir, ".*.token"))
+	matches, err := filepath.Glob(filepath.Join(pkgDir, ".*.token*"))
 	if err != nil {
 		return fmt.Errorf("failed to glob tokens: %w", err)
 	}
