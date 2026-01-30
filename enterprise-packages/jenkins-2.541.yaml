@@ -1,7 +1,7 @@
 package:
   name: jenkins-2.541
   version: "2.541.1"
-  epoch: 0
+  epoch: 1
   description: Open-source CI/CD application.
   copyright:
     - license: MIT
@@ -14,6 +14,12 @@ package:
       - jenkins-utils
       - openjdk-${{vars.java-version}}-default-jvm
 
+data:
+  - name: openjdk-versions
+    items:
+      17: "/usr/lib/jvm/java-17-openjdk"
+      21: "/usr/lib/jvm/java-21-openjdk"
+
 vars:
   java-version: '17'
 
@@ -24,7 +30,8 @@ environment:
       - libstdc++
       - libxml2-utils
       - maven
-      - openjdk-${{vars.java-version}}-default-jdk
+      - openjdk-17
+      - openjdk-21
 
 pipeline:
   - uses: git-checkout
@@ -40,7 +47,9 @@ pipeline:
       patch-file: pombump-deps-bom.yaml
       pom: bom/pom.xml
 
-  - runs: mvn spotless:apply
+  - runs: |
+      export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+      mvn spotless:apply
 
   - runs: |
       # Use commit timestamp as build date to satisfy Jenkins in-place upgrade functionality (.war file needs to match release date)
@@ -76,9 +85,52 @@ pipeline:
       mv war/target/jenkins.war ${{targets.destdir}}/usr/share/java/jenkins/
 
 subpackages:
+  - range: openjdk-versions
+    name: ${{package.name}}-openjdk-${{range.key}}
+    dependencies:
+      provides:
+        - jenkins-openjdk-${{range.key}}=${{package.full-version}}
+      runtime:
+        # Jenkins requires both bash and busybox.
+        - bash
+        - busybox
+        - coreutils
+        - glibc-locale-en
+        - ttf-dejavu
+        - tzdata
+        - openjdk-${{range.key}}-default-jvm
+    pipeline:
+      - uses: maven/pombump
+      - uses: maven/pombump
+        with:
+          patch-file: pombump-deps-bom.yaml
+          pom: bom/pom.xml
+      - runs: |
+          # Use commit timestamp as build date to satisfy Jenkins in-place upgrade functionality (.war file needs to match release date)
+          echo "Setting SOURCE_DATE_EPOCH"
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct)
+          echo "JAVA_HOME is ${{range.value}}"
+          export JAVA_HOME=${{range.value}}
+          mvn spotless:apply
+      - runs: |
+          # Use commit timestamp as build date to satisfy Jenkins in-place upgrade functionality (.war file needs to match release date)
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct)
+          export JAVA_HOME=${{range.value}}
+          export LANG=en_US.UTF-8
+
+          export MAVEN_OPTS="-DforkCount=2"
+
+          # tests take ~1.5 hours to run and have passed 100% since the initial addition of Jenkins, let's skip them and save time + resources
+          mvn install -DskipTests=true -Dspotbugs.maxAllowedViolations=1
+
+          mkdir -p ${{targets.contextdir}}/usr/share/java/jenkins
+          mv war/target/jenkins.war ${{targets.contextdir}}/usr/share/java/jenkins/
+
   - name: ${{package.name}}-utils
     description: "Metapackage for utilities used across Jenkins"
     dependencies:
+      provides:
+        - jenkins-utils=${{package.full-version}}
       runtime:
         - bash
         - bash-binsh
@@ -112,6 +164,9 @@ subpackages:
   # The Jenkins entrypoint script expects directories to exist, and the .war file
   # under a different location.
   - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - jenkins-compat=${{package.full-version}}
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/var/jenkins_home
@@ -129,6 +184,9 @@ subpackages:
   # in a subpackage. The apk version won't be quite right, but the jar itself
   # will match the version jenkins specifies in its pom.xml
   - name: ${{package.name}}-remoting
+    dependencies:
+      provides:
+        - jenkins-remoting=${{package.full-version}}
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/share/jenkins
@@ -173,6 +231,8 @@ subpackages:
 
   - name: ${{package.name}}-docker-agent
     dependencies:
+      provides:
+        - jenkins-docker-agent=${{package.full-version}}
       # These are core runtime dependencies required for common functionality
       # in Jenkins builds / pipeline jobs.
       runtime:
