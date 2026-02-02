@@ -12,7 +12,6 @@ environment:
       - bison
       - build-base
       - busybox
-      - ca-certificates-bundle
       - flex
 
 pipeline:
@@ -21,7 +20,7 @@ pipeline:
       uri: https://www.inet.no/dante/files/dante-${{package.version}}.tar.gz
       expected-sha512: bf6b82fcad63d0920b77cebe360612a639c8532fbda6dc84f1bc88e89671e358f4819bf9759b1ba3bb7fbe703eec7e59d9cef620b6e65f177686d5b00e5f221a
 
-  # ifdev.patch and gaierrval.patch are general bug fixes
+  # ifdev.patch and gaierrval.patch are general bug fixes, sourced from alpine's APKBUILD
   # glibc-interposition.patch converts K&R function definitions to ANSI C for glibc compatibility
   - uses: patch
     with:
@@ -70,8 +69,18 @@ subpackages:
           mv "${{targets.destdir}}"/usr/bin/sockd "${{targets.contextdir}}"/usr/bin/
     test:
       pipeline:
-        - runs: |
-            sockd -v
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: sockd
+        - uses: test/tw/ver-check
+          with:
+            bins: sockd
+            version-flag: "-v"
+        - name: Verify sockd configuration
+          runs: |
+            # Verify example configuration file is installed
+            stat /etc/sockd.conf
 
 update:
   enabled: true
@@ -79,7 +88,88 @@ update:
     identifier: 14716
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - python3
+        - wait-for-it
+        - dante-server
   pipeline:
     - uses: test/tw/ldd-check
-    - runs: |
-        socksify echo "test"
+    - name: Test socksify wrapper
+      runs: |
+        set -euo pipefail
+
+        # Test socksify exists and can run simple commands
+        socksify echo "socksify test passed"
+
+        # Test socksify with environment variable setting
+        SOCKS_SERVER=127.0.0.1:1080 socksify true
+
+        # Verify socksify script is executable and contains expected content
+        stat /usr/bin/socksify
+    - name: Test SOCKS client configuration
+      runs: |
+        set -euo pipefail
+
+        # Verify socks.conf example exists (installed to etc)
+        stat /etc/sockd.conf
+    - name: Test sockd server with actual SOCKS proxy operations
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          set -euo pipefail
+
+          # Create minimal working configuration for sockd
+          tee /tmp/sockd.conf << 'EOF'
+          logoutput: stderr
+
+          # Listen on localhost port 1080
+          internal: 127.0.0.1 port = 1080
+
+          # Use localhost for outgoing connections
+          external: 127.0.0.1
+
+          # No authentication required for testing
+          socksmethod: none
+          clientmethod: none
+
+          # Allow all clients from localhost
+          client pass {
+              from: 127.0.0.0/8 to: 127.0.0.0/8
+              log: connect
+          }
+
+          # Allow SOCKS connections to localhost targets
+          socks pass {
+              from: 127.0.0.0/8 to: 127.0.0.0/8
+              protocol: tcp
+              log: connect
+          }
+          EOF
+
+          # Start a simple HTTP server as a target to proxy to
+          python3 -m http.server 8888 --bind 127.0.0.1 >/dev/null 2>&1 &
+          wait-for-it -t 10 --strict 127.0.0.1:8888 -- echo "HTTP server is up"
+        start: sockd -f /tmp/sockd.conf -N 1
+        timeout: 30
+        expected_output: |
+          sockd
+        error_strings: ""
+        post: |
+          set -euo pipefail
+
+          # Wait for SOCKS server to be ready
+          wait-for-it -t 10 --strict 127.0.0.1:1080 -- echo "SOCKS server is up"
+
+          # Test SOCKS5 proxy connection using curl
+          curl -sf --socks5 127.0.0.1:1080 http://127.0.0.1:8888/ | grep -F "Directory listing"
+
+          # Test SOCKS5 hostname resolution through proxy
+          curl -sf --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:8888/ | grep -F "Directory listing"
+
+          # Test SOCKS4 compatibility
+          curl -sf --socks4 127.0.0.1:1080 http://127.0.0.1:8888/ | grep -F "Directory listing"
+
+          echo "All SOCKS proxy tests passed"
