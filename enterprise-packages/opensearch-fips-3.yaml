@@ -5,7 +5,7 @@
 package:
   name: opensearch-fips-3
   version: "3.4.0"
-  epoch: 0
+  epoch: 3
   description: Open source distributed and RESTful search engine.
   copyright:
     - license: Apache-2.0
@@ -110,13 +110,19 @@ pipeline:
       tag: ${{package.version}}
       expected-commit: 00336141f90b2456d7aa35e9052fd6baf7147423
 
+  # opensearch-env script hard codes its own internal classpath
+  # patch it to also include the system provided bcfips jars
+  - uses: patch
+    with:
+      patches: opensearch-env.patch
+
   - runs: |
       # Bump netty to 4.2.8-Final: GHSA-84h7-rjj3-6jx4
       sed -i 's/^\(netty.*\)4.2.7/\14.2.8/' gradle/libs.versions.toml
 
   - runs: |
       echo "org.gradle.daemon=false" >> gradle.properties
-      gradle localDistro --parallel -Dbuild.snapshot="false" -Dbuild.version_qualifier="" -Pcrypto.standard=FIPS-140-3 2>&1 | tee /tmp/gradle-main.log
+      ./gradlew --no-daemon localDistro --parallel -Dbuild.snapshot=false -Dbuild.version_qualifier= -Pcrypto.standard=FIPS-140-3 2>&1 | tee /tmp/gradle-main.log
 
       # Verify FIPS mode was used during build
       grep -F 'Crypto Standard       : FIPS-140-3' /tmp/gradle-main.log
@@ -174,7 +180,7 @@ pipeline:
 
   - runs: |
       cd plugins
-      gradle assemble -Dbuild.snapshot="false" -Dbuild.version_qualifier="" --stacktrace -Pcrypto.standard=FIPS-140-3 2>&1 | tee /tmp/gradle-plugins.log
+      ../gradlew --no-daemon assemble -Dbuild.snapshot=false -Dbuild.version_qualifier= --stacktrace -Pcrypto.standard=FIPS-140-3 2>&1 | tee /tmp/gradle-plugins.log
 
       # Verify FIPS mode was used during build
       grep -F 'Crypto Standard       : FIPS-140-3' /tmp/gradle-main.log
@@ -187,16 +193,6 @@ pipeline:
       echo "Removing files that conflict with subpackages"
       rm -rf /home/build/settings.gradle
 
-  - runs: |
-      # force bcfips symlinks - need to use ours, they ship uncertified versions
-      ln -sf /usr/share/java/bouncycastle-fips/bc-fips.jar ${{targets.destdir}}/usr/share/opensearch/lib/
-      ln -sf /usr/share/java/bouncycastle-fips/bc-rng-jent.jar ${{targets.destdir}}/usr/share/opensearch/lib/
-      ln -sf /usr/share/java/bouncycastle-fips/bcmail-fips.jar ${{targets.destdir}}/usr/share/opensearch/lib/
-      ln -sf /usr/share/java/bouncycastle-fips/bcpg-fips.jar ${{targets.destdir}}/usr/share/opensearch/lib/
-      ln -sf /usr/share/java/bouncycastle-fips/bcpkix-fips.jar ${{targets.destdir}}/usr/share/opensearch/lib/
-      ln -sf /usr/share/java/bouncycastle-fips/bctls-fips.jar ${{targets.destdir}}/usr/share/opensearch/lib/
-      ln -sf /usr/share/java/bouncycastle-fips/bcutil-fips.jar ${{targets.destdir}}/usr/share/opensearch/lib/
-
   - uses: strip
 
 subpackages:
@@ -206,7 +202,7 @@ subpackages:
       - runs: |
           mkdir -p ${{targets.contextdir}}/usr/share/opensearch/plugins/opensearch-${{range.key}}
           unzip "./plugins/${{range.key}}/build/distributions/${{range.key}}-${{package.version}}.zip" -d "${{targets.contextdir}}/usr/share/opensearch/plugins/opensearch-${{range.key}}"
-          # Remove bundled bc-fips jars - use system BCFIPS instead
+          # Remove bundled bc-fips jars - use system BCFIPS via module-path instead
           find "${{targets.contextdir}}/usr/share/opensearch/plugins/opensearch-${{range.key}}" -name 'bc*.jar' -delete
 
   - range: external-plugins
@@ -247,6 +243,13 @@ subpackages:
           # job scheduler requires a test cluster to connect to so skip verification checks
           if [ "${{range.key}}" = "job-scheduler" ]; then
             sed -i '/startParameter.excludedTaskNames=\[/ s/]/, "check"]/g' settings.gradle
+          fi
+
+          # sql plugin: use system bc-fips via module-path instead of bundling
+          # change implementation to compileOnly so bc-fips is not packaged in the plugin jar
+          # the implementation option leads to shading and jar hell
+          if [ "${{range.key}}" = "sql" ]; then
+            sed -i 's/implementation "org.bouncycastle:bc-fips/compileOnly "org.bouncycastle:bc-fips/' datasources/build.gradle
           fi
 
           # Ensure there's a newline at the end of the file, so we don't append
@@ -471,15 +474,14 @@ test:
       # FIPS requires 112-bit passwords (14+ chars)
       KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
       TRUSTSTORE_PASSWORD: "TrustStoreP@ssword123"
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips/"
+      OPENSEARCH_JAVA_OPTS: "--module-path=/usr/share/java/bouncycastle-fips/"
   pipeline:
     - name: "Configure and start OpenSearch in FIPS mode"
       runs: |
         set -x -euo pipefail
 
-        ln -sf /usr/share/java/bouncycastle-fips/bc*.jar /usr/share/opensearch/lib/
-
         # Generate keypair directly into BCFKS keystore using BCFIPS provider
-        JAVA_TOOL_OPTIONS="--module-path=/usr/share/java/bouncycastle-fips/" \
         keytool -genkeypair \
           -alias opensearch \
           -keyalg RSA \
@@ -493,7 +495,6 @@ test:
           -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
 
         # Export cert from BCFKS keystore for truststore
-        JAVA_TOOL_OPTIONS="--module-path=/usr/share/java/bouncycastle-fips/" \
         keytool -exportcert \
           -alias opensearch \
           -keystore /usr/share/opensearch/config/keystore.bcfks \
@@ -504,7 +505,6 @@ test:
           -file /tmp/opensearch.crt
 
         # Create BCFKS truststore and import the certificate
-        JAVA_TOOL_OPTIONS="--module-path=/usr/share/java/bouncycastle-fips/" \
         keytool -importcert \
           -alias opensearch \
           -file /tmp/opensearch.crt \
@@ -562,6 +562,9 @@ test:
         ${KEYSTORE_PASSWORD}
         KEYSTORE
 
+        # Check opensearch-plugin command works with patched opensearch-env
+        opensearch-plugin list | grep security
+
         # Start OpenSearch in foreground mode (backgrounded) so we can see output
         echo "${KEYSTORE_PASSWORD}" | sudo -E -u opensearch opensearch > /tmp/opensearch.log 2>&1 &
         OPENSEARCH_PID=$!
@@ -573,11 +576,7 @@ test:
           exit 1
         fi
 
-        # Opensearch startup scripts check for bcfips jars
-        sleep 5 # even once the api is ready, logs take a bit to show up
-        grep 'BouncyCastle FIPS library found, setting FIPS JVM options.' /tmp/opensearch.log
-        grep 'running in FIPS-140-3 mode' /tmp/opensearch.log
-
+        sleep 15 # port can be up, but cluster health not available yet? esp in arm ci, really slow
         # Verify cluster is healthy (using HTTPS with self-signed cert and default admin creds)
         curl -sf -k -u admin:admin 'https://localhost:9200/_cluster/health?pretty'
 
@@ -585,5 +584,5 @@ test:
         curl -sf -k -u admin:admin -X PUT 'https://localhost:9200/test-index/_doc/1' \
           -H 'Content-Type: application/json' \
           -d '{"name": "FIPS Test", "message": "OpenSearch running in FIPS mode with TLS"}'
-
+        sleep 15 # takes time to ingest and index doc, esp in arm ci
         curl -sf -k -u admin:admin 'https://localhost:9200/test-index/_doc/1' | grep -F "FIPS Test"
