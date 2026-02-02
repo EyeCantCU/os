@@ -5,6 +5,11 @@ package:
   description: Cadence is a distributed, scalable, durable, and highly available orchestration engine
   copyright:
     - license: Apache-2.0
+  dependencies:
+    runtime:
+      - cadence-cassandra-tool=${{package.full-version}}
+      - cadence-server=${{package.full-version}}
+      - cadence-sql-tool=${{package.full-version}}
 
 pipeline:
   - uses: git-checkout
@@ -19,7 +24,6 @@ pipeline:
         github.com/golang-jwt/jwt/v5@v5.2.2
         github.com/sirupsen/logrus@v1.9.1
         golang.org/x/crypto@v0.45.0
-      # oauth2 is transitive (not in root go.mod)
       replaces: golang.org/x/oauth2=golang.org/x/oauth2@v0.27.0
 
   - uses: go/build
@@ -33,15 +37,21 @@ pipeline:
         -X github.com/uber/cadence/common/metrics.BuildDate=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" '+%F-%T')
         -X github.com/uber/cadence/common/metrics.BuildTimeUnix=${SOURCE_DATE_EPOCH:-$(date +%s)}
 
+data:
+  - name: cadence-go-server
+    items:
+      server: ./cmd/server
+  - name: cadence-go-tools
+    items:
+      cassandra-tool: ./cmd/tools/cassandra
+      sql-tool: ./cmd/tools/sql
+
 subpackages:
   - name: ${{package.name}}-compat
     description: Compat package for ${{package.name}}
     dependencies:
       runtime:
         - cadence=${{package.full-version}}
-        - cadence-cassandra-tool=${{package.full-version}}
-        - cadence-server=${{package.full-version}}
-        - cadence-sql-tool=${{package.full-version}}
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
@@ -53,18 +63,14 @@ subpackages:
       environment:
         contents:
           packages:
-            - cadence=${{package.full-version}}
-            - cadence-cassandra-tool=${{package.full-version}}
-            - cadence-server=${{package.full-version}}
-            - cadence-sql-tool=${{package.full-version}}
-        environment:
-          PATH: /usr/local/bin:/usr/bin
+            - cadence-compat=${{package.full-version}}
       pipeline:
         - uses: test/tw/symlink-check
           with:
             allow-absolute: true
 
-  - name: ${{package.name}}-server
+  - range: cadence-go-server
+    name: ${{package.name}}-${{range.key}}
     description: Cadence server executes units of application logic, Workflows, in a resilient manner
     dependencies:
       runtime:
@@ -72,8 +78,8 @@ subpackages:
     pipeline:
       - uses: go/build
         with:
-          packages: ./cmd/server
-          output: cadence-server
+          packages: ${{range.value}}
+          output: cadence-${{range.key}}
           ldflags: |
             -X github.com/uber/cadence/common/metrics.Revision=$(git log -1 --format=%cI-%h)
             -X github.com/uber/cadence/common/metrics.Branch=$(git rev-parse --abbrev-ref HEAD)
@@ -84,30 +90,14 @@ subpackages:
       pipeline:
         - uses: test/tw/ldd-check
 
-  - name: ${{package.name}}-cassandra-tool
-    description: Cadence Cassandra database utility
+  - range: cadence-go-tools
+    name: ${{package.name}}-${{range.key}}
+    description: Cadence ${{range.key}} database utility
     pipeline:
       - uses: go/build
         with:
-          packages: ./cmd/tools/cassandra
-          output: cadence-cassandra-tool
-          ldflags: |
-            -X github.com/uber/cadence/common/metrics.Revision=$(git log -1 --format=%cI-%h)
-            -X github.com/uber/cadence/common/metrics.Branch=$(git rev-parse --abbrev-ref HEAD)
-            -X github.com/uber/cadence/common/metrics.ReleaseVersion=${{package.version}}
-            -X github.com/uber/cadence/common/metrics.BuildDate=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" '+%F-%T')
-            -X github.com/uber/cadence/common/metrics.BuildTimeUnix=${SOURCE_DATE_EPOCH:-$(date +%s)}
-    test:
-      pipeline:
-        - uses: test/tw/ldd-check
-
-  - name: ${{package.name}}-sql-tool
-    description: Cadence SQL database utility
-    pipeline:
-      - uses: go/build
-        with:
-          packages: ./cmd/tools/sql
-          output: cadence-sql-tool
+          packages: ${{range.value}}
+          output: cadence-${{range.key}}
           ldflags: |
             -X github.com/uber/cadence/common/metrics.Revision=$(git log -1 --format=%cI-%h)
             -X github.com/uber/cadence/common/metrics.Branch=$(git rev-parse --abbrev-ref HEAD)
@@ -130,6 +120,7 @@ subpackages:
     dependencies:
       runtime:
         - bash
+        - tzdata
         - cadence=${{package.full-version}}
         - cadence-cassandra-tool=${{package.full-version}}
         - cadence-server=${{package.full-version}}
@@ -143,6 +134,16 @@ subpackages:
           cp -r config/credentials/* "${{targets.subpkgdir}}"/etc/cadence/config/credentials/
           install -Dm755 docker/entrypoint.sh "${{targets.subpkgdir}}"/docker-entrypoint.sh
           install -Dm755 docker/start-cadence.sh "${{targets.subpkgdir}}"/start-cadence.sh
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /docker-entrypoint.sh
+              /start-cadence.sh
+              /etc/cadence/config/config_template.yaml
+              /etc/cadence/config/dynamicconfig
+              /etc/cadence/config/credentials
 
 update:
   enabled: true
@@ -160,6 +161,7 @@ test:
         - cadence-server=${{package.full-version}}
         - cadence-server-schema=${{package.full-version}}
         - cadence-sql-tool=${{package.full-version}}
+        - curl
         - wait-for-it
     environment:
       CADENCE_ADDRESS: "127.0.0.1:7933"
@@ -175,94 +177,19 @@ test:
       with:
         timeout: 30
         setup: |
-          mkdir -p /tmp/cadence/data /tmp/cadence/config
-          cadence-sql-tool --plugin sqlite --db /tmp/cadence/data/cadence.db setup-schema \
-            --version 0.1 --schema-file /etc/cadence/schema/sqlite/cadence/versioned/v0.1/base.sql
-          cadence-sql-tool --plugin sqlite --db /tmp/cadence/data/visibility.db setup-schema \
-            --version 0.1 --schema-file /etc/cadence/schema/sqlite/visibility/versioned/v0.1/base.sql
-          tee /tmp/cadence/config/development.yaml << 'CONFIGEOF'
-          log:
-            stdout: true
-            level: info
+          BASE="https://raw.githubusercontent.com/cadence-workflow/cadence/v${{package.version}}/config"
+          mkdir -p /etc/cadence/config/dynamicconfig
+          curl -fsSL -o /etc/cadence/config/development.yaml "${BASE}/development.yaml"
+          curl -fsSL -o /etc/cadence/config/development_sqlite.yaml "${BASE}/development_sqlite.yaml"
+          curl -fsSL -o /etc/cadence/config/dynamicconfig/development.yaml "${BASE}/dynamicconfig/development.yaml"
 
-          ringpop:
-            name: cadence
-            bootstrapMode: hosts
-            bootstrapHosts:
-              - 127.0.0.1:7933
-              - 127.0.0.1:7934
-              - 127.0.0.1:7935
-              - 127.0.0.1:7939
-            maxJoinDuration: 30s
-
-          persistence:
-            numHistoryShards: 4
-            defaultStore: default
-            visibilityStore: visibility
-            datastores:
-              default:
-                sql:
-                  pluginName: sqlite
-                  databaseName: /tmp/cadence/data/cadence.db
-                  connectAddr: ""
-                  connectProtocol: ""
-              visibility:
-                sql:
-                  pluginName: sqlite
-                  databaseName: /tmp/cadence/data/visibility.db
-                  connectAddr: ""
-                  connectProtocol: ""
-
-          services:
-            frontend:
-              rpc:
-                port: 7933
-                grpcPort: 7833
-                bindOnLocalHost: true
-            matching:
-              rpc:
-                port: 7935
-                grpcPort: 7835
-                bindOnLocalHost: true
-            history:
-              rpc:
-                port: 7934
-                grpcPort: 7834
-                bindOnLocalHost: true
-            worker:
-              rpc:
-                port: 7939
-                bindOnLocalHost: true
-
-          clusterGroupMetadata:
-            failoverVersionIncrement: 10
-            primaryClusterName: test-cluster
-            currentClusterName: test-cluster
-            clusterGroup:
-              test-cluster:
-                enabled: true
-                initialFailoverVersion: 1
-                rpcName: cadence-frontend
-                rpcAddress: "127.0.0.1:7933"
-
-          dcRedirectionPolicy:
-            policy: noop
-
-          archival:
-            history:
-              status: disabled
-            visibility:
-              status: disabled
-
-          domainDefaults:
-            archival:
-              history:
-                status: disabled
-              visibility:
-                status: disabled
-          CONFIGEOF
-          stat /tmp/cadence/config/development.yaml
-        start: cadence-server --root /tmp/cadence --config config --env development start --services frontend,matching,history,worker
+          cd /etc/cadence
+          cadence-sql-tool --plugin sqlite --db cadence.db setup-schema \
+            --version 0.1 --schema-file schema/sqlite/cadence/versioned/v0.1/base.sql
+          cadence-sql-tool --plugin sqlite --db cadence_visibility.db setup-schema \
+            --version 0.1 --schema-file schema/sqlite/visibility/versioned/v0.1/base.sql
+          stat /etc/cadence/config/development.yaml /etc/cadence/config/development_sqlite.yaml
+        start: sh -c 'cd /etc/cadence && cadence-server --root /etc/cadence --config config --env development --zone sqlite start --services frontend,matching,history,worker'
         expected_output: |
           frontend started
           matching started
