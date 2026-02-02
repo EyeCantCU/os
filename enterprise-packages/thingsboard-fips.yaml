@@ -1,0 +1,180 @@
+# we dont build the java components as part of FIPS package, Ref: https://github.com/chainguard-dev/image-requests/issues/5552#issuecomment-3788598265
+package:
+  name: thingsboard-fips
+  version: "4.3"
+  epoch: 0
+  description: "FIPS-compliant Open-source IoT Platform - JS components for device management, data collection, processing and visualization."
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - jq
+      - nodejs-22
+      - yarn
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: d844f0bacc86eb1736762f5ae0807d0efd852397
+      repository: https://github.com/thingsboard/thingsboard.git
+      tag: v${{package.version}}
+
+  - name: Bump js-yaml to remediate GHSA-mh29-5h37-fv8m
+    runs: |
+      jq '.dependencies."js-yaml" = "^4.1.1"' msa/js-executor/package.json > temp.json && mv temp.json msa/js-executor/package.json
+      jq '.dependencies."js-yaml" = "^4.1.1"' msa/web-ui/package.json > temp.json && mv temp.json msa/web-ui/package.json
+
+subpackages:
+  # nodejs 22 Ref: https://github.com/thingsboard/thingsboard/blob/master/msa/js-executor/docker/Dockerfile#L17
+  - name: thingsboard-tb-js-executor-fips
+    description: "Executes user-defined JavaScript functions in isolation for the ThingsBoard rule engine (FIPS)."
+    dependencies:
+      runtime:
+        - nodejs-22
+        - openssl-config-fipshardened
+    pipeline:
+      - name: Build js-executor TypeScript
+        runs: |
+          cd msa/js-executor
+          yarn install --non-interactive --network-concurrency 4 --network-timeout 100000 --mutex network
+          yarn run build
+      - name: Move tb-js-executor to target directories
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/share/tb-js-executor/conf" \
+                   "${{targets.subpkgdir}}/usr/bin"
+          cd msa/js-executor
+
+          # Copy compiled JS, package.json, yarn.lock, and YAML configs
+          cp -r target/src/* "${{targets.subpkgdir}}/usr/share/tb-js-executor"
+          cp package.json yarn.lock "${{targets.subpkgdir}}/usr/share/tb-js-executor"
+          cp config/*.yml "${{targets.subpkgdir}}/usr/share/tb-js-executor/conf/"
+
+          # Patch and copy .conf file and start script (replace Maven variables)
+          sed -e "s|\${pkg.installFolder}|/usr/share/tb-js-executor|g" \
+              -e "s|\${pkg.logFolder}|/var/log/tb-js-executor|g" \
+              config/tb-js-executor.conf > "${{targets.subpkgdir}}/usr/share/tb-js-executor/conf/tb-js-executor.conf"
+          sed -e "s|\${project.name}|ThingsBoard JavaScript Executor Microservice|g" \
+              -e "s|\${pkg.installFolder}|/usr/share/tb-js-executor|g" \
+              -e "s|\${pkg.name}|tb-js-executor|g" \
+              docker/start-js-executor.sh > "${{targets.subpkgdir}}/usr/bin/start-js-executor.sh"
+          chmod +x "${{targets.subpkgdir}}/usr/bin/start-js-executor.sh"
+      - name: Patch CVEs
+        runs: |
+          cd "${{targets.subpkgdir}}/usr/share/tb-js-executor"
+          resolutions='{
+            "@grpc/grpc-js": "^1.10.9",
+            "debug": "^4.3.1",
+            "fast-xml-parser": "^4.4.1",
+            "json5": "^2.2.2",
+            "moment": "^2.29.4",
+            "tough-cookie": "^4.1.3",
+            "xml2js": "^0.5.0",
+            "cookie": "^0.7.0"
+          }'
+          jq --argjson resolutions "$resolutions" '.resolutions += $resolutions' package.json > temp.json && mv temp.json package.json
+          jq '.dependencies.express = "^4.21.2"' package.json > temp.json && mv temp.json package.json
+      - name: Install nodejs dependencies
+        runs: |
+          cd "${{targets.subpkgdir}}/usr/share/tb-js-executor"
+          yarn install --production --non-interactive --network-concurrency 4 --network-timeout 100000 --mutex network && yarn cache clean --all
+    test:
+      pipeline:
+        # Note: Full startup requires Kafka, so we verify files and startup message
+        - name: Verify required files exist
+          runs: |
+            set -euo pipefail
+            stat /usr/share/tb-js-executor/server.js
+            stat /usr/share/tb-js-executor/conf/default.yml
+            stat /usr/share/tb-js-executor/conf/tb-js-executor.conf
+            stat /usr/bin/start-js-executor.sh
+        - name: Test tb-js-executor startup
+          uses: test/daemon-check-output
+          with:
+            setup: "ln -s default.yml /usr/share/tb-js-executor/conf/production.yml"
+            start: "start-js-executor.sh"
+            timeout: 30
+            expected_output: |
+              Starting 'ThingsBoard JavaScript Executor Microservice'
+
+  - name: thingsboard-tb-web-ui-fips
+    description: "Hosts static web UI content using a lightweight Express.js component (FIPS)"
+    # nodesjs 22 Ref: https://github.com/thingsboard/thingsboard/blob/master/msa/web-ui/docker/Dockerfile#L17
+    dependencies:
+      runtime:
+        - nodejs-22
+        - openssl-config-fipshardened
+    pipeline:
+      - name: Build web-ui TypeScript
+        runs: |
+          cd msa/web-ui
+          yarn install --non-interactive --network-concurrency 4 --network-timeout 100000 --mutex network
+          yarn run build
+      - name: Move tb-web-ui to target directories
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/share/tb-web-ui/conf" \
+                   "${{targets.subpkgdir}}/usr/bin"
+          cd msa/web-ui
+
+          # Copy compiled JS, package.json, yarn.lock, and YAML configs
+          cp -r target/src/* "${{targets.subpkgdir}}/usr/share/tb-web-ui"
+          cp package.json yarn.lock "${{targets.subpkgdir}}/usr/share/tb-web-ui"
+          cp config/*.yml "${{targets.subpkgdir}}/usr/share/tb-web-ui/conf/"
+
+          # Patch and copy .conf file and start script (replace Maven variables)
+          sed -e "s|\${pkg.installFolder}|/usr/share/tb-web-ui|g" \
+              -e "s|\${pkg.logFolder}|/var/log/tb-web-ui|g" \
+              config/tb-web-ui.conf > "${{targets.subpkgdir}}/usr/share/tb-web-ui/conf/tb-web-ui.conf"
+          sed -e "s|\${project.name}|ThingsBoard Web UI Microservice|g" \
+              -e "s|\${pkg.installFolder}|/usr/share/tb-web-ui|g" \
+              -e "s|\${pkg.name}|tb-web-ui|g" \
+              docker/start-web-ui.sh > "${{targets.subpkgdir}}/usr/bin/start-web-ui.sh"
+          chmod +x "${{targets.subpkgdir}}/usr/bin/start-web-ui.sh"
+      - name: Patch CVEs
+        runs: |
+          cd "${{targets.subpkgdir}}/usr/share/tb-web-ui"
+          resolutions='{
+            "json5": "^2.2.2",
+            "moment": "^2.29.4",
+            "tinymce": "^7.0.0",
+            "on-headers": "1.1.0",
+            "cookie": "^0.7.0"
+          }'
+          jq --argjson resolutions "$resolutions" '.resolutions += $resolutions' package.json > temp.json && mv temp.json package.json
+          jq '.dependencies.express = "^4.21.2"' package.json > temp.json && mv temp.json package.json
+      - name: Install nodejs dependencies
+        runs: |
+          cd "${{targets.subpkgdir}}/usr/share/tb-web-ui"
+          yarn install --production --non-interactive --network-concurrency 4 --network-timeout 100000 --mutex network && yarn cache clean --all
+    test:
+      pipeline:
+        # Note: Full startup requires ThingsBoard backend, so we verify files and startup message
+        - name: Verify required files exist
+          runs: |
+            set -euo pipefail
+            stat /usr/share/tb-web-ui/server.js
+            stat /usr/share/tb-web-ui/conf/default.yml
+            stat /usr/share/tb-web-ui/conf/tb-web-ui.conf
+            stat /usr/bin/start-web-ui.sh
+        - name: Test tb-web-ui startup
+          uses: test/daemon-check-output
+          with:
+            setup: "ln -s default.yml /usr/share/tb-web-ui/conf/production.yml"
+            start: "start-web-ui.sh"
+            timeout: 30
+            expected_output: |
+              Starting 'ThingsBoard Web UI Microservice'
+
+update:
+  enabled: true
+  github:
+    identifier: thingsboard/thingsboard
+    tag-filter: v
+    strip-prefix: v
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage
