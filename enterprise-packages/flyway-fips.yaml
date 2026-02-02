@@ -1,7 +1,7 @@
 package:
   name: flyway-fips
   version: "12.0.0"
-  epoch: 0
+  epoch: 1
   description: "FIPS-compliant Flyway database migration tool"
   copyright:
     - license: Apache-2.0
@@ -60,19 +60,10 @@ vars:
   #   to disable bundled BoringSSL in grpc-netty-shaded. Excluding until we build google-cloud-storage java library
   #   Reference: https://github.com/grpc/grpc-java/blob/master/SECURITY.md
   #
-  # - snowflake-jdbc (standard): Shades non-FIPS BouncyCastle internally. Using
-  #   snowflake-jdbc-fips variant instead (see snowflake-jdbc-fips-version below).
-  #   Reference: https://mvnrepository.com/artifact/net.snowflake/snowflake-jdbc-fips
+  # - snowflake-jdbc (standard): Shades non-FIPS BouncyCastle internally.
+  #   snowflake-jdbc-fips variant uses 1.x version of bcfips https://github.com/snowflakedb/snowflake-jdbc/blob/3a269f955813d59cad6261b3f79e68822919de37/parent-pom.xml#L33
   # =============================================================================
   drivers-core: "aws-secretsmanager-jdbc h2 hsqldb jffi mariadb-java-client mssql-jdbc ojdbc11 postgresql singlestore-jdbc-client sqlite-jdbc"
-  # =============================================================================
-  # Snowflake JDBC FIPS variant
-  # The standard snowflake-jdbc shades non-FIPS BouncyCastle internally and cannot
-  # be made FIPS-compliant. Snowflake provides a separate FIPS-compliant variant
-  # (snowflake-jdbc-fips) that uses bc-fips instead.
-  # Reference: https://github.com/snowflakedb/snowflake-jdbc/blob/master/parent-pom.xml#L540
-  # =============================================================================
-  # renovate: datasource=maven depName=net.snowflake:snowflake-jdbc-fips versioning=maven
   # =============================================================================
   # Cassandra Drivers (drivers/cassandra/)
   #
@@ -151,7 +142,7 @@ pipeline:
       # Excluded artifacts (-DexcludeArtifactIds):
       # - netty-tcnative-boringssl-static: Bundles BoringSSL native crypto (NOT FIPS)
       # - conscrypt-openjdk-uber: Bundles BoringSSL for all crypto ops (NOT FIPS)
-      # - snowflake-jdbc: Shades non-FIPS BouncyCastle internally; using -fips variant instead
+      # - snowflake-jdbc: Shades non-FIPS BouncyCastle internally; -fips variant uses 1.x version of bcfips, so excluding https://github.com/snowflakedb/snowflake-jdbc/blob/3a269f955813d59cad6261b3f79e68822919de37/parent-pom.xml#L33
       # - databricks-jdbc: Bundles bcprov and directly imports non-FIPS BC classes
       # - jaybird: Uses ARCFOUR (RC4) which is a weak/broken algorithm not FIPS-approved
       # - jtds: Depends on jcifs which bundles bcprov and imports non-FIPS BC classes
@@ -184,11 +175,9 @@ pipeline:
       # │   └── fips/                        # BCFIPS JARs (symlinked from system)
       # │                                    # Provides FIPS-validated crypto for:
       # │                                    # - msal4j (Azure auth)
-      # │                                    # - snowflake-jdbc-fips
       # │                                    # - Any driver with BYO BC support
       # ├── drivers/                         # JDBC drivers
       # │   ├── *.jar                        # Core drivers (vars.drivers-core)
-      # │   ├── snowflake-jdbc-fips-*.jar    # FIPS Snowflake driver
       # │   ├── cassandra/                   # Cassandra drivers (vars.drivers-cassandra)
       # │   └── mongo/                       # MongoDB drivers (vars.drivers-mongo)
       # │                                    # NOTE: GCP drivers excluded (conscrypt/BoringSSL)
@@ -281,28 +270,6 @@ pipeline:
       ls -1 "${{targets.contextdir}}/${{vars.flyway-base}}/drivers" | sed 's/^/  /'
       echo "==="
 
-  - name: Download snowflake-jdbc-fips from Maven Central
-    runs: |
-      # =============================================================================
-      # Snowflake JDBC FIPS variant
-      #
-      # The standard snowflake-jdbc driver shades (bundles) non-FIPS BouncyCastle
-      # internally, making it impossible to swap in BCFIPS at runtime.
-      #
-      # Snowflake provides a separate FIPS-compliant variant (snowflake-jdbc-fips)
-      # that expects BCFIPS JARs to be provided at runtime. We satisfy this
-      # requirement via the lib/fips/ symlinks to system BCFIPS JARs.
-      #
-      # Reference: https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-fips
-      # =============================================================================
-      mvn dependency:copy \
-        -Dartifact=net.snowflake:snowflake-jdbc-fips:RELEASE \
-        -DoutputDirectory="${{targets.contextdir}}/${{vars.flyway-base}}/drivers"
-
-      echo "=== Downloaded snowflake-jdbc-fips ==="
-      ls -la "${{targets.contextdir}}/${{vars.flyway-base}}/drivers/snowflake-jdbc-fips-"*.jar
-      echo "==="
-
   - name: Move flyway drivers/cassandra jars
     runs: |
       # Install Cassandra JDBC drivers to drivers/cassandra/
@@ -366,7 +333,6 @@ pipeline:
       # 3. Proper FIPS validation chain
       #
       # Drivers that use BCFIPS:
-      # - snowflake-jdbc-fips: Explicitly requires BCFIPS at runtime
       # - msal4j: Azure auth with BYO BouncyCastle support
       # - mssql-jdbc: BYO BouncyCastle support
       # - mariadb-java-client: BYO BouncyCastle support
@@ -505,24 +471,6 @@ test:
         fi
 
         echo "No excluded non-FIPS drivers found - PASS"
-    - name: Verify snowflake-jdbc-fips is present and standard snowflake-jdbc is not
-      runs: |
-        set -euo pipefail
-        # Verify FIPS variant is present
-        if ! find /usr/share/java/flyway/drivers -name "snowflake-jdbc-fips-*.jar" | grep -q .; then
-          echo "ERROR: snowflake-jdbc-fips JAR not found"
-          exit 1
-        fi
-        echo "snowflake-jdbc-fips found - PASS"
-
-        # Verify standard (non-FIPS) variant is not present
-        # Pattern: snowflake-jdbc-X.Y.Z.jar (not snowflake-jdbc-fips-X.Y.Z.jar)
-        if find /usr/share/java/flyway/drivers -name "snowflake-jdbc-[0-9]*.jar" | grep -q .; then
-          echo "ERROR: Found non-FIPS snowflake-jdbc JAR"
-          find /usr/share/java/flyway/drivers -name "snowflake-jdbc-[0-9]*.jar"
-          exit 1
-        fi
-        echo "No non-FIPS snowflake-jdbc found - PASS"
     - name: Verify FIPS JARs are first in classpath
       runs: |
         set -euo pipefail
