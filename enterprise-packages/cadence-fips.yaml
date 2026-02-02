@@ -22,12 +22,41 @@ pipeline:
       go-package: go-fips
 
 subpackages:
-  - name: cadence-server-fips
-    description: Cadence server executes units of application logic, Workflows, in a resilient manner
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
     dependencies:
       runtime:
         - cadence-fips
-        - cadence-server-schema-fips
+        - cadence-fips-cassandra-tool
+        - cadence-fips-server
+        - cadence-fips-sql-tool
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
+          ln -s /usr/bin/cadence "${{targets.subpkgdir}}"/usr/local/bin/cadence
+          ln -s /usr/bin/cadence-cassandra-tool "${{targets.subpkgdir}}"/usr/local/bin/cadence-cassandra-tool
+          ln -s /usr/bin/cadence-server "${{targets.subpkgdir}}"/usr/local/bin/cadence-server
+          ln -s /usr/bin/cadence-sql-tool "${{targets.subpkgdir}}"/usr/local/bin/cadence-sql-tool
+    test:
+      environment:
+        contents:
+          packages:
+            - cadence-fips
+            - cadence-fips-cassandra-tool
+            - cadence-fips-server
+            - cadence-fips-sql-tool
+        environment:
+          PATH: /usr/local/bin:/usr/bin
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+  - name: ${{package.name}}-server
+    description: Cadence server executes units of application logic, Workflows, in a resilient manner
+    dependencies:
+      runtime:
+        - cadence-fips-server-schema
     pipeline:
       - uses: go/build
         with:
@@ -41,37 +70,7 @@ subpackages:
         - uses: test/go-fips-check
         - uses: test/tw/ldd-check
 
-  - name: cadence-server-fips-compat
-    description: Compat package for cadence-server image (/usr/local/bin parity with upstream)
-    dependencies:
-      runtime:
-        - cadence-cassandra-tool-fips
-        - cadence-fips
-        - cadence-server-fips
-        - cadence-sql-tool-fips
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
-          ln -s /usr/bin/cadence "${{targets.subpkgdir}}"/usr/local/bin/cadence
-          ln -s /usr/bin/cadence-cassandra-tool "${{targets.subpkgdir}}"/usr/local/bin/cadence-cassandra-tool
-          ln -s /usr/bin/cadence-server "${{targets.subpkgdir}}"/usr/local/bin/cadence-server
-          ln -s /usr/bin/cadence-sql-tool "${{targets.subpkgdir}}"/usr/local/bin/cadence-sql-tool
-    test:
-      environment:
-        contents:
-          packages:
-            - cadence-cassandra-tool-fips
-            - cadence-fips
-            - cadence-server-fips
-            - cadence-sql-tool-fips
-        environment:
-          PATH: /usr/local/bin:/usr/bin
-      pipeline:
-        - uses: test/tw/symlink-check
-          with:
-            allow-absolute: true
-
-  - name: cadence-cassandra-tool-fips
+  - name: ${{package.name}}-cassandra-tool
     description: Cadence Cassandra database utility
     pipeline:
       - uses: go/build
@@ -86,7 +85,7 @@ subpackages:
         - uses: test/go-fips-check
         - uses: test/tw/ldd-check
 
-  - name: cadence-sql-tool-fips
+  - name: ${{package.name}}-sql-tool
     description: Cadence SQL database utility
     pipeline:
       - uses: go/build
@@ -101,22 +100,22 @@ subpackages:
         - uses: test/go-fips-check
         - uses: test/tw/ldd-check
 
-  - name: cadence-server-schema-fips
+  - name: ${{package.name}}-server-schema
     description: Schema files for Cadence server database setup
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/etc/cadence
           cp -r schema "${{targets.subpkgdir}}"/etc/cadence/
 
-  - name: cadence-server-oci-entrypoint-fips
+  - name: ${{package.name}}-server-oci-entrypoint
     description: Entrypoint for using Cadence server in OCI containers
     dependencies:
       runtime:
         - bash
-        - cadence-cassandra-tool-fips
         - cadence-fips
-        - cadence-server-fips
-        - cadence-sql-tool-fips
+        - cadence-fips-cassandra-tool
+        - cadence-fips-server
+        - cadence-fips-sql-tool
         - curl
         - dockerize
     pipeline:
@@ -140,18 +139,15 @@ test:
   environment:
     contents:
       packages:
-        - cadence-cassandra-tool-fips
-        - cadence-server-fips
-        - cadence-server-schema-fips
-        - cadence-sql-tool-fips
+        - cadence-fips-cassandra-tool
+        - cadence-fips-server
+        - cadence-fips-server-schema
+        - cadence-fips-sql-tool
         - wait-for-it
     environment:
       CADENCE_ADDRESS: "127.0.0.1:7933"
   pipeline:
     - uses: test/go-fips-check
-      with:
-        package-match: "cadence.*-fips$"
-    - uses: test/tw/ldd-check
     - uses: test/tw/help-check
       with:
         bins: cadence
@@ -269,4 +265,9 @@ test:
           cadence --address "${CADENCE_ADDRESS}" --domain test-domain domain register \
             --description "Test domain for package validation"
           cadence --address "${CADENCE_ADDRESS}" --domain test-domain domain describe
-          cadence --address "${CADENCE_ADDRESS}" domain list
+          # Allow domain cache to propagate to matching/history before workflow calls
+          sleep 5
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain workflow start \
+            --workflow_id test-wf-1 --tasklist test-tl --workflow_type test-wt --execution_timeout 60 --input '{}'
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain workflow describe --wid test-wf-1 | grep -F "test-wf-1"
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain workflow cancel --wid test-wf-1
