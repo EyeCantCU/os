@@ -4,6 +4,20 @@
 TOOLS_D := ./tools
 STEREO := $(TOOLS_D)/stereo
 
+ARCH ?= $(shell uname -m)
+ifeq (${ARCH}, arm64)
+	ARCH = aarch64
+endif
+PACKAGES_CONTAINER_FOLDER ?= /work/packages
+DOCKER_PLATFORM_ARG := $(shell \
+  case $(ARCH) in \
+	(aarch64) darch=arm64;; \
+	(x86_64) darch=amd64;; \
+	(*) echo "unknown-docker-platform-arch-$(ARCH)"; exit 1;; \
+  esac ; \
+  echo "--platform=linux/$$darch" \
+)
+
 ifeq (${TMPDIR}, )
 	CACHEDIR = /tmp/melange-cache
 else
@@ -138,3 +152,34 @@ ${CACHEDIR}/.libraries_token.txt: cache
 
 .PHONY: lib-token
 lib-token: ${CACHEDIR}/.libraries_token.txt
+
+%.rsa:
+	make -C $(dir $@) $(notdir $@)
+
+.PHONY: local-wolfi
+local-wolfi: os/local-melange.rsa enterprise-packages/local-melange-enterprise.rsa extra-packages/local-melange-extra.rsa
+	@mkdir -p "$(PWD)/os/packages" "$(PWD)/enterprise-packages/packages" "$(PWD)/extra-packages/packages"
+	@$(eval TMP_DIR := $(shell mktemp --tmpdir -d "$@.XXXXXX"))
+	@$(eval TMP_REPOS_FILE := $(TMP_DIR)/repositories)
+	@echo "https://packages.wolfi.dev/os" > $(TMP_REPOS_FILE)
+	@echo "https://apk.cgr.dev/chainguard-private" >> $(TMP_REPOS_FILE)
+	@echo "https://packages.cgr.dev/extras" >> $(TMP_REPOS_FILE)
+	@(for p in os enterprise-packages extra-packages ; do \
+		[ -f "$$p/packages/$(ARCH)/APKINDEX.tar.gz" ] || continue ; \
+		echo "$(PACKAGES_CONTAINER_FOLDER)/$$p"; done ) >> $(TMP_REPOS_FILE)
+	@trap 'rm -Rf "$(TMP_DIR)"' EXIT && \
+	  tok=$$(chainctl auth token --audience=apk.cgr.dev) && \
+	  ( umask 066 && printf "%s\n" "machine apk.cgr.dev" "login token" "password $$tok" > "$(TMP_DIR)/netrc" ) && \
+	docker run $(DOCKER_PLATFORM_ARG) --pull=always --rm -it \
+		--entrypoint="/bin/sh" \
+		--mount type=bind,source="$(PWD)/os/packages",destination="$(PACKAGES_CONTAINER_FOLDER)/os",readonly \
+		--mount type=bind,source="$(PWD)/enterprise-packages/packages",destination="$(PACKAGES_CONTAINER_FOLDER)/enterprise-packages",readonly \
+		--mount type=bind,source="$(PWD)/extra-packages/packages",destination="$(PACKAGES_CONTAINER_FOLDER)/extra-packages",readonly \
+		--mount type=bind,source="$(PWD)/os/local-melange.rsa.pub",destination="/etc/apk/keys/local-melange.rsa.pub",readonly \
+		--mount type=bind,source="$(PWD)/enterprise-packages/local-melange-enterprise.rsa.pub",destination="/etc/apk/keys/local-melange-enterprise.rsa.pub",readonly \
+		--mount type=bind,source="$(PWD)/extra-packages/local-melange-extra.rsa.pub",destination="/etc/apk/keys/local-melange-extra.rsa.pub",readonly \
+		--mount type=bind,source="$(PWD)/extra-packages/chainguard-extras.rsa.pub",destination="/etc/apk/keys/chainguard-extras.rsa.pub,readonly" \
+		--mount type=bind,source="$(TMP_REPOS_FILE)",destination="/etc/apk/repositories",readonly \
+		--mount type=bind,source="$(TMP_DIR)/netrc",destination="/root/.netrc",readonly \
+		-w "$(PACKAGES_CONTAINER_FOLDER)" \
+		cgr.dev/chainguard/wolfi-base:latest -il
