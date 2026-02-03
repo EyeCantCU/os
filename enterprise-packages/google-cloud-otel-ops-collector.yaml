@@ -1,0 +1,161 @@
+package:
+  name: google-cloud-otel-ops-collector
+  version: "0.143.0"
+  epoch: 0
+  description: OpenTelemetry Operations Collector for Google Cloud
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 16
+    memory: 32Gi
+  dependencies:
+    runtime:
+      - opentelemetry-java-contrib-jmx-metrics
+
+vars:
+  # OCB (OpenTelemetry Collector Builder) version - must match version in manifest.yaml
+  ocb-version: "0.138.0"
+  # Installation prefix matching upstream expectations
+  prefix: /opt/google-cloud-ops-agent
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - opentelemetry-java-contrib-jmx-metrics
+      - systemd-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/GoogleCloudPlatform/opentelemetry-operations-collector
+      tag: v${{package.version}}
+      expected-commit: 01c257f80f58a4f1fcd9d88aa4e85736bb1c9f83
+
+  # Install OCB (OpenTelemetry Collector Builder) from upstream and build collector
+  # Note: OCB version must match the version in manifest.yaml, not the repo tag
+  - runs: |
+      # Install OCB to a known location - version must match manifest.yaml
+      GOBIN=/usr/local/bin go install -trimpath -ldflags="-s -w" go.opentelemetry.io/collector/cmd/builder@v${{vars.ocb-version}}
+
+      cd otelopscol
+      mkdir -p _build
+
+      # Run OCB to generate the collector code from manifest
+      /usr/local/bin/builder --skip-compilation --config manifest.yaml
+
+      # Calculate JAR hash from the installed opentelemetry-java-contrib-jmx-metrics package
+      # This hash is embedded into the binary for runtime integrity verification
+      JAR_FILE=$(ls /usr/share/java/jmx-metrics/opentelemetry-jmx-metrics-*.jar)
+      JAR_SHA_256=$(sha256sum "$JAR_FILE" | cut -d' ' -f1)
+
+      # Build the collector with CGO enabled for systemd/journald support.
+      # Embed the JMX metrics JAR hash for verification at runtime.
+      # Avoid the gpu build tag so the binary does not hard-link NVML symbols,
+      # which fail in minimal test environments without NVIDIA libraries.
+      cd _build
+      GOWORK=off CGO_ENABLED=1 go build \
+        -buildvcs=false \
+        -ldflags="-s -w -X github.com/open-telemetry/opentelemetry-collector-contrib/receiver/jmxreceiver.MetricsGathererHash=$JAR_SHA_256" \
+        -o otelopscol \
+        .
+
+  - runs: |
+      install -Dm755 otelopscol/_build/otelopscol "${{targets.destdir}}"/usr/bin/otelopscol
+
+subpackages:
+  # Compatibility subpackage that creates symlink to JMX metrics JAR at expected location
+  - name: ${{package.name}}-jmx-compat
+    description: Compatibility symlink for JMX metrics JAR at ops-agent expected location
+    dependencies:
+      runtime:
+        - opentelemetry-java-contrib-jmx-metrics
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"${{vars.prefix}}/subagents/opentelemetry-collector
+          # Create symlink to the installed JAR
+          JAR_FILE=$(ls /usr/share/java/jmx-metrics/opentelemetry-jmx-metrics-*.jar)
+          ln -sf "$JAR_FILE" "${{targets.contextdir}}"${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+    test:
+      environment:
+        contents:
+          packages:
+            - opentelemetry-java-contrib-jmx-metrics
+      pipeline:
+        - name: Verify JMX metrics JAR symlink
+          runs: |
+            readlink -v ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+            stat ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+
+update:
+  enabled: true
+  github:
+    identifier: GoogleCloudPlatform/opentelemetry-operations-collector
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-jmx-compat
+        - curl
+        - jq
+        - net-tools
+        - openjdk-17-default-jvm
+  pipeline:
+    - name: Verify otelopscol binary exists
+      runs: stat /usr/bin/otelopscol
+    - name: Verify JMX metrics JAR symlink exists
+      runs: stat ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+    - name: Test otelopscol version
+      runs: otelopscol --version
+    - name: Validate otelopscol components
+      runs: |
+        # Verify key components are available
+        otelopscol components 2>&1 | grep -F "hostmetricsreceiver"
+        otelopscol components 2>&1 | grep -F "googlecloudexporter"
+        otelopscol components 2>&1 | grep -F "jmxreceiver"
+    - name: Test otelopscol startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create minimal OTel config for testing
+          tee /tmp/otel-test.yaml << 'EOF'
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+
+          processors:
+            batch:
+
+          exporters:
+            debug:
+              verbosity: detailed
+
+          service:
+            pipelines:
+              metrics:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [debug]
+          EOF
+        start: otelopscol --config=/tmp/otel-test.yaml
+        timeout: 60
+        expected_output: |
+          Everything is ready
+        error_strings: ""
+        post: |
+          set -euo pipefail
+          # Verify the collector is listening
+          netstat -ln | grep -F ":4317"
+          netstat -ln | grep -F ":4318"
+    - name: Validate library dependencies
+      uses: test/tw/ldd-check
