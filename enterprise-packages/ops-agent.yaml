@@ -1,0 +1,289 @@
+package:
+  name: ops-agent
+  version: "2.63.0"
+  epoch: 0
+  description: Google Cloud Ops Agent - unified agent for collecting logs and metrics on Google Cloud VMs
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 16
+    memory: 32Gi
+
+vars:
+  # Fluent Bit version compatible with this release
+  fluent-bit-version: "4.0"
+  # Installation prefix matching upstream expectations
+  prefix: /opt/google-cloud-ops-agent
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/GoogleCloudPlatform/ops-agent
+      tag: ${{package.version}}
+      expected-commit: 2289474b0be95150069203a21b244bce6a753b1a
+
+  # Build the configuration generator engine
+  - uses: go/build
+    with:
+      packages: ./cmd/google_cloud_ops_agent_engine
+      ldflags: |
+        -s -w
+        -X main.version=${{package.version}}
+      output: google_cloud_ops_agent_engine
+
+  # Install default configuration and create required directories
+  - runs: |
+      mkdir -p "${{targets.destdir}}"/etc/google-cloud-ops-agent
+      install -Dm644 confgenerator/default-config.yaml "${{targets.destdir}}"/etc/google-cloud-ops-agent/config.yaml
+
+      # Create required directories
+      mkdir -p "${{targets.destdir}}"/var/log/google-cloud-ops-agent
+      mkdir -p "${{targets.destdir}}"/var/lib/google-cloud-ops-agent
+      mkdir -p "${{targets.destdir}}"/var/run/google-cloud-ops-agent-fluent-bit
+      mkdir -p "${{targets.destdir}}"/var/run/google-cloud-ops-agent-opentelemetry-collector
+
+subpackages:
+  - name: ${{package.name}}-wrapper
+    description: Google Cloud Ops Agent process wrapper
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/agent_wrapper
+          ldflags: -s -w
+          output: google_cloud_ops_agent_wrapper
+    test:
+      pipeline:
+        - name: Verify wrapper binary exists
+          runs: stat /usr/bin/google_cloud_ops_agent_wrapper
+        - name: Test wrapper help
+          runs: |
+            google_cloud_ops_agent_wrapper -h 2>&1 | grep -F "Usage"
+
+  - name: ${{package.name}}-fluent-bit-compat
+    description: Fluent Bit compatibility symlinks for Google Cloud Ops Agent
+    dependencies:
+      runtime:
+        - fluent-bit-${{vars.fluent-bit-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"${{vars.prefix}}/subagents/fluent-bit/bin
+          ln -sf /usr/bin/fluent-bit "${{targets.contextdir}}"${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
+    test:
+      environment:
+        contents:
+          packages:
+            - fluent-bit-${{vars.fluent-bit-version}}
+      pipeline:
+        - name: Verify fluent-bit symlink
+          runs: |
+            readlink -v ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
+            ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit --version
+
+  - name: ${{package.name}}-systemd
+    description: Systemd service files for Google Cloud Ops Agent
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-wrapper
+        - google-cloud-otel-ops-collector
+        - ${{package.name}}-fluent-bit-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/lib/systemd/system
+          mkdir -p "${{targets.contextdir}}"/usr/lib/systemd/system-preset
+
+          # Install and customize systemd service files
+          # Main service
+          sed -e 's|@PREFIX@|${{vars.prefix}}|g' \
+              -e 's|@SYSCONFDIR@|/etc|g' \
+              systemd/google-cloud-ops-agent.service > "${{targets.contextdir}}"/usr/lib/systemd/system/google-cloud-ops-agent.service
+
+          # Fluent Bit service
+          sed -e 's|@PREFIX@|${{vars.prefix}}|g' \
+              -e 's|@SYSCONFDIR@|/etc|g' \
+              systemd/google-cloud-ops-agent-fluent-bit.service > "${{targets.contextdir}}"/usr/lib/systemd/system/google-cloud-ops-agent-fluent-bit.service
+
+          # OpenTelemetry Collector service
+          sed -e 's|@PREFIX@|${{vars.prefix}}|g' \
+              -e 's|@SYSCONFDIR@|/etc|g' \
+              systemd/google-cloud-ops-agent-opentelemetry-collector.service > "${{targets.contextdir}}"/usr/lib/systemd/system/google-cloud-ops-agent-opentelemetry-collector.service
+
+          # Enable services by default
+          echo "enable google-cloud-ops-agent.service" > "${{targets.contextdir}}"/usr/lib/systemd/system-preset/90-google-cloud-ops-agent.preset
+    test:
+      pipeline:
+        - uses: test/tw/verify-service
+
+  - name: ${{package.name}}-compat
+    description: Compatibility package with symlinks for upstream expected paths
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-wrapper
+        - google-cloud-otel-ops-collector
+        - ${{package.name}}-fluent-bit-compat
+    pipeline:
+      - runs: |
+          # Create symlinks from upstream expected paths to standard /usr/bin locations
+          mkdir -p "${{targets.contextdir}}"${{vars.prefix}}/libexec
+          mkdir -p "${{targets.contextdir}}"${{vars.prefix}}/subagents/opentelemetry-collector
+
+          # Engine binary
+          ln -sf /usr/bin/google_cloud_ops_agent_engine "${{targets.contextdir}}"${{vars.prefix}}/libexec/google_cloud_ops_agent_engine
+
+          # Wrapper binary
+          ln -sf /usr/bin/google_cloud_ops_agent_wrapper "${{targets.contextdir}}"${{vars.prefix}}/libexec/google_cloud_ops_agent_wrapper
+
+          # OTel collector
+          ln -sf /usr/bin/otelopscol "${{targets.contextdir}}"${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - ${{package.name}}-wrapper
+            - google-cloud-otel-ops-collector
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+        - name: Verify symlinks work
+          runs: |
+            ${{vars.prefix}}/libexec/google_cloud_ops_agent_engine -h 2>&1 || true
+            ${{vars.prefix}}/libexec/google_cloud_ops_agent_wrapper -h 2>&1 || true
+            ${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol --version
+
+  - name: ${{package.name}}-all
+    description: Meta-package for Google Cloud Ops Agent with all components
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-wrapper
+        - google-cloud-otel-ops-collector
+        - ${{package.name}}-fluent-bit-compat
+        - ${{package.name}}-systemd
+        - ${{package.name}}-compat
+    test:
+      pipeline:
+        - uses: test/metapackage
+
+update:
+  enabled: true
+  github:
+    identifier: GoogleCloudPlatform/ops-agent
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-wrapper
+        - google-cloud-otel-ops-collector
+        - ${{package.name}}-fluent-bit-compat
+        - fluent-bit-${{vars.fluent-bit-version}}
+        - curl
+        - jq
+        - net-tools
+        - procps
+        - wait-for-it
+  pipeline:
+    - name: Verify engine binary exists
+      runs: stat /usr/bin/google_cloud_ops_agent_engine
+    - name: Test engine help
+      runs: |
+        google_cloud_ops_agent_engine -h 2>&1 | grep -F "Usage of"
+    - name: Test OTel collector startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create minimal OTel config for testing
+          tee /tmp/otel-test.yaml << 'EOF'
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+
+          processors:
+            batch:
+
+          exporters:
+            debug:
+              verbosity: detailed
+
+          service:
+            pipelines:
+              metrics:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [debug]
+          EOF
+        start: otelopscol --config=/tmp/otel-test.yaml
+        timeout: 60
+        expected_output: |
+          Everything is ready
+        error_strings: ""
+        post: |
+          set -euo pipefail
+          # Verify the collector is listening
+          netstat -ln | grep -F ":4317"
+          netstat -ln | grep -F ":4318"
+    - name: Test fluent-bit startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create minimal fluent-bit config
+          tee /tmp/fluent-bit.conf << 'EOF'
+          [SERVICE]
+              Flush        1
+              Daemon       Off
+              Log_Level    info
+              HTTP_Server  On
+              HTTP_Listen  0.0.0.0
+              HTTP_Port    2020
+
+          [INPUT]
+              Name         dummy
+              Tag          test
+              Dummy        {"message": "test log entry"}
+              Rate         1
+
+          [OUTPUT]
+              Name         stdout
+              Match        *
+          EOF
+        start: fluent-bit --config=/tmp/fluent-bit.conf
+        timeout: 30
+        expected_output: |
+          fluent bit
+        error_strings: ""
+        post: |
+          set -euo pipefail
+          # Verify fluent-bit health endpoint
+          curl -sf http://localhost:2020/api/v1/health \
+            | jq -e '.["fluent-bit"] and .["fluent-bit"].version'
+    - name: Verify all components are accessible
+      runs: |
+        set -euo pipefail
+        # Engine
+        stat /usr/bin/google_cloud_ops_agent_engine
+        # Wrapper
+        stat /usr/bin/google_cloud_ops_agent_wrapper
+        # OTel collector
+        stat /usr/bin/otelopscol
+        # JMX metrics JAR (from google-cloud-otel-ops-collector)
+        stat ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+        # Fluent Bit (via symlink)
+        stat ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
+        # Default config
+        stat /etc/google-cloud-ops-agent/config.yaml
+    - name: Validate library dependencies
+      uses: test/tw/ldd-check
