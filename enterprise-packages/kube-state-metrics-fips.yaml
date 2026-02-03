@@ -1,7 +1,7 @@
 package:
   name: kube-state-metrics-fips
   version: "2.18.0"
-  epoch: 0 # GHSA-j5w8-q4qc-rx2x
+  epoch: 1 # GHSA-j5w8-q4qc-rx2x
   description: Add-on agent to generate and expose cluster-level metrics.
   dependencies:
     runtime:
@@ -54,19 +54,67 @@ subpackages:
     test:
       pipeline:
         - runs: |
+            set -euo pipefail
             stat /opt/iamguarded/kube-state-metrics/bin/kube-state-metrics
-            /opt/iamguarded/kube-state-metrics/bin/kube-state-metrics version | grep ${{package.version}}
+            /opt/iamguarded/kube-state-metrics/bin/kube-state-metrics version | grep -F ${{package.version}}
         - uses: iamguarded/test-compat
           with:
             package: kube-state-metrics
             version: ${{vars.major-version}}
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
   pipeline:
     - uses: test/go-fips-check
     - runs: |
+        set -euo pipefail
         kube-state-metrics version
         kube-state-metrics --help
+    - uses: test/kwok/cluster
+    - name: Test kube-state-metrics daemon with metrics verification
+      uses: test/daemon-check-output
+      with:
+        start: /usr/bin/kube-state-metrics --kubeconfig=$HOME/.kube/config
+        expected_output: "Started kube-state-metrics self metrics server"
+        timeout: "60"
+        post: |
+          set -euo pipefail
+          # Wait for metrics endpoint to be ready
+          wait-for-it localhost:8080 -t 30
+
+          # Verify the /metrics endpoint returns Prometheus-format metrics
+          metrics_output=$(curl -sf http://localhost:8080/metrics)
+
+          # Check for Prometheus format HELP lines (fails test if missing)
+          if echo "$metrics_output" | grep -F "# HELP"; then
+            echo "SUCCESS: Found Prometheus HELP lines in metrics output"
+          else
+            echo "FAIL: Expected Prometheus-format metrics with HELP lines"
+            echo "Actual output sample: $(echo "$metrics_output" | head -20)"
+            exit 1
+          fi
+
+          # Check for Prometheus format TYPE lines (fails test if missing)
+          if echo "$metrics_output" | grep -F "# TYPE"; then
+            echo "SUCCESS: Found Prometheus TYPE lines in metrics output"
+          else
+            echo "FAIL: Expected Prometheus-format metrics with TYPE lines"
+            exit 1
+          fi
+
+          # Verify kube-state-metrics specific metrics are present (fails test if missing)
+          if echo "$metrics_output" | grep -F "kube_"; then
+            echo "SUCCESS: Found kube_* metrics indicating kube-state-metrics is working"
+          else
+            echo "FAIL: Expected kube_* metrics from kube-state-metrics"
+            exit 1
+          fi
 
 update:
   enabled: true
