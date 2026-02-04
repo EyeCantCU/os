@@ -3,8 +3,8 @@ name: Validate Helm chart image configurability
 needs:
   packages:
     - busybox
+    - chelm
     - helm
-    - jq
     - yq
 
 inputs:
@@ -22,19 +22,6 @@ pipeline:
     runs: |
       set -eu
 
-      # Test marker components
-      # Each declared image gets a unique marker: cgr.test/<image-name>/image
-      # This lets us verify exactly which images rendered
-      MARKER_BASE="cgr.test"
-      MARKER_DIGEST="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-
-      passes=0
-      fails=0
-
-      pass() { echo "PASS: $*"; passes=$((passes + 1)); }
-      fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
-      info() { echo "INFO: $*"; }
-
       # Find chart
       chart_yaml=$(find / -maxdepth 3 -name 'Chart.yaml' -type f 2>/dev/null | head -1)
       [ -n "$chart_yaml" ] || { echo "ERROR: No Chart.yaml found"; exit 1; }
@@ -42,160 +29,33 @@ pipeline:
       chart_path=$(dirname "$chart_yaml")
       schema="$chart_path/cg.json"
 
-      info "chart: $chart_path"
+      echo "chart: $chart_path"
 
       if [ ! -f "$schema" ]; then
-        info "no cg.json - skipping validation"
+        echo "no cg.json - skipping validation"
         exit 0
       fi
 
       # Library charts can't be templated
       chart_type=$(yq -e '.type // "application"' "$chart_yaml")
       if [ "$chart_type" = "library" ]; then
-        info "library chart - skipping validation"
+        echo "library chart - skipping validation"
         exit 0
       fi
-
-      image_count=$(jq '.images | keys | length' "$schema")
-      info "images: $image_count"
-
-      case_count=$(jq '.test.cases | length' "$schema")
-      [ "$case_count" -gt 0 ] || { echo "ERROR: no test cases defined"; exit 1; }
-      info "cases: $case_count"
 
       # Disable external subcharts during testing.
       # External deps (with repository field) are packaged as separate APKs and tested
       # independently. We only need to validate the parent chart's images here.
-      # Local subcharts (no repository) are NOT disabled - their images need validation.
-      subchart_disables=""
-      if yq -e '.dependencies' "$chart_yaml" >/dev/null 2>&1; then
-        subchart_disables=$(yq -o=json '.dependencies' "$chart_yaml" | \
-          jq -r '.[] | select(.repository) | select(.repository != "") | select(.condition) | .condition + "=false"' | \
-          tr '\n' ',' | sed 's/,$//')
-      fi
+      subchart_disables=$(yq -r '.dependencies[] | select(.repository != null and .repository != "" and .condition != null) | .condition + "=false"' "$chart_yaml" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+
+      set_args=""
       if [ -n "$subchart_disables" ]; then
-        info "disabling external subcharts: $subchart_disables"
+        echo "disabling external subcharts: $subchart_disables"
+        set_args="--set=$subchart_disables"
       fi
 
-      # Process each test case
-      idx=0
-      while [ "$idx" -lt "$case_count" ]; do
-        case_name=$(jq -r ".test.cases[$idx].name" "$schema")
-        expected=$(jq -r ".test.cases[$idx].images // [] | .[]" "$schema")
-
-        info "--- $case_name ---"
-
-        # Build test values by substituting ${...} markers with test values.
-        # Markers are designed to mirror real OCI reference structure:
-        #   ${registry}      -> cgr.test                          (registry hostname)
-        #   ${repo}          -> ns/<name>                         (repository path)
-        #   ${registry_repo} -> cgr.test/ns/<name>                (full image path)
-        #   ${tag}           -> v0.0.0                            (version tag)
-        #   ${digest}        -> sha256:...                        (content digest)
-        #   ${pseudo_tag}    -> v0.0.0@sha256:...                 (tag with digest)
-        #   ${ref}           -> cgr.test/ns/<name>@sha256:...     (full reference)
-        #
-        # This matches how go-containerregistry parses OCI refs:
-        #   Registry     = ref.Context().RegistryStr()
-        #   Repo         = ref.Context().RepositoryStr()
-        values_file=$(mktemp)
-        jq --argjson idx "$idx" \
-           --arg base "$MARKER_BASE" \
-           --arg digest "$MARKER_DIGEST" '
-          (.images | to_entries | map(
-            .key as $name |
-            .value.values | walk(
-              if type == "string" then
-                gsub("\\${registry}"; $base) |
-                gsub("\\${repo}"; "ns/" + $name) |
-                gsub("\\${registry_repo}"; $base + "/ns/" + $name) |
-                gsub("\\${tag}"; "v0.0.0") |
-                gsub("\\${digest}"; $digest) |
-                gsub("\\${pseudo_tag}"; "v0.0.0@" + $digest) |
-                gsub("\\${ref}"; $base + "/ns/" + $name + "@" + $digest)
-              else . end
-            )
-          ) | reduce .[] as $v ({}; . * $v))
-          * (.test.values // {})
-          * (.test.cases[$idx].values // {})
-        ' "$schema" > "$values_file"
-
-        # Merge extra values if provided
-        extra_values='${{inputs.values}}'
-        if [ -n "$extra_values" ]; then
-          echo "$extra_values" | yq -o=json > /tmp/extra.json
-          jq -s '.[0] * .[1]' "$values_file" /tmp/extra.json > /tmp/merged.json
-          mv /tmp/merged.json "$values_file"
-        fi
-
-        # Render chart (with external subcharts disabled)
-        rendered=$(mktemp)
-        helm_args="--kube-version ${{inputs.kube-version}}"
-        if [ -n "$subchart_disables" ]; then
-          helm_args="$helm_args --set $subchart_disables"
-        fi
-        if ! helm template "$chart_path" -f "$values_file" $helm_args > "$rendered" 2>&1; then
-          fail "$case_name: helm template failed"
-          sed 's/^/  /' "$rendered"
-          rm -f "$values_file" "$rendered"
-          idx=$((idx + 1))
-          continue
-        fi
-
-        case_ok=true
-
-        # Get ignore list
-        ignore_file=$(mktemp)
-        jq -r '.test.ignore // [] | .[].image' "$schema" > "$ignore_file"
-
-        # Check each expected image has its marker anywhere in the rendered output.
-        # The marker is the repo path: ns/<name>
-        for img_name in $expected; do
-          marker="ns/$img_name"
-          if grep -qF "$marker" "$rendered"; then
-            info "found: $img_name"
-          else
-            fail "$case_name: image '$img_name' not found in rendered output"
-            case_ok=false
-          fi
-        done
-
-        # Extract image: fields structurally using jq for unconfigurable check.
-        # This avoids false positives from URLs, labels, etc. that match image patterns.
-        # Excludes helm test hooks (helm.sh/hook: test) - those only run during `helm test`
-        img_list=$(mktemp)
-        yq -o=json -N "$rendered" | jq -rs '
-          [.[] | select(.metadata.annotations["helm.sh/hook"] != "test") | .. | .image? // empty | select(type == "string")] | unique | .[]
-        ' > "$img_list"
-
-        # Check for unconfigured images (not matching any marker, not in ignore list)
-        while read -r img; do
-          [ -n "$img" ] || continue
-
-          # Skip if contains our marker base (it's a configured image)
-          echo "$img" | grep -qF "$MARKER_BASE" && continue
-
-          # Skip if contains our digest marker
-          echo "$img" | grep -qF "$MARKER_DIGEST" && continue
-
-          # Check ignore list
-          if grep -qxF "$img" "$ignore_file"; then
-            info "ignored: $img"
-            continue
-          fi
-
-          fail "$case_name: unconfigurable image: $img"
-          case_ok=false
-        done < "$img_list"
-
-        rm -f "$ignore_file" "$img_list"
-
-        [ "$case_ok" = "true" ] && pass "$case_name"
-
-        rm -f "$values_file" "$rendered"
-        idx=$((idx + 1))
-      done
-
-      echo ""
-      info "results: $passes passed, $fails failed"
-      [ "$fails" -eq 0 ]
+      chelm test "$schema" \
+        --chart="$chart_path" \
+        --kube-version="${{inputs.kube-version}}" \
+        --extra-values='${{inputs.values}}' \
+        $set_args

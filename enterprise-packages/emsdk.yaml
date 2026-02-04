@@ -1,0 +1,140 @@
+package:
+  name: emsdk
+  version: "5.0.0"
+  epoch: 2
+  description: Emscripten SDK - Toolchain for compiling C/C++ to WebAssembly
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - ant
+      - bash
+      - build-base
+      - busybox
+      - cmake
+      - curl
+      - emscripten
+      - git
+      - git-lfs
+      - libidn2
+      - libxml2
+      - make
+      - openjdk-${{vars.java-version}}-default-jvm # https://github.com/emscripten-core/emsdk/blob/main/docker/Dockerfile#L106
+      - openssh-client
+      - py3-pip
+      - tzdata
+      - unzip
+      - wget
+      - zip
+
+vars:
+  java-version: 11
+
+environment:
+  contents:
+    packages:
+      - busybox
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/emscripten-core/emsdk
+      tag: ${{package.version}}
+      expected-commit: b4258c35121c8d0e12f53568ffb22236d7816723
+
+  - runs: |
+      # Install emsdk scripts to /emsdk
+      mkdir -p "${{targets.destdir}}"/emsdk
+
+      # Copy essential files for emsdk to work
+      cp emsdk emsdk.py "${{targets.destdir}}"/emsdk/
+      cp emsdk_manifest.json emscripten-releases-tags.json "${{targets.destdir}}"/emsdk/
+      cp legacy-emscripten-tags.txt legacy-binaryen-tags.txt llvm-tags-64bit.txt "${{targets.destdir}}"/emsdk/
+      cp emsdk_env.sh "${{targets.destdir}}"/emsdk/
+
+      # Create /emsdk/upstream symlink for Docker image compatibility
+      mkdir -p "${{targets.destdir}}"/emsdk
+      ln -sf /upstream "${{targets.destdir}}"/emsdk/upstream
+
+subpackages:
+  - name: emsdk-oci-entrypoint
+    description: OCI entrypoint for emsdk container images
+    dependencies:
+      runtime:
+        - emsdk
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/emsdk/docker/
+          install -Dm755 docker/entrypoint.sh "${{targets.subpkgdir}}"/emsdk/docker/entrypoint.sh
+    test:
+      pipeline:
+        - name: "Test OCI entrypoint"
+          runs: |
+            set -euo pipefail
+            stat /emsdk/docker/entrypoint.sh
+            test -x /emsdk/docker/entrypoint.sh
+
+test:
+  pipeline:
+    - name: Verify emscripten binary version
+      runs: |
+        ## The ver-check pipeline will look for binaries versioned same as the package
+        ## but as defined in /upstream/emscripten/emscripten-version.txt, this approach won't work for this version of the application
+        emcc --version
+        em++ --version
+        emar --version
+    - name: "Test emsdk installation"
+      runs: |
+        set -euo pipefail
+
+        # Verify /emsdk/upstream symlink for Docker compatibility
+        stat /emsdk/upstream
+        test -L /emsdk/upstream
+        readlink /emsdk/upstream | grep -F "/upstream"
+
+        # Verify emscripten tools exist via symlink
+        stat /emsdk/upstream/emscripten/emcc
+        stat /emsdk/upstream/emscripten/em++
+
+        # Verify LLVM symlinks point to system LLVM
+        readlink /emsdk/upstream/bin/clang | grep -F "/usr/bin"
+        readlink /emsdk/upstream/bin/wasm-ld | grep -F "/usr/bin"
+    - name: "Test WebAssembly compilation"
+      runs: |
+        set -euo pipefail
+
+        # Compile a simple C program to WebAssembly
+        echo 'int main() { return 0; }' > test.c
+        emcc test.c -o test.js
+
+        # Verify output was created
+        stat test.js
+        stat test.wasm
+    - name: "Test library linking"
+      runs: |
+        set -euo pipefail
+        tee add.cpp << 'EOF'
+        int add(int a, int b) { return a + b; }
+        EOF
+        tee main.cpp << 'EOF'
+        #include <iostream>
+        int add(int,int);
+        int main(){ std::cout << add(2,3) << std::endl; }
+        EOF
+        em++ -c add.cpp -o add.o
+        emar rcs libadd.a add.o
+        emar t libadd.a | grep -F "add.o"
+
+        # Compile to WebAssembly
+        em++ main.cpp -L. -ladd -o main.js -sENVIRONMENT=node -sEXIT_RUNTIME=1
+        stat main.js
+        stat main.wasm
+
+        # Run with node
+        node main.js | grep -F 5
+
+update:
+  enabled: true
+  github:
+    identifier: emscripten-core/emsdk
+    use-tag: true
