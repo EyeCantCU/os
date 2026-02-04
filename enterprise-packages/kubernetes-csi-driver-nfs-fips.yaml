@@ -1,7 +1,7 @@
 package:
   name: kubernetes-csi-driver-nfs-fips
-  version: "4.12.1"
-  epoch: 3 # CVE-2025-61729
+  version: "4.13.0"
+  epoch: 0 # CVE-2025-61726
   description: This driver allows Kubernetes to access NFS server on Linux node
   copyright:
     - license: Apache-2.0
@@ -20,12 +20,7 @@ pipeline:
     with:
       repository: https://github.com/kubernetes-csi/csi-driver-nfs
       tag: v${{package.version}}
-      expected-commit: c220ebec63f171bb2e56b3112f9756e1164e47b2
-
-  - uses: go/bump
-    with:
-      deps: |-
-        github.com/opencontainers/selinux@v1.13.0
+      expected-commit: b7c6750a488545723236ba8583e1559b652def5f
 
   - uses: go/build
     with:
@@ -51,7 +46,19 @@ subpackages:
             - ${{package.name}}
       pipeline:
         - runs: |
-            test "$(readlink /nfsplugin)" = "/usr/bin/nfsplugin"
+            set -euo pipefail
+
+            # Verify symlink exists (fails test if missing)
+            stat /nfsplugin
+
+            # Verify symlink points to correct target (fails test if wrong)
+            target=$(readlink /nfsplugin)
+            if [ "$target" != "/usr/bin/nfsplugin" ]; then
+              echo "FAIL: Expected symlink target '/usr/bin/nfsplugin', got '$target'"
+              exit 1
+            fi
+
+            # Verify the symlinked binary works (fails test if binary errors)
             /nfsplugin --help
 
 update:
@@ -65,8 +72,20 @@ test:
     - uses: test/go-fips-check
     - runs: |
         nfsplugin --help
-    - runs: |
-        mkdir -p /csi
-        nfsplugin -v=5 --endpoint="unix:///csi/csi.sock" --nodeid="node-000000" > output.log 2>&1 &
-        sleep 1
-        grep "Listening for connections" output.log
+    - name: Test NFS plugin daemon startup and socket
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /csi
+        start: /usr/bin/nfsplugin -v=5 --endpoint="unix:///csi/csi.sock" --nodeid="node-000000"
+        expected_output: "Listening for connections"
+        post: |-
+          set -euo pipefail
+
+          # Verify the Unix socket was created (fails test if missing)
+          stat /csi/csi.sock
+
+          # Verify it's a socket file type (fails test if not a socket)
+          test -S /csi/csi.sock || { echo "FAIL: /csi/csi.sock is not a socket"; exit 1; }
+
+          echo "SUCCESS: CSI socket is created and is a valid Unix socket"
