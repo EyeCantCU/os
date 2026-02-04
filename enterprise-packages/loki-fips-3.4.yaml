@@ -1,7 +1,7 @@
 package:
   name: loki-fips-3.4
   version: "3.4.6"
-  epoch: 4 # CVE-2025-61726
+  epoch: 5
   description: Like Prometheus, but for logs.
   copyright:
     - license: AGPL-3.0-or-later
@@ -16,6 +16,12 @@ environment:
       - busybox
       - ca-certificates-bundle
       - go-fips-md5
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
 
 pipeline:
   - uses: git-checkout
@@ -110,6 +116,45 @@ subpackages:
             loki-canary --version
         - uses: test/go-fips-check
 
+  - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-logcli
+      provides:
+        - loki-fips-iamguarded-compat=${{package.full-version}}
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: grafana-loki
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p "/opt/iamguarded/grafana-loki/bin"
+          mkdir -p "/iamguarded/grafana-loki/wal"
+          mkdir -p "/iamguarded/grafana-loki/data"
+          mkdir -p "/iamguarded/grafana-loki/loki"
+          ln -s "../../../../usr/bin/loki" "/opt/iamguarded/grafana-loki/bin/loki"
+          ln -s "../../../../usr/bin/logcli" "/opt/iamguarded/grafana-loki/bin/logcli"
+          ln -s "/opt/iamguarded/grafana-loki/wal" "/wal"
+          ln -s "/opt/iamguarded/grafana-loki/data" "/data"
+          ln -s "/opt/iamguarded/grafana-loki/loki" "/loki"
+      - uses: iamguarded/finalize-compat
+        with:
+          package: grafana-loki
+          version: ${{vars.major-version}}
+    # Note: we are not testing with daemon-check-output because the iamguarded image is just a binary with some symlinks
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: grafana-loki
+            version: ${{vars.major-version}}
+        - uses: test/tw/symlink-check
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: loki-fips-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+
 update:
   enabled: true
   github:
@@ -118,7 +163,65 @@ update:
     tag-filter: v3.4
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      LOKI_PORT: "3100"
   pipeline:
-    - runs: |
-        loki --version
+    - uses: test/tw/ver-check
+      with:
+        bins: loki
     - uses: test/go-fips-check
+    - name: Verify Loki server starts and accepts logs
+      uses: test/daemon-check-output
+      with:
+        setup: |-
+          mkdir -p /tmp/loki/chunks /tmp/loki/rules
+          tee /tmp/loki-config.yaml <<EOF
+          auth_enabled: false
+          server:
+            http_listen_port: ${LOKI_PORT}
+          common:
+            path_prefix: /tmp/loki
+            storage:
+              filesystem:
+                chunks_directory: /tmp/loki/chunks
+                rules_directory: /tmp/loki/rules
+            replication_factor: 1
+            ring:
+              kvstore:
+                store: inmemory
+          schema_config:
+            configs:
+              - from: 2020-10-24
+                store: tsdb
+                object_store: filesystem
+                schema: v13
+                index:
+                  prefix: index_
+                  period: 24h
+          limits_config:
+            allow_structured_metadata: false
+          EOF
+        start: loki -config.file=/tmp/loki-config.yaml -config.expand-env=true
+        expected_output: "server listening on addresses"
+        timeout: 60
+        post: |-
+          set -euo pipefail
+          # Wait for Loki to be fully ready
+          curl -sf --retry 30 --retry-delay 2 --retry-all-errors "http://localhost:${LOKI_PORT}/ready"
+          # Push test logs
+          curl -f -X POST "http://localhost:${LOKI_PORT}/loki/api/v1/push" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "streams": [
+                {
+                  "stream": {"job": "test", "level": "info"},
+                  "values": [["'$(date +%s)000000000'", "test log message"]]
+                }
+              ]
+            }'
+          # Verify metrics endpoint
+          curl -f "http://localhost:${LOKI_PORT}/metrics" | grep -F "loki_"
