@@ -1,0 +1,140 @@
+package:
+  name: ghc-9.14
+  version: "9.14.1"
+  epoch: 0
+  description: "Glasgow Haskell Compiler"
+  copyright:
+    - license: "BSD-3-Clause"
+  dependencies:
+    runtime:
+      - gmp-dev
+      - numactl-dev
+    provides:
+      - ghc=${{package.full-version}}
+
+vars:
+  broken-tests: "T11489 encoding004 reloc-none"
+  # This must be strictly less than the value of LlvmMaxVersion in ghc's
+  # configure.ac.
+  llvm-vers: 20
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - cabal-install~3.16
+      - clang-${{vars.llvm-vers}}
+      - ghc~9.12
+      - ghostscript
+      - git
+      - gmp-dev
+      - libffi-dev
+      - ncurses-dev
+      - numactl-dev
+      - posix-libc-utils
+
+pipeline:
+  - runs: ghc-pkg recache --global
+
+  - name: "Fetch GHC"
+    uses: fetch
+    working-directory: "${{package.name}}"
+    with:
+      uri: "https://downloads.haskell.org/~ghc/${{package.version}}/ghc-${{package.version}}-src.tar.xz"
+      expected-sha256: "2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77"
+
+  - name: "Fetch GHC test suite"
+    uses: fetch
+    working-directory: "${{package.name}}"
+    with:
+      uri: "https://downloads.haskell.org/~ghc/${{package.version}}/ghc-${{package.version}}-testsuite.tar.xz"
+      expected-sha256: "84aefc21f0f7ddf3d1324ebac76bfb9dcb0766c14a703304c2508c6789a645ed"
+
+  - working-directory: "${{package.name}}"
+    uses: patch
+    with:
+      patches: |
+        ../0001-ghci-fix-bootstrapping-with-9.12.3-rc1-and-above.patch
+
+  # When updating to a new version, uncomment this and follow its instructions:
+  # - working-directory: "${{package.name}}/hadrian"
+  #   uses: haskell/record-dependencies
+  #
+  - uses: haskell/fetch-dependencies
+
+  - name: "Configure GHC"
+    working-directory: "${{package.name}}"
+    runs: |
+      ./boot.source
+      ./configure \
+        --host="${{host.triplet.gnu}}" \
+        --build="${{host.triplet.gnu}}" \
+        --target="${{host.triplet.gnu}}" \
+        --prefix=/usr \
+        --with-system-libffi \
+        LLC=/usr/lib/llvm-${{vars.llvm-vers}}/bin/llc \
+        OPT=/usr/lib/llvm-${{vars.llvm-vers}}/bin/opt
+
+  - name: "Build GHC"
+    working-directory: "${{package.name}}"
+    runs: hadrian/build -j binary-dist --docs=none
+
+  # Run upstream test suite here rather than in a test block, since it
+  # requires a build tree.
+  - name: "Test GHC"
+    working-directory: "${{package.name}}"
+    runs: LC_ALL=C.UTF-8 hadrian/build -j test --skip-perf --test-way=normal --test-way=ghci --broken-test="${{vars.broken-tests}}"
+
+  - name: "Install GHC"
+    working-directory: "${{package.name}}/_build/bindist/ghc-${{package.version}}-${{host.triplet.gnu}}"
+    runs: |
+      ./configure \
+        --host="${{host.triplet.gnu}}" \
+        --build="${{host.triplet.gnu}}" \
+        --target="${{host.triplet.gnu}}" \
+        --prefix=/usr
+      DESTDIR="${{targets.destdir}}" make install
+
+  - working-directory: "${{package.name}}/hadrian"
+    uses: haskell/install-cabal-freeze
+
+  - uses: strip
+
+subpackages:
+  - name: "${{package.name}}-doc"
+    description: "GHC documentation"
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr
+          mv "${{targets.destdir}}"/usr/share "${{targets.subpkgdir}}"/usr/
+    test:
+      pipeline:
+        - uses: test/docs
+
+update:
+  enabled: true
+  manual: true
+  exclude-reason: "Requires manual updates using haskell/record-dependencies"
+  release-monitor:
+    identifier: 906
+    strip-suffix: "-release"
+    version-filter-prefix: "9.14."
+    version-filter-contains: "-release"
+
+test:
+  pipeline:
+    - runs: |
+        ghc --version
+        ghc-pkg --version
+        ghci --version
+        haddock --version
+        hpc help
+        hsc2hs --version
+        runghc --version
+    - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: "/usr/lib/ghc-${{package.version}}/lib/${{build.arch}}-linux-ghc-${{package.version}}"

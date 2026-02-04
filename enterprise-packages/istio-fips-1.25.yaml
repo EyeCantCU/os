@@ -1,10 +1,13 @@
 package:
   name: istio-fips-1.25
   version: "1.25.5"
-  epoch: 6 # GHSA-jv3w-x3r3-g6rm
+  epoch: 10 # go/enterprise-rsc/istio-fips-1.25
   description: Istio is an open source service mesh that layers transparently onto existing distributed applications.
   copyright:
     - license: Apache-2.0
+  resources:
+    cpu: "11"
+    memory: 11Gi
 
 var-transforms:
   - from: ${{package.version}}
@@ -58,6 +61,9 @@ subpackages:
         - uses: test/go-fips-check
           with:
             package-match: ${{subpkg.name}}
+        - uses: test/tw/help-check
+          with:
+            bins: istio-cni
 
   - name: istio-cni-fips-${{vars.major-minor-version}}-compat
     pipeline:
@@ -102,6 +108,9 @@ subpackages:
         - uses: test/go-fips-check
           with:
             package-match: ${{subpkg.name}}
+        - uses: test/tw/help-check
+          with:
+            bins: install-cni
 
   - name: istio-install-cni-fips-${{vars.major-minor-version}}-compat
     pipeline:
@@ -139,10 +148,38 @@ subpackages:
           cp ./tools/packaging/common/envoy_bootstrap.json \
             ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
     test:
+      environment:
+        contents:
+          packages:
+            - openssl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
       pipeline:
         - uses: test/go-fips-check
           with:
             package-match: ${{subpkg.name}}
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Test pilot-agent initialization
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
+
+              # Create directories pilot-agent needs (RELATIVE paths from cwd)
+              mkdir -p var/run/secrets/istio
+              mkdir -p var/run/secrets/workload-spiffe-uds
+              mkdir -p etc/istio/proxy
+
+              # Generate self-signed CA cert
+              openssl req -x509 -newkey rsa:2048 -keyout /tmp/ca-key.pem \
+                -out var/run/secrets/istio/root-cert.pem -days 1 -nodes \
+                -subj "/CN=Istio CA"
+            start: pilot-agent proxy sidecar --domain=cluster.local
+            timeout: "30"
+            expected_output: "Starting"
 
   - name: istio-pilot-agent-fips-${{vars.major-minor-version}}-compat
     pipeline:
@@ -181,10 +218,30 @@ subpackages:
           cp ./tools/packaging/common/envoy_bootstrap.json \
             ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
     test:
+      environment:
+        contents:
+          packages:
+            - curl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
       pipeline:
         - uses: test/go-fips-check
           with:
             package-match: ${{subpkg.name}}
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Test pilot-discovery daemon startup
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
+            start: pilot-discovery discovery --monitoringAddr=:15014
+            expected_output: "Starting"
+            timeout: "30"
+            post: |
+              curl -sf http://localhost:8080/ready && echo "SUCCESS: ready endpoint responding"
 
 update:
   enabled: true
@@ -196,18 +253,35 @@ test:
     contents:
       packages:
         - jq
-        - grep
         - istio-pilot-agent-fips-${{vars.major-minor-version}}
         - istio-pilot-discovery-fips-${{vars.major-minor-version}}
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
+    - runs: |-
+        set -euo pipefail
+
         # check version/tag/commit are not "unknown" for pilot-discovery
-        pilot-discovery version -o json | jq .clientVersion.version | grep -q ${{package.version}}
-        pilot-discovery version -o json | jq .clientVersion.revision | grep -qv unknown
-        pilot-discovery version -o json | jq .clientVersion.tag | grep -qv unknown
+        pilot-discovery version -o json > /tmp/pd-version.json
+
+        # Verify version matches package version (fails if not found)
+        jq -e ".clientVersion.version | contains(\"${{package.version}}\")" /tmp/pd-version.json
+
+        # Verify revision is not "unknown" (fails if unknown)
+        jq -e '.clientVersion.revision != "unknown"' /tmp/pd-version.json
+
+        # Verify tag is not "unknown" (fails if unknown)
+        jq -e '.clientVersion.tag != "unknown"' /tmp/pd-version.json
 
         # check version/tag/commit are not "unknown" for pilot-agent
-        pilot-agent version -o json | jq .clientVersion.version | grep -q ${{package.version}}
-        pilot-agent version -o json | jq .clientVersion.revision | grep -qv unknown
-        pilot-agent version -o json | jq .clientVersion.tag | grep -qv unknown
+        pilot-agent version -o json > /tmp/pa-version.json
+
+        # Verify version matches package version (fails if not found)
+        jq -e ".clientVersion.version | contains(\"${{package.version}}\")" /tmp/pa-version.json
+
+        # Verify revision is not "unknown" (fails if unknown)
+        jq -e '.clientVersion.revision != "unknown"' /tmp/pa-version.json
+
+        # Verify tag is not "unknown" (fails if unknown)
+        jq -e '.clientVersion.tag != "unknown"' /tmp/pa-version.json
+
+        echo "SUCCESS: Version metadata verified"
