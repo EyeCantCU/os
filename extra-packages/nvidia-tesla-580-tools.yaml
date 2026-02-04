@@ -2,15 +2,35 @@
 package:
   name: nvidia-tesla-580-tools
   version: "580.126.09"
-  epoch: 1
-  description: NVIDIA Linux Tesla ${{package.version}} tools
+  epoch: 4 # go/extras-rsc/nvidia-tesla-580-tools
+  description: NVIDIA Linux Tesla ${{package.version}} debugging and development tools
   copyright:
     - license: LicenceRef-NVIDIA-DRIVER
       license-path: NVIDIA-LICENSE
   dependencies:
     runtime:
-      - ${{package.name}}-userspace=${{package.full-version}}
-      - cmd:logger # For various systemd services files
+      - ${{vars.basename}}-internal=${{package.full-version}}
+      - ${{vars.basename}}-libnvidia-ml=${{package.full-version}}
+      - ${{vars.basename}}-nvidia-modprobe~${{package.version}}
+      - ${{vars.basename}}-nvidia-settings~${{package.version}}
+      - ${{vars.basename}}-nvidia-xconfig~${{package.version}}
+  resources:
+    cpu: "4"
+    memory: 6Gi
+
+var-transforms:
+  - from: ${{package.name}}
+    match: '^(nvidia-tesla-[0-9]+).*'
+    replace: '$1'
+    to: basename
+
+data:
+  - name: library-pkgs
+    items:
+      libnvidia-api: libnvidia-api.so.*
+      libcuda: libnvidia-ptxjitcompiler.so.* libnvidia-nvvm*.so.* libcuda*.so.*
+      libvdpau_nvidia: libvdpau_nvidia.so.*
+      libnvidia-fbc: libnvidia-fbc.so.*
 
 environment:
   contents:
@@ -46,82 +66,289 @@ pipeline:
       patches: ../0001-don-t-run-nvidia-services-unless.patch
 
   # Drop compat libraries for openssl v1, and nvidia's builds of openGL and openCL
-  # (we will use our own).
+  # (we will use our own). Remove pre-built open source libraries, we can build
+  # these from source.
   - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
     runs: |
       [ "${{build.arch}}" = "x86_64" ] && rm libnvidia-pkcs11.so.*
       rm libEGL.so.* libOpenGL.so.* libOpenCL.so.*
       find . -maxdepth 1 -name 'libGL*.so.*' -not -name '*nvidia*' -delete
+      rm libnvidia-egl-xlib.so.* libnvidia-egl-gbm.so.* libnvidia-egl-xcb.so.* *wayland*.so.*
+      rm libnvidia-gtk*.so.*
 
   - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
     runs: |
       set -o pipefail
       binaries=$(cat sandboxutils-filelist.json | jq -r '.[] | select((.type=="MODPROBE") or (.type=="BINARY")) | .name')
       for t in $binaries; do
-        install -Dm0755 -t ${{targets.destdir}}/usr/bin -Dm0755 "$t"
+        install -Dm0755 -t ${{targets.contextdir}}/usr/bin -Dm0755 "$t"
       done
-      install -Dm0755 -t ${{targets.destdir}}/usr/bin nvidia-bug-report.sh
-      install -Dm0755 -t ${{targets.destdir}}/usr/bin systemd/nvidia-sleep.sh
-      rm systemd/nvidia-sleep.sh
-      mkdir -p ${{targets.destdir}}/usr/lib
-      mv ./systemd ${{targets.destdir}}/usr/lib/
-      install -Dm0644 -t ${{targets.destdir}}/etc/dbus-1/system.d/ nvidia-dbus.conf
+      install -Dm0755 -t ${{targets.contextdir}}/usr/bin nvidia-bug-report.sh
+      # We will build these from source
+      rm ${{targets.contextdir}}/usr/bin/nvidia-settings ${{targets.contextdir}}/usr/bin/nvidia-modprobe ${{targets.contextdir}}/usr/bin/nvidia-xconfig ${{targets.contextdir}}/usr/bin/nvidia-persistenced
 
 subpackages:
-  - name: ${{package.name}}-doc
+  - name: ${{vars.basename}}-doc
     description: NVIDIA Linux Tesla ${{package.version}} tools documentation
     pipeline:
       - runs: |
-          install -Dm0755 -t ${{targets.subpkgdir}}/usr/share/man/man1/ NVIDIA-Linux-${{build.arch}}-${{package.version}}/*.1.gz
+          docs=$(find . -name '*.1.gz')
+          [ -z "$docs" ] && { echo "Could not find any documentation!"; exit 1; }
+          install -Dm0644 -t ${{targets.contextdir}}/usr/share/man/man1/ $docs
     test:
       pipeline:
         - uses: test/tw/docs
 
-  - name: ${{package.name}}-userspace-display-driver
-    description: NVIDIA Linux Tesla ${{package.version}} display driver userspace libraries
+  - name: ${{vars.basename}}-systemd-service
+    description: NVIDIA Linux Tesla ${{package.version}} systemd services
     dependencies:
       runtime:
-        - ${{package.name}}-userspace=${{package.full-version}}
+        - ${{vars.basename}}-nvidia-persistenced~${{package.version}}
+        - ${{vars.basename}}-libnvidia-ml=${{package.full-version}}
+        - ${{vars.basename}}-internal=${{package.full-version}}
+        - logger
     pipeline:
       - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
         runs: |
-          install -Dm0755 -t ${{targets.subpkgdir}}/usr/lib libnvidia-gtk3.so.*
-          rm libnvidia-gtk3.so.*
-          install -Dm0755 -t ${{targets.subpkgdir}}/usr/lib libnvidia-gtk2.so.*
-          rm libnvidia-gtk2.so.*
-          install -Dm0755 -t ${{targets.subpkgdir}}/usr/lib libnvidia-egl-wayland.so.*
-          rm libnvidia-egl-wayland.so.*
-          if [ "${{build.arch}}" = "x86_64" ]; then
-            install -Dm0755 -t ${{targets.subpkgdir}}/usr/lib libnvidia-wayland-client.so.*
-            rm libnvidia-wayland-client.so.*
-          fi
+          mkdir -p ${{targets.contextdir}}/usr/bin/
+          mkdir -p ${{targets.contextdir}}/usr/lib/
+
+          install -Dm0755 -t ${{targets.contextdir}}/usr/bin systemd/nvidia-sleep.sh
+
+          mv systemd ${{targets.contextdir}}/usr/lib
+
+          mv ${{targets.destdir}}/usr/bin/nvidia-powerd ${{targets.contextdir}}/usr/bin/
+          install -Dm0644 -t ${{targets.contextdir}}/etc/dbus-1/system.d/ nvidia-dbus.conf
+    test:
+      pipeline:
+        - runs: |
+            nvidia-sleep.sh --help
+            [ -x /usr/bin/nvidia-powerd ] || { echo "missing /usr/bin/nvidia-powerd"; exit 1; }
+        - uses: test/tw/ldd-check
+        - uses: test/tw/verify-service
+
+  - name: ${{vars.basename}}-firmware
+    description: NVIDIA Linux Tesla ${{package.version}} firmware
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib/firmware/nvidia/${{package.version}}/ firmware/*
+
+  - name: ${{vars.basename}}-internal
+    description: NVIDIA Linux Tesla ${{package.version}} internal libraries
+    # Documentation just says "Various libraries that are used internally by other driver components."
+    # Some of the other libraries are undocumented, I'm putting those here too.
+    # https://download.nvidia.com/XFree86/Linux-x86_64/580.126.09/README/installedcomponents.html
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-firmware=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib \
+            libnvidia-cfg.so.* \
+            libnvidia-eglcore.so.* \
+            libnvidia-glcore.* \
+            libnvidia-glsi.so.* \
+            libnvidia-glvkspirv.so.* \
+            libnvidia-gpucomp.so.* \
+            libnvidia-rtcore.so.* \
+            libnvidia-sandboxutils.so.* \
+            libnvidia-allocator.so.*
     test:
       pipeline:
         - uses: test/tw/ldd-check
 
-  - name: ${{package.name}}-userspace
-    description: NVIDIA Linux Tesla ${{package.version}} userspace libraries
+  # This loop only works for libraries that don't have other dependencies that SCA
+  # doesn't pick up, or extra steps in the build.
+  - range: library-pkgs
+    name: ${{vars.basename}}-${{range.key}}
+    description: NVIDIA Linux Tesla ${{package.version}} ${{range.key}} libraries
     dependencies:
       runtime:
-        - libglvnd
-        - opencl
+        - ${{vars.basename}}-internal=${{package.full-version}}
     pipeline:
       - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
         runs: |
-          install -Dm0755 -t ${{targets.subpkgdir}}/usr/lib *.so.*
-          install -Dm0755 -t ${{targets.subpkgdir}}/usr/lib/firmware/nvidia/${{package.version}}/ firmware/*
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib ${{range.value}}
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
 
-          install -Dm0644 -t ${{targets.subpkgdir}}/usr/share/glvnd/egl_vendor.d/ 10_nvidia.json
-          install -Dm0644 -t ${{targets.subpkgdir}}/usr/share/egl/egl_external_platform.d/ 10_nvidia_wayland.json
-          install -Dm0644 -t ${{targets.subpkgdir}}/usr/share/egl/egl_external_platform.d/ 15_nvidia_gbm.json
-          install -Dm0644 -t ${{targets.subpkgdir}}/usr/share/egl/egl_external_platform.d/ 20_nvidia_xcb.json
-          install -Dm0644 -t ${{targets.subpkgdir}}/usr/share/egl/egl_external_platform.d/ 20_nvidia_xlib.json
-          install -Dm0644 -t ${{targets.subpkgdir}}/etc/vulkan/icd.d/ nvidia_icd.json
-          install -Dm0644 -t ${{targets.subpkgdir}}/etc/vulkan/implicit_layer.d/ nvidia_layers.json
-          install -Dm0644 -t ${{targets.subpkgdir}}/etc/share/nvidia/files.d/ sandboxutils-filelist.json
+  - name: ${{vars.basename}}-libnvidia-opengl
+    description: NVIDIA Linux Tesla ${{package.version}} opengl libraries
+    dependencies:
+      runtime:
+        - libglvnd
+        - ${{vars.basename}}-internal=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib \
+            libEGL_nvidia.so.* \
+            libGL*.so.* \
+            libGLX_nvidia.so.* \
+            libnvidia-tls.so.* \
+            libglxserver_nvidia.so.*
+          install -Dm0644 -t ${{targets.contextdir}}/usr/share/glvnd/egl_vendor.d/ 10_nvidia.json
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{vars.basename}}-libnvidia-opencl
+    description: NVIDIA Linux Tesla ${{package.version}} opencl libraries
+    dependencies:
+      runtime:
+        - opencl
+        - ${{vars.basename}}-internal=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvidia-opencl.so.*
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{vars.basename}}-libnvidia-encode
+    description: NVIDIA Linux Tesla ${{package.version}} NVENC libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-internal=${{package.full-version}}
+        - ${{vars.basename}}-nvcuvid=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvidia-encode.so.*
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{vars.basename}}-libnvidia-opticalflow
+    description: NVIDIA Linux Tesla ${{package.version}} opticalflow libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-internal=${{package.full-version}}
+        - ${{vars.basename}}-nvcuvid=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvidia-opticalflow.so.*
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{vars.basename}}-nvcuvid
+    description: NVIDIA Linux Tesla ${{package.version}} CUVID libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-internal=${{package.full-version}}
+        - ${{vars.basename}}-libcuda=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvcuvid.so.*
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{vars.basename}}-libnvidia-ml
+    description: NVIDIA Linux Tesla ${{package.version}} Management libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-internal=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          ln -s libnvidia-ml.so.${{package.version}} ${{targets.contextdir}}/usr/lib/libnvidia-ml.so.1
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvidia-ml.so.${{package.version}}
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{vars.basename}}-libnvidia-ngx
+    description: NVIDIA Linux Tesla ${{package.version}} NGX libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-internal=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvidia-ngx.so.*
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          mv ${{targets.destdir}}/usr/bin/nvidia-ngx-updater ${{targets.contextdir}}/usr/bin/nvidia-ngx-updater
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+        - runs: test -x /usr/bin/nvidia-ngx-updater || { echo "missing /usr/bin/nvidia-ngx-updater"; exit 1; }
+
+  - name: ${{vars.basename}}-libnvoptix
+    description: NVIDIA Linux Tesla ${{package.version}} OptiX libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-internal=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvoptix.so.*
+          mkdir -p ${{targets.contextdir}}/usr/share/nvidia
+          install -Dm0755 -t ${{targets.contextdir}}/usr/share/nvidia nvoptix.bin
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{vars.basename}}-libnvidia-pkcs11
+    description: NVIDIA Linux Tesla ${{package.version}} Confidential Compute libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-internal=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        if: ${{build.arch}} != "aarch64"
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
+          install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvidia-pkcs11-openssl3.so.*
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+          if: ${{build.arch}} != "aarch64"
+
+  - name: ${{vars.basename}}-libnvidia-vulkan
+    description: NVIDIA Linux Tesla ${{package.version}} vulkan libraries
+    dependencies:
+      runtime:
+        - ${{vars.basename}}-libnvidia-opengl # NVIDIA GLVND GLX implementation doubles as a vulkan ICD
+        - ${{vars.basename}}-libcuda=${{package.full-version}}
+        - ${{vars.basename}}-internal=${{package.full-version}}
+    pipeline:
+      - working-directory: NVIDIA-Linux-${{build.arch}}-${{package.version}}
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/lib
           if [ "${{build.arch}}" = "x86_64" ]; then
-            install -Dm0644 -t ${{targets.subpkgdir}}/etc/vulkansc/icd.d/ nvidia_icd_vksc.json
+            install -Dm0755 -t ${{targets.contextdir}}/usr/lib libnvidia-vksc-core.so.* libnvidia-present.so.*
+            install -Dm0644 -t ${{targets.contextdir}}/etc/vulkansc/icd.d/ nvidia_icd_vksc.json
           fi
+          install -Dm0644 -t ${{targets.contextdir}}/etc/vulkan/icd.d/ nvidia_icd.json
+          install -Dm0644 -t ${{targets.contextdir}}/etc/vulkan/implicit_layer.d/ nvidia_layers.json
+      - runs: |
+          # Run this in the last subpackage pipeline, whatever that is
+          ok=true
+          for i in NVIDIA-Linux-${{build.arch}}-${{package.version}}/*.so.*; do
+            lib="$(basename $i)"
+            [ -n "$(find ${{targets.outdir}} -name "$lib")" ] || {
+              ok=false
+              echo "Could not find installed copy of $lib"
+              echo "Please install this library in an appropriate subpackage or remove it."
+            }
+          done
+          [ "$ok" = "true" ]
     test:
       pipeline:
         - uses: test/tw/ldd-check
@@ -130,19 +357,17 @@ test:
   pipeline:
     - uses: test/tw/ldd-check
     - runs: |
-        nvidia-modprobe --help
         [ "${{build.arch}}" = "x86_64" ] && nvidia-pcc --help # Only built for x86
-        nvidia-persistenced --help
-        nvidia-settings --help
         nvidia-bug-report.sh --help
         nvidia-debugdump --help
-        nvidia-xconfig --help
         nvidia-cuda-mps-server --help
         nvidia-cuda-mps-control --help
-        nvidia-sleep.sh --help
         nvidia-smi --help
 
 update:
   enabled: true
+  # We need every release or we might miss some
+  # that nvidia-580 kernel driver depends on.
+  require-sequential: true
   release-monitor:
     identifier: 388052

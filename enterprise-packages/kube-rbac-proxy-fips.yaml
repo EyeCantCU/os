@@ -1,10 +1,13 @@
 package:
   name: kube-rbac-proxy-fips
   version: "0.20.2"
-  epoch: 0 # CVE-2025-61729
+  epoch: 2 # go/enterprise-rsc/kube-rbac-proxy-fips
   description: Kubernetes RBAC authorizing HTTP proxy for a single upstream.
   copyright:
     - license: Apache-2.0
+  resources:
+    cpu: "1"
+    memory: 9Gi
 
 environment:
   contents:
@@ -36,8 +39,57 @@ update:
     tag-filter: v
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - python3
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
-        kube-rbac-proxy --version
-        kube-rbac-proxy --help
+    - uses: test/tw/ver-check
+      with:
+        bins: kube-rbac-proxy
+    - uses: test/tw/help-check
+      with:
+        bins: kube-rbac-proxy
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Test kube-rbac-proxy daemon startup and connectivity
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create a simple upstream server for the proxy to forward to
+          mkdir -p /tmp/upstream
+          echo '{"status":"ok"}' > /tmp/upstream/health
+          cd /tmp/upstream
+          python3 -m http.server 8081 > /tmp/upstream.log 2>&1 &
+          wait-for-it localhost:8081 -t 30
+        start: /usr/bin/kube-rbac-proxy --upstream=http://localhost:8081/ --insecure-listen-address=:8080 --logtostderr=true
+        expected_output: "Listening insecurely on"
+        timeout: "60"
+        post: |
+          set -euo pipefail
+
+          # Wait for the proxy to be listening on port 8080
+          wait-for-it localhost:8080 -t 30
+
+          # Test proxy connectivity - expect 401/403 without proper RBAC authorization
+          # Using set +e to capture response code even on HTTP errors
+          set +e
+          response_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health)
+          curl_rc=$?
+          set -e
+
+          # 401 Unauthorized or 403 Forbidden means proxy is working and enforcing RBAC
+          if [ "$response_code" = "401" ] || [ "$response_code" = "403" ]; then
+            echo "SUCCESS: kube-rbac-proxy is running and enforcing RBAC (got HTTP $response_code)"
+          elif [ "$response_code" = "200" ]; then
+            echo "SUCCESS: kube-rbac-proxy is running and forwarding requests"
+          else
+            echo "FAIL: Expected HTTP 401, 403, or 200, got $response_code (curl exit code: $curl_rc)"
+            exit 1
+          fi
