@@ -1,7 +1,7 @@
 package:
   name: emscripten
   version: "5.0.0"
-  epoch: 2 # go/enterprise-rsc/emscripten
+  epoch: 3
   description: Emscripten compiler - C/C++ to WebAssembly
   copyright:
     - license: MIT
@@ -32,7 +32,6 @@ environment:
       - nodejs
       - npm
       - python3
-      - wolfi-base
 
 pipeline:
   - uses: git-checkout
@@ -42,8 +41,9 @@ pipeline:
       expected-commit: be68a767ff3937d97ffc7996a24bd3d7e7f9c849
 
   - runs: |
-      # Run bootstrap for npm dependencies
-      python3 bootstrap.py
+      # Install production dependencies only (matches upstream emsdk behavior)
+      # Using --omit=dev reduces node_modules from ~239 to ~123 packages
+      npm ci --omit=dev
 
       # Fix CVE-2025-5889 in brace-expansion
       npm install brace-expansion@4.0.1 --depth=10
@@ -62,8 +62,10 @@ pipeline:
       mkdir -p "${{targets.destdir}}"/upstream/emscripten
 
       # Copy Python entry points to emscripten subdirectory
+      # Includes all tools from upstream emsdk (emscons, emstrip, emscan-deps, em-config)
       for f in emcc.py em++.py emar.py emranlib.py emcmake.py \
-               emconfigure.py emmake.py emrun.py embuilder.py emsize.py; do
+               emconfigure.py emmake.py emrun.py embuilder.py emsize.py \
+               emstrip.py emscan-deps.py emscons.py em-config.py; do
         cp "$f" "${{targets.destdir}}"/upstream/emscripten/
       done
 
@@ -85,8 +87,9 @@ pipeline:
       EOF
 
   - runs: |
-      # Create wrapper scripts in emscripten subdirectory (SDK expected format)
-      for tool in emcc em++ emar emranlib emcmake emconfigure emmake emrun embuilder emsize; do
+      # Create wrapper scripts for tools with .py files at root level
+      for tool in emcc em++ emar emranlib emcmake emconfigure emmake emrun embuilder emsize \
+                  emstrip emscan-deps emscons em-config; do
         tee "${{targets.destdir}}"/upstream/emscripten/${tool} << WRAPPER
       #!/bin/sh
       export EM_CONFIG=/upstream/emscripten/.emscripten
@@ -95,10 +98,15 @@ pipeline:
         chmod +x "${{targets.destdir}}"/upstream/emscripten/${tool}
       done
 
-      # Create symlinks in /usr/bin for PATH convenience
-      mkdir -p "${{targets.destdir}}"/usr/bin
-      for tool in emcc em++ emar emranlib emcmake emconfigure emmake emrun embuilder emsize; do
-        ln -sf /upstream/emscripten/${tool} "${{targets.destdir}}"/usr/bin/${tool}
+      # Create wrapper scripts for tools that live in tools/ subdirectory
+      # These match upstream emsdk (emdwp, emnm, empath-split, emprofile, emsymbolizer)
+      for tool in emdwp emnm empath-split emprofile emsymbolizer; do
+        tee "${{targets.destdir}}"/upstream/emscripten/${tool} << WRAPPER
+      #!/bin/sh
+      export EM_CONFIG=/upstream/emscripten/.emscripten
+      exec python3 /upstream/emscripten/tools/${tool}.py "\$@"
+      WRAPPER
+        chmod +x "${{targets.destdir}}"/upstream/emscripten/${tool}
       done
 
   - runs: |
@@ -110,14 +118,30 @@ pipeline:
       done
 
 test:
+  environment:
+    environment:
+      # Match upstream emsdk PATH setup - tools are in /upstream/emscripten
+      PATH: /upstream/emscripten:/usr/bin:/bin
   pipeline:
     - name: Verify emscripten binary version
       runs: |
-        ## The ver-check pipeline will look for binaries versioned same as the package
-        ## But due to the versions defined in /upstream/emscripten/emscripten-version.txt
+        # Not using test/tw/ver-check because emscripten version output includes
+        # additional metadata from emscripten-version.txt that doesn't match
+        # the package version format exactly
         emcc --version
         em++ --version
         emar --version
+        # Verify root-level tools are available
+        emstrip --version
+        emscons --version
+        emscan-deps --version
+        em-config --version
+        # Verify tools/ subdirectory tools are available (match upstream emsdk)
+        emdwp --help
+        emnm --help
+        empath-split --help
+        emprofile --help
+        emsymbolizer --help
     - name: "Test WebAssembly compilation"
       runs: |
         set -euo pipefail
