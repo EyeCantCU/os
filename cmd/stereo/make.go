@@ -21,7 +21,7 @@ func makeCmd() *cobra.Command {
 		Short: "helpers for makefile",
 	}
 
-	for _, subcmd := range []string{"package", "test", "debug", "test-debug", "compile"} {
+	for _, subcmd := range []string{"package", "test", "debug", "test-debug"} {
 		cmd.AddCommand(&cobra.Command{
 			Use:   subcmd,
 			Short: fmt.Sprintf("runs make %s/* in the right place", subcmd),
@@ -111,13 +111,7 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 
 	args := []string{}
 
-	// Silence output when using melange compile
-	// Allows us to parse compiled manifest directly
-	if subcmd == "compile" {
-		args = append(args, "-s")
-	} else {
-		log.Printf("found %s in %s", pkg, dir)
-	}
+	log.Printf("found %s in %s", pkg, dir)
 
 	args = append(args, path.Join(subcmd, pkg))
 
@@ -149,6 +143,17 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 	extra = strings.Join(opts, " ")
 
 	cmd.Env = append(cmd.Env, fmt.Sprintf("MELANGE_EXTRA_OPTS=%s", extra))
+
+	cleanup := func() {
+		if err := cleanupTokens(dir, pkg); err != nil {
+			log.Printf("failed to clean tokens for %s: %v", pkg, err)
+		}
+	}
+	defer cleanup()
+
+	if err := ensureTokens(ctx, dir, pkg, subcmd); err != nil {
+		return err
+	}
 
 	return cmd.Run()
 }
