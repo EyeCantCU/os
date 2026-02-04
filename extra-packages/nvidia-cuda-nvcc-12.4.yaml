@@ -1,12 +1,16 @@
 package:
   name: nvidia-cuda-nvcc-12.4
   version: 12.4.131
-  epoch: 13
+  epoch: 14
   description: CUDA NVCC
   copyright:
     - license: LicenseRef-NVIDIA-CUDA-nvcc
       license-path: LICENSE
   dependencies:
+    # We need to replace math-vector.h from glibc-dev
+    # as we need to guard vector types on arm64
+    replaces:
+      - glibc-dev
     runtime:
       - nvidia-cuda-ld-config-${{vars.cuda-version}}
 
@@ -14,6 +18,7 @@ environment:
   contents:
     packages:
       - busybox
+      - glibc-dev
 
 var-transforms:
   - from: ${{package.name}}
@@ -49,10 +54,6 @@ pipeline:
     with:
       patches: math_functions_glibc_2.41.patch math_functions_glibc_2.42.patch
 
-  # Setup version symlinks
-  - runs: |
-      mkdir -p ${{targets.destdir}}/usr/local/
-
   - runs: |
       mkdir -p ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
       mv include ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
@@ -61,11 +62,42 @@ pipeline:
       mv bin ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
       mv nvvm ${{targets.destdir}}/usr/local/cuda-${{vars.cuda-version}}/
 
+  - if: ${{build.arch}} == "aarch64"
+    runs: |
+      install -Dm755 /usr/include/bits/math-vector.h ${{targets.contextdir}}/usr/include/bits/math-vector.h
+
+      # Fixes: https://github.com/chainguard-dev/internal-dev/issues/21940
+      #
+      # Packages FTBFS because NVCC disables Neon on ARM64, but math-vector.h will
+      # include the arm_neon header anyway. A fix for this has been submitted to upstream
+      # glibc at:
+      #
+      #  https://sourceware.org/pipermail/libc-alpha/2023-September/151770.html
+      #
+      # Unfortunately, the patch wasn't accepted as is, because the glibc maintainers
+      # consider this to be a problem with the C parser. It's messy, but for now this
+      # is the best we can do.
+      #
+      # This "sed" basically implements the solution discussed at:
+      #
+      #  https://github.com/NixOS/nixpkgs/pull/264599#issuecomment-1790820506
+      sed -i \
+        -e 's@^#if __GNUC_PREREQ(9, 0)$@#if __GNUC_PREREQ(9, 0) \&\& !defined(__CUDACC__)@' \
+        -e 's@^#elif __glibc_clang_prereq(8, 0)$@#elif __glibc_clang_prereq(8, 0) \&\& !defined(__CUDACC__)@' \
+        -e 's@^#if __GNUC_PREREQ(10, 0) || __glibc_clang_prereq(11, 0)$@#if (__GNUC_PREREQ(10, 0) || __glibc_clang_prereq(11, 0)) \&\& !defined(__CUDACC__)@' \
+        ${{targets.contextdir}}/usr/include/bits/math-vector.h
+
 subpackages:
   - name: ${{package.name}}-dev
     description: ${{package.name}} development headers
     pipeline:
       - uses: split/dev
+      # We must ship the math-vector.h header with the main package as C compilers need
+      # glibc headers, and we do not depend on the NVCC dev package everywhere
+      - if: ${{build.arch}} == "aarch64"
+        runs: |
+          mkdir -p ${{targets.destdir}}/usr/include
+          mv ${{targets.contextdir}}/usr/include/bits ${{targets.destdir}}/usr/include/
     dependencies:
       runtime:
         - ${{package.name}}=${{package.full-version}}
@@ -86,8 +118,7 @@ subpackages:
             - ${{package.name}}-dev=${{package.full-version}}
             - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
       pipeline:
-        - if: ${{build.arch}} != "aarch64" # https://github.com/chainguard-dev/internal-dev/issues/21940
-          runs: |
+        - runs: |
             nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
             tmpdir="$(mktemp -d)"
             trap "rm -rf $tmpdir" EXIT
@@ -126,8 +157,7 @@ subpackages:
             - ${{package.name}}-dev=${{package.full-version}}
             - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
       pipeline:
-        - if: ${{build.arch}} != "aarch64" # https://github.com/chainguard-dev/internal-dev/issues/21940
-          runs: |
+        - runs: |
             nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
             tmpdir="$(mktemp -d)"
             trap "rm -rf $tmpdir" EXIT
@@ -167,8 +197,7 @@ subpackages:
             - ${{package.name}}-dev=${{package.full-version}}
             - nvidia-cuda-cudart-${{vars.cuda-version}}-dev
       pipeline:
-        - if: ${{build.arch}} != "aarch64" # https://github.com/chainguard-dev/internal-dev/issues/21940
-          runs: |
+        - runs: |
             cuda_home="/usr/local/cuda-${{vars.cuda-version}}"
             export PATH="$cuda_home/bin:$PATH"
             nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
@@ -203,7 +232,6 @@ test:
   pipeline:
     - uses: test/tw/ldd-check
     - name: Test .c files can be compiled
-      if: ${{build.arch}} != "aarch64" # https://github.com/chainguard-dev/internal-dev/issues/21940
       runs: |
         gcc_bin="gcc-${{vars.gcc-latest-major-version}}"
         nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
@@ -219,7 +247,6 @@ test:
         $nvcc_cmd -o "$tmpdir/test-c" "$tmpdir/test-c.c"
         "$tmpdir/test-c"
     - name: Test .cu files can be compiled
-      if: ${{build.arch}} != "aarch64" # https://github.com/chainguard-dev/internal-dev/issues/21940
       runs: |
         gcc_bin="gcc-${{vars.gcc-latest-major-version}}"
         nvcc="/usr/local/cuda-${{vars.cuda-version}}/bin/nvcc"
@@ -235,7 +262,6 @@ test:
         $nvcc_cmd -o "$tmpdir/test-cu" "$tmpdir/test-cu.cu"
         "$tmpdir/test-cu"
     - name: Test our gcc latest version configuration
-      if: ${{build.arch}} != "aarch64" # https://github.com/chainguard-dev/internal-dev/issues/21940
       runs: |
         next_gcc_ver="$((${{vars.gcc-latest-major-version}} + 1))"
         # There's currently no gcc-$ver command for the latest gcc
