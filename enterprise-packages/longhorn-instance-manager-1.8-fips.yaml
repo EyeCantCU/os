@@ -1,0 +1,188 @@
+#nolint:update-identifier-must-match-git-repository
+package:
+  name: longhorn-instance-manager-1.8-fips
+  version: 1.8.2
+  epoch: 0
+  description: FIPS-compliant Longhorn instance manager for managing engine and replica instances on the node
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - longhorn-instance-manager-fips=${{package.full-version}}
+    runtime:
+      - acl
+      - bash
+      - busybox
+      - cifs-utils
+      - coreutils
+      - device-mapper
+      - e2fsprogs
+      - fuse3
+      - gawk
+      - go-spdk-helper-fips
+      - grpc-health-probe-fips
+      - iproute2
+      - jq
+      - kmod
+      - logrotate
+      - longhorn-libqcow
+      - longhorn-spdk
+      - netcat-openbsd
+      - nfs-utils
+      - nvme-cli
+      - openssl-config-fipshardened
+      - procps
+      - qemu
+      - rancher-tgt
+      - sg3-utils
+      - tini
+      - util-linux
+      - util-linux-misc
+      - xfsprogs
+  resources:
+    cpu: "4"
+    memory: 8Gi
+
+environment:
+  contents:
+    packages:
+      - libtool
+      - longhorn-libqcow-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/longhorn/longhorn-instance-manager
+      tag: v${{package.version}}
+      expected-commit: dd1ba12c55fe33fa22b15f8e8bce78335b112a1a
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/oauth2@v0.27.0
+
+  - uses: go/build
+    with:
+      go-package: go-fips
+      packages: .
+      output: longhorn-instance-manager
+      ldflags: |
+        -X main.Version=v${{package.version}}
+        -X main.GitCommit=$(git rev-parse HEAD)
+        -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        -linkmode external
+
+  - working-directory: ./package
+    runs: |
+      install -m755 instance-manager "${{targets.destdir}}"/usr/bin/
+      install -m755 instance-manager-v2-prestop "${{targets.destdir}}"/usr/bin/
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility symlinks and runtime dependencies for longhorn-instance-manager FIPS image
+    dependencies:
+      provides:
+        - longhorn-instance-manager-fips-compat=${{package.full-version}}
+    pipeline:
+      - name: Create directories for symlinks
+        runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/sbin
+      - name: Create symlinks for longhorn-instance-manager binaries and scripts
+        runs: |
+          ln -sf /usr/bin/longhorn-instance-manager "${{targets.subpkgdir}}"/usr/local/bin/longhorn-instance-manager
+          ln -sf /usr/bin/instance-manager "${{targets.subpkgdir}}"/usr/local/bin/instance-manager
+          ln -sf /usr/bin/instance-manager-v2-prestop "${{targets.subpkgdir}}"/usr/local/bin/instance-manager-v2-prestop
+      - name: Other required runtime binaries symlinks
+        runs: |
+          ln -sf /usr/bin/grpc-health-probe "${{targets.subpkgdir}}"/usr/local/bin/grpc_health_probe
+          ln -sf /usr/bin/go-spdk-helper "${{targets.subpkgdir}}"/usr/local/bin/go-spdk-helper
+          ln -sf /usr/bin/nvme "${{targets.subpkgdir}}"/usr/local/sbin/nvme
+          ln -sf /usr/bin/tini "${{targets.subpkgdir}}"/tini
+    test:
+      environment:
+        contents:
+          packages:
+            - grpcurl
+            - wait-for-it
+            - ${{package.name}}
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: longhorn-instance-manager-fips-compat
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - name: Verify daemon starts correctly
+          uses: test/daemon-check-output
+          with:
+            setup: mkdir -p /var/log/instances
+            start: /tini -- longhorn-instance-manager daemon --listen localhost:8500
+            timeout: 30
+            expected_output: |
+              process-manager gRPC server listening
+              proxy gRPC server listening
+              disk gRPC server listening
+              instance gRPC server listening
+            post: |
+              set -euo pipefail
+              wait-for-it -t 5 localhost:8500
+              grpc_health_probe -addr=localhost:8500 -connect-timeout=5s -rpc-timeout=5s check 2>&1 | grep -F "SERVING"
+              grpcurl -plaintext localhost:8500 list | grep -F "ProcessManagerService"
+              grpcurl -plaintext -d '{}' localhost:8500 ProcessManagerService.VersionGet | grep -F "v${{package.version}}"
+              grpcurl -plaintext -d '{}' localhost:8500 ProcessManagerService.ProcessList | grep -F "{}"
+        - name: Verify wrapper scripts are installed and are executable
+          runs: |
+            test -x /usr/bin/instance-manager
+            test -x /usr/bin/instance-manager-v2-prestop
+        - name: rancher-tgt binaries are in /usr/bin/ (provided by rancher-tgt package)
+          runs: |
+            test -x /usr/bin/tgt-admin
+            test -x /usr/bin/tgt-setup-lun
+            test -x /usr/bin/tgtadm
+            test -x /usr/bin/tgtd
+            test -x /usr/bin/tgtimg
+        - name: Verify required runtime binaries are present
+          runs: |
+            command -v tini
+            command -v dmsetup
+            command -v nvme
+            command -v tgtd
+            command -v tgtadm
+            command -v tgt-admin
+            command -v mkfs.ext4
+            command -v mkfs.xfs
+            command -v ip
+            command -v nc
+            command -v logrotate
+            command -v awk
+            command -v jq
+            command -v qemu-img
+            command -v grpc-health-probe
+            command -v go-spdk-helper
+            command -v longhorn-instance-manager
+            command -v spdk_tgt
+
+test:
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+    - uses: test/tw/ver-check
+      with:
+        bins: longhorn-instance-manager
+    - uses: test/tw/help-check
+      with:
+        bins: longhorn-instance-manager instance-manager instance-manager-v2-prestop
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - -rc*
+    - -dev*
+  github:
+    identifier: longhorn/longhorn
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v1.8.
