@@ -1,0 +1,125 @@
+package:
+  name: cg-sccache-config
+  version: "0.1"
+  epoch: 0
+  description: Utility to add sccache wrappers around all installed/supported compilers
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - sccache
+
+vars:
+  test-cuda-version: 13.1
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - shellcheck
+
+pipeline:
+  - runs: |
+      shellcheck cg-sccache-config
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+      cp cg-sccache-config ${{targets.destdir}}/usr/bin/
+
+update:
+  enabled: false
+  exclude-reason: "this is the upstream"
+
+test:
+  environment:
+    contents:
+      packages:
+        - build-base
+        - nvidia-cuda-nvcc-${{vars.test-cuda-version}}-dev
+        - nvidia-cuda-nvrtc-${{vars.test-cuda-version}}-dev
+        - nvidia-cuda-cudart-${{vars.test-cuda-version}}-dev
+        - nvcc-${{vars.test-cuda-version}}-gcc-wrapper
+    environment:
+      SCCACHE_LOG: debug
+      SCCACHE_ERROR_LOG: /tmp/sccache.log
+  pipeline:
+    - uses: sccache/enable
+    - name: "smoke test gcc/g++ after wrapper install"
+      uses: test/compiler/smoke
+      with:
+        cc: gcc
+        cxx: g++
+    - name: "clean up after smoke test"
+      runs: |
+        trap 'rm -f "$SCCACHE_ERROR_LOG"' EXIT
+        killall sccache
+        for i in $(seq 10); do
+          pidof sccache || break
+          sleep 1
+        done
+        # Will only exist if sccache was spawned
+        cat "$SCCACHE_ERROR_LOG"
+    - name: "validate hardening is still in place after wrapper install"
+      uses: test/compiler/hardening-check
+      with:
+        cc: gcc
+    - name: "clean up after hardening-check"
+      runs: |
+        trap 'rm -f "$SCCACHE_ERROR_LOG"' EXIT
+        killall sccache
+        for i in $(seq 10); do
+          pidof sccache || break
+          sleep 1
+        done
+        # Will only exist if sccache was spawned
+        cat "$SCCACHE_ERROR_LOG"
+    - name: "validate that C objects are getting cached"
+      runs: |
+        tmpdir="$(mktemp -d)"
+        trap 'rm -rf "$tmpdir" "$SCCACHE_ERROR_LOG" stats.out' EXIT
+
+        cat > "$tmpdir/test.c" << EOF
+        #include <stdio.h>
+
+        int main() {
+          return(0);
+        }
+        EOF
+        gcc -c "$tmpdir/test.c"
+        gcc -c "$tmpdir/test.c"
+
+        sccache --show-stats | tee stats.out
+        killall sccache
+        for i in $(seq 10); do
+          pidof sccache || break
+          sleep 1
+        done
+        # Will only exist if sccache was spawned
+        cat "$SCCACHE_ERROR_LOG"
+        grep -E '^Cache hits \(C/C\+\+\)\s+1$' stats.out
+    - name: "validate that nvcc objects are getting cached"
+      runs: |
+        tmpdir="$(mktemp -d)"
+        trap 'rm -rf "$tmpdir" "$SCCACHE_ERROR_LOG" stats.out' EXIT
+        export PATH="$PATH:/usr/local/cuda-${{vars.test-cuda-version}}/bin"
+
+        cat > "$tmpdir/test.cu" << EOF
+        #include <stdio.h>
+
+        int main() {
+          return(0);
+        }
+        EOF
+        nvcc -c "$tmpdir/test.cu"
+        nvcc -c "$tmpdir/test.cu"
+
+        sccache --show-stats | tee stats.out
+        killall sccache
+        for i in $(seq 10); do
+          pidof sccache || break
+          sleep 1
+        done
+        # Will only exist if sccache was spawned
+        cat "$SCCACHE_ERROR_LOG"
+        grep -E '^Cache hits \(CUDA\)\s+1$' stats.out
