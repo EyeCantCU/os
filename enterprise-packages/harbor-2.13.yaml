@@ -1,13 +1,16 @@
 package:
   name: harbor-2.13
   version: "2.13.4"
-  epoch: 3
+  epoch: 6
   description: An open source trusted cloud native registry project that stores, signs, and scans content
   copyright:
     - license: Apache-2.0
   dependencies:
     provides:
       - harbor=${{package.full-version}}
+  resources:
+    cpu: "6"
+    memory: 15Gi
 
 # To be updated as upstream harbor distribution requirements, when drift check fails for harbor-distribution subpackage.
 vars:
@@ -89,6 +92,7 @@ subpackages:
         - findutils
         - gawk
         - grep
+        - ini-file
         - posix-libc-utils
       provides:
         - harbor-core-iamguarded-compat=${{package.full-version}}
@@ -479,19 +483,30 @@ subpackages:
           package: harbor-portal
           version: ${{vars.major-minor-version}}
       - runs: |
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          mkdir -p /iamguarded/nginx
+          mkdir -p /opt/iamguarded/harbor
           mkdir -p /opt/iamguarded/harbor/nginx-conf
-          cp -r /etc/nginx/* /opt/iamguarded/harbor/nginx-conf/
+          mkdir -p /opt/iamguarded/nginx/conf
+          mkdir -p /opt/iamguarded/nginx/sbin
+          mkdir -p /opt/iamguarded/nginx/logs
+
+          cp -r /etc/nginx/* /opt/iamguarded/nginx/conf/
           chmod g+rwX /opt/iamguarded
+
+          ln -sf /usr/sbin/nginx /opt/iamguarded/nginx/sbin/nginx
+          ln -sf /dev/stdout /opt/iamguarded/nginx/logs/access.log
+          ln -sf /dev/stderr /opt/iamguarded/nginx/logs/error.log
+
+          # Copy the harbor portal nginx config (required by harbor-portal/postunpack.sh)
+          cp ./src/portal/docker-build/nginx.conf.example /opt/iamguarded/harbor/nginx-conf/nginx.conf
 
           /opt/iamguarded/scripts/nginx/postunpack.sh
           /opt/iamguarded/scripts/harbor-portal/postunpack.sh
 
-          mkdir -p /opt/iamguarded/nginx/sbin
-          ln -sf /usr/sbin/nginx /opt/iamguarded/nginx/sbin/nginx
-
-          # /opt/iamguarded/harbor is expected to have portal content
-          rm -rf /opt/iamguarded/harbor
-          ln -sf /usr/share/nginx/html /opt/iamguarded/harbor
+          # postunpack.sh changes nginx root to /opt/iamguarded/harbor, but portal content is at /usr/share/nginx/html
+          sed -i 's|root\s*/opt/iamguarded/harbor;|root /usr/share/nginx/html;|g' /opt/iamguarded/nginx/conf/nginx.conf
+          sed -i 's|root\s*/opt/iamguarded/harbor;|root /usr/share/nginx/html;|g' /opt/iamguarded/nginx/conf.default/nginx.conf
       - uses: iamguarded/finalize-compat
         with:
           package: harbor-portal
@@ -529,7 +544,7 @@ subpackages:
               Starting NGINX
             post: |
               # cannot test further without full harbor setup
-              curl localhost:8080 | grep "harbor-app"
+              curl -sfL --retry 3 localhost:8080 | grep -Fiq "<title>Harbor</title>"
               # Upstream image: docker.io/bitnamilegacy/harbor-portal:2.13.2-debian-12-r1
               # also doesn't have any files under: /opt/iamguarded/nginx/conf/iamguarded/certs and /opt/iamguarded/nginx/conf.default/iamguarded/certs
 
@@ -555,6 +570,96 @@ subpackages:
       pipeline:
         - runs: |
             harbor-registryctl --help
+
+  - name: ${{package.name}}-registryctl-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}-registryctl
+        - bash
+        - coreutils
+        - posix-libc-utils
+        - findutils
+        - grep
+        - sed
+        - yq
+      provides:
+        - harbor-registryctl-iamguarded-compat=${{package.full-version}}
+    description: "Iamguarded compat for Harbor registryctl"
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: harbor-registryctl
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded
+          mkdir -p /iamguarded
+          mkdir -p /etc/registryctl
+          mkdir -p /storage
+          mkdir -p /opt/iamguarded/harbor-registryctl/bin
+          mkdir -p /opt/iamguarded/harbor-registryctl/etc/registryctl
+          mkdir -p /opt/iamguarded/harbor-registryctl/storage /iamguarded/harbor-registryctl/storage
+
+          # Access needed during runtime
+          chmod g+rwX /opt/iamguarded
+          chmod g+rwX /iamguarded
+          ln -sf /usr/bin/harbor-registryctl /opt/iamguarded/harbor-registryctl/bin/harbor-registryctl
+          ln -sf /harbor/harbor_registryctl /opt/iamguarded/harbor-registryctl/bin/harbor-registryctl
+
+          # Disable some commands used in iamguarded scripts. These commands more likely fail in this since this image take non root approach
+          sed -i 's/ensure_user_exists/# ensure_user_exists/g' /opt/iamguarded/scripts/harbor-registryctl/postunpack.sh
+          sed -i 's/chown -R "$HARBOR_REGISTRYCTL_DAEMON_USER" "$dir"/# chown -R "$HARBOR_REGISTRYCTL_DAEMON_USER" "$dir"/g' /opt/iamguarded/scripts/harbor-registryctl/postunpack.sh
+          # Disable configure_permissions_system_certs which calls chown via set_permissions_ownership in libharbor.sh
+          sed -i 's/configure_permissions_system_certs/# configure_permissions_system_certs/g' /opt/iamguarded/scripts/harbor-registryctl/postunpack.sh
+          /opt/iamguarded/scripts/harbor-registryctl/postunpack.sh
+      - uses: iamguarded/finalize-compat
+        with:
+          package: harbor-registryctl
+          version: ${{vars.major-minor-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: harbor
+              gid: 1001
+          users:
+            - username: harbor
+              gid: 1001
+              uid: 1001
+          run-as: 0
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: harbor-registryctl
+            version: ${{vars.major-minor-version}}
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: harbor-registryctl-iamguarded-compat
+            real-pkg-name: ${{subpkg.name}}
+        - name: "Test binaries"
+          runs: |
+            /opt/iamguarded/harbor-registryctl/bin/harbor-registryctl -h 2>&1 | grep -Fiq "Usage"
+        - name: "Test registryctl"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # Install the config file, upstream also doesn't have it by default in their image.
+              # https://raw.githubusercontent.com/chainguard-dev/iamguarded-containers/refs/heads/main/bitnami/harbor-registryctl/2/debian-12/config/registryctl/config.yml
+              # Needs auth when accessing private repo, so simply copy the config here:
+              cat << EOF >> /etc/registryctl/config.yml
+              ---
+              protocol: "http"
+              port: 8080
+              log_level: "INFO"
+              registry_config: "/etc/registry/config.yml"
+              EOF
+            start: /opt/iamguarded/scripts/harbor-registryctl/entrypoint.sh /opt/iamguarded/scripts/harbor-registryctl/run.sh
+            timeout: 15
+            expected_output: |
+              Starting harbor-registryctl setup
+              harbor-registryctl setup finished
 
   - name: ${{package.name}}-redis-compat
     description: Compat package for running redis with harbor
