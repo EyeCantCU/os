@@ -1,0 +1,112 @@
+package:
+  name: google-closure-compiler
+  # renovate: datasource=maven depName=com.google.javascript:closure-compiler versioning=maven
+  version: "20260128"
+  epoch: 0
+  description: Google Closure Compiler - JavaScript optimizer (meta package)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - google-closure-compiler-java
+
+environment:
+  contents:
+    packages:
+      - bash
+      - bazelisk
+      - build-base
+      - busybox
+      - clang
+      - nodejs
+      - openjdk-21-default-jvm
+      - python3
+
+vars:
+  java-version: 21
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/google/closure-compiler
+      expected-commit: 5e574196bd2c6fefd53018749b237beea9810271
+      tag: v${{package.version}}
+
+  - runs: |
+      export CC=clang
+      export CXX=clang++
+      bazelisk build //:all
+      mkdir ${{targets.destdir}}/tmp
+      mv bazel-bin/compiler_shaded.jar ${{targets.destdir}}//tmp/
+
+subpackages:
+  - name: google-closure-compiler-java
+    description: Google Closure Compiler JAR - JavaScript optimizer
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/share/java/google-closure-compiler
+          mv ${{targets.destdir}}/tmp/compiler_shaded.jar "${{targets.subpkgdir}}"/usr/share/java/google-closure-compiler/compiler.jar
+    test:
+      environment:
+        contents:
+          packages:
+            - openjdk-21-default-jvm
+      pipeline:
+        - name: Verify compiler JAR exists
+          runs: |
+            set -euo pipefail
+            stat /usr/share/java/google-closure-compiler/compiler.jar
+        - name: Test compiler version
+          runs: |
+            java -jar /usr/share/java/google-closure-compiler/compiler.jar --version
+        - name: Test JavaScript compilation
+          runs: |
+            set -euo pipefail
+            tee /tmp/hello.js << 'EOF'
+            // A simple function.
+            function hello(longName) {
+              alert('Hello, ' + longName);
+            }
+            hello('New User');
+            EOF
+            java -jar /usr/share/java/google-closure-compiler/compiler.jar \
+              --js /tmp/hello.js \
+              --js_output_file /tmp/hello-compiled.js
+            cat /tmp/hello-compiled.js
+            # Verify: comments stripped, whitespace removed, variable renamed
+            grep -vF "// A simple function" /tmp/hello-compiled.js
+            grep -vF "longName" /tmp/hello-compiled.js
+            # Verify output is minified (shorter than input)
+            input_size=$(wc -c < /tmp/hello.js)
+            output_size=$(wc -c < /tmp/hello-compiled.js)
+            echo "Input: $input_size bytes, Output: $output_size bytes"
+            test "$output_size" -lt "$input_size"
+        - name: Test advanced optimization
+          runs: |
+            set -euo pipefail
+            tee /tmp/advanced.js << 'EOF'
+            /** @define {boolean} */
+            var DEBUG = true;
+            if (DEBUG) {
+              console.log('debug mode');
+            }
+            console.log('production');
+            EOF
+            java -jar /usr/share/java/google-closure-compiler/compiler.jar \
+              --js /tmp/advanced.js \
+              --js_output_file /tmp/advanced_out.js \
+              --compilation_level ADVANCED \
+              --define='DEBUG=false'
+            cat /tmp/advanced_out.js
+            # DEBUG code should be eliminated
+            grep -vF "debug mode" /tmp/advanced_out.js
+
+update:
+  enabled: true
+  github:
+    identifier: google/closure-compiler
+    use-tag: true
+    tag-filter-prefix: v
+  version-transform:
+    - match: ^v(.*)$
+      replace: $1

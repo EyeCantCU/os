@@ -9,6 +9,7 @@ package:
     runtime:
       - binaryen
       - clang
+      - google-closure-compiler-java
       - lld
       - llvm
       - nodejs
@@ -26,8 +27,8 @@ environment:
       - binaryen
       - busybox
       - clang
-      - curl
       - git
+      - google-closure-compiler-java
       - lld
       - llvm
       - nodejs
@@ -48,11 +49,14 @@ pipeline:
       # Install dependencies (npm install needed for overrides, npm ci requires exact lock match)
       npm install --omit=dev --only=production
 
-      # Update google-closure-compiler JAR to fix CVE-2022-3510, CVE-2024-7254,
-      # CVE-2022-3509, CVE-2022-3171 (protobuf-java vulns in bundled JAR)
-      # Direct JAR replacement avoids pulling in ~130 extra npm dependencies
-      curl -fsSL -o node_modules/google-closure-compiler-java/compiler.jar \
-        https://repo1.maven.org/maven2/com/google/javascript/closure-compiler/v20260121/closure-compiler-v20260121.jar
+      # Symlink google-closure-compiler JAR from system package
+      # This fixes CVE-2022-3510, CVE-2024-7254, CVE-2022-3509, CVE-2022-3171
+      mkdir -p node_modules/google-closure-compiler-java
+      ln -sf /usr/share/java/google-closure-compiler/compiler.jar node_modules/google-closure-compiler-java/compiler.jar
+      # Create index.js so require('google-closure-compiler-java') returns JAR path
+      echo "module.exports = require.resolve('./compiler.jar');" > node_modules/google-closure-compiler-java/index.js
+      # Also ensure the wrapper module can find it
+      rm -rf node_modules/google-closure-compiler/node_modules/google-closure-compiler-java
 
       # Generate entry points using upstream tooling
       python tools/maint/create_entry_points.py
@@ -115,6 +119,10 @@ pipeline:
       done
 
 test:
+  environment:
+    contents:
+      packages:
+        - openjdk-21-default-jvm
   pipeline:
     - name: Verify emscripten entry points match upstream
       runs: |
@@ -161,6 +169,29 @@ test:
         set -euo pipefail
         export PATH=/upstream/emscripten:$PATH
         /upstream/emscripten/tools/file_packager --help
+    - name: Test google-closure-compiler integration
+      runs: |
+        set -euo pipefail
+        export PATH=/upstream/emscripten:$PATH
+
+        # Verify the module structure exists
+        stat /upstream/emscripten/node_modules/google-closure-compiler-java/compiler.jar
+        stat /upstream/emscripten/node_modules/google-closure-compiler-java/index.js
+
+        # Verify index.js exports the JAR path
+        grep -F "require.resolve('./compiler.jar')" /upstream/emscripten/node_modules/google-closure-compiler-java/index.js
+
+        # Verify the npm wrapper CLI exists
+        stat /upstream/emscripten/node_modules/.bin/google-closure-compiler
+
+        # Test closure compiler via npm wrapper
+        echo 'function hello(name) { console.log("Hello " + name); } hello("World");' > /tmp/test.js
+        /upstream/emscripten/node_modules/.bin/google-closure-compiler --js /tmp/test.js --js_output_file /tmp/test.min.js
+        stat /tmp/test.min.js
+        cat /tmp/test.min.js
+
+        # Verify output is minified (variable renamed)
+        grep -vF "function hello(name)" /tmp/test.min.js
 
 update:
   enabled: true
