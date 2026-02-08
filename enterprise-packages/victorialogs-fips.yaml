@@ -83,24 +83,33 @@ test:
     - uses: test/tw/ldd-check
     - name: Test the victoria-logs binary
       runs: |
-        victoria-logs -version | grep ${{package.version}}
+        victoria-logs -version | grep -F "${{package.version}}"
     - uses: test/tw/help-check
       with:
         bins: victoria-logs
     - name: "Test victoria-logs service"
       uses: test/daemon-check-output
       with:
-        setup: |
-          Xvfb :99 -screen 0 1280x1024x24 2>/dev/null &
-          npm install && npx cypress install
         start: victoria-logs -httpListenAddr=:9428
-        post: |
+        post: |-
+          #!/bin/bash -ex
+          set -o pipefail
+
+          Xvfb :99 -screen 0 1280x1024x24 2>/dev/null &
+          XVFB_PID=$!
+
+          cleanup() {
+            kill "$XVFB_PID" 2>/dev/null || true
+            pkill -9 -f chromium 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
           # Test vmui static assets are served
-          curl -sf http://localhost:9428/select/vmui/favicon.svg | grep -q "svg"
-          curl -sf http://localhost:9428/select/vmui/manifest.json | grep -q "name"
+          curl -sf http://localhost:9428/select/vmui/favicon.svg | grep -F "svg"
+          curl -sf http://localhost:9428/select/vmui/manifest.json | grep -F "name"
 
           # Test health endpoint
-          curl -sf http://localhost:9428/health | grep -q "OK"
+          curl -sf http://localhost:9428/health | grep -F "OK"
 
           # Test log ingestion endpoint accepts data
           curl -sf -X POST "http://localhost:9428/insert/jsonline" \
@@ -109,15 +118,13 @@ test:
 
           # Verify ingested log can be queried (query endpoint returns JSON lines)
           sleep 1
-          curl -sf "http://localhost:9428/select/logsql/query?query=test&limit=10" | grep -q "test log message"
+          curl -sf "http://localhost:9428/select/logsql/query?query=test&limit=10" | grep -F "test log message"
 
           # Test hits endpoint returns proper JSON with timestamps
-          curl -sf "http://localhost:9428/select/logsql/hits?query=*&start=1d" | grep -q "timestamps"
+          curl -sf "http://localhost:9428/select/logsql/hits?query=*&start=1d&step=1h" | grep -F "timestamps"
 
-          # Run Cypress e2e tests for vmui
-          npm run cy:run && CYPRESS_EXIT=0 || CYPRESS_EXIT=$?
-          pkill -f chromium 2>/dev/null || true
-          pkill -f Xvfb 2>/dev/null || true
-          exit ${CYPRESS_EXIT}
+          # Run Cypress e2e tests for vmui with a timeout to prevent hanging
+          npm install && npx cypress install
+          timeout --kill-after=10 300 npm run cy:run
         expected_output: |
           started server at http://0.0.0.0:9428/
