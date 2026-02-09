@@ -1,7 +1,7 @@
 package:
   name: kuberay-operator-fips
   version: "1.5.1"
-  epoch: 2 # CVE-2025-61730
+  epoch: 3 # CVE-2025-61730
   description: A toolkit to run Ray applications on Kubernetes
   copyright:
     - license: Apache-2.0
@@ -36,26 +36,45 @@ test:
         - kustomize
   pipeline:
     - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: manager
     - uses: test/kwok/cluster
     - name: Fetch the kuberay from the source repo
       runs: |
+        set -euo pipefail
         git clone --depth=1 https://github.com/ray-project/kuberay
-    - name: Let's install the CRDs
-      working-directory: kuberay/ray-operator/config
-      runs: |
-        kustomize build crd | kubectl apply --server-side=true -f -
-        # lets wait a couple of seconds for the CRDs to be installed
-        sleep 5
+    - name: Test operator with Ray Job
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          set -euo pipefail
+          # Apply CRDs using kustomize
+          kustomize build kuberay/ray-operator/config/crd | kubectl apply --server-side=true -f -
+          # Wait for CRDs to be established
+          kubectl wait --for=condition=Established crd --all --timeout=60s
+        start: /usr/bin/manager --leader-election-namespace=default
+        expected_output: "Starting Controller"
+        timeout: "60"
+        post: |-
+          set -euo pipefail
 
-        # let's start the operator
-        /usr/bin/manager --leader-election-namespace=default > out.log 2>&1 &
+          # Apply a sample RayJob to verify the operator processes CRs correctly
+          kubectl apply -f kuberay/ray-operator/config/samples/ray-job.sample.yaml
 
-        # let's wait a couple of seconds for the operator to start
-        sleep 10
+          # Verify the RayJob CR was created (proves kubectl apply worked)
+          kubectl get rayjob -n default || { echo "FAIL: RayJob not created"; exit 1; }
 
-        # let's apply for a simple Ray Job
-        kubectl apply -f samples/ray-job.sample.yaml
-        sleep 10
+          # Wait for the operator to process the RayJob and create associated pods
+          # The operator creates a RayCluster which in turn creates head/worker pods
+          sleep 10
 
-        # let's wait a couple of seconds for the Ray Job to be created
-        kubectl wait --for=condition=Ready pods --all -n default
+          # Verify pods were created by the operator processing the RayJob
+          kubectl wait --for=condition=Ready pods --all -n default --timeout=120s || {
+            echo "FAIL: Pods not ready - operator may not have processed RayJob correctly"
+            kubectl get pods -n default
+            kubectl get rayjob -n default -o yaml
+            exit 1
+          }
+
+          echo "SUCCESS: Operator processed RayJob and pods are ready"
