@@ -15,15 +15,7 @@ KEY ?= local-melange-extra.rsa
 REPO ?= $(shell pwd)/packages
 QEMU_KERNEL_REPO := https://apk.cgr.dev/chainguard-private/
 
-ifeq (${MELANGE_RUNNER},)
-MELANGE_RUNNER = qemu
-$(warning ****************************** WARNING ******************************)
-$(warning *** MELANGE_RUNNER is unset. The default runner is now qemu, which)
-$(warning *** requires chainctl authentication to access the Chainguard kernel.)
-$(warning *** See `melange build --help` for a list of other runner options.)
-$(warning ****************************** WARNING ******************************)
-endif
-
+MELANGE_RUNNER ?= qemu
 MELANGE_OPTS += --runner=${MELANGE_RUNNER}
 MELANGE_TEST_OPTS += --runner=${MELANGE_RUNNER}
 
@@ -46,6 +38,7 @@ MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += --generate-index false
 MELANGE_OPTS += --cache-dir ${CACHEDIR}
 MELANGE_OPTS += --pipeline-dir ./pipelines/
+MELANGE_OPTS += --package-append busybox
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
 ifeq (${LINT}, yes)
@@ -126,15 +119,6 @@ kernel/%/vmlinuz: kernel/%/linux.apk
 		[ -f $$tmpd/boot/vmlinuz ] && mv $$tmpd/boot/* $(dir $@) && \
 		rc=$$?; rm -Rf $$tmpd; exit $$rc
 
-${CACHEDIR}/.libraries_token.txt: cache
-	tmpf=$(shell mktemp); \
-	chainctl auth login --audience libraries.cgr.dev; \
-	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
-	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
-
-.PHONY: lib-token
-lib-token: ${CACHEDIR}/.libraries_token.txt
-
 yamls := $(wildcard *.yaml)
 pkgs := $(subst .yaml,,$(yamls))
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
@@ -174,15 +158,6 @@ packages/$(ARCH)/%.apk: cache $(KEY) $(QEMU_KERNEL_DEP)
 	mkdir -p ./$(pkgname)/
 	$(eval SOURCE_DATE_EPOCH ?= $(shell git log -1 --pretty=%ct --follow $(yamlfile)))
 	SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(MELANGE) build $(yamlfile) $(MELANGE_OPTS) --source-dir ./$(pkgname)/
-
-# Please do not print any additional content via this target
-# so that we can parse output directly with jq
-compile_targets = $(foreach name,$(pkgs),compile/$(name))
-$(compile_targets): compile/%:
-	@$(MAKE) $(KEY) >/dev/null 2>&1
-	@mkdir -p ./$(*)/
-	$(eval yamlfile := $*.yaml)
-	@$(MELANGE) compile $(yamlfile) $(MELANGE_OPTS) --source-dir ./$(*)/
 
 .PHONY: dev-container
 dev-container:

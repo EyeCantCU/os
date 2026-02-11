@@ -1,7 +1,7 @@
 package:
   name: rke2-runtime-1.31
   version: "1.31.14.2.1"
-  epoch: 2
+  epoch: 7 # GHSA-cfpf-hrx2-8rv6
   description: Rancher Kubernetes Engine 2 (RKE2) is a fully conformant Kubernetes distribution with minimal dependencies
   copyright:
     - license: Apache-2.0
@@ -12,8 +12,8 @@ package:
       - containerd-shim-runc-v2
       - crictl
       - ctr
+      - ip6tables
       - ipset
-      - iptables-wrappers
       - kubectl-${{vars.kubernetes-version}}
       - kubelet-${{vars.kubernetes-version}}
       - mount
@@ -70,6 +70,8 @@ pipeline:
         github.com/quic-go/quic-go@v0.54.1
         github.com/libp2p/go-libp2p@v0.44.0
         github.com/opencontainers/selinux@v1.13.0
+        github.com/containernetworking/plugins@v1.9.0
+        github.com/expr-lang/expr@v1.17.7
 
   # Upstream extracts runtime image binaries to '/bin'
   # This patch modifies the extractPath func to use '/usr/bin' to work with our setup
@@ -78,27 +80,36 @@ pipeline:
     with:
       patches: bootstrap.go.patch
 
+  - name: Extract ETCD build date from upstream
+    runs: |
+      # Extract build date from upstream build-images script
+      ETCD_BUILD_DATE=$(grep "hardened-etcd:" scripts/build-images | grep -o "build[0-9]*")
+      echo "Extracted ETCD build date from upstream: $ETCD_BUILD_DATE"
+      echo "$ETCD_BUILD_DATE" > /tmp/etcd-build-date
+
   - runs: |
-      cat > build.sh <<'EOF'
+      ETCD_BUILD_DATE=$(cat /tmp/etcd-build-date)
+
+      cat > build.sh <<EOF
       #!/bin/bash
       set -e
       source scripts/version.sh
 
       LDFLAGS="
-        -X ${K3S_PKG}/pkg/version.GitCommit=$(git rev-parse HEAD)
-        -X ${K3S_PKG}/pkg/version.Program=${PROG}
-        -X ${K3S_PKG}/pkg/version.Version=${{vars.mangled-package-version}}
-        -X ${K3S_PKG}/pkg/version.UpstreamGolang=$(go env GOVERSION)
-        -X ${RKE2_PKG}/pkg/images.DefaultRegistry=${REGISTRY}
-        -X ${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:${ETCD_VERSION}-build20250612
-        -X ${RKE2_PKG}/pkg/images.DefaultKubernetesImage=rancher/hardened-kubernetes:${KUBERNETES_IMAGE_TAG}
-        -X ${RKE2_PKG}/pkg/images.DefaultPauseImage=rancher/mirrored-pause:${PAUSE_VERSION}
-        -X ${RKE2_PKG}/pkg/images.DefaultRuntimeImage=${REPO}/${PROG}-runtime:v${{vars.image-version}}
-        -X ${RKE2_PKG}/pkg/images.DefaultCloudControllerManagerImage=rancher/rke2-cloud-provider:${CCM_VERSION}
+        -X \${K3S_PKG}/pkg/version.GitCommit=\$(git rev-parse HEAD)
+        -X \${K3S_PKG}/pkg/version.Program=\${PROG}
+        -X \${K3S_PKG}/pkg/version.Version=${{vars.mangled-package-version}}
+        -X \${K3S_PKG}/pkg/version.UpstreamGolang=\$(go env GOVERSION)
+        -X \${RKE2_PKG}/pkg/images.DefaultRegistry=\${REGISTRY}
+        -X \${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:\${ETCD_VERSION}-${ETCD_BUILD_DATE}
+        -X \${RKE2_PKG}/pkg/images.DefaultKubernetesImage=rancher/hardened-kubernetes:\${KUBERNETES_IMAGE_TAG}
+        -X \${RKE2_PKG}/pkg/images.DefaultPauseImage=rancher/mirrored-pause:\${PAUSE_VERSION}
+        -X \${RKE2_PKG}/pkg/images.DefaultRuntimeImage=\${REPO}/\${PROG}-runtime:v${{vars.image-version}}
+        -X \${RKE2_PKG}/pkg/images.DefaultCloudControllerManagerImage=rancher/rke2-cloud-provider:\${CCM_VERSION}
       "
 
       mkdir -p ${{targets.destdir}}/usr/bin
-      go build -tags "${BUILD_TAGS}" \-o ${{targets.destdir}}/usr/bin/rke2 -ldflags "${LDFLAGS}"
+      go build -tags "\${BUILD_TAGS}" \\-o ${{targets.destdir}}/usr/bin/rke2 -ldflags "\${LDFLAGS}"
       EOF
 
       chmod +x build.sh
@@ -122,6 +133,12 @@ subpackages:
           # cleanup
           # REF: https://github.com/rancher/rke2/blob/release-1.32/Dockerfile#L114
           rm ${{targets.contextdir}}/charts/chart_versions.yaml
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            dir: "/charts/"
+            name: "*.yaml"
 
 # Matching upstream tag and transforming it back to apkv2 friendly format
 # EX: '1.33.3+rke2r1' --> '1.33.3.2.1'

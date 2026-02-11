@@ -1,0 +1,61 @@
+name: Validate Helm chart image configurability
+
+needs:
+  packages:
+    - busybox
+    - chelm
+    - helm
+    - yq
+
+inputs:
+  values:
+    description: |
+      YAML values required to render the chart (e.g., storage config for Loki).
+      Applied to all test cases.
+    required: false
+  kube-version:
+    description: Kubernetes version to use for helm template rendering.
+    default: "1.35.0"
+
+pipeline:
+  - name: Validate chart images
+    runs: |
+      set -eu
+
+      # Find chart
+      chart_yaml=$(find / -maxdepth 3 -name 'Chart.yaml' -type f 2>/dev/null | head -1)
+      [ -n "$chart_yaml" ] || { echo "ERROR: No Chart.yaml found"; exit 1; }
+
+      chart_path=$(dirname "$chart_yaml")
+      schema="$chart_path/cg.json"
+
+      echo "chart: $chart_path"
+
+      if [ ! -f "$schema" ]; then
+        echo "no cg.json - skipping validation"
+        exit 0
+      fi
+
+      # Library charts can't be templated
+      chart_type=$(yq -e '.type // "application"' "$chart_yaml")
+      if [ "$chart_type" = "library" ]; then
+        echo "library chart - skipping validation"
+        exit 0
+      fi
+
+      # Disable external subcharts during testing.
+      # External deps (with repository field) are packaged as separate APKs and tested
+      # independently. We only need to validate the parent chart's images here.
+      subchart_disables=$(yq -r '.dependencies[] | select(.repository != null and .repository != "" and .condition != null) | .condition + "=false"' "$chart_yaml" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+
+      set_args=""
+      if [ -n "$subchart_disables" ]; then
+        echo "disabling external subcharts: $subchart_disables"
+        set_args="--set=$subchart_disables"
+      fi
+
+      chelm test "$schema" \
+        --chart="$chart_path" \
+        --kube-version="${{inputs.kube-version}}" \
+        --extra-values='${{inputs.values}}' \
+        $set_args

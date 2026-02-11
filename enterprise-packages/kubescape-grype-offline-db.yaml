@@ -1,0 +1,115 @@
+#nolint:git-checkout-must-use-github-updates,valid-pipeline-git-checkout-tag
+package:
+  name: kubescape-grype-offline-db
+  version: 0_git20250804
+  epoch: 0
+  description: Grype offline database proxy server for airgapped Kubernetes environments
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - nodejs-22
+
+vars:
+  app-dir: /usr/share/grype-offline-db
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - curl
+      - jq
+      - nodejs-22
+      - npm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubescape/grype-offline-db.git
+      branch: main
+      expected-commit: bc4f1a753c8d680abab6f624ecf898ef4974106e
+
+  - name: Install npm dependencies
+    runs: |
+      cd app
+      # Update express to fix CVEs (CVE-2024-43796, CVE-2024-29041)
+      npm pkg set "dependencies.express=^4.21.0"
+      # Add overrides to fix CVEs in transitive dependencies
+      npm pkg set "overrides.body-parser=^1.20.3"
+      npm pkg set "overrides.cookie=^0.7.0"
+      npm pkg set "overrides.path-to-regexp=^0.1.12"
+      npm pkg set "overrides.qs=^6.14.1"
+      npm pkg set "overrides.send=^0.19.0"
+      npm pkg set "overrides.serve-static=^1.16.0"
+      npm install --omit=dev
+
+  - name: Download Grype database
+    runs: |
+      cd app
+      # Download the database listing
+      curl -sf "https://toolbox-data.anchore.io/grype/databases/listing.json" | jq -r '.available."5" | first' > grype-db.json
+      # Download the database tarball
+      curl -sf -o grype-db.tar.gz "$(jq -r '.url' grype-db.json)"
+
+  - name: Install application
+    runs: |
+      mkdir -p "${{targets.contextdir}}${{vars.app-dir}}"
+      cp -r app/* "${{targets.contextdir}}${{vars.app-dir}}/"
+
+      # Create wrapper script
+      mkdir -p "${{targets.contextdir}}/usr/bin"
+      cat > "${{targets.contextdir}}/usr/bin/grype-offline-db" << 'EOF'
+      #!/bin/sh
+      cd /usr/share/grype-offline-db
+      exec node index.js "$@"
+      EOF
+      chmod 755 "${{targets.contextdir}}/usr/bin/grype-offline-db"
+
+update:
+  enabled: true
+  git:
+  schedule:
+    period: monthly
+    reason: Upstream does not maintain tags or releases
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - wait-for-it
+    environment:
+      PORT: "8080"
+      BASE_URL: "http://localhost:8080"
+      DISABLE_DB_EXPIRATION: "true"
+  pipeline:
+    - name: Verify installation
+      runs: |
+        set -euo pipefail
+        stat ${{vars.app-dir}}/index.js
+        stat ${{vars.app-dir}}/package.json
+        stat ${{vars.app-dir}}/grype-db.json
+        stat ${{vars.app-dir}}/grype-db.tar.gz
+        stat /usr/bin/grype-offline-db
+    - name: Test server functionality
+      uses: test/daemon-check-output
+      with:
+        start: grype-offline-db
+        timeout: 30
+        expected_output: |
+          Server listening on port 8080
+        post: |
+          set -euo pipefail
+          wait-for-it -t 10 --strict localhost:8080 -- echo "Server is up"
+
+          # Test root endpoint
+          curl -sf http://localhost:8080/ | grep -F "Grype Offline Database"
+
+          # Test listing.json endpoint returns valid JSON with expected structure
+          curl -sf http://localhost:8080/listing.json | jq -e '.available."5" | length > 0'
+          curl -sf http://localhost:8080/listing.json | jq -e '.available."5"[0].url | contains("grype-db.tar.gz")'
+
+          # Test database download endpoint (just verify it starts with gzip magic bytes)
+          curl -sf -o /tmp/grype-db.tar.gz http://localhost:8080/grype-db.tar.gz
+          head -c 2 /tmp/grype-db.tar.gz | od -An -tx1 | grep -F "1f 8b"

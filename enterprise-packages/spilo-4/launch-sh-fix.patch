@@ -1,23 +1,31 @@
-From 0dbd09479b0de20c4c3f58519c87fed10c692e8b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Uti Edun <uti.edun@chainguard.dev>
-Date: Wed, 15 Oct 2025 11:58:52 +0000
-Subject: [PATCH] fix: update launch script to create service directory and
- adjust permissions. This is because on wolfi, the /etc/service dir is already
- owned by runit and symlinking to that location causes error during package
- build
+Date: Mon, 9 Dec 2025 16:15:00 +0000
+Subject: [PATCH] fix: Handle restricted permissions on system directories in
+ Wolfi
 
+This patch addresses permission issues when running Spilo on Wolfi Linux where
+system directories like /etc/service, /var/spool/cron, and /var/tmp may already
+exist with restricted permissions owned by system users (e.g., runit, cron).
+
+Changes:
+- Create $RW_DIR/service directory and set proper ownership
+- Handle /etc/service by removing and symlinking to writable location
+- Gracefully handle /var/spool/cron with permission fix attempts before removal
+- Gracefully handle /var/tmp with fallback if removal fails
+- Add error suppression to prevent permission denied errors from stopping startup
 ---
- postgres-appliance/launch.sh | 12 ++++++++++--
- 1 file changed, 10 insertions(+), 2 deletions(-)
+ postgres-appliance/launch.sh | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
 
 diff --git a/postgres-appliance/launch.sh b/postgres-appliance/launch.sh
-index 1e3e54f..326344f 100755
+index 1e3e54f..216fec2 100755
 --- a/postgres-appliance/launch.sh
 +++ b/postgres-appliance/launch.sh
 @@ -24,7 +24,7 @@ else
      ln -snf /usr/lib/locale/locale-archive.22 /run/locale-archive
  fi
- 
+
 -mkdir -p "$PGLOG" "$PGDATA" "$RW_DIR/postgresql" "$RW_DIR/tmp" "$RW_DIR/certs"
 +mkdir -p "$PGLOG" "$PGDATA" "$RW_DIR/postgresql" "$RW_DIR/tmp" "$RW_DIR/certs" "$RW_DIR/service"
  if [ "$(id -u)" -ne 0 ]; then
@@ -32,21 +40,31 @@ index 1e3e54f..326344f 100755
  chmod -R go-w "$PGROOT"
  chmod 01777 "$RW_DIR/tmp"
  chmod 0700 "$PGDATA"
-@@ -67,6 +67,14 @@ sv_stop() {
+@@ -66,7 +66,24 @@ sv_stop() {
+     sv -w 86400 stop patroni
      sv -w 86400 stop /etc/service/*
  }
- 
 +rm -rf /etc/service
 +ln -s "$RW_DIR/service" /etc/service
+
++# Handle /var/spool/cron - it may already exist with restricted permissions on some systems (e.g., Wolfi)
++if [ -e /var/spool/cron ] && [ ! -L /var/spool/cron ]; then
++    chmod -R 775 /var/spool/cron 2>/dev/null || true
++    rm -fr /var/spool/cron 2>/dev/null || true
++fi
++[ ! -e /var/spool/cron ] && mkdir -p /var/spool && ln -s "$RW_DIR/cron" /var/spool/cron
 +
-+rm -fr /var/spool/cron /var/tmp
-+mkdir -p /var/spool
-+ln -s "$RW_DIR/cron" /var/spool/cron
-+ln -s "$RW_DIR/tmp" /var/tmp
++# Handle /var/tmp - it may already exist
++if [ -e /var/tmp ] && [ ! -L /var/tmp ]; then
++    rm -fr /var/tmp 2>/dev/null || true
++fi
++[ ! -e /var/tmp ] && ln -s "$RW_DIR/tmp" /var/tmp
++
 +ln -s "$RW_DIR/postgres.yml" "$PGHOME/postgres.yml"
++chmod 01777 /var/spool/cron /etc/service /var/tmp 2>/dev/null || true
  [ ! -d /etc/service ] && exit 1  # /etc/service has not been created due to an error, the container is no-op
- 
+
  trap sv_stop TERM QUIT INT
--- 
-2.51.0
+--
+2.51.2
 

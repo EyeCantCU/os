@@ -1,0 +1,113 @@
+package:
+  name: proxysql-fips
+  version: "3.0.5"
+  epoch: 0
+  description: High-performance MySQL proxy with a GPL license
+  copyright:
+    - license: GPL-3.0-or-later
+  dependencies:
+    runtime:
+      - openssl-config-fipshardened
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bison
+      - build-base
+      - busybox
+      - bzip2
+      - cmake-3
+      - curl-dev
+      - gawk
+      - git
+      - grep
+      - icu
+      - icu-dev
+      - jemalloc-dev
+      - libevent-dev
+      - libtool
+      - m4
+      - openssl
+      - openssl-dev
+      - patch
+      - perl
+      - pkgconf-dev
+      - posix-libc-utils
+      - python3
+      - util-linux-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/sysown/proxysql
+      tag: v${{package.version}}
+      expected-commit: 7e9e00997d7d9fa4811c86c3a3bec9c886386e1f
+
+  # Build libmicrohttpd without gnutls - the embedded HTTP server will not support HTTPS
+  # Use system curl linked to openssl instead of vendored curl
+  - uses: patch
+    with:
+      patches: |
+        libmicrohttpd-disable-https.patch
+        remove-gnutls-linking.patch
+        use-system-curl.patch
+
+  - runs: make -j$(nproc) GIT_VERSION=${{package.version}}-r${{package.epoch}}
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mkdir -p ${{targets.destdir}}/etc
+      install -m 0755 src/proxysql ${{targets.destdir}}/usr/bin
+      install -m 0600 etc/proxysql.cnf ${{targets.destdir}}/etc
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: sysown/proxysql
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - binutils
+        - posix-libc-utils
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: proxysql
+    - uses: test/tw/ver-check
+      with:
+        bins: proxysql
+    - name: Verify dynamic linking to system libraries
+      runs: |
+        # Use readelf to check direct dependencies, not transitive ones via ldd
+        # This ensures we're not statically linking OpenSSL while also dynamically linking it
+        readelf -d /usr/bin/proxysql | grep -F "libssl.so"
+        readelf -d /usr/bin/proxysql | grep -F "libcrypto.so"
+        readelf -d /usr/bin/proxysql | grep -F "libcurl.so"
+    - runs: |
+        # Generate ProxySQL configuration
+        cat > ./proxysql.cnf <<EOF
+        admin_variables={
+            mysql_ssl=false
+        }
+        EOF
+
+        # Start ProxySQL
+        echo "Starting ProxySQL..."
+        proxysql --daemon --config-file=./proxysql.cnf
+
+        # Check the status of the previous command
+        if [ $? -ne 0 ]; then
+            echo "ProxySQL failed to start"
+            exit 1
+        else
+            echo "ProxySQL started successfully"
+        fi

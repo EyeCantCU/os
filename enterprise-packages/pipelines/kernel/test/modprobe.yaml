@@ -1,0 +1,65 @@
+name: modprobe
+
+needs:
+  packages:
+    - bash
+    - busybox-full
+    - kmod
+    - posix-libc-utils
+    - qemu
+
+inputs:
+  modprobe:
+    description: Name or alias of module to load
+    required: true
+  modname:
+    description: Canonical name of module to load
+    required: false
+  args:
+    description: Kernel cmdline args
+    required: false
+    default: module.sig_enforce=1
+  error:
+    description: Error string to expect.
+    required: false
+    default:
+
+pipeline:
+  - name: Test kernel boot and modprobe in microvm
+    runs: |
+      initrd_root=$(mktemp -t initrd_root.XXXXXXXX -d)
+      initrd_image=$(mktemp -t initrd_image.XXXXXXXX)
+      arch=$(uname -m)
+
+      ./scripts/make-busybox-initramfs make-root "$initrd_root"
+
+      ./scripts/make-busybox-initramfs add-modules "$initrd_root"
+
+      ./scripts/make-busybox-initramfs make-init "$initrd_root" ./scripts/modprobe_test "${{inputs.modprobe}}" "${{inputs.modname}}" "${{inputs.error}}"
+
+      ./scripts/make-busybox-initramfs make-image "$initrd_root" "$initrd_image"
+
+      case "$arch" in
+          x86_64)
+            timeout 300 qemu-system-x86_64 \
+                -kernel /boot/vmlinuz -m 1G -cpu max -machine q35 \
+                -nographic -append "console=ttyS0 panic=-1 ${{inputs.args}}" -initrd "$initrd_image" \
+                -no-reboot > qemu_output.log
+          ;;
+          aarch64)
+            timeout 300 qemu-system-aarch64 \
+                -kernel /boot/vmlinuz -m 1G -cpu max -machine virt \
+                -nographic -append "panic=-1 ${{inputs.args}}" -initrd "$initrd_image" \
+                -no-reboot > qemu_output.log
+          ;;
+      esac
+      awk '/Starting modprobe test/,/Finished modprobe test/' qemu_output.log
+      if grep -q "FAIL" qemu_output.log; then
+        echo "Test failed - output:"
+        cat qemu_output.log
+        exit 1
+      elif ! grep -q "Finished modprobe test" qemu_output.log; then
+        echo "Test did not complete - output:"
+        cat qemu_output.log
+        exit 1
+      fi

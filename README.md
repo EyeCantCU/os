@@ -12,4 +12,4 @@ Details on these tools an how to use them can be found in the [Shrink](./docs/sh
 
 ## Transitions
 
-Stereo contains tools to help perform shared library transitions - see the [TRANSITIONS](./docs/TRANSITIONS.md) for more details.
+Stereo contains tools to help perform shared library transitions - see the [TRANSITION](./docs/TRANSITION.md) for more details.

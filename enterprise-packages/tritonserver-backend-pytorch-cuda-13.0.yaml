@@ -2,7 +2,7 @@
 package:
   name: tritonserver-backend-pytorch-cuda-13.0
   version: 25.11
-  epoch: 0
+  epoch: 2
   description: NVIDIA Triton Inference Server Python Backend
   copyright:
     - license: BSD-3-Clause
@@ -15,6 +15,8 @@ package:
       - libjpeg-turbo
       - libpng
       - libtorch-tensorrt-cuda-${{vars.cuda-version}}
+      - libtorchvision-cuda-${{vars.cuda-version}}
+      - py${{vars.python-version}}-torch-cuda-${{vars.cuda-version}}-bin
       - tritonserver-cuda-${{vars.cuda-version}}
 
 vars:
@@ -43,6 +45,9 @@ environment:
       - opencv-dev
       - py${{vars.python-version}}-build-base-dev
       - rapidjson-dev
+      - triton-inference-server-backend=${{package.version}}
+      - triton-inference-server-common=${{package.version}}
+      - triton-inference-server-core=${{package.version}}
   environment:
     CUDA_ARCHITECTURES: all
     LIBRARY_PATH: /usr/lib/python${{vars.python-version}}/site-packages/torch/lib
@@ -52,18 +57,12 @@ pipeline:
     with:
       repository: https://github.com/triton-inference-server/pytorch_backend
       branch: r${{package.version}}
-      expected-commit: 1f571e5ba5811665dd72a2d3ec49801f25201db5
+      expected-commit: cdb637bea6f4471647ddb2833d55095bebf310e1
 
-  # cmake.patch:
-  # - Use libtorchvision.so instead of libtorchvision.so.1
-  # - Skip patchelf in non-Docker builds
-  # - Use our libopencv
-  # - Use our torchtrtc binary
-  # fuser-depracate.patch removes a header no longer in use
   - uses: patch
     with:
       patches: |
-        cmake.patch
+        0001-Disable-vendoring-of-files-from-other-APKs.patch
         fuser-depracate.patch
 
   - uses: cmake/configure
@@ -74,17 +73,63 @@ pipeline:
         -DTRITON_PYTORCH_ENABLE_TORCHTRT=on \
         -DTRITON_PYTORCH_INCLUDE_PATHS="/usr/include/torch;/usr/include/torch/csrc/api/include" \
         -DTRITON_PYTORCH_LIB_PATHS="/usr/lib" \
-        -DTRITON_TORCHTRT_INCLUDE_PATH="/usr/include/torch_tensorrt" \
-        -DTRITON_TORCHTRT_LIB_PATHS="/usr/lib" \
-        -DTRITON_PYTORCH_SKIP_TORCH_INSTALL=ON \
+        -DTRITON_REPO_ORGANIZATION:STRING=file:///usr/src/triton-inference-server \
+        -DTRITON_COMMON_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/common.git && git branch --show-current) \
+        -DTRITON_CORE_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/core.git && git branch --show-current) \
+        -DTRITON_BACKEND_REPO_TAG:STRING=$(cd /usr/src/triton-inference-server/backend.git && git branch --show-current) \
         -DCMAKE_INSTALL_PREFIX=/opt/tritonserver
 
   - uses: cmake/build
 
   - uses: cmake/install
 
-  - name: Remove tritonserver core headers
-    runs: rm -r "${{targets.contextdir}}/opt/tritonserver/include/triton/core/"
+  - name: "Remove extraneous files"
+    runs: |
+      cd ${{targets.contextdir}}/opt/tritonserver
+      for file in *; do
+        case "$file" in
+          backends|lib)
+            continue
+            ;;
+          bin|include)
+            rm -rf "$file"
+            ;;
+          *)
+            echo "ERROR: Unexpected file $(pwd)/$file" 1>&2
+            exit 1
+            ;;
+        esac
+      done
+      cd ${{targets.contextdir}}/opt/tritonserver/lib
+      for file in *; do
+        case "$file" in
+          cmake)
+            continue
+            ;;
+          *.a|pkgconfig|stubs)
+            rm -rf "$file"
+            ;;
+          *)
+            echo "ERROR: Unexpected file $(pwd)/$file" 1>&2
+            exit 1
+            ;;
+        esac
+      done
+      cd ${{targets.contextdir}}/opt/tritonserver/lib/cmake
+      for file in *; do
+        case "$file" in
+          TritonPyTorchBackend)
+            continue
+            ;;
+          GTest|TritonBackend|TritonCommon|TritonCore)
+            rm -rf "$file"
+            ;;
+          *)
+            echo "ERROR: Unexpected file $(pwd)/$file" 1>&2
+            exit 1
+            ;;
+        esac
+      done
 
 update:
   enabled: false

@@ -1,0 +1,77 @@
+#!/bin/bash
+
+usage() {
+    echo "Usage: $0 <module-file> <certificate-file>"
+    exit 1
+}
+
+stderr() { echo "$@" >&2; }
+
+main() {
+    if [ $# -ne 2 ]; then
+        stderr "Error: Expected 2 arguments, got $#"
+        usage
+    fi
+
+    local module_file="$1"
+    local cert_file="$2"
+
+    if [ ! -f "$module_file" ]; then
+        stderr "Error: Module file '$module_file' not found"
+        return 1
+    fi
+
+    if [ ! -f "$cert_file" ]; then
+        stderr "Error: Certificate file '$cert_file' not found"
+        return 1
+    fi
+
+    local extract_script
+    if [ -f "./scripts/extract-module-sig.pl" ]; then
+        # If we're in a kernel source tree, use that copy
+        extract_script="./scripts/extract-module-sig.pl"
+    else
+        # If not in a kernel source tree, look for a source tree from a headers package.
+        extract_script=$(find /usr/src -name "extract-module-sig.pl" -type f 2>/dev/null | head -n1)
+        if [ -z "$extract_script" ]; then
+            stderr "Error: could not find extract-module-sig.pl"
+            return 1
+        fi
+    fi
+
+    local temp_dir
+    temp_dir=$(mktemp -d) || {
+        stderr "Error: Failed to create temporary directory"
+        return 1
+    }
+    trap 'rm -rf "$temp_dir"' EXIT
+
+    local module_to_process="$module_file"
+    case "$module_file" in
+        *.zst)
+            local decompressed_name="${module_file%.zst}"
+            zstd -d "$module_file" -o "$temp_dir/$(basename "$decompressed_name")" || {
+                stderr "Error: Failed to decompress module"
+                return 1
+            }
+            module_file="$temp_dir/$(basename "$decompressed_name")"
+            ;;
+    esac
+
+    "$extract_script" -s "$module_file" > "$temp_dir/module.sig" || {
+        stderr "Error: Failed to extract signature from module"
+        return 1
+    }
+    "$extract_script" -0 "$module_file" > "$temp_dir/module.unsigned" || {
+        stderr "Error: Failed to extract unsigned content from module"
+        return 1
+    }
+
+    # -noverify disables certificate chain verification, not signature verification
+    openssl cms -verify -inform DER -in "$temp_dir/module.sig" -content "$temp_dir/module.unsigned" -binary -certfile "$cert_file" -noverify -out /dev/null || {
+        stderr "Signature verification failed"
+        return 1
+    }
+}
+
+main "$@"

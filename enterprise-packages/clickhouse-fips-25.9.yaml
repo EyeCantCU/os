@@ -1,6 +1,6 @@
 package:
   name: clickhouse-fips-25.9
-  version: "25.9.6.117"
+  version: "25.9.7.56"
   epoch: 1
   description: ClickHouse is the fastest and most resource efficient open-source database for real-time apps and analytics.
   copyright:
@@ -56,6 +56,7 @@ environment:
       - rustup
       - samurai
       - wget
+      - xmlstarlet
       - yasm
   environment:
     RUSTC_BOOTSTRAP: 1
@@ -66,7 +67,7 @@ pipeline:
     with:
       repository: https://github.com/ClickHouse/ClickHouse
       tag: v${{package.version}}-stable
-      expected-commit: ff2a1965ca61a121986c9e65a94c3bcff9d84744
+      expected-commit: f805515dfb03279ddf29fcc641cff9150915d778
 
   - uses: patch
     with:
@@ -244,6 +245,82 @@ subpackages:
                 exit 1
               }
 
+  - name: clickhouse-fips-${{vars.major-minor-version}}-iamguarded-compat
+    dependencies:
+      provides:
+        - clickhouse-fips-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox
+        - coreutils
+        - xmlstarlet
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: clickhouse
+          version: ${{vars.major-version}}
+      - runs: |
+          set -x
+          mkdir -p /iamguarded/clickhouse/etc
+          mkdir -p /iamguarded/clickhouse/data
+          mkdir -p /opt/iamguarded/clickhouse/etc.default
+          mkdir -p /opt/iamguarded/clickhouse/etc/config.d
+          mkdir -p /opt/iamguarded/clickhouse/etc/conf.d
+          mkdir -p /opt/iamguarded/clickhouse/etc/users.d
+          mkdir -p /opt/iamguarded/clickhouse/bin
+          mkdir -p /opt/iamguarded/clickhouse/logs
+          mkdir -p /opt/iamguarded/clickhouse/tmp
+          mkdir -p /opt/iamguarded/clickhouse/licenses
+          mkdir -p ${{targets.contextdir}}/var/log/clickhouse-server
+          mkdir ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          mkdir ${{targets.contextdir}}/docker-entrypoint-startdb.d
+          install -m755 ${{targets.destdir}}/etc/clickhouse-keeper/keeper_config.xml /opt/iamguarded/clickhouse/etc/keeper_config.xml
+          install -m755 ${{targets.destdir}}/etc/clickhouse-server/users.xml /opt/iamguarded/clickhouse/etc/users.xml
+          install -m755 ${{targets.destdir}}/etc/clickhouse-server/config.xml /opt/iamguarded/clickhouse/etc/config.xml
+          mkdir -p ${{targets.contextdir}}/var/log/
+          # Disable some commands used in iamguarded scripts. These commands more likely fail in this since this image take non root approach
+          sed -i 's/ensure_user_exists/# ensure_user_exists/g' /opt/iamguarded/scripts/clickhouse/postunpack.sh
+          # The `--userspec`` flag belongs to GNU's chroot, whereas we are use BusyBox's. As a workaround, use `su-exec` instead.
+          sed -i 's|exec chroot --userspec="$userspec" /|exec chroot / su-exec "$userspec"|' /opt/iamguarded/scripts/libos.sh
+          sed -i 's|chroot --userspec="$userspec" /|chroot / su-exec "$userspec"|' /opt/iamguarded/scripts/libos.sh
+          # Use package path while unpacking
+          find /opt/iamguarded/scripts -iname "*.sh" -exec sed -i '/chown/c\continue' -i {} \;
+          # Remove existing symlinks that might conflict
+          rm -f /etc/clickhouse-server /var/lib/clickhouse /var/log/clickhouse-server /var/lib/clickhouse/tmp
+          /opt/iamguarded/scripts/clickhouse/postunpack.sh
+          # Find all files in /usr/bin that are either named "clickhouse" or symlinks pointing to "clickhouse"
+          for file in ${{targets.destdir}}/usr/bin/*; do
+              if [ -f "$file" ] && [ "$(basename "$file")" = "clickhouse" ]; then
+                  # Found a direct match for "clickhouse"
+                  ln -sf /usr/bin/clickhouse /opt/iamguarded/clickhouse/bin/clickhouse
+              elif [ -L "$file" ]; then
+                  # Check if the symlink points to clickhouse
+                  target=$(readlink -f "$file")
+                  if [ "$(basename "$target")" = "clickhouse" ]; then
+                      link_name=$(basename "$file")
+                      ln -sf /usr/bin/clickhouse "/opt/iamguarded/clickhouse/bin/$link_name"
+                  fi
+              fi
+          done
+          ln -s /dev/stdout ${{targets.contextdir}}/var/log/clickhouse-server/clickhouse.log
+          ln -s /dev/stderr ${{targets.contextdir}}/var/log/clickhouse-server/clickhouse_error.log
+          mkdir -p ${{targets.contextdir}}/var/lib
+          ln -s /iamguarded/clickhouse/data ${{targets.contextdir}}/var/lib/clickhouse
+      - uses: iamguarded/finalize-compat
+        with:
+          package: clickhouse
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: clickhouse
+            version: ${{vars.major-version}}
+
   - name: clickhouse-keeper-fips-${{vars.major-minor-version}}
     description: "clickhouse keeper"
     dependencies:
@@ -318,6 +395,79 @@ subpackages:
 
               # Get data from the node
               clickhouse-keeper-client --host 127.0.0.1 --port 9181 -q "get \"/test-node\"" | grep -q "test-data"
+
+  - name: clickhouse-keeper-fips-${{vars.major-minor-version}}-iamguarded-compat
+    dependencies:
+      provides:
+        - clickhouse-keeper-fips-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - busybox
+        - coreutils
+        - merged-usrsbin
+        - wolfi-baselayout
+        - clickhouse-keeper-fips
+        - xmlstarlet
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: clickhouse-keeper
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /iamguarded/clickhouse-keeper/etc
+          mkdir -p /iamguarded/clickhouse-keeper/data
+          mkdir -p /opt/iamguarded/clickhouse-keeper/etc
+          mkdir -p /opt/iamguarded/clickhouse-keeper/etc.default
+          mkdir -p /opt/iamguarded/clickhouse-keeper/bin
+          mkdir -p /opt/iamguarded/clickhouse-keeper/logs
+          mkdir -p /opt/iamguarded/clickhouse-keeper/tmp
+          mkdir -p /opt/iamguarded/clickhouse-keeper/licenses
+
+          mkdir -p ${{targets.contextdir}}/var/log/clickhouse-server
+
+          install -m755 ${{targets.destdir}}/etc/clickhouse-keeper/keeper_config.xml /opt/iamguarded/clickhouse-keeper/etc/keeper_config.xml
+
+          mkdir -p ${{targets.contextdir}}/var/log/
+
+          sed -i 's/ensure_user_exists/# ensure_user_exists/g' /opt/iamguarded/scripts/clickhouse-keeper/postunpack.sh
+
+          sed -i 's|exec chroot --userspec="$userspec" /|exec chroot / su-exec "$userspec"|' /opt/iamguarded/scripts/libos.sh
+          sed -i 's|chroot --userspec="$userspec" /|chroot / su-exec "$userspec"|' /opt/iamguarded/scripts/libos.sh
+
+          # Use package path while unpacking
+          find /opt/iamguarded/scripts -iname "*.sh" -exec sed -i '/chown/c\continue' -i {} \;
+          # Remove existing symlinks that might conflict
+          rm -f /etc/clickhouse-keeper /var/lib/clickhouse /var/log/clickhouse-server
+          /opt/iamguarded/scripts/clickhouse-keeper/postunpack.sh
+
+          # Find all files in /usr/bin that are either named "clickhouse-keeper" or symlinks pointing to "clickhouse-keeper"
+          for file in ${{targets.destdir}}/usr/bin/*; do
+              if [ -f "$file" ] && [ "$(basename "$file")" = "clickhouse-keeper" ]; then
+                  # Found a direct match for "clickhouse-keeper"
+                  ln -sf /usr/bin/clickhouse-keeper /opt/iamguarded/clickhouse-keeper/bin/clickhouse-keeper
+              elif [ -L "$file" ]; then
+                  # Check if the symlink points to clickhouse-keeper
+                  target=$(readlink -f "$file")
+                  if [ "$(basename "$target")" = "clickhouse-keeper" ]; then
+                      link_name=$(basename "$file")
+                      ln -sf /usr/bin/clickhouse-keeper "/opt/iamguarded/clickhouse-keeper/bin/$link_name"
+                  fi
+              fi
+          done
+      - uses: iamguarded/finalize-compat
+        with:
+          package: clickhouse-keeper
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: clickhouse-keeper
+            version: ${{vars.major-version}}
 
 test:
   environment:

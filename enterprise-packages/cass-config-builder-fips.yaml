@@ -1,0 +1,84 @@
+package:
+  name: cass-config-builder-fips
+  version: "1.0.18"
+  epoch: 0
+  description: |
+    Configuration builder for Apache Cassandra based on definitions at datastax/cass-config-definitions (FIPS mode)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openssl-config-fipshardened
+
+vars:
+  # Java 11 matches upstream Docker image: https://github.com/datastax/cass-config-builder/blob/ca53d1a90530fd225fc033d57656f2314298b015/docker/Dockerfile#L14
+  java-version: "11"
+
+environment:
+  contents:
+    packages:
+      - bouncycastle-fips~2.1
+      - busybox
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/datastax/cass-config-builder
+      expected-commit: ca53d1a90530fd225fc033d57656f2314298b015
+      tag: v${{package.version}}
+
+  - runs: |
+      sed -i 's|git@\(.*\):|https://\1/|g' .gitmodules
+      git submodule update --init
+
+  - runs: |
+      # Ensure version.txt exists
+      echo "${{package.version}}" > version.txt
+
+      # Patch build.gradle to use projectDir for version.txt (fixes Gradle daemon working directory issues)
+      sed -i "s|new File('version.txt')|new File(projectDir, 'version.txt')|g" build.gradle
+
+      ./gradlew copyDockerBuildCtx --stacktrace
+      mkdir -p "${{targets.destdir}}"/usr/local/bin
+      mkdir -p "${{targets.destdir}}"/definitions
+      cp -r build/docker/bin/* "${{targets.destdir}}"/usr/local/bin
+      cp -r build/docker/definitions/* "${{targets.destdir}}"/definitions
+      cp -r build/docker/*.jar "${{targets.destdir}}"/usr/local/bin/
+
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar "${{targets.destdir}}"/usr/local/bin/
+
+update:
+  enabled: true
+  github:
+    identifier: datastax/cass-config-builder
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - openjdk-${{vars.java-version}}-default-jdk
+        - openssl-config-fipshardened
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
+    - name: Verify installation
+      runs: |
+        set -euo pipefail
+        ls /usr/local/bin/cass-config-builder-*.jar
+        test -d /definitions
+        test -x /usr/local/bin/user_setup
+        test -x /usr/local/bin/run_configbuilder

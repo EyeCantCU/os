@@ -1,0 +1,152 @@
+# Provides Debian CA certificates for cert-manager's trust-manager to inject into pods.
+# How it works: Extracts ca-certificates from Debian repos, converts to JSON, packages with
+# copyandmaybepause binary. trust-manager runs this as init container to inject CA bundles
+# into application containers, enabling them to trust the same CAs as Debian systems.
+# This reverse-engineers upstream's GitHub Actions build process.
+# Ref: https://github.com/cert-manager/trust-manager/tree/main/trust-packages
+package:
+  name: cert-manager-package-11
+  version: "20210119.4" # Debian 11 (Bullseye) ca-certificates
+  epoch: 0
+  description: Debian 11 CA bundle for cert-manager trust-manager init containers
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - tini
+      - trust-package # Provides copyandmaybepause binary
+
+environment:
+  contents:
+    packages:
+      - binutils
+      - busybox
+      - curl
+      - gnutar
+      - jq
+      - xz
+
+pipeline:
+  # Symlink copyandmaybepause at root
+  - runs: |
+      mkdir -p ${{targets.destdir}}
+      ln -s /usr/bin/copyandmaybepause ${{targets.destdir}}/copyandmaybepause
+
+  # Extract Debian CA certificates and convert to JSON
+  # Ref: https://github.com/cert-manager/trust-manager/blob/main/make/debian-trust-package-fetch.sh
+  - name: Process Debian CA certificates
+    runs: |
+      set -euo pipefail
+
+      # trust-manager expects this exact path structure
+      mkdir -p "${{targets.destdir}}/debian-package"
+
+      # Production uses pinned versions for reproducible builds
+      # Ref: https://github.com/cert-manager/trust-manager/blob/main/make/debian-bullseye-trust-package.mk#L24
+      ACTION="exact"
+      TARGET_DEBIAN_BUNDLE_VERSION="${{package.version}}"
+      target_ca_certificates_version="${TARGET_DEBIAN_BUNDLE_VERSION%.*}"  # Strip patch version for .deb filename
+
+      # Create temporary build directory
+      BUILD_DIR=$(mktemp -d)
+      cd "$BUILD_DIR"
+
+      # Fetch exact CA bundle from Debian 11 repos to match system expectations
+      DEB_URL="https://deb.debian.org/debian/pool/main/c/ca-certificates/ca-certificates_${target_ca_certificates_version}_all.deb"
+      echo "Fetching Debian ca-certificates from: $DEB_URL"
+      curl -fLO "$DEB_URL"
+
+      # Extract using ar/tar to avoid dpkg dependency
+      ar x "ca-certificates_${target_ca_certificates_version}_all.deb"
+      tar -xf data.tar.xz
+
+      # Debian default enables only Mozilla certificates
+      > ca-bundle.crt
+      for cert in usr/share/ca-certificates/mozilla/*.crt; do
+        [ -f "$cert" ] && cat "$cert" >> ca-bundle.crt
+      done
+
+      installed_version="${target_ca_certificates_version}"
+
+      # Create JSON bundle in trust-manager's expected format
+      PACKAGE_NAME="cert-manager-debian-bullseye"
+      # Upstream versioning for ACTION="exact" adds .0 suffix
+      # Ref: https://github.com/cert-manager/trust-manager/blob/main/make/debian-trust-package-fetch.sh#L113
+      version_suffix=".0"
+      json_version="${installed_version}${version_suffix}"
+
+      echo "Creating JSON bundle with version: $json_version"
+      echo "{}" | jq \
+        --rawfile bundle ca-bundle.crt \
+        --arg name "$PACKAGE_NAME" \
+        --arg version "$json_version" \
+        '.name = $name | .bundle = $bundle | .version = $version' \
+        > "${{targets.destdir}}/debian-package/cert-manager-package-debian.json"
+
+      # Cleanup temporary build directory
+      cd /
+      rm -rf "$BUILD_DIR"
+
+update:
+  enabled: true
+  release-monitor:
+    identifier: 388117
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+        - openssl # For certificate validation
+        - git
+        - go
+  pipeline:
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
+    # Validate bundle format using upstream validator
+    - name: Validate with trust-manager validator
+      runs: |
+        set -euo pipefail
+        git clone --depth 1 --branch main https://github.com/cert-manager/trust-manager /tmp/trust-manager
+        cd /tmp/trust-manager
+        go build -o /tmp/validate-trust-package ./cmd/validate-trust-package
+        /tmp/validate-trust-package < /debian-package/cert-manager-package-debian.json
+        rm -rf /tmp/trust-manager /tmp/validate-trust-package
+    # Verify JSON structure
+    - name: Verify JSON bundle structure
+      runs: |
+        set -euo pipefail
+        stat /debian-package/cert-manager-package-debian.json
+        jq -e '.name == "cert-manager-debian-bullseye"' /debian-package/cert-manager-package-debian.json
+        jq -e '.version | test("^[0-9]+\\.[0-9]+")' /debian-package/cert-manager-package-debian.json
+    # Validate CA certificates
+    - name: Validate CA certificates content
+      runs: |
+        set -euo pipefail
+
+        # Extract and validate certificates
+        jq -r '.bundle' /debian-package/cert-manager-package-debian.json > /tmp/ca-bundle.crt
+
+        # Ensure certificates exist
+        grep -F "BEGIN CERTIFICATE" /tmp/ca-bundle.crt
+
+        # Validate certificate format
+        openssl crl2pkcs7 -nocrl -certfile /tmp/ca-bundle.crt | openssl pkcs7 -print_certs -noout
+    # Test copyandmaybepause symlink
+    - name: Test copyandmaybepause functionality
+      runs: |
+        set -euo pipefail
+        mkdir -p /tmp/source /tmp/dest
+        cp /debian-package/cert-manager-package-debian.json /tmp/source/
+        /copyandmaybepause /tmp/source /tmp/dest
+        stat /tmp/dest/cert-manager-package-debian.json
+        diff /tmp/source/cert-manager-package-debian.json /tmp/dest/cert-manager-package-debian.json
+    # Simulate init container scenario
+    - name: Integration test
+      runs: |
+        set -euo pipefail
+        mkdir -p /tmp/packages
+        /copyandmaybepause /debian-package /tmp/packages
+        stat /tmp/packages/cert-manager-package-debian.json
+        jq -e '.name and .version and .bundle' /tmp/packages/cert-manager-package-debian.json

@@ -1,13 +1,16 @@
 package:
   name: configmap-reload-fips
   version: "0.15.0"
-  epoch: 5 # CVE-2025-61729
+  epoch: 9 # CVE-2025-61732
   description: Simple binary to trigger a reload when a Kubernetes ConfigMap is updated
   copyright:
     - license: Apache-2.0
   dependencies:
     runtime:
       - ca-certificates-bundle
+  resources:
+    cpu: "3"
+    memory: 9Gi
 
 environment:
   contents:
@@ -15,6 +18,12 @@ environment:
       - busybox
       - ca-certificates-bundle
       - go-fips
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
 
 pipeline:
   - uses: git-checkout
@@ -29,9 +38,51 @@ pipeline:
       output: configmap-reload
       go-package: go-fips
 
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: configmap-reload
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p "/opt/iamguarded/configmap-reload/bin/"
+          ln -s "../../../../usr/bin/configmap-reload" "/opt/iamguarded/configmap-reload/bin/configmap-reload"
+      - uses: iamguarded/finalize-compat
+        with:
+          package: configmap-reload
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: configmap-reload
+            version: ${{vars.major-version}}
+        - uses: test/tw/symlink-check
+        - runs: |
+            stat /opt/iamguarded/configmap-reload/bin/configmap-reload
+
 test:
   pipeline:
     - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: configmap-reload
+    - name: Verify binary functionality
+      uses: test/daemon-check-output
+      with:
+        setup: |-
+          # Create test directory and file to watch
+          mkdir -p /tmp/test-volume
+          echo "initial-config" > /tmp/test-volume/config.yaml
+        start: configmap-reload -volume-dir=/tmp/test-volume -webhook-url=http://localhost:8080 -webhook-method=POST
+        expected_output: "/tmp/test-volume"
+        timeout: 30
+        post: |
+          wait-for-it --timeout=20 localhost:9533
 
 update:
   enabled: true
