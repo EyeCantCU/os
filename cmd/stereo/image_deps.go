@@ -20,6 +20,13 @@ import (
 	"google.golang.org/api/iterator"
 )
 
+// isPublicImage determines if an image repository URL represents a public image.
+// Public images are hosted at cgr.dev/chainguard/<image-name>.
+// Everything else (cgr.dev/chainguard-private/*, cgr.dev/custom-images/*, etc.) is private.
+func isPublicImage(repoURL string) bool {
+	return strings.HasPrefix(repoURL, "cgr.dev/chainguard/")
+}
+
 func imageDependenciesCmd() *cobra.Command {
 	var (
 		private      bool
@@ -163,23 +170,36 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 		var g errgroup.Group
 		g.SetLimit(runtime.GOMAXPROCS(0))
 
-		for addr, cfg := range configs {
+		for addr, info := range configs {
 			g.Go(func() error {
 				// Capture variables for closure
 				currentAddr := addr
-				currentCfg := cfg
+				currentInfo := info
 				currentArch := arch
 
+				// Determine if this image is public or private based on repo URL
+				imageIsPublic := currentInfo.repo != "" && isPublicImage(currentInfo.repo)
+
+				// Skip images that don't match the requested imageSet
+				if imageSet == "public" && !imageIsPublic {
+					log.Printf("Skipping %s: private image (repo: %s)", currentAddr, currentInfo.repo)
+					return nil
+				}
+				if imageSet == "private" && imageIsPublic {
+					log.Printf("Skipping %s: public image (repo: %s)", currentAddr, currentInfo.repo)
+					return nil
+				}
+
 				// Check if this image supports the current architecture
-				if !supportsApkoArchitecture(currentCfg, currentArch) {
+				if !supportsApkoArchitecture(currentInfo.config, currentArch) {
 					log.Printf("Skipping %s: does not support architecture %s", currentAddr, currentArch)
 					return nil
 				}
 
-				log.Printf("Resolving dependencies for image: %s (architecture: %s)", currentAddr, currentArch)
+				log.Printf("Resolving dependencies for image: %s (repo: %s, architecture: %s)", currentAddr, currentInfo.repo, currentArch)
 
 				// Create a copy of the configuration to avoid mutation by lockImageDependencies
-				cfgCopy := *currentCfg
+				cfgCopy := *currentInfo.config
 
 				// Resolve image to APK packages
 				packages, err := lockImageDependencies(ctx, &cfgCopy, cache, buildRepos[imageSet], currentArch)
@@ -210,11 +230,13 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 				imageDetailFile := filepath.Join(detailDir, fmt.Sprintf("%s.json", safeAddr))
 				imageData := struct {
 					Address       string   `json:"address"`
+					Repo          string   `json:"repo"`
 					RepositorySet string   `json:"repository_set"`
 					Architecture  string   `json:"architecture"`
 					Dependencies  []string `json:"dependencies"`
 				}{
 					Address:       currentAddr,
+					Repo:          currentInfo.repo,
 					RepositorySet: imageSet,
 					Architecture:  currentArch,
 					Dependencies:  sortedPkgs,
@@ -368,6 +390,7 @@ func createGCSReader(ctx context.Context, gcsPath string, threshold int) (io.Rea
 		Prefix: prefix,
 	}
 
+	count := 0
 	it := bucket.Objects(ctx, query)
 	for {
 		attrs, err := it.Next()
@@ -380,6 +403,11 @@ func createGCSReader(ctx context.Context, gcsPath string, threshold int) (io.Rea
 		}
 		if strings.HasSuffix(attrs.Name, ".tfplan.json") {
 			objects = append(objects, attrs)
+			count++
+		}
+		// Only care about up to threshold image plans
+		if count >= threshold {
+			break
 		}
 	}
 
@@ -394,11 +422,6 @@ func createGCSReader(ctx context.Context, gcsPath string, threshold int) (io.Rea
 	sort.Slice(objects, func(i, j int) bool {
 		return objects[i].Created.After(objects[j].Created)
 	})
-
-	// Take latest N (threshold)
-	if len(objects) > threshold {
-		objects = objects[:threshold]
-	}
 
 	// Reverse to get oldest first (like tac)
 	for i, j := 0, len(objects)-1; i < j; i, j = i+1, j-1 {
