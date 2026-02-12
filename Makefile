@@ -18,7 +18,12 @@ DOCKER_PLATFORM_ARG := $(shell \
   echo "--platform=linux/$$darch" \
 )
 
+# Only query stereo for package list if it exists
+ifneq ($(wildcard $(STEREO)),)
 pkgs := $(shell $(STEREO) make targets)
+else
+pkgs :=
+endif
 
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
 $(pkg_targets): package/%: $(STEREO)
@@ -35,6 +40,21 @@ $(debug_targets): debug/%: $(STEREO)
 test_debug_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(test_debug_targets): test-debug/%: $(STEREO)
 	$(STEREO) make test-debug $*
+
+# Fallback rules when stereo doesn't exist yet - build it first, then re-invoke make
+ifeq ($(pkgs),)
+package/%: $(STEREO)
+	@$(MAKE) $@
+
+test/%: $(STEREO)
+	@$(MAKE) $@
+
+debug/%: $(STEREO)
+	@$(MAKE) $@
+
+test-debug/%: $(STEREO)
+	@$(MAKE) $@
+endif
 
 package-list: $(STEREO)
 	$(STEREO) make targets
