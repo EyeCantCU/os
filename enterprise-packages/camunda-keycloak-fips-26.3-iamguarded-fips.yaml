@@ -1,7 +1,7 @@
 package:
   name: camunda-keycloak-fips-26.3-iamguarded-fips
   version: "26.3.5"
-  epoch: 1
+  epoch: 2
   description: Camunda fork of Keycloak
   copyright:
     - license: Apache-2.0
@@ -96,23 +96,33 @@ test:
       with:
         package: keycloak
         version: ${{vars.major-version}}
+    - uses: java-fips/algorithms
+      with:
+        java-version: "${{vars.java-version}}"
     - working-directory: /tmp
       pipeline:
         - name: "Test database creation"
-          with:
-            setup: echo "127.0.0.1 postgresql" >> /etc/hosts
           runs: |
+            set -euo pipefail
+            # Add postgresql hostname to /etc/hosts
+            tee -a /etc/hosts <<EOF
+            127.0.0.1 postgresql
+            EOF
             sudo -u $PGUSER initdb -D $PGDATA
             sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
             sudo -u $PGUSER createdb $PGDB
-            sudo -u $PGUSER psql -lqt | cut -d \| -f 1 | grep -qw $PGDB
+            # Verify database was created (fails test if not found)
+            sudo -u $PGUSER psql -lqt | cut -d \| -f 1 | grep -Fw $PGDB
         - name: "start daemon on localhost"
           uses: test/daemon-check-output
           with:
             setup: |
-              #!/bin/sh -e
-              echo "127.0.0.1 postgresql" >> /etc/hosts
-              echo "$(hostname) postgresql" >> /etc/hosts
+              set -euo pipefail
+              # Add postgresql and hostname entries to /etc/hosts
+              tee -a /etc/hosts <<EOF
+              127.0.0.1 postgresql
+              $(hostname) postgresql
+              EOF
             start: |
               env "IAMGUARDED_APP_NAME=keycloak" \
                 "APP_VERSION=${{package.version}}" \
@@ -139,13 +149,14 @@ test:
               Keycloak ${{package.version}}
               Profile dev activated.
             post: |
-              #!/bin/sh -e
+              set -euo pipefail
               url=http://localhost:9000/health/ready
               response=$(curl -fsS --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 0 --retry-max-time 40 "$url") || {
                 echo "curl ${url} failed $?"
                 exit 1
               }
-              echo "$response" | jq .status | grep -q UP || {
+              # Verify health status is UP (fails test if not found)
+              echo "$response" | jq .status | grep -F UP || {
                 echo "response from $url did not contain \"UP\""
                 echo "response: $response"
                 exit 1
