@@ -1,7 +1,7 @@
 package:
   name: istio-envoy-fips-1.27
   version: "1.27.5"
-  epoch: 0
+  epoch: 1
   description: Envoy with additional Istio plugins (wasm, telemetry, etc)
   copyright:
     - license: Apache-2.0
@@ -111,6 +111,7 @@ test:
         - netcat-openbsd
         - procps
         - jq
+        - openssl
   pipeline:
     - name: "Verify binary installation"
       runs: |
@@ -185,4 +186,30 @@ test:
           if ! ps -p $first_pid > /dev/null; then
             echo "Original Envoy process not found"
             exit 1
+          fi
+    - name: "Test TLS ciphers"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          # Generate self-signed certificate for TLS listener
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout serverkey.pem \
+            -out servercert.pem \
+            -days 1 \
+            -subj "/CN=localhost"
+        start: envoy --config-path envoy-demo-tls.yaml
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          # Test that curl works
+          curl --cacert servercert.pem  -o /dev/null https://localhost:10000
+          # Force CHACHA20 connection, and ensure it doesn't work
+          result=$(echo Q | OPENSSL_CONF=/dev/null openssl s_client -tls1_3 -CAfile servercert.pem -ciphersuites TLS_CHACHA20_POLY1305_SHA256  -connect localhost:10000 2>&1| tail -n1)
+          if [ "$result" = "DONE" ]; then
+             echo Error: non-approved TLS_CHACHA20_POLY1305_SHA256 connection successful
+             exit 1
           fi

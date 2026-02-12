@@ -18,13 +18,12 @@ DOCKER_PLATFORM_ARG := $(shell \
   echo "--platform=linux/$$darch" \
 )
 
-ifeq (${TMPDIR}, )
-	CACHEDIR = /tmp/melange-cache
-else
-	CACHEDIR = ${TMPDIR}/melange-cache
-endif
-
+# Only query stereo for package list if it exists
+ifneq ($(wildcard $(STEREO)),)
 pkgs := $(shell $(STEREO) make targets)
+else
+pkgs :=
+endif
 
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
 $(pkg_targets): package/%: $(STEREO)
@@ -42,9 +41,20 @@ test_debug_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(test_debug_targets): test-debug/%: $(STEREO)
 	$(STEREO) make test-debug $*
 
-compile_targets = $(foreach name,$(pkgs),compile/$(name))
-$(compile_targets): compile/%: $(STEREO)
-	@$(STEREO) make compile $*
+# Fallback rules when stereo doesn't exist yet - build it first, then re-invoke make
+ifeq ($(pkgs),)
+package/%: $(STEREO)
+	@$(MAKE) $@
+
+test/%: $(STEREO)
+	@$(MAKE) $@
+
+debug/%: $(STEREO)
+	@$(MAKE) $@
+
+test-debug/%: $(STEREO)
+	@$(MAKE) $@
+endif
 
 package-list: $(STEREO)
 	$(STEREO) make targets
@@ -139,19 +149,6 @@ clean:
 	make -C extra-packages clean
 	make -C enterprise-packages clean
 	$(MAKE) clean-archive
-
-.PHONY: cache
-cache:
-	mkdir -p ${CACHEDIR}
-
-${CACHEDIR}/.libraries_token.txt: cache
-	tmpf=$(shell mktemp); \
-	chainctl auth login --audience libraries.cgr.dev; \
-	chainctl auth token --audience libraries.cgr.dev > $${tmpf}; \
-	mv $${tmpf} ${CACHEDIR}/.libraries_token.txt
-
-.PHONY: lib-token
-lib-token: ${CACHEDIR}/.libraries_token.txt
 
 %.rsa:
 	make -C $(dir $@) $(notdir $@)

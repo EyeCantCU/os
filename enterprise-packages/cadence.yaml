@@ -1,0 +1,209 @@
+package:
+  name: cadence
+  version: "1.3.6"
+  epoch: 1
+  description: Cadence is a distributed, scalable, durable, and highly available orchestration engine
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - cadence-cassandra-tool=${{package.full-version}}
+      - cadence-server=${{package.full-version}}
+      - cadence-sql-tool=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/cadence-workflow/cadence
+      tag: v${{package.version}}
+      expected-commit: a484e23286beae275868b67c4dffdd639a8646c4
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/golang-jwt/jwt/v5@v5.2.2
+        github.com/sirupsen/logrus@v1.9.1
+        golang.org/x/crypto@v0.45.0
+      replaces: golang.org/x/oauth2=golang.org/x/oauth2@v0.27.0
+
+  - uses: go/build
+    with:
+      packages: ./cmd/tools/cli
+      output: cadence
+      ldflags: |
+        -X github.com/uber/cadence/common/metrics.Revision=${{package.epoch}}
+        -X github.com/uber/cadence/common/metrics.Branch=$(git rev-parse --abbrev-ref HEAD)
+        -X github.com/uber/cadence/common/metrics.ReleaseVersion=${{package.version}}
+        -X github.com/uber/cadence/common/metrics.BuildDate=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" '+%F-%T')
+        -X github.com/uber/cadence/common/metrics.BuildTimeUnix=${SOURCE_DATE_EPOCH:-$(date +%s)}
+
+data:
+  - name: cadence-go-server
+    items:
+      server: ./cmd/server
+
+  - name: cadence-go-tools
+    items:
+      cassandra-tool: ./cmd/tools/cassandra
+      sql-tool: ./cmd/tools/sql
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    dependencies:
+      runtime:
+        - cadence=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
+          ln -s /usr/bin/cadence "${{targets.subpkgdir}}"/usr/local/bin/cadence
+          ln -s /usr/bin/cadence-cassandra-tool "${{targets.subpkgdir}}"/usr/local/bin/cadence-cassandra-tool
+          ln -s /usr/bin/cadence-server "${{targets.subpkgdir}}"/usr/local/bin/cadence-server
+          ln -s /usr/bin/cadence-sql-tool "${{targets.subpkgdir}}"/usr/local/bin/cadence-sql-tool
+    test:
+      environment:
+        contents:
+          packages:
+            - cadence-compat=${{package.full-version}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+  - range: cadence-go-server
+    name: ${{package.name}}-${{range.key}}
+    description: Cadence server executes units of application logic, Workflows, in a resilient manner
+    dependencies:
+      runtime:
+        - cadence-server-schema=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ${{range.value}}
+          output: cadence-${{range.key}}
+          ldflags: |
+            -X github.com/uber/cadence/common/metrics.Revision=$(git log -1 --format=%cI-%h)
+            -X github.com/uber/cadence/common/metrics.Branch=$(git rev-parse --abbrev-ref HEAD)
+            -X github.com/uber/cadence/common/metrics.ReleaseVersion=${{package.version}}
+            -X github.com/uber/cadence/common/metrics.BuildDate=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" '+%F-%T')
+            -X github.com/uber/cadence/common/metrics.BuildTimeUnix=${SOURCE_DATE_EPOCH:-$(date +%s)}
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - range: cadence-go-tools
+    name: ${{package.name}}-${{range.key}}
+    description: Cadence ${{range.key}} database utility
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ${{range.value}}
+          output: cadence-${{range.key}}
+          ldflags: |
+            -X github.com/uber/cadence/common/metrics.Revision=$(git log -1 --format=%cI-%h)
+            -X github.com/uber/cadence/common/metrics.Branch=$(git rev-parse --abbrev-ref HEAD)
+            -X github.com/uber/cadence/common/metrics.ReleaseVersion=${{package.version}}
+            -X github.com/uber/cadence/common/metrics.BuildDate=$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" '+%F-%T')
+            -X github.com/uber/cadence/common/metrics.BuildTimeUnix=${SOURCE_DATE_EPOCH:-$(date +%s)}
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-server-schema
+    description: Schema files for Cadence server database setup
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/etc/cadence
+          cp -r schema "${{targets.subpkgdir}}"/etc/cadence/
+
+  - name: ${{package.name}}-server-oci-entrypoint
+    description: Entrypoint for using Cadence server in OCI containers
+    dependencies:
+      runtime:
+        - bash
+        - busybox # required for schema jobs that run shell scripts
+        - tzdata
+        - cadence=${{package.full-version}}
+        - cadence-cassandra-tool=${{package.full-version}}
+        - cadence-server=${{package.full-version}}
+        - cadence-sql-tool=${{package.full-version}}
+        - dockerize
+    pipeline:
+      - runs: |
+          install -Dm644 docker/config_template.yaml "${{targets.subpkgdir}}"/etc/cadence/config/config_template.yaml
+          mkdir -p "${{targets.subpkgdir}}"/etc/cadence/config/dynamicconfig "${{targets.subpkgdir}}"/etc/cadence/config/credentials
+          cp -r config/dynamicconfig/* "${{targets.subpkgdir}}"/etc/cadence/config/dynamicconfig/
+          cp -r config/credentials/* "${{targets.subpkgdir}}"/etc/cadence/config/credentials/
+          install -Dm755 docker/entrypoint.sh "${{targets.subpkgdir}}"/docker-entrypoint.sh
+          install -Dm755 docker/start-cadence.sh "${{targets.subpkgdir}}"/start-cadence.sh
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /docker-entrypoint.sh
+              /start-cadence.sh
+              /etc/cadence/config/config_template.yaml
+              /etc/cadence/config/dynamicconfig
+              /etc/cadence/config/credentials
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - "-prerelease"
+  github:
+    identifier: cadence-workflow/cadence
+    strip-prefix: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - cadence-cassandra-tool=${{package.full-version}}
+        - cadence-server=${{package.full-version}}
+        - cadence-server-schema=${{package.full-version}}
+        - cadence-sql-tool=${{package.full-version}}
+        - curl
+        - wait-for-it
+    environment:
+      CADENCE_ADDRESS: "127.0.0.1:7933"
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: cadence
+    - name: Verify cadence CLI config list (no server required)
+      runs: |
+        cadence admin config listall | grep -F "frontend.rps"
+    - name: Server integration and domain management test
+      uses: test/daemon-check-output
+      with:
+        timeout: 30
+        setup: |
+          BASE="https://raw.githubusercontent.com/cadence-workflow/cadence/v${{package.version}}/config"
+          mkdir -p /etc/cadence/config/dynamicconfig
+          curl -fsSL -o /etc/cadence/config/development.yaml "${BASE}/development.yaml"
+          curl -fsSL -o /etc/cadence/config/development_sqlite.yaml "${BASE}/development_sqlite.yaml"
+          curl -fsSL -o /etc/cadence/config/dynamicconfig/development.yaml "${BASE}/dynamicconfig/development.yaml"
+
+          cd /etc/cadence
+          cadence-sql-tool --plugin sqlite --db cadence.db setup-schema \
+            --version 0.1 --schema-file schema/sqlite/cadence/versioned/v0.1/base.sql
+          cadence-sql-tool --plugin sqlite --db cadence_visibility.db setup-schema \
+            --version 0.1 --schema-file schema/sqlite/visibility/versioned/v0.1/base.sql
+          stat /etc/cadence/config/development.yaml /etc/cadence/config/development_sqlite.yaml
+        start: sh -c 'cd /etc/cadence && cadence-server --root /etc/cadence --config config --env development --zone sqlite start --services frontend,matching,history,worker'
+        expected_output: |
+          frontend started
+          matching started
+          history started
+        post: |
+          wait-for-it -h 127.0.0.1 -p 7933 -t 60
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain domain register \
+            --description "Test domain for package validation"
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain domain describe
+          # Allow domain cache to propagate to matching/history before workflow calls
+          sleep 5
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain workflow start \
+            --workflow_id test-wf-1 --tasklist test-tl --workflow_type test-wt --execution_timeout 60 --input '{}'
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain workflow describe --wid test-wf-1 | grep -F "test-wf-1"
+          cadence --address "${CADENCE_ADDRESS}" --domain test-domain workflow cancel --wid test-wf-1

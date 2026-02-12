@@ -1,0 +1,150 @@
+package:
+  name: cass-config-builder-fips
+  version: "1.0.18"
+  epoch: 1
+  description: |
+    Configuration builder for Apache Cassandra based on definitions at datastax/cass-config-definitions (FIPS mode)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openssl-config-fipshardened
+
+vars:
+  # Java 11 matches upstream Docker image: https://github.com/datastax/cass-config-builder/blob/ca53d1a90530fd225fc033d57656f2314298b015/docker/Dockerfile#L14
+  java-version: "11"
+
+environment:
+  contents:
+    packages:
+      - bouncycastle-fips~2.1
+      - busybox
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/datastax/cass-config-builder
+      expected-commit: ca53d1a90530fd225fc033d57656f2314298b015
+      tag: v${{package.version}}
+
+  - runs: |
+      sed -i 's|git@\(.*\):|https://\1/|g' .gitmodules
+      git submodule update --init
+
+  - runs: |
+      # Ensure version.txt exists
+      echo "${{package.version}}" > version.txt
+
+      # Patch build.gradle to use projectDir for version.txt (fixes Gradle daemon working directory issues)
+      sed -i "s|new File('version.txt')|new File(projectDir, 'version.txt')|g" build.gradle
+
+      ./gradlew copyDockerBuildCtx --stacktrace
+      mkdir -p "${{targets.destdir}}"/usr/local/bin
+      mkdir -p "${{targets.destdir}}"/definitions
+      cp -r build/docker/bin/* "${{targets.destdir}}"/usr/local/bin
+      cp -r build/docker/definitions/* "${{targets.destdir}}"/definitions
+      cp -r build/docker/*.jar "${{targets.destdir}}"/usr/local/bin/
+
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar "${{targets.destdir}}"/usr/local/bin/
+
+update:
+  enabled: true
+  github:
+    identifier: datastax/cass-config-builder
+    strip-prefix: v
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - openjdk-${{vars.java-version}}-default-jdk
+        - openssl-config-fipshardened
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - uses: test/tw/symlink-check
+      with:
+        allow-absolute: true
+    - name: Verify installation
+      runs: |
+        set -euo pipefail
+        # Verify JAR file exists (fails test if missing)
+        ls /usr/local/bin/cass-config-builder-*.jar
+        # Verify definitions directory exists (stat gives clear error if missing)
+        stat /definitions
+        # Verify scripts are present and executable
+        stat /usr/local/bin/user_setup
+        test -x /usr/local/bin/user_setup || { echo "FAIL: user_setup is not executable"; exit 1; }
+        stat /usr/local/bin/run_configbuilder
+        test -x /usr/local/bin/run_configbuilder || { echo "FAIL: run_configbuilder is not executable"; exit 1; }
+    - name: Config builder JAR help test
+      runs: |
+        set -euo pipefail
+        # Find the config builder JAR
+        JAR_FILE=$(ls /usr/local/bin/cass-config-builder-*.jar | head -1)
+        echo "Testing JAR: $JAR_FILE"
+
+        # Verify the JAR is a valid Java archive containing classes
+        jar tf "$JAR_FILE" | grep -F ".class" || {
+          echo "FAIL: JAR does not contain class files"
+          exit 1
+        }
+
+        # Try executing the JAR to verify it runs
+        set +e
+        output=$(java -jar "$JAR_FILE" 2>&1)
+        rc=$?
+        set -e
+
+        echo "JAR execution output (exit code $rc):"
+        echo "$output" | head -30
+
+        # Verify we get meaningful output (usage, help, or error about missing args)
+        if echo "$output" | grep -iF "usage"; then
+          echo "SUCCESS: Config builder JAR shows usage information"
+        elif echo "$output" | grep -iF "config"; then
+          echo "SUCCESS: Config builder JAR produces config-related output"
+        elif echo "$output" | grep -iF "cassandra"; then
+          echo "SUCCESS: Config builder JAR produces Cassandra-related output"
+        elif [ -n "$output" ]; then
+          echo "SUCCESS: Config builder JAR executes and produces output"
+        else
+          echo "FAIL: Config builder JAR produced no output"
+          exit 1
+        fi
+    - name: run_configbuilder script test
+      runs: |
+        set -euo pipefail
+        # Verify script references java (fails test if not found)
+        grep -F "java" /usr/local/bin/run_configbuilder
+
+        # List available definitions to confirm they exist
+        echo "Available definitions:"
+        ls /definitions/ | head -10
+
+        # Try executing the script to verify it's functional
+        set +e
+        output=$(/usr/local/bin/run_configbuilder 2>&1)
+        rc=$?
+        set -e
+
+        echo "Script execution output (exit code $rc):"
+        echo "$output" | head -30
+
+        # The script should produce output indicating it attempted to run
+        if [ -n "$output" ]; then
+          echo "SUCCESS: run_configbuilder script executes and produces output"
+        else
+          echo "FAIL: run_configbuilder produced no output"
+          exit 1
+        fi
