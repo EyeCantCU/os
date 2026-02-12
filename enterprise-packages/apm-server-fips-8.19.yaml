@@ -1,7 +1,7 @@
 package:
   name: apm-server-fips-8.19
   version: "8.19.11"
-  epoch: 0 # CVE-2025-68119
+  epoch: 2 # CVE-2025-61732
   description: Elastic APM is an application performance monitoring system built on the Elastic Stack
   copyright:
     - license: Elastic-2.0
@@ -70,6 +70,8 @@ test:
     - uses: test/go-fips-check
     - name: "Test APM server startup"
       runs: |
+        set -euo pipefail
+
         apm-server -e -c /usr/share/apm-server/apm-server.yml > log.txt 2>&1 &
         APM_PID=$!
 
@@ -78,16 +80,18 @@ test:
         # Wait for the server to start
         wait-for-it localhost:8200 --timeout=60
 
-        curl -s localhost:8200 | jq '.version' | grep "${{package.version}}"
+        # Verify version from API response (fails test if version mismatch)
+        curl -sf localhost:8200 | jq '.version' | grep -F "${{package.version}}"
+
         # Kill the APM server process
         kill $APM_PID
-        wait $APM_PID 2>/dev/null
+        wait $APM_PID 2>/dev/null || true
 
         # ssl test
         mkcert -install
         mkcert -cert-file apm-server.crt -key-file apm-server.key localhost
 
-        cat <<EOF > ssl-config.yml
+        tee ssl-config.yml <<'EOF'
           apm-server:
             host: "127.0.0.1:8200"
             ssl:
@@ -106,5 +110,8 @@ test:
         # Wait for the server to start
         wait-for-it localhost:8200 --timeout=240
 
-        curl -sk --tls-max 1.2 https://localhost:8200 | jq '.version' | grep "${{package.version}}"
-        kill $APM_PID
+        # Verify TLS connection works and version is correct (fails test if error)
+        curl -sfk --tls-max 1.2 https://localhost:8200 | jq '.version' | grep -F "${{package.version}}"
+
+        # Cleanup (process may already be dead)
+        kill $APM_PID 2>/dev/null || true
