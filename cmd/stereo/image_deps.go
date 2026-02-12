@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,9 +14,18 @@ import (
 	"sync"
 
 	"chainguard.dev/apko/pkg/apk/apk"
+	"cloud.google.com/go/storage"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/api/iterator"
 )
+
+// isPublicImage determines if an image repository URL represents a public image.
+// Public images are hosted at cgr.dev/chainguard/<image-name>.
+// Everything else (cgr.dev/chainguard-private/*, cgr.dev/custom-images/*, etc.) is private.
+func isPublicImage(repoURL string) bool {
+	return strings.HasPrefix(repoURL, "cgr.dev/chainguard/")
+}
 
 func imageDependenciesCmd() *cobra.Command {
 	var (
@@ -23,12 +33,14 @@ func imageDependenciesCmd() *cobra.Command {
 		arch         string
 		useWithdrawn bool
 		withdrawnDir string
+		useGCS       string
+		threshold    int
 	)
 
 	cmd := &cobra.Command{
 		Use:   "image-dependencies",
 		Short: "Pre-compute image dependencies from terraform JSON plan",
-		Long: `This command reads terraform JSON from stdin, parses all apko_build configurations,
+		Long: `This command reads terraform JSON from stdin (or a GCS bucket), parses all apko_build configurations,
 and resolves them to lists of APK packages used by each image. The results are written
 to JSON files in the resolved/images/ directory.
 
@@ -41,7 +53,7 @@ respecting any archs constraints in apko configurations.`,
 			} else {
 				architectures = []string{"x86_64", "aarch64"}
 			}
-			return imageDependencies(cmd.Context(), private, architectures, useWithdrawn, withdrawnDir)
+			return imageDependencies(cmd.Context(), private, architectures, useWithdrawn, withdrawnDir, useGCS, threshold)
 		},
 	}
 
@@ -49,11 +61,13 @@ respecting any archs constraints in apko configurations.`,
 	cmd.Flags().StringVar(&arch, "arch", "", "Architecture to evaluate (default: both x86_64 and aarch64)")
 	cmd.Flags().BoolVar(&useWithdrawn, "use-withdrawn", false, "Use withdrawn APKINDEX files instead of live repositories")
 	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn APKINDEX files")
+	cmd.Flags().StringVar(&useGCS, "use-gcs", "", "GCS bucket path to read terraform plans from (e.g., gs://bucket-name/path)")
+	cmd.Flags().IntVar(&threshold, "threshold", 800, "Number of most recent terraform plan files to consider from GCS")
 
 	return cmd
 }
 
-func imageDependencies(ctx context.Context, private bool, architectures []string, useWithdrawn bool, withdrawnDir string) error {
+func imageDependencies(ctx context.Context, private bool, architectures []string, useWithdrawn bool, withdrawnDir string, useGCS string, threshold int) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -70,9 +84,22 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 		imageSet = "public"
 	}
 
-	// Parse terraform JSON from stdin to get image configurations
-	log.Printf("Parsing terraform plan from stdin...")
-	configs, err := walk(ctx, os.Stdin)
+	// Get input source (either stdin or GCS)
+	var input io.Reader
+	var err error
+	if useGCS != "" {
+		log.Printf("Fetching terraform plans from GCS: %s (threshold: %d files)...", useGCS, threshold)
+		input, err = createGCSReader(ctx, useGCS, threshold)
+		if err != nil {
+			return fmt.Errorf("creating GCS reader: %w", err)
+		}
+	} else {
+		log.Printf("Parsing terraform plan from stdin...")
+		input = os.Stdin
+	}
+
+	// Parse terraform JSON to get image configurations
+	configs, err := walk(ctx, input)
 	if err != nil {
 		return fmt.Errorf("parsing terraform plan: %w", err)
 	}
@@ -143,23 +170,36 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 		var g errgroup.Group
 		g.SetLimit(runtime.GOMAXPROCS(0))
 
-		for addr, cfg := range configs {
+		for addr, info := range configs {
 			g.Go(func() error {
 				// Capture variables for closure
 				currentAddr := addr
-				currentCfg := cfg
+				currentInfo := info
 				currentArch := arch
 
+				// Determine if this image is public or private based on repo URL
+				imageIsPublic := currentInfo.repo != "" && isPublicImage(currentInfo.repo)
+
+				// Skip images that don't match the requested imageSet
+				if imageSet == "public" && !imageIsPublic {
+					log.Printf("Skipping %s: private image (repo: %s)", currentAddr, currentInfo.repo)
+					return nil
+				}
+				if imageSet == "private" && imageIsPublic {
+					log.Printf("Skipping %s: public image (repo: %s)", currentAddr, currentInfo.repo)
+					return nil
+				}
+
 				// Check if this image supports the current architecture
-				if !supportsApkoArchitecture(currentCfg, currentArch) {
+				if !supportsApkoArchitecture(currentInfo.config, currentArch) {
 					log.Printf("Skipping %s: does not support architecture %s", currentAddr, currentArch)
 					return nil
 				}
 
-				log.Printf("Resolving dependencies for image: %s (architecture: %s)", currentAddr, currentArch)
+				log.Printf("Resolving dependencies for image: %s (repo: %s, architecture: %s)", currentAddr, currentInfo.repo, currentArch)
 
 				// Create a copy of the configuration to avoid mutation by lockImageDependencies
-				cfgCopy := *currentCfg
+				cfgCopy := *currentInfo.config
 
 				// Resolve image to APK packages
 				packages, err := lockImageDependencies(ctx, &cfgCopy, cache, buildRepos[imageSet], currentArch)
@@ -190,11 +230,13 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 				imageDetailFile := filepath.Join(detailDir, fmt.Sprintf("%s.json", safeAddr))
 				imageData := struct {
 					Address       string   `json:"address"`
+					Repo          string   `json:"repo"`
 					RepositorySet string   `json:"repository_set"`
 					Architecture  string   `json:"architecture"`
 					Dependencies  []string `json:"dependencies"`
 				}{
 					Address:       currentAddr,
+					Repo:          currentInfo.repo,
 					RepositorySet: imageSet,
 					Architecture:  currentArch,
 					Dependencies:  sortedPkgs,
@@ -304,4 +346,150 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 
 	log.Printf("Image dependency pre-computation complete for architectures %v", architectures)
 	return nil
+}
+
+// createGCSReader creates an io.Reader that streams terraform plan files from GCS.
+// It lists objects matching .tfplan.json, sorts by creation time (newest first),
+// takes the most recent 'threshold' files, reverses them (oldest first), and
+// streams their contents concatenated together.
+func createGCSReader(ctx context.Context, gcsPath string, threshold int) (io.Reader, error) {
+	// Parse GCS path (gs://bucket/prefix)
+	if !strings.HasPrefix(gcsPath, "gs://") {
+		return nil, fmt.Errorf("GCS path must start with gs://, got: %s", gcsPath)
+	}
+
+	pathWithoutScheme := strings.TrimPrefix(gcsPath, "gs://")
+	parts := strings.SplitN(pathWithoutScheme, "/", 2)
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("invalid GCS path: %s", gcsPath)
+	}
+
+	bucketName := parts[0]
+	var prefix string
+	if len(parts) > 1 {
+		prefix = parts[1]
+		// Ensure prefix ends with / for directory-style matching (but only if non-empty)
+		if prefix != "" && !strings.HasSuffix(prefix, "/") {
+			prefix = prefix + "/"
+		}
+	}
+
+	// Create GCS client
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("creating GCS client: %w", err)
+	}
+
+	bucket := client.Bucket(bucketName)
+
+	// List all objects with .tfplan.json suffix
+	log.Printf("Listing objects from gs://%s/%s...", bucketName, prefix)
+
+	var objects []*storage.ObjectAttrs
+	query := &storage.Query{
+		Prefix: prefix,
+	}
+
+	count := 0
+	it := bucket.Objects(ctx, query)
+	for {
+		attrs, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			client.Close()
+			return nil, fmt.Errorf("iterating objects: %w", err)
+		}
+		if strings.HasSuffix(attrs.Name, ".tfplan.json") {
+			objects = append(objects, attrs)
+			count++
+		}
+		// Only care about up to threshold image plans
+		if count >= threshold {
+			break
+		}
+	}
+
+	log.Printf("Found %d .tfplan.json files in GCS", len(objects))
+
+	if len(objects) == 0 {
+		client.Close()
+		return nil, fmt.Errorf("no .tfplan.json files found in %s", gcsPath)
+	}
+
+	// Sort by creation time, newest first
+	sort.Slice(objects, func(i, j int) bool {
+		return objects[i].Created.After(objects[j].Created)
+	})
+
+	// Reverse to get oldest first (like tac)
+	for i, j := 0, len(objects)-1; i < j; i, j = i+1, j-1 {
+		objects[i], objects[j] = objects[j], objects[i]
+	}
+
+	log.Printf("Processing %d terraform plan files from GCS (oldest to newest)", len(objects))
+
+	// Create a multi-reader that streams all files
+	return &gcsMultiReader{
+		ctx:     ctx,
+		bucket:  bucket,
+		objects: objects,
+		client:  client,
+	}, nil
+}
+
+// gcsMultiReader implements io.Reader to stream multiple GCS objects sequentially
+type gcsMultiReader struct {
+	ctx     context.Context
+	bucket  *storage.BucketHandle
+	objects []*storage.ObjectAttrs
+	client  *storage.Client
+
+	currentIndex  int
+	currentReader io.ReadCloser
+}
+
+func (r *gcsMultiReader) Read(p []byte) (n int, err error) {
+	for {
+		// If we have a current reader, try to read from it
+		if r.currentReader != nil {
+			n, err = r.currentReader.Read(p)
+			if err == nil {
+				return n, nil
+			}
+
+			// If we hit EOF, close current reader and move to next file
+			if err == io.EOF {
+				r.currentReader.Close()
+				r.currentReader = nil
+				r.currentIndex++
+				// Continue to next file
+			} else {
+				// Other error, return it
+				return n, err
+			}
+		}
+
+		// Check if we've processed all objects
+		if r.currentIndex >= len(r.objects) {
+			if r.client != nil {
+				r.client.Close()
+				r.client = nil
+			}
+			return 0, io.EOF
+		}
+
+		// Open next object
+		obj := r.objects[r.currentIndex]
+		log.Printf("Reading terraform plan %d/%d: gs://%s/%s (created: %s)",
+			r.currentIndex+1, len(r.objects), r.bucket.BucketName(), obj.Name, obj.Created.Format("2006-01-02 15:04:05"))
+
+		reader, err := r.bucket.Object(obj.Name).NewReader(r.ctx)
+		if err != nil {
+			return 0, fmt.Errorf("opening GCS object %s: %w", obj.Name, err)
+		}
+
+		r.currentReader = reader
+	}
 }

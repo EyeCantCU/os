@@ -13,6 +13,17 @@ function monkeyPatch() {
   }
 
   crypto.createHash = createHashInterceptMD5;
+
+  // Node.js 20.12+ added crypto.hash() which bypasses createHash
+  if (typeof crypto.hash === 'function') {
+    const originalHash = crypto.hash;
+    crypto.hash = function(algorithm, ...rest) {
+      if (algorithm === 'md5') {
+        algorithm = 'sha1';
+      }
+      return originalHash(algorithm, ...rest);
+    };
+  }
 }
 
 monkeyPatch();
