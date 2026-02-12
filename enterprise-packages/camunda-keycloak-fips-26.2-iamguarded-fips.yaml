@@ -1,7 +1,7 @@
 package:
   name: camunda-keycloak-fips-26.2-iamguarded-fips
   version: "26.2.5"
-  epoch: 2
+  epoch: 3
   description: Camunda fork of Keycloak
   copyright:
     - license: Apache-2.0
@@ -83,7 +83,7 @@ test:
       PGDATA: /tmp/test_db
       PGUSER: bn_keycloak
       PGDB: iamguarded_keycloak
-      ALLOW_EMPTY_PASS: true
+      ALLOW_EMPTY_PASS: "true"
       LANG: C.UTF-8 # Adding locales to prevent test failure on aarch64
       LC_ALL: C.UTF-8 # Adding locales to prevent test failure on aarch64
       KC_CACHE: ispn
@@ -91,6 +91,13 @@ test:
       KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD:-}
       KC_BOOTSTRAP_ADMIN_PASSWORD: $KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD
       KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+      # Environment variables for Keycloak daemon test
+      IAMGUARDED_APP_NAME: keycloak
+      APP_VERSION: ${{package.version}}
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: PASSWORD-FOR-ADMIN-USER
+      KEYCLOAK_EXTRA_ARGS: "--features=fips --fips-mode=non-strict --https-key-store-password=LongKeystorePassword"
+      KEYCLOAK_ENABLE_HEALTH_ENDPOINTS: "true"
   pipeline:
     - uses: iamguarded/test-compat
       with:
@@ -102,25 +109,21 @@ test:
           with:
             setup: echo "127.0.0.1 postgresql" >> /etc/hosts
           runs: |
+            set -euo pipefail
             sudo -u $PGUSER initdb -D $PGDATA
             sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
             sudo -u $PGUSER createdb $PGDB
-            sudo -u $PGUSER psql -lqt | cut -d \| -f 1 | grep -qw $PGDB
+            # Verify database was created (fails test if not found)
+            sudo -u $PGUSER psql -lqt | cut -d \| -f 1 | grep -F "$PGDB"
         - name: "start daemon on localhost"
           uses: test/daemon-check-output
           with:
             setup: |
-              #!/bin/sh -e
+              set -euo pipefail
               echo "127.0.0.1 postgresql" >> /etc/hosts
               echo "$(hostname) postgresql" >> /etc/hosts
             start: |
-              env "IAMGUARDED_APP_NAME=keycloak" \
-                "APP_VERSION=${{package.version}}" \
-                "PATH=/opt/iamguarded/keycloak/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-                "KEYCLOAK_ADMIN=admin" \
-                "KEYCLOAK_ADMIN_PASSWORD=PASSWORD-FOR-ADMIN-USER" \
-                "KEYCLOAK_EXTRA_ARGS=--features=fips --fips-mode=non-strict --https-key-store-password=LongKeystorePassword" \
-                "KEYCLOAK_ENABLE_HEALTH_ENDPOINTS=true" \
+              env "PATH=/opt/iamguarded/keycloak/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 /opt/iamguarded/scripts/keycloak/entrypoint.sh \
                 /opt/iamguarded/scripts/keycloak/run.sh
             timeout: 120
@@ -139,18 +142,23 @@ test:
               Keycloak ${{package.version}}
               Profile dev activated.
             post: |
-              #!/bin/sh -e
+              set -euo pipefail
               url=http://localhost:9000/health/ready
               response=$(curl -fsS --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 0 --retry-max-time 40 "$url") || {
                 echo "curl ${url} failed $?"
                 exit 1
               }
-              echo "$response" | jq .status | grep -q UP || {
+              # Verify health endpoint reports UP status (fails test if not found)
+              echo "$response" | jq .status | grep -F "UP" || {
                 echo "response from $url did not contain \"UP\""
                 echo "response: $response"
                 exit 1
               }
               echo "$url had expected output: $response"
+    - name: "FIPS cryptographic algorithms validation"
+      uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
 
 update:
   # The upstream repos releases contains a 'nightly' release. Which we want to
