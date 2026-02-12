@@ -1,0 +1,130 @@
+package:
+  name: gitlab-workhorse-ce-18.8
+  version: "18.8.4"
+  epoch: 0 # CVE-2025-61732
+  description: A smart reverse proxy for GitLab intended to handle resource-intensive and long-running requests.
+  copyright:
+    - license: MIT
+  dependencies:
+    provides:
+      - gitlab-workhorse-ce=${{package.full-version}}
+    runtime:
+      - exiftool
+      - gitlab-base-${{vars.major-minor-version}}
+      - gitlab-rails-ce-assets-${{vars.major-minor-version}}
+      - gitlab-rails-ce-doc-${{vars.major-minor-version}}
+      - gitlab-workhorse-scripts-${{vars.major-minor-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gitlabhq/gitlabhq.git
+      tag: v${{package.version}}
+      expected-commit: a11b8d53073b009a60efe8848a1a144fcd7b7888
+
+  - uses: go/build
+    with:
+      modroot: ./workhorse
+      packages: ./cmd/gitlab-workhorse
+      output: gitlab-workhorse
+      ldflags: |
+        -X main.Version=v${{package.version}}
+        -X main.BuildTime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
+
+  - uses: go/build
+    with:
+      modroot: ./workhorse
+      packages: ./cmd/gitlab-resize-image
+      output: gitlab-resize-image
+      ldflags: |
+        -X main.Version=v${{package.version}}
+        -X main.BuildTime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
+
+  - uses: go/build
+    with:
+      modroot: ./workhorse
+      packages: ./cmd/gitlab-zip-cat
+      output: gitlab-zip-cat
+      ldflags: |
+        -X main.Version=v${{package.version}}
+        -X main.BuildTime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
+
+  - uses: go/build
+    with:
+      modroot: ./workhorse
+      packages: ./cmd/gitlab-zip-metadata
+      output: gitlab-zip-metadata
+      ldflags: |
+        -X main.Version=v${{package.version}}
+        -X main.BuildTime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - gzip
+        - imagemagick
+        - redis
+        - zip
+  pipeline:
+    - name: Version check
+      runs: |
+        gitlab-workhorse -version | grep ${{package.version}}
+        gitlab-zip-cat -version | grep ${{package.version}}
+        gitlab-zip-metadata -version | grep ${{package.version}}
+    - name: Test workhorse
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/usr/bin/bash
+          set -e
+          # Create a configuration file for gitlab-workhorse with the dynamic port
+          tee /tmp/workhorse-config.toml <<EOL
+          [redis]
+          URL = "redis://localhost:6379"
+
+          [metadata]
+            zip_reader_limit_bytes = 104857600
+
+          [image_resizer]
+            max_scaler_procs = 4
+            max_filesize = 250000
+
+          [[listeners]]
+            network = "tcp"
+            addr = "127.0.0.1:3443"
+          EOL
+          redis-server --daemonize yes
+        start: gitlab-workhorse -logFile stdout -logFormat json -authBackend http://localhost:8080 -config /tmp/workhorse-config.toml
+        expected_output: |
+          Starting
+          Using redis/go-redis
+          keywatcher: starting process loop
+          keywatcher: listening for subscriptions
+          Running upstream server
+    - name: Test zip-metadata
+      runs: |
+        echo "Hello, there!" > /tmp/hello.txt
+        zip /tmp/hello.zip /tmp/hello.txt
+        gitlab-zip-metadata /tmp/hello.zip > /tmp/hello.gz
+        gunzip /tmp/hello.gz
+        grep "GitLab Build Artifacts Metadata" /tmp/hello
+    - name: Test image resizer
+      runs: |
+        magick -size 32x32 xc:white test.jpg
+        GL_RESIZE_IMAGE_WIDTH=16 gitlab-resize-image < ./test.jpg > ./resized-test.png
+        stat ./resized-test.png
+    - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v18.8.
