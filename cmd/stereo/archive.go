@@ -23,6 +23,7 @@ func archiveCmd() *cobra.Command {
 		arch              string
 		generateWithdrawn bool
 		customerFilter    string
+		useBigQuery       bool
 	)
 
 	cmd := &cobra.Command{
@@ -35,11 +36,14 @@ based on the following criteria:
 - Not the most recent version if still built from origin melange configuration
 - Not a reverse build dependency for any current melange configurations
 - Not still in use in images, VMs, or manual seed dependencies
-- Not listed in customer APK filter file (if present)
+- Not listed in customer APK filter (from file or BigQuery)
 
 When no --arch is specified, analysis is performed across both x86_64 and aarch64 architectures,
 consolidating age-based candidates from all architectures and considering a package for archival
-only if it meets dependency criteria on ALL supported architectures.`,
+only if it meets dependency criteria on ALL supported architectures.
+
+Customer APK filter can be loaded from a local file (--customer-filter) or directly from BigQuery
+(--use-bigquery) which queries the last 90 days of customer APK access data.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var architectures []string
 			if arch != "" {
@@ -48,7 +52,7 @@ only if it meets dependency criteria on ALL supported architectures.`,
 				architectures = []string{"x86_64", "aarch64"}
 			}
 			duration := time.Duration(durationDays*24) * time.Hour
-			return archive(cmd.Context(), duration, architectures, generateWithdrawn, customerFilter)
+			return archive(cmd.Context(), duration, architectures, generateWithdrawn, customerFilter, useBigQuery)
 		},
 	}
 
@@ -56,6 +60,7 @@ only if it meets dependency criteria on ALL supported architectures.`,
 	cmd.Flags().StringVar(&arch, "arch", "", "Architecture to evaluate (default: both x86_64 and aarch64)")
 	cmd.Flags().BoolVar(&generateWithdrawn, "generate-withdrawn", false, "Generate withdrawn-packages.txt files for each repository")
 	cmd.Flags().StringVar(&customerFilter, "customer-filter", "shrink/garbage-collection/customer-apk-filter.txt", "Path to customer APK filter file (optional)")
+	cmd.Flags().BoolVar(&useBigQuery, "use-bigquery", false, "Use BigQuery to fetch customer APK access data instead of local file")
 
 	return cmd
 }
@@ -87,7 +92,7 @@ type ArchiveContext struct {
 	Architectures   []string                           // all architectures being analyzed
 }
 
-func archive(ctx context.Context, duration time.Duration, architectures []string, generateWithdrawn bool, customerFilter string) error {
+func archive(ctx context.Context, duration time.Duration, architectures []string, generateWithdrawn bool, customerFilter string, useBigQuery bool) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -181,7 +186,7 @@ func archive(ctx context.Context, duration time.Duration, architectures []string
 	candidates = filtered
 
 	// Step 10: Filter out packages listed in customer APK filter
-	filtered, retained, err = filterByCustomerFilter(candidates, customerFilter)
+	filtered, retained, err = filterByCustomerFilter(ctx, candidates, customerFilter, useBigQuery)
 	if err != nil {
 		return fmt.Errorf("filtering by customer filter: %w", err)
 	}
@@ -1069,23 +1074,34 @@ func filterByVersionStreams(candidates []ArchiveCandidate) ([]ArchiveCandidate, 
 	return filtered, retained, nil
 }
 
-func filterByCustomerFilter(candidates []ArchiveCandidate, customerFilterFile string) ([]ArchiveCandidate, []RetainCandidate, error) {
-	log.Printf("Checking for customer APK filter: %s...", customerFilterFile)
+func filterByCustomerFilter(ctx context.Context, candidates []ArchiveCandidate, customerFilterFile string, useBigQuery bool) ([]ArchiveCandidate, []RetainCandidate, error) {
+	var customerFilterAPKs map[string]bool
+	var err error
 
-	// Check if the customer filter file exists
-	if _, err := os.Stat(customerFilterFile); os.IsNotExist(err) {
-		log.Printf("Customer APK filter file not found: %s. Skipping customer filter.", customerFilterFile)
-		// No filter file, return all candidates as-is
-		return candidates, nil, nil
+	if useBigQuery {
+		log.Println("Using BigQuery for customer APK filter...")
+		customerFilterAPKs, err = fetchCustomerAPKsFromBigQuery(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fetching customer APKs from BigQuery: %w", err)
+		}
+	} else {
+		log.Printf("Checking for customer APK filter: %s...", customerFilterFile)
+
+		// Check if the customer filter file exists
+		if _, err := os.Stat(customerFilterFile); os.IsNotExist(err) {
+			log.Printf("Customer APK filter file not found: %s. Skipping customer filter.", customerFilterFile)
+			// No filter file, return all candidates as-is
+			return candidates, nil, nil
+		}
+
+		// Load customer filter APKs from file
+		customerFilterAPKs, err = loadCustomerFilterAPKs(customerFilterFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading customer filter file: %w", err)
+		}
+
+		log.Printf("Loaded %d APK entries from customer filter file", len(customerFilterAPKs))
 	}
-
-	// Load customer filter APKs
-	customerFilterAPKs, err := loadCustomerFilterAPKs(customerFilterFile)
-	if err != nil {
-		return nil, nil, fmt.Errorf("loading customer filter file: %w", err)
-	}
-
-	log.Printf("Loaded %d APK entries from customer filter file", len(customerFilterAPKs))
 
 	var filtered []ArchiveCandidate
 	var retained []RetainCandidate
