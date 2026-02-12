@@ -1,0 +1,133 @@
+package:
+  name: fleet-server-fips-9.3
+  version: "9.3.0"
+  epoch: 0 # CVE-2025-68119
+  description: The Fleet server allows managing a fleet of Elastic Agents.
+  copyright:
+    - license: Elastic-2.0
+  dependencies:
+    provides:
+      - fleet-server-fips=${{package.full-version}}
+  resources:
+    cpu: 8
+    memory: 64Gi
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/fleet-server
+      tag: v${{package.version}}
+      expected-commit: 26fa2de69e6e7b958e1ed8e4cf37d0be0d1c3252
+
+  - uses: go/build
+    with:
+      packages: ./
+      output: fleet-server
+      ldflags: -X 'github.com/elastic/fleet-server/build.Version=${{package.version}}' -X 'github.com/elastic/fleet-server/build.CommitSHA=$(git rev-parse HEAD)'
+      go-package: go-fips
+      tags: requirefips # To print "FIPS-distribution: true" in version output: https://github.com/elastic/fleet-server/blob/dae35b6d1b92ce54e26f066c6a077fb6a103e8fc/internal/pkg/build/build.go#L22
+
+  - name: copy fleet-server.yml
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/fleet-server
+      cp fleet-server.yml ${{targets.destdir}}/usr/share/fleet-server/fleet-server.yml
+
+update:
+  enabled: true
+  github:
+    strip-prefix: v
+    identifier: elastic/fleet-server
+    use-tag: true
+    tag-filter-prefix: v9.3.
+
+test:
+  environment:
+    accounts:
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 0
+      run-as: 0
+    contents:
+      packages:
+        - bash
+        - curl
+        - elasticsearch-fips-9
+        - jq
+        - sudo
+        - wait-for-it
+    environment:
+      ELASTICSEARCH_HOSTS: localhost:9200
+      ELASTICSEARCH_PASSWORD: "MySuperSecureP@ssword123"
+      ES_JAVA_HOME: /usr/lib/jvm/java-21-openjdk
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Verify fleet-server FIPS build tag
+      runs: |
+        fleet-server --version | grep "FIPS-distribution: true"
+    - name: Generate configuration
+      runs: |
+        # Test fleet-server setup with FIPS-enabled Elasticsearch
+        cat <<EOF > /tmp/config.yml
+        output:
+          elasticsearch:
+            hosts: '\${ELASTICSEARCH_HOSTS:http://localhost:9200}'
+            ssl.verification_mode: none
+
+        fleet:
+          agent:
+            id: '\${FLEET_SERVER_AGENT_ID:dev-fleet-server}'
+
+        inputs:
+          - type: fleet-server
+            policy.id: '\${FLEET_SERVER_POLICY_ID:fleet-server-policy}'
+
+        logging:
+          to_stderr: true
+          pretty: true
+          level: '\${LOG_LEVEL:DEBUG}'
+
+        http.enabled: true
+        EOF
+    - name: Test fleet-server with FIPS Elasticsearch
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Setup Elasticsearch FIPS
+          # Ensure proper directory ownership before keystore creation
+          mkdir -p /usr/share/elasticsearch/config
+          chown -R elasticsearch:root /usr/share/elasticsearch
+
+          ES_RUN=""
+          if [ "$(id -u)" -eq 0 ] ; then
+            ES_RUN="sudo -E -u elasticsearch"
+          fi
+
+          # Create Elasticsearch keystore with FIPS-compliant password
+          printf "${ELASTICSEARCH_PASSWORD}\n${ELASTICSEARCH_PASSWORD}\n" | $ES_RUN /usr/share/elasticsearch/bin/elasticsearch-keystore create -p
+
+          # Start Elasticsearch FIPS with no security
+          touch /tmp/elasticsearch.pid
+          chown elasticsearch:root /tmp/elasticsearch.pid
+          echo "${ELASTICSEARCH_PASSWORD}" | $ES_RUN /usr/share/elasticsearch/bin/elasticsearch \
+            -Ediscovery.type=single-node \
+            -Expack.security.enabled=false \
+            -p /tmp/elasticsearch.pid > elasticsearch.log 2>&1 &
+
+          # Wait for Elasticsearch
+          wait-for-it localhost:9200 --timeout=120
+
+          # Confirm Elasticsearch status before continuing
+          curl --retry 10 -sf -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status' | grep "green"
+        start: fleet-server -c /tmp/config.yml
+        expected_output: |
+          Http server started
+          Listening on
+          Running
+          HEALTHY
+        timeout: 120
+        post: |
+          # Verify fleet-server HTTP API is accessible
+          curl -sf --retry 3 "http://localhost:8220/api/status" | grep -i "HEALTHY"
