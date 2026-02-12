@@ -1,33 +1,37 @@
 package:
-  name: cilium-1.18
-  version: "1.18.6"
-  epoch: 2 # CVE-2025-61732
+  name: cilium-fips-1.19
+  version: "1.19.0"
+  epoch: 0 # CVE-2025-61732
   description: Cilium is a networking, observability, and security solution with an eBPF-based dataplane
   copyright:
     - license: Apache-2.0
   resources:
-    cpu: 20
+    cpu: 30
     memory: 64Gi
   dependencies:
     runtime:
       - bpftool
-      - cni-plugins-loopback
+      - cilium-host-utils=${{package.full-version}}
+      - cni-plugins-fips-loopback
       - iproute2
       - ipset
       - iptables-nft
       - kmod
       # cilium does compilations at runtime on the node.
       - llvm-19-bpf
-      - merged-sbin
-      - wolfi-baselayout
     provides:
       - cilium=${{package.full-version}}
 
+# This package contains cni binaries. They can be copied out of Wolfi
+# onto older host-os During build-time link against an older glibc, to
+# ensure go-fips built cni remain ABI compatible with old foreign
+# host-os. Majority of regular go-fips binaries/images do not need
+# this.
 environment:
   contents:
     packages:
       - bash
-      - bazel-6
+      - bazel-7
       - binutils
       - build-base
       - busybox
@@ -36,37 +40,61 @@ environment:
       - cmake
       - coreutils # for GNU install
       - git
-      - go
+      # MD5 needed by the Hubble config watched to calculate hash:
+      # https://github.com/cilium/cilium/blob/9e9f098982ddc31463cfcf2d589d9e1d8bb040a7/pkg/hubble/exporter/config_watcher.go#L102
+      - go-fips-md5~1.24
       - grep
-      - isl-dev
+      - iptables-nft
       - libcxx1-19-dev
       - libtool
       - lld-19
       - lld-19-dev
+      - llvm-19
       - llvm-19-dev
-      - mpc-dev
-      - openjdk-11
+      # tools run on host and are linked against oldglibc for compatability
+      - oldglibc~2.28
+      - openjdk-21-default-jdk
+      # for fips config & fips-provider
+      - openssl-config-fipshardened
       - patch
       - python3-dev
       - samurai
       - wolfi-baselayout
+  environment:
+    CGO_ENABLED: "1"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: 95896696119f33a0f5d21019182192fcdab3600f
+      expected-commit: 7c6667e1e707d7f39a4af3409c2a9ebea2917d32
 
   - uses: patch
     with:
-      patches: loopback-location.patch
+      patches: loopback-location.patch cilium-version.patch portable-libcrypto.patch
+
+  - uses: go/bump
+    with:
+      # Cherry-pick https://github.com/godbus/dbus/pull/413 to avoid crypto & sha1 usage
+      replaces: github.com/godbus/dbus/v5=github.com/xnox/godbus-dbus/v5@v5.1.0.1
 
   - runs: |
       # Bazel errors out on toolchain stanza
       sed -i '/$toolchain /d' go.mod
       # Bazel errors out on go point release
       sed -i 's|^\(go 1\.[0-9]*\)\.[0-9]*|\1|' go.mod
+
+  - uses: go/remove-cgo-enabled-0
+    with:
+      files: Makefile Makefile.defs images/runtime/build-gops.sh
+      seds: |
+        s,CGO_ENABLED=0[ ]*,,g
+        s,-s -w,-w,g
+        s,tools/mount,,g
+        s,tools/sysctlfix,,g
+        s,plugins/cilium-cni,,g
+        s|osusergo|osusergo,netgo|g
 
   - runs: |
       # Remove groupadd from Makefile: it's not doing anything useful in
@@ -75,6 +103,12 @@ pipeline:
 
       DESTDIR=${{targets.destdir}} DISABLE_ENVOY_INSTALLATION=1 make build-container
       DESTDIR=${{targets.destdir}} DISABLE_ENVOY_INSTALLATION=1 make install-container
+
+  - runs: |
+      for d in tools/sysctlfix tools/mount plugins/cilium-cni; do
+          make -C $d clean all
+          DESTDIR=${{targets.destdir}} make -C $d install
+      done
 
   - uses: strip
 
@@ -123,108 +157,108 @@ subpackages:
             test -x $(readlink -f /install-plugin.sh)
             test -x $(readlink -f /cni-uninstall.sh)
 
-  - name: ${{package.name}}-compat
-    description: Compat to make our image compatible with upstream
-    dependencies:
-      runtime:
-        - wolfi-baselayout
-      provides:
-        - cilium-compat=${{package.full-version}}
-    pipeline:
-      - runs: |
-          mkdir -p ${{targets.subpkgdir}}/run
-          mkdir -p ${{targets.subpkgdir}}/var
-          ln -sf /run ${{targets.subpkgdir}}/var/run
-    test:
-      pipeline:
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: cilium-compat
-            real-pkg-name: ${{subpkg.name}}
-
-  - name: ${{package.name}}-iptables
-    description: iptables compatibility package for cilium
-    dependencies:
-      runtime:
-        - iptables-nft
-        - merged-sbin
-        - wolfi-baselayout
-      provides:
-        - cilium-iptables=${{package.full-version}}
-    test:
-      pipeline:
-        - uses: test/emptypackage
-
   - name: ${{package.name}}-operator-generic
     description: Generic operator for cilium
     dependencies:
       runtime:
         - gops
-        - merged-sbin
-        - wolfi-baselayout
       provides:
-        - cilium-operator-generic=${{package.full-version}}
+        - cilium-operator-generic-fips=${{package.full-version}}
     pipeline:
       - runs: |
           cd /home/build/operator
           make cilium-operator-generic
           DESTDIR=${{targets.subpkgdir}} make install-generic
       - uses: strip
+    # test added by a robot (binary)
     test:
       pipeline:
         - runs: |
-            # Test version output
-            cilium-operator-generic --version | grep -q "${{package.version}}"
+            stat /usr/bin/cilium-operator-generic
 
   - name: ${{package.name}}-operator-aws
     description: AWS operator for cilium
     dependencies:
       runtime:
         - gops
-        - merged-sbin
-        - wolfi-baselayout
       provides:
-        - cilium-operator-aws=${{package.full-version}}
+        - cilium-operator-aws-fips=${{package.full-version}}
     pipeline:
       - runs: |
           cd /home/build/operator
           make cilium-operator-aws
           DESTDIR=${{targets.subpkgdir}} make install-aws
       - uses: strip
+    # test added by a robot (binary)
     test:
       pipeline:
         - runs: |
-            # Test version output
-            cilium-operator-aws --version | grep -q "${{package.version}}"
+            stat /usr/bin/cilium-operator-aws
+
+  - name: ${{package.name}}-operator-azure
+    description: Azure operator for cilium
+    dependencies:
+      runtime:
+        - gops
+      provides:
+        - cilium-operator-azure-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          cd /home/build/operator
+          make cilium-operator-azure
+          DESTDIR=${{targets.subpkgdir}} make install-azure
+      - uses: strip
+    # test added by a robot (binary)
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/cilium-operator-azure
 
   - name: ${{package.name}}-hubble-relay
     description: Hubble relay
     dependencies:
       provides:
-        - cilium-hubble-relay=${{package.full-version}}
-      runtime:
-        - merged-sbin
-        - wolfi-baselayout
+        - cilium-hubble-relay-fips=${{package.full-version}}
     pipeline:
       - runs: |
           cd /home/build/hubble-relay
           make hubble-relay
           DESTDIR=${{targets.subpkgdir}} make install
       - uses: strip
+    # test added by a robot (binary)
     test:
       pipeline:
         - runs: |
-            # Test version output
-            hubble-relay --version | grep -q "${{package.version}}"
+            stat /usr/bin/hubble-relay
+
+  - name: ${{package.name}}-host-utils
+    description: Cilium binaries that run on the host.
+    dependencies:
+      runtime:
+        - libcrypto3-2.34
+      provides:
+        - cilium-host-utils=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for p in cilium-mount cilium-sysctlfix; do
+              mv "${{targets.destdir}}"/usr/bin/$p "${{targets.contextdir}}"/usr/bin
+          done
+          mkdir -p "${{targets.contextdir}}/opt/cni/bin"
+          mv "${{targets.destdir}}"/opt/cni/bin/cilium-cni "${{targets.contextdir}}"/opt/cni/bin
+      - uses: strip
+    test:
+      pipeline:
+        - uses: test/go-fips-check
 
   - name: ${{package.name}}-clustermesh-apiserver
     description: Clustermesh apiserver
     dependencies:
       runtime:
-        - etcd
-        - gops
+        - etcd-fips
+        - gops-fips
       provides:
-        - cilium-clustermesh-apiserver=${{package.full-version}}
+        - cilium-clustermesh-apiserver-fips=${{package.full-version}}
     pipeline:
       - working-directory: /home/build/clustermesh-apiserver
         pipeline:
@@ -234,6 +268,7 @@ subpackages:
       - uses: strip
     test:
       pipeline:
+        - uses: test/go-fips-check
         - runs: |
             # check these files exist
             stat /usr/bin/clustermesh-apiserver
@@ -243,24 +278,38 @@ subpackages:
 
 test:
   pipeline:
+    - uses: test/go-fips-check
     - uses: test/tw/ver-check
       with:
-        bins: cilium cilium-dbg cilium-agent
-    # Ensure that structured version info is available
-    - runs: cilium version -ojsonpath={.Client.Version} | grep ${{package.version}}
+        bins: |
+          cilium
+          cilium-dbg
+          cilium-agent
     - name: Test help commands
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          cilium
+          cilium-agent
+          cilium-bugtool
+          cilium-dbg
+          cilium-health
+          cilium-mount
+          cilium-sysctlfix
+    - name: Check that fips-capable hosts, with fips off by default work
       runs: |
-        cilium --help
-        cilium-agent --help
-        cilium-bugtool --help
-        cilium-dbg --help
-        cilium-health --help
-        cilium-mount --help
-        cilium-sysctlfix --help
+        # Mock fips provider available, but not chosen by default
+        #
+        # Note since fips provider is the only provider, this is a
+        # superficial change, which however does trip up go-msft
+        # toolchain FIPS mode checks
+        sed 's|fips=yes|fips=no|' -i /etc/ssl/openssl.cnf
+        # Ensure that structured version info is available
+        cilium version -ojsonpath={.Client.Version} | grep ${{package.version}}
 
 update:
   enabled: true
   github:
     identifier: cilium/cilium
     strip-prefix: v
-    tag-filter-prefix: v1.18.
+    tag-filter-prefix: v1.19.
