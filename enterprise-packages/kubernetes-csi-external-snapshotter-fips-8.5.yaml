@@ -1,0 +1,117 @@
+package:
+  name: kubernetes-csi-external-snapshotter-fips-8.5
+  version: "8.5.0"
+  epoch: 0 # CVE-2025-68119
+  description: Sidecar container that watches Kubernetes Snapshot CRD objects and triggers CreateSnapshot/DeleteSnapshot against a CSI endpoint
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - kubernetes-csi-external-snapshotter-fips=${{package.full-version}}
+      - kubernetes-csi-external-csi-snapshotter-fips=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes-csi/external-snapshotter
+      tag: v${{package.version}}
+      expected-commit: 5aab051d1af135e2c852f6fb7fc27fa709d877bf
+
+  - uses: go/build
+    with:
+      packages: ./cmd/csi-snapshotter
+      output: csi-snapshotter
+      ldflags: -X main.version=$(git describe --long --tags --match="v*" --dirty 2>/dev/null || git rev-list -n1 HEAD)
+      go-package: go-fips
+
+  - uses: strip
+
+subpackages:
+  - name: kubernetes-csi-external-snapshot-controller-fips-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - kubernetes-csi-external-snapshot-controller-fips=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/snapshot-controller
+          output: snapshot-controller
+          ldflags: -X main.version=$(git describe --long --tags --match="v*" --dirty 2>/dev/null || git rev-list -n1 HEAD)
+          go-package: go-fips
+      - uses: strip
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: kubernetes-csi-external-snapshot-controller-fips-${{vars.major-minor-version}}
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: kubernetes-csi-external-snapshot-controller-fips
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Test snapshot-controller daemon with kwok
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # Install VolumeSnapshot CRDs required by snapshot-controller
+              kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v${{package.version}}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+              kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v${{package.version}}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+              kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v${{package.version}}/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+              kubectl wait --for=condition=Established crd --all --timeout=60s
+            start: /usr/bin/snapshot-controller --kubeconfig ~/.kube/config --http-endpoint :8080
+            expected_output: "Starting snapshot controller"
+            timeout: "60"
+            post: |
+              set -euo pipefail
+              # Verify metrics endpoint is accessible and returns snapshot controller metrics
+              curl -sf http://localhost:8080/metrics | grep -F "snapshot_controller"
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes-csi/external-snapshotter
+    strip-prefix: v
+    tag-filter: v8.5
+
+test:
+  environment:
+    contents:
+      packages:
+        - kubernetes-csi-external-snapshot-controller-fips-${{vars.major-minor-version}}
+        - curl
+        - kubernetes-csi-driver-hostpath
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ver-check
+      with:
+        bins: csi-snapshotter
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          csi-snapshotter
+          snapshot-controller
+    - uses: test/kwok/cluster
+    - name: Test csi-snapshotter with hostpath driver
+      runs: |-
+        set -euo pipefail
+        mkdir -p /csi
+        hostpathplugin --v=5 --endpoint="unix:///csi/csi.sock" --nodeid="node-000000" > hostpathplugin.log 2>&1 & sleep 5
+        csi-snapshotter --v=5 --csi-address "/csi/csi.sock" --kubeconfig ~/.kube/config --http-endpoint ":8080" > csi-attacher.log 2>&1 & sleep 10
+        sleep 10
+        # Verify metrics endpoint is accessible and returns expected CSI metrics
+        curl -sf localhost:8080/metrics | grep -F "process_"
