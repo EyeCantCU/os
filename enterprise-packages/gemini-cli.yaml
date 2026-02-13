@@ -5,11 +5,16 @@ package:
   description: AI agent that brings Google Gemini directly into your terminal
   copyright:
     - license: Apache-2.0
+  dependencies:
+    runtime:
+      - libsecret
+      - nodejs-${{vars.node-version}}
   resources:
     cpu: "4"
     memory: 12Gi
 
 vars:
+  # Node.js 24 is current Active LTS
   node-version: "24"
 
 environment:
@@ -58,22 +63,21 @@ pipeline:
         /tmp/gemini-core.tgz \
         /tmp/gemini-cli.tgz
 
-  - name: Clean up temporary files
-    runs: |
-      rm -f /tmp/gemini-*.tgz
-      npm cache clean --force
-
   - name: Remove prebuilt binaries for other architectures
     runs: |
-      case "${{build.arch}}" in
-        aarch64)
-          find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "linux-x64" -o -name "x64" \) -exec rm -rf {} + || :
-          ;;
-        x86_64)
-          find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "linux-arm64" -o -name "arm64" \) -exec rm -rf {} + || :
-          ;;
-      esac
       find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "darwin-*" -o -name "win32-*" -o -name "fallbacks" \) -exec rm -rf {} + || :
+
+  - assertions:
+      required-steps: 1
+    pipeline:
+      - if: ${{build.arch}} == 'aarch64'
+        name: Remove x86_64 prebuilt binaries
+        runs: |
+          find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "linux-x64" -o -name "x64" \) -exec rm -rf {} + || :
+      - if: ${{build.arch}} == 'x86_64'
+        name: Remove aarch64 prebuilt binaries
+        runs: |
+          find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "linux-arm64" -o -name "arm64" \) -exec rm -rf {} + || :
 
 update:
   enabled: true
@@ -82,10 +86,6 @@ update:
     strip-prefix: v
 
 test:
-  environment:
-    contents:
-      packages:
-        - nodejs-${{vars.node-version}}
   pipeline:
     - uses: test/tw/ldd-check
       with:
@@ -97,3 +97,15 @@ test:
       with:
         bins: gemini
         version: ${{package.version}}
+    - name: Verify CLI requires authentication
+      runs: |
+        set -euo pipefail
+
+        # Ensure we don't accidentally have auth in the env
+        unset GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENAI_USE_VERTEXAI GOOGLE_CLOUD_PROJECT || true
+
+        # CLI should fail without auth when running an example prompt
+        if gemini -p "Say hello from a test prompt"; then
+          echo "Expected gemini to fail without authentication, but it succeeded" >&2
+          exit 1
+        fi
