@@ -21,7 +21,7 @@ This document provides guidance to Claude Code (claude.ai/code) when working wit
 - Build with Docker (fallback): `make docker-package/<package-name>`
 - Test a package: `make test/<package-name>`
 - Debug test failures: `make test-debug/<package-name>` (requires a TTY)
-- Lint YAML files: `./lint.sh [filename.yaml]`
+- Lint YAML files: `./lint.sh [filename.yaml]` (run from package subdirectory: `os/`, `enterprise-packages/`, or `extra-packages/`)
 - Run in dev container: `make dev-container`
 - Scan for vulnerabilities: `wolfictl scan ./packages/$(uname -m)/<package-name-and-version>.apk`
 - Explore APK contents: `tar tzv -f packages/$(uname -m)/<package-name-and-version>.apk`
@@ -38,7 +38,7 @@ This document provides guidance to Claude Code (claude.ai/code) when working wit
 - When patching CVEs: use `<CVE-ID>.patch` naming convention
 - Security fixes must be recorded in the advisories repo
 - Version streams: use version string in package name, provide logical unversioned forms
-- ALWAYS run `./lint.sh <filename.yaml>` after updating any YAML file to ensure proper formatting
+- ALWAYS run `./lint.sh <filename.yaml>` after updating any YAML file to ensure proper formatting (each package subdirectory has its own `lint.sh`)
 - Avoid removing comments unless they are no longer accurate.
 
 ## File Structure & Packages
