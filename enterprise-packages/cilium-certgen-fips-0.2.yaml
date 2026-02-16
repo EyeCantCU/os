@@ -1,7 +1,7 @@
 package:
   name: cilium-certgen-fips-0.2
   version: "0.2.4"
-  epoch: 1 # CVE-2025-61732
+  epoch: 2 # CVE-2025-61732
   description: A convenience tool to generate and store certificates for Hubble Relay mTLS.
   copyright:
     - license: Apache-2.0
@@ -57,19 +57,21 @@ test:
         bins: cilium-certgen
     - name: Generate certificates
       runs: |
+        set -euo pipefail
+
         # Test certificate generation functionality
         # Create test directory
         mkdir -p /tmp/certgen-test
         cd /tmp/certgen-test
 
-        # Test 1: Validate help and flags
-        cilium-certgen --help | grep -q "config-file"
-        cilium-certgen --help | grep -q "ca-cert-file"
-        cilium-certgen --help | grep -q "ca-key-file"
-        cilium-certgen --help | grep -q "ca-generate"
+        # Test 1: Validate help and flags (verify expected flags are documented)
+        cilium-certgen --help | grep -F "config-file"
+        cilium-certgen --help | grep -F "ca-cert-file"
+        cilium-certgen --help | grep -F "ca-key-file"
+        cilium-certgen --help | grep -F "ca-generate"
 
         # Test 2: Create certificate configuration
-        cat > cert-config.yaml << EOF
+        tee cert-config.yaml <<EOF
         certs:
           - name: basic-server-cert
             namespace: default
@@ -89,26 +91,25 @@ test:
         openssl req -x509 -newkey rsa:2048 -keyout test-ca.key -out test-ca.crt -days 1 -nodes \
           -subj "/CN=Test Root CA"
 
-        # Test 4: Verify certificates we created
-        openssl x509 -text -noout -in test-ca.crt | grep -i "CN.*Test Root CA"
+        # Test 4: Verify certificates we created (fails test if not valid)
+        openssl x509 -text -noout -in test-ca.crt | grep -F "Test Root CA"
         openssl x509 -checkend 3600 -noout -in test-ca.crt  # Check if valid for next hour
 
-        # Test 5: Validate configuration file format
-        if ! cat cert-config.yaml | grep -q "commonName: server.example.com"; then
-          echo "Configuration validation failed"
-          exit 1
-        fi
+        # Test 5: Validate configuration file format (fails test if missing expected content)
+        grep -F "commonName: server.example.com" cert-config.yaml
 
         # Test 6: Try to run cilium-certgen with dry-run style validation
         # Since this tool requires Kubernetes, we'll test error handling
-        if cilium-certgen --ca-cert-file=test-ca.crt --ca-key-file=test-ca.key --config-file=cert-config.yaml 2>&1 | grep -q "connection refused"; then
+        if cilium-certgen --ca-cert-file=test-ca.crt --ca-key-file=test-ca.key --config-file=cert-config.yaml 2>&1 | grep -F "connection refused"; then
           echo "Expected connection error when no Kubernetes cluster available - this is normal"
         fi
 
         echo "Certificate generation validation tests completed successfully"
     - uses: test/kwok/cluster
     - name: Cluster certificate generation test
-      runs: |
+      runs: |-
+        set -euo pipefail
+
         # Set up kubeconfig like in nova.yaml
         kubectl config view --minify --raw > /tmp/kubeconfig.yaml
         export KUBECONFIG=/tmp/kubeconfig.yaml
@@ -124,7 +125,7 @@ test:
         kubectl create namespace certgen-test-basic
 
         # Save certificate configuration
-        cat > /tmp/basic-cert-config.yaml << EOF
+        tee /tmp/basic-cert-config.yaml <<EOF
         certs:
           - name: basic-server-cert
             namespace: certgen-test-basic
@@ -156,16 +157,20 @@ test:
         kubectl get secret -n certgen-test-basic basic-server-cert --template='{{ index .data "tls.crt" }}' | base64 -d > /tmp/server.crt
         kubectl get secret -n certgen-test-basic basic-server-cert --template='{{ index .data "tls.key" }}' | base64 -d > /tmp/server.key
 
-        # Verification
-        openssl x509 -text -noout -in /tmp/test-ca.crt | grep -i "CN.*Test Root CA"
+        # Verification (each grep -F fails test if pattern not found)
+        openssl x509 -text -noout -in /tmp/test-ca.crt | grep -F "Test Root CA"
         openssl x509 -checkend 3600 -noout -in /tmp/test-ca.crt
         openssl verify -CAfile /tmp/test-ca.crt /tmp/server.crt
-        openssl x509 -subject -noout -in /tmp/server.crt | grep -i "CN.*server.example.com"
-        openssl x509 -ext subjectAltName -noout -in /tmp/server.crt | grep -E "server.example.com|api.example.com|10.0.0.100"
+        openssl x509 -subject -noout -in /tmp/server.crt | grep -F "server.example.com"
 
-        # Verify secrets were created correctly
-        kubectl get secret -n certgen-test-basic test-ca -o jsonpath='{.type}' | grep -q "Opaque"
-        kubectl get secret -n certgen-test-basic basic-server-cert -o jsonpath='{.type}' | grep -q "kubernetes.io/tls"
+        # Verify SAN entries are present
+        openssl x509 -ext subjectAltName -noout -in /tmp/server.crt | grep -F "server.example.com"
+        openssl x509 -ext subjectAltName -noout -in /tmp/server.crt | grep -F "api.example.com"
+        openssl x509 -ext subjectAltName -noout -in /tmp/server.crt | grep -F "10.0.0.100"
+
+        # Verify secrets were created correctly (fails test if type doesn't match)
+        kubectl get secret -n certgen-test-basic test-ca -o jsonpath='{.type}' | grep -F "Opaque"
+        kubectl get secret -n certgen-test-basic basic-server-cert -o jsonpath='{.type}' | grep -F "kubernetes.io/tls"
 
         echo "Expected Output validation:"
         echo "- CA secret test-ca created in certgen-test-basic namespace"
