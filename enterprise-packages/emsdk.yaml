@@ -1,7 +1,7 @@
 package:
   name: emsdk
   version: "5.0.0"
-  epoch: 3
+  epoch: 4
   description: Emscripten SDK - Toolchain for compiling C/C++ to WebAssembly
   copyright:
     - license: MIT
@@ -34,6 +34,7 @@ environment:
   contents:
     packages:
       - busybox
+      - emscripten
 
 pipeline:
   - uses: git-checkout
@@ -44,7 +45,7 @@ pipeline:
 
   - runs: |
       # Install emsdk scripts to /emsdk
-      mkdir -p "${{targets.destdir}}"/emsdk
+      mkdir -p "${{targets.destdir}}"/emsdk/upstream
 
       # Copy essential files for emsdk to work
       cp emsdk emsdk.py "${{targets.destdir}}"/emsdk/
@@ -52,9 +53,29 @@ pipeline:
       cp legacy-emscripten-tags.txt legacy-binaryen-tags.txt llvm-tags-64bit.txt "${{targets.destdir}}"/emsdk/
       cp emsdk_env.sh "${{targets.destdir}}"/emsdk/
 
-      # Create /emsdk/upstream symlink for Docker image compatibility
-      mkdir -p "${{targets.destdir}}"/emsdk
-      ln -sf /upstream "${{targets.destdir}}"/emsdk/upstream
+      for item in /upstream/*; do
+        ln -sf "$item" "${{targets.destdir}}"/emsdk/upstream/
+      done
+
+      # Create .emsdk_version so that `emsdk construct_env` (called by the
+      # entrypoint via emsdk_env.sh) recognises the toolchain as installed and
+      # active.  Without this file, adjusted_path() strips /emsdk/upstream/emscripten
+      # from PATH because no tools are detected as active.
+      # This is important as emsdk tools are not installed with the sdk but with apk!
+      COMMIT_HASH=$(grep "\"${{package.version}}\":" emscripten-releases-tags.json | sed 's/.*": "//;s/".*//')
+      echo "releases-${COMMIT_HASH}-64bit" > "${{targets.destdir}}"/emsdk/upstream/.emsdk_version
+
+  # Create .emscripten config matching upstream Docker image layout
+  # https://github.com/emscripten-core/emsdk/blob/main/docker/Dockerfile
+  - runs: |
+      tee "${{targets.destdir}}"/emsdk/.emscripten << 'EOF'
+      import os
+      emsdk_path = os.path.dirname(os.path.abspath(__file__))
+      NODE_JS = '/usr/bin/node'
+      LLVM_ROOT = emsdk_path + '/upstream/bin'
+      BINARYEN_ROOT = emsdk_path + '/upstream'
+      EMSCRIPTEN_ROOT = emsdk_path + '/upstream/emscripten'
+      EOF
 
 subpackages:
   - name: emsdk-oci-entrypoint
@@ -88,12 +109,14 @@ test:
       runs: |
         set -euo pipefail
 
-        # Verify /emsdk/upstream symlink for Docker compatibility
+        # Verify /emsdk/upstream is a real directory matching upstream Docker layout
         stat /emsdk/upstream
-        test -L /emsdk/upstream
-        readlink /emsdk/upstream | grep -F "/upstream"
+        test -d /emsdk/upstream
 
-        # Verify emscripten tools exist via symlink
+        # Verify .emsdk_version exists directly in the directory
+        stat /emsdk/upstream/.emsdk_version
+
+        # Verify emscripten tools are accessible via /emsdk/upstream
         stat /emsdk/upstream/emscripten/emcc
         stat /emsdk/upstream/emscripten/em++
 
