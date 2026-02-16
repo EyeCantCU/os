@@ -18,9 +18,6 @@ vars:
 environment:
   contents:
     packages:
-      - build-base
-      - busybox
-      - ca-certificates-bundle
 
 pipeline:
   - uses: git-checkout
@@ -34,12 +31,11 @@ pipeline:
     with:
       packages: ./cmd/google_cloud_ops_agent_engine
       ldflags: |
-        -s -w
         -X main.version=${{package.version}}
       output: google_cloud_ops_agent_engine
 
-  # Install default configuration and create required directories
-  - runs: |
+  - name: Install configuration and directories
+    runs: |
       mkdir -p "${{targets.destdir}}"/etc/google-cloud-ops-agent
       install -Dm644 confgenerator/default-config.yaml "${{targets.destdir}}"/etc/google-cloud-ops-agent/config.yaml
 
@@ -54,15 +50,15 @@ subpackages:
       - uses: go/build
         with:
           packages: ./cmd/agent_wrapper
-          ldflags: -s -w
           output: google_cloud_ops_agent_wrapper
     test:
       pipeline:
-        - name: Verify wrapper binary exists
-          runs: stat /usr/bin/google_cloud_ops_agent_wrapper
-        - name: Test wrapper help
-          runs: |
-            google_cloud_ops_agent_wrapper -h 2>&1 | grep -F "Usage"
+        - uses: test/tw/contains-files
+          with:
+            files: /usr/bin/google_cloud_ops_agent_wrapper
+        - uses: test/tw/help-check
+          with:
+            bins: google_cloud_ops_agent_wrapper
 
   - name: ${{package.name}}-fluent-bit-compat
     description: Fluent Bit compatibility symlinks for Google Cloud Ops Agent
@@ -74,15 +70,10 @@ subpackages:
           mkdir -p "${{targets.contextdir}}"${{vars.prefix}}/subagents/fluent-bit/bin
           ln -sf /usr/bin/fluent-bit "${{targets.contextdir}}"${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
     test:
-      environment:
-        contents:
-          packages:
-            - fluent-bit-${{vars.fluent-bit-version}}
       pipeline:
-        - name: Verify fluent-bit symlink
-          runs: |
-            readlink -v ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
-            ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit --version
+        - uses: test/tw/contains-files
+          with:
+            files: ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
 
   - name: ${{package.name}}-systemd
     description: Systemd service files for Google Cloud Ops Agent
@@ -119,6 +110,14 @@ subpackages:
     test:
       pipeline:
         - uses: test/tw/verify-service
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/lib/systemd/system
+            name: "*.service"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/lib/systemd/system
+            name: "*.conf"
 
   - name: ${{package.name}}-compat
     description: Compatibility package with symlinks for upstream expected paths
@@ -143,21 +142,15 @@ subpackages:
           # OTel collector
           ln -sf /usr/bin/otelopscol "${{targets.contextdir}}"${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol
     test:
-      environment:
-        contents:
-          packages:
-            - ${{package.name}}
-            - ${{package.name}}-wrapper
-            - google-cloud-otel-ops-collector
       pipeline:
         - uses: test/tw/symlink-check
           with:
             allow-absolute: "true"
-        - name: Verify symlinks work
-          runs: |
-            ${{vars.prefix}}/libexec/google_cloud_ops_agent_engine -h 2>&1
-            ${{vars.prefix}}/libexec/google_cloud_ops_agent_wrapper -h 2>&1
-            ${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol --version
+        - uses: test/tw/help-check
+          with:
+            bins: |
+              ${{vars.prefix}}/libexec/google_cloud_ops_agent_engine
+              ${{vars.prefix}}/libexec/google_cloud_ops_agent_wrapper
 
   - name: ${{package.name}}-all
     description: Meta-package for Google Cloud Ops Agent with all components
@@ -193,11 +186,9 @@ test:
         - procps
         - wait-for-it
   pipeline:
-    - name: Verify engine binary exists
-      runs: stat /usr/bin/google_cloud_ops_agent_engine
-    - name: Test engine help
-      runs: |
-        google_cloud_ops_agent_engine -h 2>&1 | grep -F "Usage of"
+    - uses: test/tw/help-check
+      with:
+        bins: google_cloud_ops_agent_engine
     - name: Test OTel collector startup
       uses: test/daemon-check-output
       with:
@@ -233,8 +224,8 @@ test:
         post: |
           set -euo pipefail
           # Verify the collector is listening
-          netstat -ln | grep -F ":4317"
-          netstat -ln | grep -F ":4318"
+          wait-for-it localhost:4317 -t 5
+          wait-for-it localhost:4318 -t 5
     - name: Test fluent-bit startup
       uses: test/daemon-check-output
       with:
@@ -265,23 +256,14 @@ test:
           fluent bit
         post: |
           set -euo pipefail
+          wait-for-it localhost:2020 -t 5
           # Verify fluent-bit health endpoint
           curl -sf http://localhost:2020/api/v1/health \
             | jq -e '.["fluent-bit"] and .["fluent-bit"].version'
     - name: Verify all components are accessible
       runs: |
         set -euo pipefail
-        # Engine
-        stat /usr/bin/google_cloud_ops_agent_engine
-        # Wrapper
-        stat /usr/bin/google_cloud_ops_agent_wrapper
-        # OTel collector
-        stat /usr/bin/otelopscol
         # JMX metrics JAR (from google-cloud-otel-ops-collector)
         stat ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
-        # Fluent Bit (via symlink)
-        stat ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
-        # Default config
-        stat /etc/google-cloud-ops-agent/config.yaml
     - name: Validate library dependencies
       uses: test/tw/ldd-check
