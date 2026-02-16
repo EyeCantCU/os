@@ -1,8 +1,8 @@
 #nolint:valid-pipeline-git-checkout-commit,valid-pipeline-git-checkout-tag
 package:
   name: cilium-envoy-fips-1.17
-  version: "1.17.12"
-  epoch: 2 # go/enterprise-rsc/cilium-envoy-fips-1.17
+  version: "1.17.13"
+  epoch: 0 # CVE-2025-61732
   description: Envoy with additional cilium plugins
   copyright:
     - license: Apache-2.0
@@ -28,38 +28,40 @@ environment:
       - bash
       - bazel-7
       - binutils
-      - boringssl-fips-static-${{vars.boringssl}}-newapi
+      - boringssl-fips-static-${{vars.boringssl}}
       - build-base
       - busybox
       - ca-certificates-bundle
-      - clang-17
+      - clang-18
       - cmake
       - coreutils # for GNU install
       - git
       - glibc-locale-en # Fixes issues with UTF-8 characters in filenames
       - go-fips<1.25
       - isl-dev
-      - libcxx1-17-dev
       - libtool
-      - lld-17
-      - lld-17-dev
-      - llvm-17
-      - llvm-17-dev
-      - openjdk-21-default-jdk
+      - linux-headers
+      - llvm-18
+      - llvm-18-dev
+      - llvm-libcxx-18
+      - llvm-libcxx-18-dev
+      - llvm-libcxxabi-18
+      - llvm-lld-18~18
+      - openjdk-25-default-jdk
       - patch
       - python3-dev
       - samurai
       - wolfi-baselayout
 
 vars:
-  boringssl: "2023042800"
+  boringssl: "20240407"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cilium/cilium
       tag: v${{package.version}}
-      expected-commit: 7533de6dc6366c5504b394a090ac7d1680dc54ee
+      expected-commit: b0547c9f09de0088acdd34f6e1e1aeb992d23837
       destination: cilium
 
   - uses: git-checkout
@@ -79,10 +81,6 @@ pipeline:
       # Sometimes the commit is too "hidden" and can't be reset to, so we try fetching it explicitly.
       git fetch origin $ENVOY_SHA
       git reset --hard $ENVOY_SHA
-      # Fix 404, likely can drop in the next release
-      sed -i "s|5251fec52ee063192dcd8bd0615c6283e7b12b6c|8e583d10a1781319981e5ad4a477be9ad3f6fe73|" WORKSPACE
-      sed 's|build --@com_googlesource_googleurl//build_config:system_icu=0|build --@googleurl//build_config:system_icu=0|' -i envoy.bazelrc
-      git commit -m "Update envoy to fix offline url" WORKSPACE envoy.bazelrc
 
   - runs: |
       # Bazel errors out on toolchain stanza
@@ -115,20 +113,21 @@ pipeline:
       # Unregister to use Wolfi's toolchain available in the build env.
       sed 's/register_toolchains/#register_toolchains/g' -i WORKSPACE
 
-      # Create symlink for llvm-ar-17 since the build expects this specific name
-      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-17
+      # Create symlink for llvm-ar-18 since the build expects this specific name
+      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-18
+      ln -sf /usr/bin/lld /usr/bin/ld.lld-18
+      ln -sf /usr/bin/lld /usr/lib/llvm-18/bin/ld.lld-18
 
   - runs: |
-      export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+      export CARGO_BAZEL_REPIN=true
       mkdir -p .cache/bazel/_bazel_root
 
       ./bazel/setup_clang.sh /usr
 
       # Use libc++ to be consistent with other Wolfi Envoy packages.
       echo "build --config=libc++" >> user.bazelrc
-
-      # Create symlink for llvm-ar-17 since the build expects this specific name
-      ln -sf /usr/bin/llvm-ar /usr/bin/llvm-ar-17
+      echo "build --action_env=CC=clang" >> user.bazelrc
+      echo "build --action_env=CXX=clang++" >> user.bazelrc
 
       # Choose boringssl-fips
       # Despite using boringssl prebuilt in FIPS mode different
@@ -192,12 +191,10 @@ test:
         envoy_version=$(cilium-envoy --version | sed -n 's|.*/BoringSSL-FIPS-\(.*\)|\1|p')
         [ "$envoy_version" = "${{vars.boringssl}}" ]
         /usr/bin/bssl-test_fips
-        bssl_version=$(/usr/bin/bssl-test_fips | sed -n 's|^Module version: \(.*\)|\1|p')
-        [ "$bssl_version" = "${{vars.boringssl}}" ]
+        /usr/bin/bssl-test_fips | grep "^Module: 'BoringCrypto', version: ${{vars.boringssl}} hash:$"
     - uses: test/cmvp-fips-certification-check
       with:
-        certificate-number: 4953
-        software-version: ${{vars.boringssl}}
+        certificate-number: 5104
     - name: "Verify libcilium.so installation"
       runs: |
         # Check that the library exists
