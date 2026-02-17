@@ -88,8 +88,8 @@ func buckets(ctx context.Context, dirs []string) error {
 
 	// set of pkg=ver lines from configs mapped back to (one) addr for nicer errors
 	pkgvers := map[string]string{}
-	for addr, cfg := range configs {
-		for _, pkgver := range cfg.Contents.Packages {
+	for addr, info := range configs {
+		for _, pkgver := range info.config.Contents.Packages {
 			pkgvers[pkgver] = addr
 		}
 	}
@@ -271,9 +271,15 @@ func lock(ctx context.Context, c *config.Configuration, cache *apk.Cache, apkRep
 }
 
 // implementation of this ported from github.com/jonjohnsonjr/tfimages
-func walk(ctx context.Context, in io.Reader) (map[string]*types.ImageConfiguration, error) {
+// imageInfo holds both the apko configuration and the target repository URL
+type imageInfo struct {
+	config *types.ImageConfiguration
+	repo   string
+}
+
+func walk(ctx context.Context, in io.Reader) (map[string]*imageInfo, error) {
 	w := walker{
-		configs: map[string]*types.ImageConfiguration{},
+		configs: map[string]*imageInfo{},
 	}
 
 	dec := json.NewDecoder(in)
@@ -298,8 +304,8 @@ func walk(ctx context.Context, in io.Reader) (map[string]*types.ImageConfigurati
 }
 
 type walker struct {
-	// addr -> config
-	configs map[string]*types.ImageConfiguration
+	// addr -> imageInfo
+	configs map[string]*imageInfo
 }
 
 func (w *walker) walkModules(m *tfjson.StateModule) error {
@@ -325,7 +331,17 @@ func (w *walker) walkModules(m *tfjson.StateModule) error {
 				return fmt.Errorf("unmarshal: %w", err)
 			}
 
-			w.configs[r.Address] = &ic
+			var repoURL string
+			if repo, ok := r.AttributeValues["repo"]; ok {
+				if repoStr, ok := repo.(string); ok {
+					repoURL = repoStr
+				}
+			}
+
+			w.configs[r.Address] = &imageInfo{
+				config: &ic,
+				repo:   repoURL,
+			}
 		}
 	}
 
