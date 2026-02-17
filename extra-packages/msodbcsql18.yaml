@@ -2,7 +2,7 @@
 package:
   name: msodbcsql18
   version: 18.5.1.1
-  epoch: 0
+  epoch: 1
   description: "ODBC Driver for Microsoft(R) SQL Server(R)"
   copyright:
     - license: "MICROSOFT SOFTWARE LICENSE"
@@ -61,6 +61,90 @@ pipeline:
       mkdir -p ${{targets.destdir}}/etc
       odbcinst -i -d -f ${{targets.destdir}}/opt/microsoft/msodbcsql18/etc/odbcinst.ini
       install -Dpm0644 -t ${{targets.destdir}}/etc /etc/odbcinst.ini
+
+subpackages:
+  # Compatibility subpackage for Datadog Agent SQL Server monitoring.
+  # Creates symlinks and odbcinst.ini at paths expected by datadog-agent.
+  #
+  # Official datadog/agent image layout:
+  #   /opt/datadog-agent/embedded/msodbcsql/{etc,include,lib,lib64,share}
+  #
+  # This subpackage creates symlinks from the datadog-agent paths to the
+  # msodbcsql18 installation at /opt/microsoft/msodbcsql18/.
+  #
+  # The odbcinst.ini is copied and modified to reference the datadog-agent
+  # paths so that ODBCSYSINI can be set to /opt/datadog-agent/embedded/msodbcsql/etc
+  # for the datadog-agent process.
+  - name: ${{package.name}}-datadog-agent-compat
+    description: "Datadog Agent compatibility layer for msodbcsql18"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - runs: |
+          # Target directory matching official datadog/agent image layout
+          destd="/opt/datadog-agent/embedded/msodbcsql"
+          # Source directory where msodbcsql18 is installed
+          srcd="/opt/microsoft/msodbcsql18"
+
+          mkdir -p "${{targets.contextdir}}${destd}"
+
+          # Create symlinks from datadog-agent paths to msodbcsql18 install location
+          ln -sf "${srcd}/lib64" "${{targets.contextdir}}${destd}/lib64"
+          ln -sf "${srcd}/include" "${{targets.contextdir}}${destd}/include"
+          ln -sf "${srcd}/share" "${{targets.contextdir}}${destd}/share"
+
+          # Create lib as symlink to lib64 for compatibility
+          ln -sf lib64 "${{targets.contextdir}}${destd}/lib"
+
+          # Copy and fix odbcinst.ini to use datadog-agent paths
+          # This allows setting ODBCSYSINI=/opt/datadog-agent/embedded/msodbcsql/etc
+          mkdir -p "${{targets.contextdir}}${destd}/etc"
+          cp /etc/odbcinst.ini "${{targets.contextdir}}${destd}/etc/odbcinst.ini"
+          sed -i "s|${srcd}/lib64/|${destd}/lib64/|g" "${{targets.contextdir}}${destd}/etc/odbcinst.ini"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - unixodbc
+            - posix-libc-utils
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - runs: |
+            set -euo pipefail
+
+            destd="/opt/datadog-agent/embedded/msodbcsql"
+            srcd="/opt/microsoft/msodbcsql18"
+
+            # Verify directory structure exists
+            stat "${destd}"
+            stat "${destd}/etc"
+            stat "${destd}/include"
+            stat "${destd}/lib"
+            stat "${destd}/lib64"
+            stat "${destd}/share"
+
+            # Verify symlinks point to correct locations
+            readlink "${destd}/lib64" | grep -F "${srcd}/lib64"
+            readlink "${destd}/include" | grep -F "${srcd}/include"
+            readlink "${destd}/share" | grep -F "${srcd}/share"
+            readlink "${destd}/lib" | grep -F "lib64"
+
+            # Verify library is accessible and loadable (use find to avoid hardcoding version)
+            driver_lib=$(find -L "${destd}/lib64/" -name "libmsodbcsql-*.so.*" | head -1)
+            [ -n "$driver_lib" ] || { echo "ERROR: No driver library found"; exit 1; }
+            stat "$driver_lib"
+            ldd "$driver_lib"
+
+            # Verify odbcinst.ini exists with correct datadog-agent path
+            stat "${destd}/etc/odbcinst.ini"
+            grep -F "${destd}/lib64/" "${destd}/etc/odbcinst.ini"
+
+            # Verify driver is registered with unixODBC
+            odbcinst -q -d | grep -F "ODBC Driver 18 for SQL Server"
 
 test:
   environment:
