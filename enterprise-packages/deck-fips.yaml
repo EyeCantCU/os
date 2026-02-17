@@ -1,7 +1,7 @@
 package:
   name: deck-fips
-  version: "1.55.1"
-  epoch: 0 # CVE-2025-61729
+  version: "1.55.2"
+  epoch: 1 # CVE-2025-61732
   description: Configuration management and drift detection for Kong
   copyright:
     - license: Apache-2.0
@@ -15,7 +15,7 @@ pipeline:
     with:
       repository: https://github.com/Kong/deck
       tag: v${{package.version}}
-      expected-commit: 784529304b34ec07a5b88e09f54e5f7ab157f009
+      expected-commit: 8bfab745a25e321497c581944fb3fcb4cb9f6118
 
   - uses: go/build
     with:
@@ -73,8 +73,10 @@ test:
         expect-contains: "The deck tool helps you manage Kong clusters"
     - name: "Core File Operations"
       runs: |
+        set -euo pipefail
+
         # kong config
-        cat > kong.yaml << EOL
+        tee kong.yaml <<'EOL'
         _format_version: "3.0"
         services:
         - name: example-service
@@ -89,7 +91,7 @@ test:
         deck file validate kong.yaml
 
         # Test openapi conversion
-        cat > openapi.json << EOL
+        tee openapi.json <<'EOL'
         {
           "openapi": "3.0.0",
           "info": {
@@ -112,13 +114,16 @@ test:
         EOL
 
         deck file openapi2kong --spec openapi.json -o converted-kong.yaml
+        # Verify conversion produced expected service (fails test if not found)
         yq -o json converted-kong.yaml | jq -e '.services[] | select(.name | contains("sample-api"))'
     - name: "Kong Integration Test"
       uses: test/daemon-check-output
       with:
         setup: |
+          set -euo pipefail
+
           mkdir -p /tmp/kong_prefix
-          cat <<'CFG' >/tmp/kong.yml
+          tee /tmp/kong.yml <<'CFG'
           _format_version: "3.0"
           services:
             - name: example-service
@@ -128,7 +133,7 @@ test:
                   paths: [ /example ]
           CFG
 
-          cat <<'SH' >/tmp/run-kong.sh
+          tee /tmp/run-kong.sh <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
           kong prepare -p /tmp/kong_prefix
@@ -139,18 +144,20 @@ test:
         start: /tmp/run-kong.sh
         timeout: 40
         expected_output: "Kong started"
-        post: |
+        post: |-
+          set -euo pipefail
+
           wait-for-it 127.0.0.1:8001 -t 30
 
-          # kong connectivity
+          # Verify kong connectivity (fails test if ping fails)
           deck gateway ping --kong-addr http://127.0.0.1:8001
 
-          # config dump
+          # Dump config and verify service is present (fails test if not found)
           deck gateway dump --kong-addr http://127.0.0.1:8001 -o kong-dump.yaml
-          grep -e "example-service" kong-dump.yaml
+          grep -F "example-service" kong-dump.yaml
 
-          # test drift detection, modify config to create drift
+          # Test drift detection - modify config to create drift
           sed -i 's/example-service/modified-service/' /tmp/kong.yml
 
-          # should detect drift
-          deck gateway diff --kong-addr http://127.0.0.1:8001 /tmp/kong.yml | grep -F -e "modified-service"
+          # Verify drift detection finds the change (fails test if not detected)
+          deck gateway diff --kong-addr http://127.0.0.1:8001 /tmp/kong.yml | grep -F "modified-service"

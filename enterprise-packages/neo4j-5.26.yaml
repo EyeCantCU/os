@@ -1,7 +1,7 @@
 package:
   name: neo4j-5.26
-  version: "5.26.20"
-  epoch: 0 # Bump netty-codec-http to 4.1.130.Final
+  version: "5.26.21"
+  epoch: 1
   description:
   copyright:
     - license: GPL-3.0-or-later
@@ -14,6 +14,9 @@ package:
       - openjdk-17-default-jvm
     provides:
       - neo4j=${{package.full-version}}
+
+vars:
+  jdk-version: 17 # https://github.com/neo4j/docker-neo4j-publish/blob/a3f58105abfd307a24467da003f46d4bd13813f3/5.26.21/bullseye/community/Dockerfile#L3
 
 var-transforms:
   - from: ${{package.name}}
@@ -29,7 +32,7 @@ environment:
       - ca-certificates-bundle
       - curl
       - maven
-      - openjdk-17-default-jdk
+      - openjdk-${{vars.jdk-version}}-default-jdk
       - wolfi-base
       - wolfi-baselayout
 
@@ -38,13 +41,16 @@ pipeline:
     with:
       repository: https://github.com/neo4j/neo4j
       tag: ${{package.version}}
-      expected-commit: 42fb61f53d12bdd6dd80cce880c9d4ab9cc53df5
+      expected-commit: 7c73e293b2f461b11fd98750d5668a25920c4248
 
   - uses: maven/pombump
 
   - runs: |
       export LANG=en_US.UTF-8
       export MAVEN_OPTS="-Xmx2048m"
+
+      # Remove -SNAPSHOT suffix
+      mvn versions:set -DnewVersion=${{package.version}}
 
       mvn package -DskipTests=true -T$(nproc)C -q -Doverwrite=true
 
@@ -81,7 +87,7 @@ subpackages:
         with:
           repository: https://github.com/neo4j/docker-neo4j-publish
           branch: master
-          expected-commit: d4e4e90a496407cf88ec3afa022e181fd6e5fd8e
+          expected-commit: 67cc259b7a3fa243774ecb4d619e7d17562bed73
       - working-directory: ${{package.version}}/bullseye/community
         runs: |
           mkdir -p ${{targets.contextdir}}/startup
@@ -98,10 +104,62 @@ subpackages:
       provides:
         - neo4j-docker-publish=${{package.full-version}}
     test:
+      environment:
+        accounts:
+          groups:
+            - groupname: neo4j
+              gid: 7474
+          users:
+            - username: neo4j
+              gid: 7474
+              uid: 7474
+          run-as: 0
+        contents:
+          packages:
+            - ${{package.name}}
+            - curl
+            - wait-for-it
+            - sudo
+        environment:
+          JAVA_HOME: /usr/lib/jvm/default-jvm
+          NEO4J_AUTH: "neo4j/TestP@ss123"
+          NEO4J_HOME: /var/lib/neo4j
+          NEO4J_EDITION: "community"
       pipeline:
         - uses: test/tw/virtualpackage
           with:
             virtual-pkg-name: neo4j-docker-publish
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /logs /data
+              chown -R neo4j:neo4j /var/lib/neo4j /data /logs
+            start: sudo -E -u neo4j /startup/docker-entrypoint.sh neo4j
+            timeout: 60
+            expected_output: |
+              Starting
+              Bolt enabled
+              Started
+            post: |
+              ./test-daemon.sh
+
+  - name: "${{package.name}}-bash-completion"
+    description: "bash completion for ${{package.name}}"
+    dependencies:
+      provides:
+        - neo4j-bash-completion=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share/bash-completion
+          mv ${{targets.destdir}}/var/lib/neo4j/bin/completion ${{targets.contextdir}}/usr/share/bash-completion/completions
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/share/bash-completion/completions/neo4j_completion
+            stat /usr/share/bash-completion/completions/neo4j-admin_completion
 
 update:
   enabled: true
@@ -120,17 +178,28 @@ test:
     environment:
       JAVA_HOME: /usr/lib/jvm/default-jvm
   pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          neo4j
+          neo4j-admin
+          cypher-shell
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          neo4j
+          neo4j-admin
+          cypher-shell
     - uses: test/daemon-check-output
       with:
+        setup: |
+          neo4j-admin dbms set-initial-password TestP@ss123
         start: /usr/bin/neo4j console
         timeout: 60
         expected_output: |
           Starting Neo4j
           Starting
           Bolt enabled on localhost
+          Started
         post: |
-          #!/bin/sh -e
-          wait-for-it localhost:7474 --timeout=60
-          neo4j status | grep -i "Neo4j is running"
-          neo4j-admin server status | grep -i "Neo4j is running"
-          curl -fsSL localhost:7474/browser | grep "<title>Neo4j Browser</title>"
+          ./test-daemon.sh
