@@ -1,7 +1,7 @@
 package:
   name: emsdk
-  version: "5.0.0"
-  epoch: 3
+  version: "5.0.1"
+  epoch: 0
   description: Emscripten SDK - Toolchain for compiling C/C++ to WebAssembly
   copyright:
     - license: MIT
@@ -15,7 +15,6 @@ package:
       - curl
       - emscripten
       - git
-      - git-lfs
       - libidn2
       - libxml2
       - make
@@ -34,17 +33,18 @@ environment:
   contents:
     packages:
       - busybox
+      - emscripten
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/emscripten-core/emsdk
       tag: ${{package.version}}
-      expected-commit: b4258c35121c8d0e12f53568ffb22236d7816723
+      expected-commit: 14c18b569f55138fe4963924162244251f454fb0
 
   - runs: |
       # Install emsdk scripts to /emsdk
-      mkdir -p "${{targets.destdir}}"/emsdk
+      mkdir -p "${{targets.destdir}}"/emsdk/upstream
 
       # Copy essential files for emsdk to work
       cp emsdk emsdk.py "${{targets.destdir}}"/emsdk/
@@ -52,9 +52,29 @@ pipeline:
       cp legacy-emscripten-tags.txt legacy-binaryen-tags.txt llvm-tags-64bit.txt "${{targets.destdir}}"/emsdk/
       cp emsdk_env.sh "${{targets.destdir}}"/emsdk/
 
-      # Create /emsdk/upstream symlink for Docker image compatibility
-      mkdir -p "${{targets.destdir}}"/emsdk
-      ln -sf /upstream "${{targets.destdir}}"/emsdk/upstream
+      for item in /upstream/*; do
+        ln -sf "$item" "${{targets.destdir}}"/emsdk/upstream/
+      done
+
+      # Create .emsdk_version so that `emsdk construct_env` (called by the
+      # entrypoint via emsdk_env.sh) recognises the toolchain as installed and
+      # active.  Without this file, adjusted_path() strips /emsdk/upstream/emscripten
+      # from PATH because no tools are detected as active.
+      # This is important as emsdk tools are not installed with the sdk but with apk!
+      COMMIT_HASH=$(grep "\"${{package.version}}\":" emscripten-releases-tags.json | sed 's/.*": "//;s/".*//')
+      echo "releases-${COMMIT_HASH}-64bit" > "${{targets.destdir}}"/emsdk/upstream/.emsdk_version
+
+  # Create .emscripten config matching upstream Docker image layout
+  # https://github.com/emscripten-core/emsdk/blob/main/docker/Dockerfile
+  - runs: |
+      tee "${{targets.destdir}}"/emsdk/.emscripten << 'EOF'
+      import os
+      emsdk_path = os.path.dirname(os.path.abspath(__file__))
+      NODE_JS = '/usr/bin/node'
+      LLVM_ROOT = emsdk_path + '/upstream/bin'
+      BINARYEN_ROOT = '/usr'
+      EMSCRIPTEN_ROOT = emsdk_path + '/upstream/emscripten'
+      EOF
 
 subpackages:
   - name: emsdk-oci-entrypoint
@@ -68,11 +88,10 @@ subpackages:
           install -Dm755 docker/entrypoint.sh "${{targets.subpkgdir}}"/emsdk/docker/entrypoint.sh
     test:
       pipeline:
-        - name: "Test OCI entrypoint"
-          runs: |
-            set -euo pipefail
-            stat /emsdk/docker/entrypoint.sh
-            test -x /emsdk/docker/entrypoint.sh
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /emsdk/docker/entrypoint.sh
 
 test:
   pipeline:
@@ -84,18 +103,22 @@ test:
         emcc --version
         em++ --version
         emar --version
-    - name: "Test emsdk installation"
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /emsdk/upstream
+          /emsdk/upstream/.emsdk_version
+          /emsdk/upstream/emscripten/emcc
+          /emsdk/upstream/emscripten/em++
+          /emsdk/upstream/bin/clang
+          /emsdk/upstream/bin/wasm-ld
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /emsdk/upstream
+    - name: "Test emsdk upstream LLVM symlinks"
       runs: |
         set -euo pipefail
-
-        # Verify /emsdk/upstream symlink for Docker compatibility
-        stat /emsdk/upstream
-        test -L /emsdk/upstream
-        readlink /emsdk/upstream | grep -F "/upstream"
-
-        # Verify emscripten tools exist via symlink
-        stat /emsdk/upstream/emscripten/emcc
-        stat /emsdk/upstream/emscripten/em++
 
         # Verify LLVM symlinks point to system LLVM
         readlink /emsdk/upstream/bin/clang | grep -F "/usr/bin"
