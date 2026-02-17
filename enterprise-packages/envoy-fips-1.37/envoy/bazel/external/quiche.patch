@@ -1,0 +1,162 @@
+From d7fb860ebfa623d3350423485e1877f007ec2e98 Mon Sep 17 00:00:00 2001
+From: Dimitri John Ledkov <dimitri.ledkov@surgut.co.uk>
+Date: Tue, 10 Feb 2026 15:37:32 -0500
+Subject: [PATCH] tls: add support for old boringssl
+
+Add back support for old boringssl effectively reverting back to pre-
+d825ed231325b00d09e51adbd01fefadabeb76e0 code that allowed to use
+boringssl without the post BORINGSSL_API_VERSION 32 changes, which add
+support for draft-ietf-tls-trust-anchor-ids-02.
+
+Change-Id: I181d1e5e0397018ec6f48bff35c757c8b8f25282
+---
+ .../quic/core/crypto/tls_server_connection.cc | 20 +-----
+ quiche/quic/core/tls_client_handshaker.cc     | 16 -----
+ .../quic/core/tls_client_handshaker_test.cc   | 66 -------------------
+ 3 files changed, 2 insertions(+), 100 deletions(-)
+
+diff --git a/quiche/quic/core/crypto/tls_server_connection.cc b/quiche/quic/core/crypto/tls_server_connection.cc
+index d6dc35f92..cfcfd5892 100644
+--- a/quiche/quic/core/crypto/tls_server_connection.cc
++++ b/quiche/quic/core/crypto/tls_server_connection.cc
+@@ -76,24 +76,8 @@ absl::Status TlsServerConnection::ConfigureSSL(
+ void TlsServerConnection::AddCertChain(
+     const std::vector<CRYPTO_BUFFER*>& cert_chain,
+     absl::string_view trust_anchor_id) {
+-  bssl::UniquePtr<SSL_CREDENTIAL> credential(SSL_CREDENTIAL_new_x509());
+-  SSL_CREDENTIAL_set1_cert_chain(credential.get(), cert_chain.data(),
+-                                 cert_chain.size());
+-  if (ssl_config().signing_algorithm_prefs.has_value()) {
+-    SSL_CREDENTIAL_set1_signing_algorithm_prefs(
+-        credential.get(), ssl_config().signing_algorithm_prefs->data(),
+-        ssl_config().signing_algorithm_prefs->size());
+-  }
+-  SSL_CREDENTIAL_set_private_key_method(
+-      credential.get(), &TlsServerConnection::kPrivateKeyMethod);
+-  if (!trust_anchor_id.empty()) {
+-    SSL_CREDENTIAL_set1_trust_anchor_id(
+-        credential.get(),
+-        reinterpret_cast<const uint8_t*>(trust_anchor_id.data()),
+-        trust_anchor_id.size());
+-    SSL_CREDENTIAL_set_must_match_issuer(credential.get(), 1);
+-  }
+-  SSL_add1_credential(ssl(), credential.get());
++  SSL_set_chain_and_key(ssl(), cert_chain.data(), cert_chain.size(), nullptr,
++                        &TlsServerConnection::kPrivateKeyMethod);
+ }
+ 
+ void TlsServerConnection::SetClientCertMode(ClientCertMode client_cert_mode) {
+diff --git a/quiche/quic/core/tls_client_handshaker.cc b/quiche/quic/core/tls_client_handshaker.cc
+index 19adf5a7e..b245b20bf 100644
+--- a/quiche/quic/core/tls_client_handshaker.cc
++++ b/quiche/quic/core/tls_client_handshaker.cc
+@@ -167,21 +167,6 @@ bool TlsClientHandshaker::CryptoConnect() {
+     return false;
+   }
+ 
+-  // Configure TLS Trust Anchor IDs
+-  // (https://tlswg.org/tls-trust-anchor-ids/draft-ietf-tls-trust-anchor-ids.html),
+-  // if set.
+-  if (tls_connection_.ssl_config().trust_anchor_ids.has_value()) {
+-    if (!SSL_set1_requested_trust_anchors(
+-            ssl(),
+-            reinterpret_cast<const uint8_t*>(
+-                tls_connection_.ssl_config().trust_anchor_ids->data()),
+-            tls_connection_.ssl_config().trust_anchor_ids->size())) {
+-      CloseConnection(QUIC_HANDSHAKE_FAILED,
+-                      "Client failed to set TLS Trust Anchor IDs");
+-      return false;
+-    }
+-  }
+-
+   // The compliance policy must be the last thing configured before the
+   // handshake in order to have defined behavior.
+   if (ssl_compliance_policy_.has_value()) {
+@@ -568,7 +553,6 @@ QuicAsyncStatus TlsClientHandshaker::VerifyCertChain(
+     const std::vector<std::string>& certs, std::string* error_details,
+     std::unique_ptr<ProofVerifyDetails>* details, uint8_t* out_alert,
+     std::unique_ptr<ProofVerifierCallback> callback) {
+-  matched_trust_anchor_id_ = SSL_peer_matched_trust_anchor(ssl());
+ 
+   const uint8_t* ocsp_response_raw;
+   size_t ocsp_response_len;
+diff --git a/quiche/quic/core/tls_client_handshaker_test.cc b/quiche/quic/core/tls_client_handshaker_test.cc
+index 458707251..04b706543 100644
+--- a/quiche/quic/core/tls_client_handshaker_test.cc
++++ b/quiche/quic/core/tls_client_handshaker_test.cc
+@@ -376,72 +376,6 @@ TEST_P(TlsClientHandshakerTest, HandshakeWithAsyncProofVerifier) {
+   EXPECT_TRUE(stream()->one_rtt_keys_available());
+ }
+ 
+-TEST_P(TlsClientHandshakerTest, HandshakeWithTrustAnchorIds) {
+-  const std::string kTestTrustAnchorId = {0x03, 0x01, 0x02, 0x03};
+-  const std::string kTestServerTrustAnchorId = {0x01, 0x02, 0x03};
+-  InitializeFakeServer(kTestServerTrustAnchorId);
+-  ssl_config_.emplace();
+-  ssl_config_->trust_anchor_ids = kTestTrustAnchorId;
+-  CreateConnection();
+-  CompleteCryptoHandshake();
+-  ASSERT_TRUE(stream()->encryption_established());
+-  EXPECT_TRUE(stream()->MatchedTrustAnchorIdForTesting());
+-}
+-
+-// Tests that the client can complete a handshake in which it sends multiple
+-// Trust Anchor IDs, one which matches the server's credential and one which
+-// doesn't.
+-TEST_P(TlsClientHandshakerTest, HandshakeWithMultipleTrustAnchorIds) {
+-  // The client sends two trust anchor IDs, the first of which doesn't match the
+-  // server's credential and the second does.
+-  const std::string kTestTrustAnchorIds = {0x04, 0x00, 0x01, 0x02, 0x03,
+-                                           0x03, 0x01, 0x02, 0x03};
+-  const std::string kTestServerTrustAnchorId = {0x01, 0x02, 0x03};
+-  InitializeFakeServer(kTestServerTrustAnchorId);
+-  ssl_config_.emplace();
+-  ssl_config_->trust_anchor_ids = kTestTrustAnchorIds;
+-  CreateConnection();
+-  CompleteCryptoHandshake();
+-  ASSERT_TRUE(stream()->encryption_established());
+-  EXPECT_TRUE(stream()->MatchedTrustAnchorIdForTesting());
+-}
+-
+-// Tests that the client can complete a handshake in which it sends no Trust
+-// Anchor IDs.
+-TEST_P(TlsClientHandshakerTest, HandshakeWithEmptyTrustAnchorIdList) {
+-  InitializeFakeServer("");
+-  ssl_config_.emplace();
+-  ssl_config_->trust_anchor_ids.emplace();
+-  CreateConnection();
+-
+-  // Add a DoS callback on the server, to test that the client sent an empty
+-  // extension. This is a bit of a hack. TlsServerHandshaker already configures
+-  // the certificate selection callback, but does not usefully expose any way
+-  // for tests to inspect the ClientHello. So, instead, we register a different
+-  // callback that also gets the ClientHello.
+-  static bool callback_ran;
+-  callback_ran = false;
+-  SSL_CTX_set_dos_protection_cb(
+-      server_crypto_config_->ssl_ctx(),
+-      [](const SSL_CLIENT_HELLO* client_hello) -> int {
+-        const uint8_t* data;
+-        size_t len;
+-        EXPECT_TRUE(SSL_early_callback_ctx_extension_get(
+-            client_hello, TLSEXT_TYPE_trust_anchors, &data, &len));
+-        // The extension should contain an empty list, i.e. a two-byte encoding
+-        // of a zero length.
+-        EXPECT_EQ(len, 2u);
+-        EXPECT_EQ(data[0], 0x00);
+-        EXPECT_EQ(data[1], 0x00);
+-        callback_ran = true;
+-        return 1;
+-      });
+-
+-  CompleteCryptoHandshake();
+-  ASSERT_TRUE(stream()->encryption_established());
+-  EXPECT_TRUE(callback_ran);
+-}
+-
+ TEST_P(TlsClientHandshakerTest, Resumption) {
+   // Disable 0-RTT on the server so that we're only testing 1-RTT resumption:
+   SSL_CTX_set_early_data_enabled(server_crypto_config_->ssl_ctx(), false);
+-- 
+2.51.0
+
