@@ -1,13 +1,11 @@
 package:
-  name: beats-9.2
-  version: "9.2.5"
-  epoch: 0 # CVE-2025-68119
-  description: >
-    The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (logs, metrics, network data). They send the data to Elasticsearch directly or via Logstash.
-
+  name: beats-fips-9.3
+  version: "9.3.0"
+  epoch: 0 # go/enterprise-rsc/beats-fips-9.2
+  description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
   resources:
-    cpu: 16
-    memory: 32Gi
+    cpu: "8"
+    memory: 20Gi
   copyright:
     - license: Apache-2.0
     - license: Elastic-2.0
@@ -22,6 +20,7 @@ environment:
   contents:
     packages:
       - mage
+      - openssl-config-fipshardened
       - rsync
 
 pipeline:
@@ -29,35 +28,37 @@ pipeline:
     with:
       repository: https://github.com/elastic/beats
       tag: v${{package.version}}
-      expected-commit: 090edf6777335b72756841fc32203573a0cc1073
-      cherry-picks: |
-        main/6e42552a23ce: CVE-2026-0528 security patch
+      expected-commit: 0f4fc63162db855e0a1c5f0ec5894a8939e31d80
 
 subpackages:
-  - name: auditbeat-${{vars.major-minor-version}}
+  - name: auditbeat-fips-${{vars.major-minor-version}}
     dependencies:
       provides:
-        - auditbeat=${{package.full-version}}
+        - auditbeat-fips=${{package.full-version}}
     pipeline:
-      - name: Build auditbeat
-        runs: |
+      - uses: go/build
+        with:
+          go-package: go-fips-md5
+          ldflags: |
+            -X github.com/elastic/beats/v7/libbeat/version.commit=$(git rev-parse HEAD)
+            -X github.com/elastic/beats/v7/libbeat/version.buildTime=$(date ${SOURCE_DATE_EPOCH:+ -d@${SOURCE_DATE_EPOCH}} "+%Y-%m-%dT%H:%M:%SZ")
+          output: auditbeat
+          packages: ./auditbeat
+      - runs: |
           mkdir -p \
             ${{targets.subpkgdir}}/usr/bin \
             ${{targets.subpkgdir}}/usr/share/auditbeat \
             ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d \
             ${{targets.subpkgdir}}/usr/share/auditbeat/data \
-            ${{targets.subpkgdir}}/usr/share/auditbeat/logs
+            ${{targets.subpkgdir}}/usr/share/auditbeat/logs \
 
           cd auditbeat
-
-          mage build
           mage fields
 
           cp -r auditbeat.docker.yml auditbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
           cp module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
           mv ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.docker.yml ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.yml
 
-          mv auditbeat ${{targets.subpkgdir}}/usr/bin/
           ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
 
           # Match the dashboards on the counterpart image
@@ -83,16 +84,19 @@ subpackages:
           packages:
             - bash
             - curl
-            - elasticsearch-9
+            - elasticsearch-${{vars.major-minor-version}}
             - jq
             - kibana-${{vars.major-minor-version}}
-            - openjdk-21
             - sudo
             - wait-for-it
         environment:
           ELASTICSEARCH_HOSTS: localhost:9200
-          ES_JAVA_HOME: /usr/lib/jvm/java-21-openjdk
+          ES_JAVA_HOME: /usr/lib/jvm/java-25-openjdk
+          NODE_OPTIONS: "--openssl-config=/dev/null"
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "auditbeat-fips-${{vars.major-minor-version}}"
         - name: Test build
           runs: auditbeat version | grep ${{package.version}}
         - name: Test exporting
@@ -110,101 +114,46 @@ subpackages:
             auditbeat keystore list | grep FOO
             auditbeat keystore remove FOO | grep "successfully removed key: FOO"
         - name: Test auditbeat setup and test
-          working-directory: /usr/share/auditbeat
-          runs: |
-            chown -R elasticsearch:root /usr/share/elasticsearch
-
-            touch /tmp/elasticsearch.pid
-            chown -R elasticsearch:root /tmp/elasticsearch.pid
-            # Start up Elasticsearch with no username/password
-            sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
-              -Ediscovery.type=single-node \
-              -Expack.security.enabled=false \
-              -p /tmp/elasticsearch.pid
-
-            wait-for-it localhost:9200 --timeout=60
-
-            # Confirm Elasticsearch status before continuing
-            es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
-            echo "Elasticsearch status: $es_status"
-
-            timer_start=$(date +%s)
-            while [ $es_status != "green" ]
-            do
-              timer_now=$(date +%s)
-              es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
-              echo "Elasticsearch status: $es_status"
-              if [ $(( timer_now - timer_start )) -gt 60 ]
-              then
-                echo "Timed out waiting for Elasticsearch!"
-                exit 1
-              fi
-              sleep 2
-            done
-
-            # Run Kibana
-            printf "elasticsearch.hosts: [\"http://localhost:9200\"]\n" > kibana.yml
-            /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
-            wait-for-it localhost:5601 --timeout=60
-
-            # Test auditbeat setup with default Elasticsearch and Kibana services running
-            for try in $(seq 1 5)
-            do
-              if ! auditbeat setup
-              then
-                sleep 5
-              else
-                break
-              fi
-            done
-
-            auditbeat test output
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: auditbeat
-            real-pkg-name: ${{subpkg.name}}
-
-  - name: auditbeat-${{vars.major-minor-version}}-oci-entrypoint
-    dependencies:
-      provides:
-        - auditbeat-oci-entrypoint=${{package.full-version}}
-      runtime:
-        - tini
-        - tini-compat
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/usr/bin
-          cd auditbeat
-          sed 's/{{ \.BeatName }}/auditbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
-          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
-          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
-          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
-    test:
-      environment:
-        contents:
-          packages:
-            - auditbeat-${{vars.major-minor-version}}
-      pipeline:
-        - name: "Check expected scripts exist"
-          runs: stat /usr/local/bin/docker-entrypoint
-        - name: Test auditbeat startup through docker entrypoint
           uses: test/daemon-check-output
-          working-directory: /usr/share/auditbeat
           with:
-            start: /usr/local/bin/docker-entrypoint --environment container > /dev/null 2>&1 &
-            expected_output: |
-              Syscall filter successfully installe
-            error_strings: |
-              Error:
-              denied
-              "not found"
-              "no such file or directory"
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: auditbeat-oci-entrypoint
-            real-pkg-name: ${{subpkg.name}}
+            setup: |
+              chown -R elasticsearch:root /usr/share/elasticsearch
+              touch /tmp/elasticsearch.pid
+              chown -R elasticsearch:root /tmp/elasticsearch.pid
 
-  - name: metricbeat-${{vars.major-minor-version}}
+              # Start up Elasticsearch with no username/password
+              sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+                -Ediscovery.type=single-node \
+                -Expack.security.enabled=false \
+                -p /tmp/elasticsearch.pid
+
+              wait-for-it localhost:9200 --timeout=120
+
+              # Confirm Elasticsearch status before continuing
+              curl --retry 10 -sf -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status' | grep "green"
+
+              echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+            start: /usr/share/kibana/bin/kibana --config kibana.yml --allow-root
+            expected_output: |
+              http server running
+              Task Manager is healthy
+              Kibana is now available
+            error_strings: |
+              FAIL
+              FATAL
+              Traceback.*most.recent.call
+              Exception in thread
+              java.lang.*Exception
+              Gem::MissingSpecError
+              command not found
+            timeout: 120
+            post: |
+              wait-for-it localhost:5601 --timeout=120
+              cd /usr/share/auditbeat
+              auditbeat setup
+              auditbeat test output
+
+  - name: metricbeat-fips-${{vars.major-minor-version}}
     dependencies:
       runtime:
         - bash
@@ -215,7 +164,7 @@ subpackages:
         - findutils
         - procps
       provides:
-        - metricbeat=${{package.full-version}}
+        - metricbeat-fips=${{package.full-version}}
     pipeline:
       - uses: go/bump
         with:
@@ -225,6 +174,7 @@ subpackages:
         with:
           packages: ./x-pack/metricbeat
           output: metricbeat
+          go-package: go-fips
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/modules.d
@@ -241,7 +191,7 @@ subpackages:
           mage dashboards
           mv build/kibana "${{targets.subpkgdir}}"/usr/share/metricbeat/
 
-          ln -sf /usr/bin/metricbeat "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat
+          ln -sf /usr/bin/metricbeat  "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat
           mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/data "${{targets.subpkgdir}}"/usr/share/metricbeat/logs
           chown -R root:root "${{targets.subpkgdir}}"/usr/share/metricbeat && \
             find "${{targets.subpkgdir}}"/usr/share/metricbeat -type d -exec chmod 0755 {} \; && \
@@ -252,36 +202,16 @@ subpackages:
       - uses: strip
     test:
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "metricbeat-fips-${{vars.major-minor-version}}"
         - runs: |
             metricbeat version
             cd /usr/share/metricbeat
             metricbeat modules list
             metricbeat --help
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: metricbeat
-            real-pkg-name: ${{subpkg.name}}
 
-  - name: metricbeat-${{vars.major-minor-version}}-oci-entrypoint
-    dependencies:
-      runtime:
-        - tini
-        - tini-compat
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/usr/bin
-          cd metricbeat
-          sed 's/{{ \.BeatName }}/metricbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
-          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
-          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
-          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
-    test:
-      pipeline:
-        - name: "Check expected scripts exist"
-          runs: |
-            stat /usr/local/bin/docker-entrypoint
-
-  - name: filebeat-${{vars.major-minor-version}}
+  - name: filebeat-fips-${{vars.major-minor-version}}
     dependencies:
       runtime:
         - bash
@@ -292,12 +222,13 @@ subpackages:
         - findutils
         - procps
       provides:
-        - filebeat=${{package.full-version}}
+        - filebeat-fips=${{package.full-version}}
     pipeline:
       - uses: go/build
         with:
           packages: ./x-pack/filebeat
           output: filebeat
+          go-package: go-fips
       - runs: |
           mkdir -p "${{targets.subpkgdir}}"/usr/bin
           mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d
@@ -335,44 +266,33 @@ subpackages:
       - uses: strip
     test:
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "filebeat-fips-${{vars.major-minor-version}}"
         - runs: |
             filebeat version
             cd /usr/share/filebeat
             filebeat modules list
             filebeat --help
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: filebeat
-            real-pkg-name: ${{subpkg.name}}
 
-  - name: filebeat-${{vars.major-minor-version}}-oci-entrypoint
+  - name: heartbeat-fips-${{vars.major-minor-version}}
     dependencies:
       runtime:
-        - tini
-        - tini-compat
-    pipeline:
-      - runs: |
-          mkdir -p "${{targets.subpkgdir}}"/usr/bin
-          cd filebeat
-          sed 's/{{ \.BeatName }}/filebeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
-          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
-          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
-          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
-    test:
-      pipeline:
-        - name: "Check expected scripts exist"
-          runs: |
-            stat /usr/local/bin/docker-entrypoint
-
-  - name: heartbeat-${{vars.major-minor-version}}
-    dependencies:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
       provides:
-        - heartbeat=${{package.full-version}}
+        - heartbeat-fips=${{package.full-version}}
     pipeline:
       - uses: go/build
         with:
           packages: ./x-pack/heartbeat
           output: heartbeat
+          go-package: go-fips
       - name: Build heartbeat
         runs: |
           mkdir -p \
@@ -384,7 +304,6 @@ subpackages:
           cd heartbeat
 
           mage fields
-
           ln -sf /usr/bin/heartbeat "${{targets.subpkgdir}}"/usr/share/heartbeat/heartbeat
 
           cp -r heartbeat.docker.yml heartbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/heartbeat/
@@ -415,7 +334,11 @@ subpackages:
             - sudo
             - openssl
       pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: "heartbeat-fips-${{vars.major-minor-version}}"
         - runs: |
+            set -eu -o pipefail
             cd /usr/share/heartbeat
             heartbeat export config >/dev/null
             heartbeat test config
@@ -468,12 +391,8 @@ subpackages:
                 cat /tmp/nginx.log
                 exit 1
               fi
-        - uses: test/virtualpackage
-          with:
-            virtual-pkg-name: heartbeat
-            real-pkg-name: ${{subpkg.name}}
 
-  - name: heartbeat-${{vars.major-minor-version}}-oci-entrypoint
+  - name: heartbeat-fips-${{vars.major-minor-version}}-oci-entrypoint
     dependencies:
       runtime:
         - tini
@@ -492,10 +411,6 @@ subpackages:
           runs: |
             stat /usr/local/bin/docker-entrypoint
 
-test:
-  pipeline:
-    - uses: test/emptypackage
-
 update:
   enabled: true
   ignore-regex-patterns:
@@ -505,5 +420,10 @@ update:
     - .*\+build[0-9]*$
   github:
     strip-prefix: v
-    tag-filter: v9.2.
+    tag-filter: v9.3.
     identifier: elastic/beats
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage
