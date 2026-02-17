@@ -2,25 +2,19 @@
 #it falls back to maven central, but ontop requires a dependency from a third-party repository
 package:
   name: ontop
-  version: "5.4.0"
+  version: "5.5.0"
   epoch: 0
   description: Ontop is a platform to query relational databases as Virtual RDF Knowledge Graphs using SPARQL
   copyright:
     - license: Apache-2.0
   dependencies:
     runtime:
-      - bash-binsh #required by entrypoint script and healthcheck script
-      - busybox # basic utility required by entrypoint and main binary like rm, dirname, cd
-      # wget, netcat, jattach required by docker image
-      # REF: https://github.com/ontop/ontop/blob/version5/client/docker/Dockerfile#L42
-      - jattach
-      - netcat-openbsd
-      # procps is required as healthcheck script uses -p flag for ps command
-      # REF: https://github.com/ontop/ontop/blob/version5/client/docker/healthcheck.sh#L20
-      - procps
-      - wget
+      - bash # required by ontop CLI script
+      - busybox # basic utility required by ontop CLI script like rm, dirname, cd
 
 vars:
+  # Upstream projects have users who are still relying on Java 11
+  # https://github.com/ontop/ontop/issues/865#issuecomment-2875581012
   java-version: 11
   java-home: /opt/java/openjdk
   package-home: /opt/ontop
@@ -40,8 +34,10 @@ pipeline:
     with:
       repository: https://github.com/ontop/ontop
       tag: ontop-${{package.version}}
-      expected-commit: f3a5d55dbe53fedd6048dc5a3a86e27238b1b1d1
+      expected-commit: bb194040057aaae60e713aca819dd8302394bcf0
 
+  # If the Dockerfile changes the jre modules, our package may still build successfully even if the module set is now out of sync.
+  # Hence, a drift check would ensure failures
   - name: "Verify JRE modules match upstream Dockerfile"
     runs: |
       set -euo pipefail
@@ -70,8 +66,6 @@ pipeline:
 
       mkdir -p "${{targets.contextdir}}/${{vars.package-home}}"
       mv build/distribution/target/ontop-cli-*/* "${{targets.contextdir}}/${{vars.package-home}}/"
-      install -m 755 client/docker/entrypoint.sh "${{targets.contextdir}}/${{vars.package-home}}/"
-      install -m 755 client/docker/healthcheck.sh "${{targets.contextdir}}/${{vars.package-home}}/"
 
       rm -rf "${{targets.contextdir}}/${{vars.package-home}}/ontop.bat" \
              "${{targets.contextdir}}/${{vars.package-home}}/ontop-completion.sh" \
@@ -82,6 +76,7 @@ update:
   ignore-regex-patterns:
     - ".*beta.*"
     - ".*rc.*"
+    - ".*alpha.*"
   github:
     identifier: ontop/ontop
     strip-prefix: ontop-
@@ -107,50 +102,43 @@ test:
         stat /opt/ontop/lib/ontop-cli-${{package.version}}.jar
         stat /opt/ontop/lib/ontop-endpoint-${{package.version}}.jar
 
-        # This describes how rows in a PERSON table become RDF triples (more on this below)
-        # https://www.w3.org/TR/2012/REC-r2rml-20120927/#ex_EMP
-        cat << 'EOF' > /tmp/test-mapping.ttl
-        @base <http://example.org/mapping/> .
-        @prefix rr: <http://www.w3.org/ns/r2rml#> .
-        @prefix ex: <http://example.org/> .
-
-        <TriplesMap1>
-            rr:logicalTable [ rr:tableName "PERSON" ];
-            rr:subjectMap [
-                rr:template "http://example.org/person/{id}";
-                rr:class ex:Person
-            ];
-            rr:predicateObjectMap [
-                rr:predicate ex:name;
-                rr:objectMap [ rr:column "NAME" ]
-            ].
-        EOF
-
+        # REF: https://github.com/ontop/ontop/blob/ontop-${{package.version}}/client/cli/src/test/resources/mapping.ttl
         # Test mapping pretty-r2rml - formats R2RML files
-        ontop mapping pretty-r2rml -i /tmp/test-mapping.ttl -o /tmp/pretty-output.ttl
+        ontop mapping pretty-r2rml -i test-mapping.ttl -o /tmp/pretty-output.ttl
 
         # Test mapping to-obda conversion
-        ontop mapping to-obda -i /tmp/test-mapping.ttl -o /tmp/output.obda
+        ontop mapping to-obda -i test-mapping.ttl -o /tmp/output.obda
 
         # Target RDF triple syntax
-        # (subject, predicate, object)
-        # (http://example.org/person/1, rdf:type, ex:Person)
-        # (http://example.org/person/1, ex:name, "Bob")
-        #
-        # since Ontop gives content of relational databases as knowledge graphs
-        # visual way to think about it
-        # [Person 1] --name--> "Bob"
-        #  |
-        #  +--type--> Person
+        grep -F "DEPT" /tmp/output.obda
+        grep -F "EMP" /tmp/output.obda
 
-        # subject: ex:person/{id}
-        # predicate: a (rdf:type)
-        # object: ex:Person
-        #
-        # subject: ex:person/{id}
-        # predicate: ex:name
-        # object: {NAME}
-        grep -F -e "ex:person/{id} a ex:Person ; ex:name {NAME} ." /tmp/output.obda
-
-        # Data Source
-        grep -F -e "SELECT * FROM PERSON" /tmp/output.obda
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    description: OCI entrypoint for Ontop
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - bash-binsh # required by entrypoint script and healthcheck script
+        # wget, netcat, jattach required by docker image
+        # REF: https://github.com/ontop/ontop/blob/ontop-5.4.0/client/docker/Dockerfile#L42
+        - jattach
+        - netcat-openbsd
+        # procps is required as healthcheck script uses -p flag for ps command
+        # REF: https://github.com/ontop/ontop/blob/ontop-5.4.0/client/docker/healthcheck.sh#L20
+        - procps
+        - wget
+    pipeline:
+      - runs: |
+          # Install entrypoint and healthcheck scripts for OCI container usage
+          # REF: https://github.com/ontop/ontop/blob/ontop-5.4.0/client/docker/Dockerfile#L58
+          mkdir -p "${{targets.contextdir}}/${{vars.package-home}}"
+          install -m 755 client/docker/entrypoint.sh "${{targets.contextdir}}/${{vars.package-home}}/"
+          install -m 755 client/docker/healthcheck.sh "${{targets.contextdir}}/${{vars.package-home}}/"
+    test:
+      pipeline:
+        - name: Check script is executable
+          runs: |
+            set -euo pipefail
+            test -x /opt/ontop/entrypoint.sh
+            test -x /opt/ontop/healthcheck.sh
