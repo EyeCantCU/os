@@ -1,7 +1,7 @@
 package:
   name: prometheus-fips-3.6
   version: "3.6.0"
-  epoch: 4 # GHSA-j5w8-q4qc-rx2x
+  epoch: 6 # go/enterprise-rsc/prometheus-fips-3.6
   description: The Prometheus monitoring system and time series database.
   copyright:
     - license: Apache-2.0
@@ -9,6 +9,9 @@ package:
     provides:
       - prometheus-fips=${{package.full-version}}
       - prometheus-fips-lts=${{package.full-version}}
+  resources:
+    cpu: "11"
+    memory: 17Gi
 
 var-transforms:
   - from: ${{package.version}}
@@ -127,9 +130,14 @@ subpackages:
           version: ${{vars.major-version}}
     test:
       pipeline:
-        - runs: |
+        - name: Verify symlinks and binaries work
+          runs: |
+            set -euo pipefail
+            # Verify symlinks exist (fails test if missing)
             stat /opt/iamguarded/prometheus/bin/prometheus
             stat /opt/iamguarded/prometheus/bin/promtool
+            # Functional test: verify symlinked binaries execute correctly
+            # (ver-check doesn't support absolute paths, so testing symlink resolution inline)
             /opt/iamguarded/prometheus/bin/prometheus --version
             /opt/iamguarded/prometheus/bin/promtool --version
         - uses: iamguarded/test-compat
@@ -153,8 +161,19 @@ test:
         - curl
   pipeline:
     - uses: test/go-fips-check
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          prometheus
+          promtool
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          prometheus
+          promtool
     - name: Check Prometheus Rules
       runs: |
+        set -euo pipefail
         cat << 'EOF' > rules.example
         groups:
         - name: http
@@ -162,13 +181,11 @@ test:
           - record: job:http_inprogress_requests:sum
             expr: sum(http_inprogress_requests) by (job)
         EOF
+        # Verify promtool can validate rules (fails test if rules are invalid)
         promtool check rules rules.example
-        prometheus --version
-        prometheus --help
-        promtool --version
-        promtool --help
     - name: Verify Prometheus Installation and Server Running Capability
       runs: |
+        set -euo pipefail
         cat << 'EOF' > prometheus.yml
         global:
           scrape_interval: 15s
@@ -181,5 +198,6 @@ test:
         prometheus --config.file=./prometheus.yml --web.listen-address=127.0.0.1:9090 &
         PROMETHEUS_PID=$!
         sleep 5
-        curl -s "http://127.0.0.1:9090/-/healthy" | grep -q "Prometheus Server is Healthy."
+        # Verify health endpoint returns expected message (fails test if not healthy)
+        curl -s "http://127.0.0.1:9090/-/healthy" | grep -F "Prometheus Server is Healthy."
         kill $PROMETHEUS_PID

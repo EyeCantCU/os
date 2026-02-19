@@ -1,0 +1,108 @@
+#nolint:update-identifier-must-match-git-repository
+package:
+  name: longhorn-share-manager-fips-1.11
+  version: "1.11.0"
+  epoch: 1 # GHSA-r6j8-c6r2-37rr
+  description: Longhorn Share Manager manages NFS exports for RWX volumes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - longhorn-share-manager-fips=${{package.full-version}}
+    runtime:
+      - blkid
+      - blockdev
+      - coreutils
+      - dash-binsh
+      - dbus
+      - e2fsprogs
+      - e2fsprogs-extra
+      - mount
+      - nfs-ganesha
+      - nfs-utils
+      - rpcbind
+      - systemd
+      - umount
+      - util-linux
+      - util-linux-misc
+      - xfsprogs
+
+# This package contains binaries that may be deployed on nodes. During
+# build-time link against an older glibc, to ensure go-fips built binaries
+# remain ABI compatible with old foreign host-os.
+environment:
+  contents:
+    packages:
+      - oldglibc~2.28
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/longhorn/longhorn-share-manager.git
+      tag: v${{package.version}}
+      expected-commit: c99868776a66c628cb95436ec97961e978892d30
+
+  - uses: go/build
+    with:
+      packages: .
+      output: longhorn-share-manager
+      ldflags: |
+        -X main.Version=${{package.version}}
+      go-package: go-fips
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    dependencies:
+      provides:
+        - longhorn-share-manager-fips-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/
+          ln -s ./usr/bin/longhorn-share-manager "${{targets.contextdir}}"/longhorn-share-manager
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+test:
+  environment:
+    contents:
+      packages:
+        - grpc-health-probe
+    environment:
+      FAST_FAILOVER: false
+      LEASE_LIFETIME: 60
+      GRACE_PERIOD: 30
+  pipeline:
+    - uses: test/go-fips-check
+    - name: "Test binary help"
+      uses: test/tw/help-check
+      with:
+        bins: longhorn-share-manager
+    - name: "Functional test for daemon"
+      uses: test/daemon-check-output
+      with:
+        setup: mkdir -p /tmp/test-volume
+        start: longhorn-share-manager daemon --volume /tmp/test-volume --data-engine v1 --fs ext4
+        expected_output: |
+          Listening on share manager gRPC server :9600
+        post: |
+          grpc-health-probe -addr=localhost:9600 2>&1 | grep -F "SERVING"
+
+# All of the version streamed components of longhorn should follow a single release as shown in https://github.com/longhorn/longhorn
+# To align with this, we will watch for releases from the longhorn/longhorn repo.
+# The expectation is that should a release/tag be available in the group repo, that release/tag will also be available in the component but not vice versa.
+update:
+  enabled: true
+  github:
+    identifier: longhorn/longhorn
+    strip-prefix: v
+    tag-filter-prefix: v1.11
+    use-tag: true
+  ignore-regex-patterns:
+    - '.*-rc\d+$'
+    - ".*-dev-.*"

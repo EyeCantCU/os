@@ -1,7 +1,7 @@
 package:
   name: grafana-alloy
-  version: "1.12.2"
-  epoch: 0 # GHSA-cfpf-hrx2-8rv6
+  version: "1.13.1"
+  epoch: 0 # go/wolfi-rsc/grafana-alloy
   description: OpenTelemetry Collector distribution with programmable pipelines
   copyright:
     - license: Apache-2.0
@@ -11,6 +11,9 @@ package:
       - ${{package.name}}-compat=${{package.full-version}}
     runtime:
       - libsystemd
+  resources:
+    cpu: "19"
+    memory: 31Gi
 
 environment:
   contents:
@@ -27,12 +30,18 @@ environment:
     # https://github.com/grafana/alloy/blob/f5043307c5b9bb6d94dbb0d3c4d2bc19139f4b63/Makefile#L89
     CGO_ENABLED: "1"
 
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/grafana/alloy
       tag: v${{package.version}}
-      expected-commit: 477e3147cbce062bce7a9ecaef06c6612b6c1623
+      expected-commit: 45bb36eb8d5ed96f667e3cf411b77c0ffba234b9
 
   - runs: |
       # Upstream already have a `replace` directive downgrading from 1.3.x to
@@ -40,18 +49,23 @@ pipeline:
       # downgrade
       sed -i 's,\(github.com/opencontainers/runc\) v1.2.6,\1 v1.2.8,' go.mod
 
+  - name: Generate UI
+    runs: make generate-ui
+
   - uses: go/bump
     with:
       deps: |-
-        golang.org/x/crypto@v0.45.0
-        github.com/expr-lang/expr@v1.17.7
+        github.com/go-git/go-git/v5@v5.16.5
 
-  - name: Generate UI
-    runs: make generate-ui
+  - name: run go mod tidy on ./collector
+    runs: |
+      cd collector
+      go mod tidy
 
   - uses: go/build
     with:
       packages: .
+      modroot: ./collector
       output: alloy
       tags: netgo,builtinassets,promtail_journal_enabled
 
@@ -60,12 +74,41 @@ pipeline:
       mkdir -p ${{targets.contextdir}}/etc/alloy/
       install -m644 -D example-config.alloy ${{targets.contextdir}}/etc/alloy/config.alloy
 
+subpackages:
+  - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: grafana-alloy
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          mkdir -p "/opt/iamguarded/grafana-alloy/bin/"
+          ln -sf "../../../../usr/bin/alloy" "/opt/iamguarded/grafana-alloy/bin/alloy"
+      - uses: iamguarded/finalize-compat
+        with:
+          package: grafana-alloy
+          version: ${{vars.major-minor-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: grafana-alloy
+            version: ${{vars.major-minor-version}}
+        - uses: test/tw/symlink-check
+        - runs: |
+            stat /opt/iamguarded/grafana-alloy/bin/alloy
+
 test:
   pipeline:
-    - runs: |
-        /usr/bin/alloy --version
-        alloy --version
-        alloy --help
+    - uses: test/tw/ver-check
+      with:
+        bins: alloy
+    - uses: test/tw/help-check
+      with:
+        bins: alloy
     - uses: test/daemon-check-output
       with:
         setup: |

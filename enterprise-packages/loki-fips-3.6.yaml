@@ -1,6 +1,6 @@
 package:
   name: loki-fips-3.6
-  version: "3.6.4"
+  version: "3.6.6"
   epoch: 0
   description: Like Prometheus, but for logs.
   copyright:
@@ -17,10 +17,16 @@ environment:
       - ca-certificates-bundle
       - go-fips-md5
 
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
+
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: d80526692af3bf28c35622a59a3231933b193bc2
+      expected-commit: fb202465c6e9fdda198e06d6588de8381ded79e7
       repository: https://github.com/grafana/loki
       tag: v${{package.version}}
 
@@ -53,10 +59,66 @@ subpackages:
       provides:
         - logcli-fips=${{package.full-version}}
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - curl
+        environment:
+          LOKI_PORT: "3100"
       pipeline:
-        - runs: |
-            logcli --version
         - uses: test/go-fips-check
+        - name: Verify logcli can query logs from Loki
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              mkdir -p /tmp/loki/chunks /tmp/loki/rules
+              tee /tmp/loki-config.yaml <<EOF
+              auth_enabled: false
+              server:
+                http_listen_port: ${LOKI_PORT}
+              common:
+                path_prefix: /tmp/loki
+                storage:
+                  filesystem:
+                    chunks_directory: /tmp/loki/chunks
+                    rules_directory: /tmp/loki/rules
+                replication_factor: 1
+                ring:
+                  kvstore:
+                    store: inmemory
+              schema_config:
+                configs:
+                  - from: 2020-10-24
+                    store: tsdb
+                    object_store: filesystem
+                    schema: v13
+                    index:
+                      prefix: index_
+                      period: 24h
+              limits_config:
+                allow_structured_metadata: false
+              EOF
+            start: loki -config.file=/tmp/loki-config.yaml -config.expand-env=true
+            expected_output: "server listening on addresses"
+            timeout: 60
+            post: |-
+              set -euo pipefail
+              # Wait for Loki to be fully ready
+              curl -sf --retry 30 --retry-delay 2 --retry-all-errors "http://localhost:${LOKI_PORT}/ready"
+              # Push test logs to Loki
+              curl -f -X POST "http://localhost:${LOKI_PORT}/loki/api/v1/push" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "streams": [
+                    {
+                      "stream": {"job": "test", "level": "info"},
+                      "values": [["'$(date +%s)000000000'", "test log message from logcli test"]]
+                    }
+                  ]
+                }'
+              # Verify logcli can connect
+              logcli --addr="http://localhost:${LOKI_PORT}" query '{job=~".+"}' --limit=10 | grep "test log message from logcli test"
 
   - name: ${{package.name}}-promtail
     pipeline:
@@ -70,10 +132,82 @@ subpackages:
       provides:
         - promtail-fips=${{package.full-version}}
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - curl
+        environment:
+          LOKI_PORT: "3100"
+          PROMTAIL_PORT: "9080"
       pipeline:
-        - runs: |
-            promtail --version
         - uses: test/go-fips-check
+        - name: Verify promtail can send logs to Loki
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              # Start Loki first
+              mkdir -p /tmp/loki/chunks /tmp/loki/rules /tmp/promtail
+              tee /tmp/loki-config.yaml <<EOF
+              auth_enabled: false
+              server:
+                http_listen_port: ${LOKI_PORT}
+              common:
+                path_prefix: /tmp/loki
+                storage:
+                  filesystem:
+                    chunks_directory: /tmp/loki/chunks
+                    rules_directory: /tmp/loki/rules
+                replication_factor: 1
+                ring:
+                  kvstore:
+                    store: inmemory
+              schema_config:
+                configs:
+                  - from: 2020-10-24
+                    store: tsdb
+                    object_store: filesystem
+                    schema: v13
+                    index:
+                      prefix: index_
+                      period: 24h
+              limits_config:
+                allow_structured_metadata: false
+              EOF
+              loki -config.file=/tmp/loki-config.yaml -config.expand-env=true > /tmp/loki.log 2>&1 &
+              LOKI_PID=$!
+              # Wait for Loki to be ready
+              wait-for-it localhost:${LOKI_PORT} -t 60
+              # Create test log file for promtail to read
+              echo "test log line from promtail" > /tmp/promtail/test.log
+              # # Create promtail config
+              tee /tmp/promtail-config.yaml <<EOF
+              server:
+                http_listen_port: ${PROMTAIL_PORT}
+                grpc_listen_port: 0
+              positions:
+                filename: /tmp/promtail/positions.yaml
+              clients:
+                - url: http://localhost:${LOKI_PORT}/loki/api/v1/push
+              scrape_configs:
+                - job_name: test
+                  static_configs:
+                    - targets:
+                        - localhost
+                      labels:
+                        job: promtail_test
+                        __path__: /tmp/promtail/*.log
+              EOF
+            start: promtail -config.file=/tmp/promtail-config.yaml -config.expand-env=true
+            expected_output: "Reloading configuration file"
+            timeout: 60
+            post: |-
+              set -euo pipefail
+              # Wait for promtail to start and scrape logs
+              wait-for-it localhost:${PROMTAIL_PORT} -t 60
+              # Verify promtail is running and responding with retry
+              curl -sf --retry 30 --retry-delay 2 --retry-all-errors "http://localhost:${PROMTAIL_PORT}/ready"
+              curl   "http://localhost:${PROMTAIL_PORT}/ready"
 
   - name: ${{package.name}}-loki-canary
     pipeline:
@@ -84,10 +218,99 @@ subpackages:
       provides:
         - loki-canary-fips=${{package.full-version}}
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - curl
+            - wait-for-it
+        environment:
+          LOKI_PORT: "3100"
+          CANARY_PORT: "3500"
       pipeline:
-        - runs: |
-            loki-canary --version
         - uses: test/go-fips-check
+        - name: Verify loki-canary starts and serves metrics
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              set -euo pipefail
+              # Start Loki first
+              mkdir -p /tmp/loki/chunks /tmp/loki/rules
+              tee /tmp/loki-config.yaml <<EOF
+              auth_enabled: false
+              server:
+                http_listen_port: ${LOKI_PORT}
+              common:
+                path_prefix: /tmp/loki
+                storage:
+                  filesystem:
+                    chunks_directory: /tmp/loki/chunks
+                    rules_directory: /tmp/loki/rules
+                replication_factor: 1
+                ring:
+                  kvstore:
+                    store: inmemory
+              schema_config:
+                configs:
+                  - from: 2020-10-24
+                    store: tsdb
+                    object_store: filesystem
+                    schema: v13
+                    index:
+                      prefix: index_
+                      period: 24h
+              limits_config:
+                allow_structured_metadata: false
+              EOF
+              loki -config.file=/tmp/loki-config.yaml -config.expand-env=true > /tmp/loki.log 2>&1 &
+              LOKI_PID=$!
+              # Wait for Loki to be ready
+              wait-for-it localhost:${LOKI_PORT} -t 60
+            start: loki-canary -addr=localhost:${LOKI_PORT} -port=${CANARY_PORT} -labelname=canary -labelvalue=test
+            expected_output: "Querying loki"
+            timeout: 120
+            post: |-
+              CANARY_PID=$!
+              # Wait for canary to start
+              wait-for-it localhost:${CANARY_PORT} -t 60
+              # Verify canary metrics endpoint is responding
+              curl -f "http://localhost:${CANARY_PORT}/metrics" | grep -F "loki_canary"
+              # Cleanup
+              kill $CANARY_PID $LOKI_PID 2>/dev/null || true
+
+  - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - ${{package.name}}-logcli
+      provides:
+        - loki-fips-iamguarded-compat=${{package.full-version}}
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: grafana-loki
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p "/opt/iamguarded/grafana-loki/bin"
+          mkdir -p "/iamguarded/grafana-loki/wal"
+          mkdir -p "/iamguarded/grafana-loki/data"
+          mkdir -p "/iamguarded/grafana-loki/loki"
+          ln -s "../../../../usr/bin/loki" "/opt/iamguarded/grafana-loki/bin/loki"
+          ln -s "../../../../usr/bin/logcli" "/opt/iamguarded/grafana-loki/bin/logcli"
+          ln -s "/opt/iamguarded/grafana-loki/wal" "/wal"
+          ln -s "/opt/iamguarded/grafana-loki/data" "/data"
+          ln -s "/opt/iamguarded/grafana-loki/loki" "/loki"
+      - uses: iamguarded/finalize-compat
+        with:
+          package: grafana-loki
+          version: ${{vars.major-version}}
+    test:
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: grafana-loki
+            version: ${{vars.major-version}}
+        - uses: test/tw/symlink-check
 
 update:
   enabled: true
@@ -97,7 +320,62 @@ update:
     tag-filter: v3.6
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      LOKI_PORT: "3100"
   pipeline:
-    - runs: |
-        loki --version
     - uses: test/go-fips-check
+    - name: Verify Loki server starts and accepts logs
+      uses: test/daemon-check-output
+      with:
+        setup: |-
+          mkdir -p /tmp/loki/chunks /tmp/loki/rules
+          tee /tmp/loki-config.yaml <<EOF
+          auth_enabled: false
+          server:
+            http_listen_port: ${LOKI_PORT}
+          common:
+            path_prefix: /tmp/loki
+            storage:
+              filesystem:
+                chunks_directory: /tmp/loki/chunks
+                rules_directory: /tmp/loki/rules
+            replication_factor: 1
+            ring:
+              kvstore:
+                store: inmemory
+          schema_config:
+            configs:
+              - from: 2020-10-24
+                store: tsdb
+                object_store: filesystem
+                schema: v13
+                index:
+                  prefix: index_
+                  period: 24h
+          limits_config:
+            allow_structured_metadata: false
+          EOF
+        start: loki -config.file=/tmp/loki-config.yaml -config.expand-env=true
+        expected_output: "server listening on addresses"
+        timeout: 60
+        post: |-
+          set -euo pipefail
+          # Wait for Loki to be fully ready
+          curl -sf --retry 30 --retry-delay 2 --retry-all-errors "http://localhost:${LOKI_PORT}/ready"
+          # Push test logs
+          curl -f -X POST "http://localhost:${LOKI_PORT}/loki/api/v1/push" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "streams": [
+                {
+                  "stream": {"job": "test", "level": "info"},
+                  "values": [["'$(date +%s)000000000'", "test log message"]]
+                }
+              ]
+            }'
+          # Verify metrics endpoint
+          curl -f "http://localhost:${LOKI_PORT}/metrics" | grep -F "loki_"

@@ -1,7 +1,7 @@
 package:
   name: istio-1.27
-  version: "1.27.5"
-  epoch: 1 # GHSA-jv3w-x3r3-g6rm
+  version: "1.27.7"
+  epoch: 0 # GHSA-jv3w-x3r3-g6rm
   description: Istio is an open source service mesh that layers transparently onto existing distributed applications.
   copyright:
     - license: Apache-2.0
@@ -26,7 +26,7 @@ pipeline:
     with:
       repository: https://github.com/istio/istio
       tag: ${{package.version}}
-      expected-commit: 4e291059a25d05161759d4d848308dd25251b3fe
+      expected-commit: 044f05ec0a1c9ba4bf80a26d801a39f70b58af81
 
   - uses: go/bump
     with:
@@ -212,6 +212,11 @@ subpackages:
         contents:
           packages:
             - jq
+            - openssl
+            - curl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
       pipeline:
         - name: Verify pilot-agent version and startup capability
           runs: |
@@ -227,6 +232,27 @@ subpackages:
 
             # Verify help output shows expected commands
             pilot-agent --help 2>&1 | grep -F "proxy"
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Verify pilot-agent daemon startup with kwok cluster
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
+
+              # Create directories pilot-agent needs (RELATIVE paths from cwd)
+              mkdir -p var/run/secrets/istio
+              mkdir -p var/run/secrets/workload-spiffe-uds
+              mkdir -p etc/istio/proxy
+
+              # Generate self-signed CA cert
+              openssl req -x509 -newkey rsa:2048 -keyout /tmp/ca-key.pem \
+                -out var/run/secrets/istio/root-cert.pem -days 1 -nodes \
+                -subj "/CN=Istio CA"
+            start: pilot-agent proxy sidecar --domain=cluster.local
+            timeout: 30
+            expected_output: "Starting"
 
   - name: istio-pilot-agent-${{vars.major-minor-version}}-compat
     pipeline:
@@ -268,6 +294,10 @@ subpackages:
         contents:
           packages:
             - jq
+            - curl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
       pipeline:
         - name: Verify pilot-discovery version and startup capability
           runs: |
@@ -283,6 +313,21 @@ subpackages:
 
             # Verify help output shows expected commands
             pilot-discovery --help 2>&1 | grep -F "discovery"
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Verify pilot-discovery daemon startup with kwok cluster
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
+            start: pilot-discovery discovery --monitoringAddr=:15014
+            expected_output: "Starting"
+            timeout: 30
+            post: |
+              set -euo pipefail
+              # Verify ready endpoint responds (fails test if not ready)
+              curl -sf http://localhost:8080/ready && echo "SUCCESS: ready endpoint responding"
 
   - name: istio-pilot-discovery-${{vars.major-minor-version}}-compat
     pipeline:

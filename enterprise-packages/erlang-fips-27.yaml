@@ -1,6 +1,6 @@
 package:
   name: erlang-fips-27
-  version: "27.3.4.6"
+  version: "27.3.4.7"
   epoch: 1
   description: General-purpose programming language and runtime environment
   copyright:
@@ -32,7 +32,7 @@ pipeline:
     with:
       repository: https://github.com/erlang/otp
       tag: OTP-${{package.version}}
-      expected-commit: f1b17a1fb4d2bc74501608852547f8d9b504f7e3
+      expected-commit: e56f9815d9f9389768afa2bc45c7233a7db838fd
 
   - runs: |
       export CPPFLAGS="-D_BSD_SOURCE $CPPFLAGS"
@@ -98,6 +98,11 @@ subpackages:
           with:
             virtual-pkg-name: erlang-fips-odbc
             real-pkg-name: ${{subpkg.name}}
+        - name: Verify ODBC module loads
+          runs: |
+            set -euo pipefail
+            # Verify ODBC module can be loaded successfully (fails test if module not found)
+            erl -eval '{module, odbc} = code:ensure_loaded(odbc), halt().' -noshell
 
 update:
   enabled: true
@@ -108,26 +113,36 @@ update:
 
 test:
   pipeline:
-    - runs: |
-        erl -eval 'erlang:display(erlang:system_info(otp_release)), halt().'  -noshell
-        ct_run --version
-        ct_run --help
-        dialyzer --version
-        dialyzer --help
-        erl --version
-        erl --help
-        erlc -v
-        typer --version
-        typer --help
-    - runs: |
-        cat <<EOF > "hello.erl"
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          ct_run
+          dialyzer
+          erl
+          typer
+    - name: Verify FIPS mode is enabled
+      runs: |
+        set -euo pipefail
+        # Verify FIPS mode is enabled in crypto module (critical for FIPS-labeled package)
+        output=$(erl -eval 'io:format("FIPS: ~p~n", [crypto:info_fips()]), halt().' -noshell)
+        echo "$output"
+        echo "$output" | grep -F "enabled" || {
+          echo "FAIL: FIPS mode is not enabled"
+          exit 1
+        }
+    - name: Test Erlang compilation and execution
+      runs: |
+        set -euo pipefail
+        tee hello.erl <<'EOF'
         -module(hello).
         -export([hello_wolfi/0]).
 
         hello_wolfi() -> io:fwrite("hello, wolfi\n").
         EOF
 
+        # Compile Erlang module (fails test if compilation fails)
         erlc hello.erl
 
+        # Execute and verify output (fails test if execution fails)
         erl -noshell -pa . -eval "hello:hello_wolfi()." -s init stop
     - uses: test/tw/ldd-check

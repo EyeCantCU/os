@@ -1,7 +1,7 @@
 package:
   name: wave-fips
   version: 0.10.0
-  epoch: 13 # CVE-2025-61729
+  epoch: 16 # CVE-2025-61732
   description: Kubernetes configuration tracking controller
   copyright:
     - license: Apache-2.0
@@ -40,9 +40,79 @@ update:
     strip-prefix: v
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
-        wave --version
-        wave --help
-    - runs: wave 2>&1 | grep -qi "try setting KUBERNETES_MASTER environment variable"
+    - uses: test/tw/ver-check
+      with:
+        bins: wave
+    - uses: test/tw/help-check
+      with:
+        bins: wave
+    - name: Verify Kubernetes connection error message
+      runs: |
+        set -euo pipefail
+        # wave should fail when no Kubernetes cluster is available
+        if output=$(wave 2>&1); then
+          echo "FAIL: Expected wave to fail without Kubernetes cluster"
+          exit 1
+        fi
+        # Verify the error message is helpful (fails test if message not found)
+        echo "$output" | grep -Fi "try setting KUBERNETES_MASTER environment variable"
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Test wave Kubernetes controller startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          set -euo pipefail
+          # Grant wave controller cluster-admin access for watching resources
+          kubectl create clusterrolebinding wave-admin \
+            --clusterrole=cluster-admin \
+            --serviceaccount=default:default
+        start: wave
+        expected_output: "Starting Controller"
+        timeout: 30
+        post: |-
+          set -euo pipefail
+          # Create a ConfigMap that wave can track
+          kubectl create configmap test-config --from-literal=key=value
+
+          # Create a deployment with wave annotation to track config changes
+          kubectl apply -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: test-wave
+            annotations:
+              wave.pusher.com/update-on-config-change: "true"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: test-wave
+            template:
+              metadata:
+                labels:
+                  app: test-wave
+              spec:
+                containers:
+                - name: nginx
+                  image: nginx:latest
+                  envFrom:
+                  - configMapRef:
+                      name: test-config
+          EOF
+
+          # Give wave time to process and add its hash annotation
+          sleep 5
+
+          # Verify wave added its tracking hash to the deployment (proves controller works)
+          kubectl get deployment test-wave -o yaml | grep -F "wave.pusher.com"

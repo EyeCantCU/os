@@ -1,7 +1,7 @@
 package:
   name: istio-1.26
   version: "1.26.8"
-  epoch: 1 # GHSA-jv3w-x3r3-g6rm
+  epoch: 2 # GHSA-jv3w-x3r3-g6rm
   description: Istio is an open source service mesh that layers transparently onto existing distributed applications.
   copyright:
     - license: Apache-2.0
@@ -203,6 +203,13 @@ subpackages:
           cp ./tools/packaging/common/envoy_bootstrap.json \
             ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
     test:
+      environment:
+        contents:
+          packages:
+            - openssl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
       pipeline:
         - uses: test/tw/ver-check
           with:
@@ -210,13 +217,27 @@ subpackages:
         - uses: test/tw/help-check
           with:
             bins: pilot-agent
-        - name: Verify pilot-agent daemon startup capability
-          runs: |
-            set -euo pipefail
-            # Verify binary is installed (fails test if missing)
-            stat /usr/bin/pilot-agent
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Verify pilot-agent daemon startup with kwok cluster
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
 
-            echo "SUCCESS: pilot-agent daemon can execute"
+              # Create directories pilot-agent needs (RELATIVE paths from cwd)
+              mkdir -p var/run/secrets/istio
+              mkdir -p var/run/secrets/workload-spiffe-uds
+              mkdir -p etc/istio/proxy
+
+              # Generate self-signed CA cert for pilot-agent
+              openssl req -x509 -newkey rsa:2048 -keyout /tmp/ca-key.pem \
+                -out var/run/secrets/istio/root-cert.pem -days 1 -nodes \
+                -subj "/CN=Istio CA"
+            start: pilot-agent proxy sidecar --domain=cluster.local
+            expected_output: "Starting"
+            timeout: 30
 
   - name: istio-pilot-agent-${{vars.major-minor-version}}-compat
     pipeline:
@@ -254,6 +275,13 @@ subpackages:
           cp ./tools/packaging/common/envoy_bootstrap.json \
             ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
     test:
+      environment:
+        contents:
+          packages:
+            - curl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
       pipeline:
         - uses: test/tw/ver-check
           with:
@@ -261,13 +289,19 @@ subpackages:
         - uses: test/tw/help-check
           with:
             bins: pilot-discovery
-        - name: Verify pilot-discovery daemon startup capability
-          runs: |
-            set -euo pipefail
-            # Verify binary is installed (fails test if missing)
-            stat /usr/bin/pilot-discovery
-
-            echo "SUCCESS: pilot-discovery daemon can execute"
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Verify pilot-discovery daemon startup with kwok cluster and ready endpoint
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
+            start: pilot-discovery discovery --monitoringAddr=:15014
+            expected_output: "Starting"
+            timeout: 30
+            post: |
+              curl -sf http://localhost:8080/ready && echo "SUCCESS: ready endpoint responding"
 
   - name: istio-pilot-discovery-${{vars.major-minor-version}}-compat
     pipeline:
@@ -315,7 +349,7 @@ test:
         pilot-discovery version -o json | jq -e '.clientVersion.tag' | grep -vF "unknown"
         echo "SUCCESS: pilot-discovery metadata verified"
     - name: Verify pilot-agent build metadata
-      runs: |
+      runs: |-
         set -euo pipefail
         # Verify version/tag/commit are correctly embedded (not "unknown")
         echo "Checking pilot-agent version metadata..."

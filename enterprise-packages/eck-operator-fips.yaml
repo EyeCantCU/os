@@ -1,7 +1,7 @@
 package:
   name: eck-operator-fips
-  version: "3.2.0"
-  epoch: 3 # CVE-2025-61729
+  version: "3.3.0"
+  epoch: 2 # CVE-2025-68121
   description: Elastic Cloud on Kubernetes
   copyright:
     - license: Elastic-2.0
@@ -15,30 +15,7 @@ pipeline:
     with:
       repository: https://github.com/elastic/cloud-on-k8s/
       tag: v${{package.version}}
-      expected-commit: 3ed7be5a2c82cd10fcac910bc0c294c4e4c4983a
-
-  - uses: go/bump
-    with:
-      deps: |-
-        golang.org/x/crypto@v0.45.0
-      modroot: hack/operatorhub
-
-  - uses: go/bump
-    with:
-      deps: |-
-        golang.org/x/crypto@v0.45.0
-      modroot: hack/manifest-gen
-
-  - uses: go/bump
-    with:
-      deps: |-
-        golang.org/x/crypto@v0.45.0
-      modroot: hack/helm/release
-
-  - uses: go/bump
-    with:
-      deps: |-
-        golang.org/x/crypto@v0.45.0
+      expected-commit: 01a7bef40a3f6531a62f004bac131ce7c1b7caa1
 
   - runs: |
       mkdir -p ${{targets.contextdir}}/conf
@@ -64,40 +41,90 @@ test:
     contents:
       packages:
         - eck-operator-compat
-        - wait-for-it
+        - curl
   pipeline:
     - uses: test/go-fips-check
-    - runs: |
-        [ -f /usr/bin/elastic-operator ] && exit 0 || exit 1
-        /elastic-operator --version
-        elastic-operator --version
+    - uses: test/tw/ver-check
+      with:
+        bins: elastic-operator
     - uses: test/kwok/cluster
     - runs: |
+        set -euo pipefail
         kubectl create -f https://download.elastic.co/downloads/eck/3.0.0/crds.yaml
+        kubectl wait --for=condition=Established crd --all --timeout=60s
         kubectl create namespace test
     - uses: test/daemon-check-output
       with:
-        start: elastic-operator manager --operator-namespace test
-        timeout: 30
+        start: elastic-operator manager --operator-namespace test --metrics-port 8080
+        timeout: 60
         expected_output: |
           Starting the manager
           Starting Controller
           Starting workers
+          Starting EventSource
+          elasticsearch
+          kibana
         error_strings: |
           unlicensed
         post: |
+          set -euo pipefail
+
+          # Verify operator pods are running
           kubectl get pods -n test
           kubectl logs -n test -l control-plane=elastic-operator
 
+          # Wait for metrics endpoint to be ready
           wait-for-it localhost:8080 --timeout=30
 
-          # Check all endpoints
-          curl -s http://localhost:8080/metrics | grep -q "elastic_operator_"
-          curl -s http://localhost:8080/health | grep -q "status.*ok"
-          curl -s http://localhost:8080/ready | grep -q "ready"
+          # Check metrics endpoint (fails test if controller_runtime not found)
+          curl -sf http://localhost:8080/metrics | grep -F "controller_runtime"
 
-          # Check operator status
-          kubectl get elasticsearch -A
+          # Create an Elasticsearch custom resource to verify operator functionality
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: elasticsearch.k8s.elastic.co/v1
+          kind: Elasticsearch
+          metadata:
+            name: test-es
+            namespace: test
+          spec:
+            version: 8.11.0
+            nodeSets:
+            - name: default
+              count: 1
+              config:
+                node.store.allow_mmap: false
+          EOF
+
+          # Wait for operator to process the CR and create resources
+          sleep 10
+
+          # Verify operator created the StatefulSet for Elasticsearch (fails test if not found)
+          if ! kubectl get statefulset test-es-es-default -n test; then
+            echo "FAIL: ECK operator did not create StatefulSet test-es-es-default"
+            kubectl get statefulset -n test
+            exit 1
+          fi
+          echo "SUCCESS: ECK operator created StatefulSet test-es-es-default"
+
+          # Verify operator created the HTTP Service (fails test if not found)
+          if ! kubectl get service test-es-es-http -n test; then
+            echo "FAIL: ECK operator did not create HTTP Service test-es-es-http"
+            kubectl get services -n test
+            exit 1
+          fi
+          echo "SUCCESS: ECK operator created HTTP Service test-es-es-http"
+
+          # Verify operator processed the Elasticsearch CR (status should be set)
+          status=$(kubectl get elasticsearch test-es -n test -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+          if [ -n "$status" ]; then
+            echo "SUCCESS: ECK operator processed Elasticsearch CR with status: $status"
+          else
+            echo "FAIL: Elasticsearch CR not processed by operator - no status set"
+            kubectl get elasticsearch test-es -n test -o yaml
+            exit 1
+          fi
+
+          # Verify Kibana CRD is also recognized
           kubectl get kibana -A
 
 update:

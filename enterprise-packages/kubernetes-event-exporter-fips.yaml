@@ -1,7 +1,7 @@
 package:
   name: kubernetes-event-exporter-fips
   version: "1.7"
-  epoch: 17 # GHSA-4f99-4q7p-p3gh
+  epoch: 20 # CVE-2025-68121
   description: Export Kubernetes events to multiple destinations with routing and filtering
   copyright:
     - license: Apache-2.0
@@ -43,31 +43,85 @@ update:
 
 test:
   environment:
+    contents:
+      packages:
+        - curl
     environment:
-      KUBERNETES_SERVICE_HOST: test-example.net
-      KUBERNETES_SERVICE_PORT: 8081
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
   pipeline:
     - uses: test/go-fips-check
-    - name: "Create mock data"
-      runs: |
-        mkdir -p /var/run/secrets/kubernetes.io/serviceaccount
-        echo "dummy-token" > /var/run/secrets/kubernetes.io/serviceaccount/token
-        echo -e "log:\n  level: info\nsinks:\n  - name: stdout\n    kind: stdout\n" > /tmp/test-config.yaml
-    - name: "Test --help"
-      runs: |
-        kubernetes-event-exporter --help || (echo "Help command failed!" && exit 1)
-    - name: "Start and validate logs"
-      runs: |
-        kubernetes-event-exporter -conf /tmp/test-config.yaml > /tmp/event-exporter.log 2>&1 &
-        EXPORTER_PID=$!
-        sleep 5
+    - uses: test/tw/help-check
+      with:
+        bins: kubernetes-event-exporter
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Test Kubernetes event exporter with file sink
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create ClusterRole for event watching cluster-wide
+          kubectl apply -f - <<'EOF'
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: event-exporter
+          rules:
+          - apiGroups: [""]
+            resources: ["events"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: [""]
+            resources: ["configmaps"]
+            verbs: ["get", "list", "watch"]
+          EOF
 
-        # Check logs for expected output
-        if grep -q "Listening on" /tmp/event-exporter.log /tmp/event-exporter.log; then
-          echo "Test passed: Found expected log output."
-        else
-          echo "Test failed: Did not find expected log output."
-          cat /tmp/event-exporter.log
-          kill $EXPORTER_PID
-          exit 1
-        fi
+          # Create ClusterRoleBinding to grant permissions to default SA
+          kubectl apply -f - <<'EOF'
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: event-exporter
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: event-exporter
+          subjects:
+          - kind: ServiceAccount
+            name: default
+            namespace: default
+          EOF
+
+          # Create config with file sink for output verification
+          mkdir -p /tmp/event-output
+          tee /tmp/event-config.yaml <<'EOF'
+          logLevel: info
+          route:
+            routes:
+              - match:
+                  - receiver: file-sink
+          receivers:
+            - name: file-sink
+              file:
+                path: /tmp/event-output/events.json
+                layout: {}
+          EOF
+        start: /usr/bin/kubernetes-event-exporter -conf /tmp/event-config.yaml
+        expected_output: "Registering sink"
+        timeout: "60"
+        post: |
+          # Create a test pod to trigger events in the cluster
+          kubectl run test-pod --image=busybox --restart=Never -- sleep 3600
+
+          # Wait for events to be processed and exported to file sink
+          sleep 10
+
+          # Verify file sink received exported events
+          if [ -s /tmp/event-output/events.json ]; then
+            echo "SUCCESS: Events exported to file sink"
+            head -5 /tmp/event-output/events.json
+          else
+            echo "FAIL: No events exported to file sink after pod creation"
+            ls -la /tmp/event-output/ || true
+            exit 1
+          fi

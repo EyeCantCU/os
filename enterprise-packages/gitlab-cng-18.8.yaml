@@ -1,0 +1,587 @@
+# Please refer to the variables below manifest that aligns with the CNG release tag set in the CNG package version.
+# The manifest can be found here:
+# - https://gitlab.com/gitlab-org/build/CNG/-/blob/v<PACKAGE VERSION HERE>/ci_files/variables.yml
+# # Additionally, the latest 'gitaly-backup' package (part of gitlab-cng), must be built first.
+vars:
+  registry-commit: 0f300fbbaf2c5727fcaaddd58042107b66901978
+  registry-tag: 'v4.33.0-gitlab'
+  # Exporter tags: https://gitlab.com/gitlab-org/ruby/gems/gitlab-exporter/-/tags
+  exporter-commit: 87e1cbff4dd90ab2212e7b1fe7291ea4da14218d
+  exporter-tag: '16.3.1'
+  # Logger tags: https://gitlab.com/gitlab-org/cloud-native/gitlab-logger/-/tags
+  logger-commit: 61e76054e898803f7c2408e7e54dfba96a5085fc
+  logger-tag: 'v3.0.0'
+  # Shell tags: https://gitlab.com/gitlab-org/gitlab-shell/-/tags
+  shell-commit: 73d5ec55604c39ea9b4447a860d70fa4486ae599
+  shell-tag: 'v14.45.5'
+  # Runtime versions
+  postgres-version: '17'
+  python-version: '3.9'
+  ruby-version: '3.2'
+  # GitLab directories
+  gitlab-home: /srv/gitlab
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+package:
+  name: gitlab-cng-18.8
+  # ---Additional updates required--- Review 'vars' section (above), when reviewing version bumps.
+  version: "18.8.4"
+  epoch: 0
+  description: Cloud Native container images per component of GitLab
+  copyright:
+    - license: MIT
+  resources:
+    cpu: 16
+    memory: 24Gi
+  dependencies:
+    provides:
+      - gitlab-cng=${{package.full-version}}
+      - gitlab=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates
+      - gawk
+      - heimdal-dev
+      - icu-dev
+      - libpq-${{vars.postgres-version}}
+      - postgresql-${{vars.postgres-version}}-dev
+      - py${{vars.python-version}}-pip
+      - ruby${{vars.ruby-version}}-bundler
+      - ruby-${{vars.ruby-version}}
+      - ruby-${{vars.ruby-version}}-dev
+      - yq
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://gitlab.com/gitlab-org/build/CNG.git
+      tag: v${{package.version}}
+      expected-commit: ca2b87273c8ac2e43ccae6f75553cc0755fa93d5
+
+  - name: Verify all the vars tags are up to date with the upstream
+    runs: |
+      # Runtime versions
+      POSTGRES_VERSION=$(yq -r '.variables.PG_VERSION' ./ci_files/variables.yml | awk -F '.' '{print $1}')
+      PYTHON_VERSION=$(yq -r '.variables.PYTHON_VERSION' ./ci_files/variables.yml | awk -F '.' '{print $1"."$2}')
+      RUBY_VERSION=$(yq -r '.variables.RUBY_VERSION' ./ci_files/variables.yml | awk -F '.' '{print $1"."$2}')
+
+      # Tags
+      REGISTRY_TAG=$(yq -r '.variables.GITLAB_CONTAINER_REGISTRY_VERSION' ./ci_files/variables.yml)
+      EXPORTER_TAG=$(yq -r '.variables.GITLAB_EXPORTER_VERSION' ./ci_files/variables.yml)
+      LOGGER_TAG=$(yq -r '.variables.GITLAB_LOGGER_VERSION' ./ci_files/variables.yml)
+      SHELL_TAG=$(yq -r '.variables.GITLAB_SHELL_VERSION' ./ci_files/variables.yml)
+
+      check_version() {
+        local vars_name=$1
+        local expected_value=$2
+        local actual_value=$3
+
+        if [ "$expected_value" != "$actual_value" ]; then
+          echo "Error: Expected $vars_name: $expected_value but got: $actual_value"
+          exit 1
+        fi
+      }
+
+      # Check runtime versions
+      check_version "postgres-version" "${{vars.postgres-version}}" "$POSTGRES_VERSION"
+      check_version "python-version" "${{vars.python-version}}" "$PYTHON_VERSION"
+      check_version "ruby-version" "${{vars.ruby-version}}" "$RUBY_VERSION"
+
+      # Check tags
+      check_version "registry-tag" "${{vars.registry-tag}}" "$REGISTRY_TAG"
+      check_version "exporter-tag" "${{vars.exporter-tag}}" "$EXPORTER_TAG"
+      check_version "logger-tag" "${{vars.logger-tag}}" "$LOGGER_TAG"
+      check_version "shell-tag" "${{vars.shell-tag}}" "$SHELL_TAG"
+
+data:
+  # Used to create all of the *-scripts subpackages from the CNG repo.
+  - name: scripts
+    items:
+      cfssl-self-sign: ./cfssl-self-sign
+      container-registry: ./gitlab-container-registry
+      exporter: ./gitlab-exporter
+      gitaly: ./gitaly
+      pages: ./gitlab-pages
+      rails: ./gitlab-rails
+      shell: ./gitlab-shell
+      workhorse: ./gitlab-workhorse
+
+subpackages:
+  - range: scripts
+    name: gitlab-${{range.key}}-scripts-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-${{range.key}}-scripts=${{package.full-version}}
+    pipeline:
+      - runs: |
+          cd ${{range.value}}
+          for script in $(find scripts/ -type f); do
+            mkdir -p ${{targets.contextdir}}/$(dirname $script)
+            cp $script ${{targets.contextdir}}/$script
+          done
+
+          # Authorized keys must be at root for GitLab Shell
+          if [ '${{range.key}}' = 'shell' ]; then
+            mv ${{targets.contextdir}}/scripts/authorized_keys ${{targets.contextdir}}/
+          fi
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-${{range.key}}-scripts
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: gitlab-base-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-base=${{package.full-version}}
+      runtime:
+        - bash
+        - bash-binsh
+        - busybox
+        - ca-certificates
+        - coreutils
+        - curl
+        - gawk
+        - gitlab-logger-${{vars.major-minor-version}}=${{package.full-version}}
+        - gomplate~4
+        - findutils
+        - grep
+        - less
+        - procps
+        - sed
+        - tini
+        - tzdata
+        - xtail
+    pipeline:
+      - runs: |
+          cd ./gitlab-base
+          for script in $(find scripts/ -type f); do
+            mkdir -p ${{targets.contextdir}}/$(dirname $script)
+            cp $script ${{targets.contextdir}}/$script
+          done
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-base
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: gitlab-certificates-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-certificates=${{package.full-version}}
+      runtime:
+        - ca-certificates
+    pipeline:
+      - runs: |
+          cd ./certificates
+          for script in $(find scripts/ -type f); do
+            mkdir -p ${{targets.contextdir}}/$(dirname $script)
+            cp $script ${{targets.contextdir}}/$script
+          done
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-certificates
+            real-pkg-name: ${{subpkg.name}}
+        - name: Test bundle-certificates script
+          runs: |
+            /scripts/bundle-certificates
+            # if bundle-certificates runs correctly, it dereferences symlinks outside of /etc/ssl/certs
+            for f in /etc/ssl/certs/*.pem /etc/ssl/certs/*.crt; do
+              if [ -L "$f" ]; then
+                origin=$(readlink -f "$f")
+                originPath=${origin%/*}
+                if [ "$originPath" != "/etc/ssl/certs" ]; then
+                  echo "Error: $f is a symlink pointing outside of /etc/ssl/certs to $origin"
+                  exit 1
+                fi
+              fi
+            done
+
+  - name: gitlab-container-registry-${{vars.major-minor-version}}
+    description: The GitLab Container Registry originated as a fork of the Docker Distribution Registry, now CNCF Distribution, both distributed under Apache License Version 2.0.
+    dependencies:
+      provides:
+        - gitlab-container-registry=${{package.full-version}}
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://gitlab.com/gitlab-org/container-registry
+          tag: ${{vars.registry-tag}}
+          expected-commit: ${{vars.registry-commit}}
+          destination: ./container-registry
+      - working-directory: ./container-registry
+        runs: |
+          mkdir -p "${{targets.contextdir}}"/etc/docker/registry
+      - uses: go/bump
+        with:
+          deps: |-
+            github.com/golang-jwt/jwt/v4@v4.5.2
+            github.com/go-viper/mapstructure/v2@v2.4.0
+          modroot: ./container-registry
+      - uses: go/build
+        with:
+          packages: ./cmd/registry
+          output: registry
+          tags: include_oss,include_gcs,continuous_profiler_stackdriver
+          ldflags: |
+            -X github.com/docker/distribution/version.Version=${{vars.registry-tag}}
+            -X github.com/docker/distribution/version.Revision=$(git rev-parse HEAD || echo '<unknown>')
+            -X github.com/docker/distribution/version.Package="github.com/docker/distribution"
+            -X github.com/docker/distribution/version.BuildTime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
+          modroot: ./container-registry
+    test:
+      environment:
+        contents:
+          packages:
+            - crane
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-container-registry
+            real-pkg-name: ${{subpkg.name}}
+        - runs: |
+            #!/bin/bash
+
+            # Create the configuration file
+            tee /etc/docker/registry/config.yml <<EOL
+            # This config file is a basic configuration using filesystem metadata and blob
+            # storage.
+            version: 0.1
+            log:
+              accesslog:
+                disabled: false
+                formatter: text
+              level: info
+              formatter: text
+              fields:
+                service: registry
+            storage:
+              delete:
+                enabled: true
+              filesystem:
+                # Temp dir, rename if you need persistence.
+                # registry/storage/paths.go describes the structure of the data
+                # written to this directory
+                rootdirectory: "/tmp/registry"
+            http:
+              # Registry API will be accessible at localhost:5000
+              addr: :5000
+              debug:
+                addr: :5001
+                prometheus:
+                  enabled: true
+                  path: /metrics
+                pprof:
+                  enabled: true
+            EOL
+
+            # Run the Docker registry with the configuration file
+            registry serve /etc/docker/registry/config.yml > /dev/null 2>&1 &
+            PID=$!
+
+            # Wait for the registry to start
+            sleep 5
+
+            # Test the registry
+            crane catalog localhost:5000
+
+            # copy the image to the registry
+            crane copy alpine:latest localhost:5000/alpine:latest
+
+            # check for the image in the registry
+            crane manifest localhost:5000/alpine:latest
+
+            # Stop the registry
+            kill $PID
+
+  - name: gitlab-exporter-${{vars.major-minor-version}}
+    description: GitLab Exporter is a Prometheus Web exporter.
+    dependencies:
+      provides:
+        - gitlab-exporter=${{package.full-version}}
+      runtime:
+        - busybox
+        - jemalloc
+        - libpq-${{vars.postgres-version}}
+        - ruby-${{vars.ruby-version}}
+        - ruby${{vars.ruby-version}}-bundler
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://gitlab.com/gitlab-org/gitlab-exporter
+          tag: ${{vars.exporter-tag}}
+          expected-commit: ${{vars.exporter-commit}}
+          destination: ./exporter
+      - uses: ruby/build
+        with:
+          gem: gitlab-exporter
+          dir: ./exporter
+      - working-directory: ./exporter
+        runs: |
+          TARGET_DIR_BIN="${{targets.contextdir}}/usr/bin"
+          TARGET_DIR_INSTALL="${{targets.contextdir}}$(ruby -e 'puts Gem.default_dir')/"
+
+          mkdir -p "${TARGET_DIR_BIN}"
+          mkdir -p "${TARGET_DIR_INSTALL}"
+
+          gem install gitlab-exporter-${{vars.exporter-tag}}.gem \
+            --install-dir ${TARGET_DIR_INSTALL}  \
+            --bindir ${TARGET_DIR_BIN} \
+            --version ${{vars.exporter-tag}} \
+            --no-document \
+            --verbose
+      - uses: ruby/clean
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-exporter
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/tw/ldd-check
+        - name: "Test gitlab-exporter"
+          runs: |
+            if ! command -v gitlab-exporter &> /dev/null; then
+              echo "GitLab Exporter is not installed."
+              exit 1
+            fi
+
+  - name: gitlab-logger-${{vars.major-minor-version}}
+    description: GitLab Logger provides a means of wrapping non-structured log files within structure JSON.
+    dependencies:
+      provides:
+        - gitlab-logger=${{package.full-version}}
+        - gitlab-logger-compat-${{vars.major-minor-version}}=${{package.full-version}}
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://gitlab.com/gitlab-org/cloud-native/gitlab-logger
+          tag: ${{vars.logger-tag}}
+          destination: ./logger
+      - uses: go/build
+        with:
+          packages: ./cmd/gitlab-logger
+          output: gitlab-logger
+          ldflags: |
+            -X main.version=${component_version}
+            -X main.buildtime=$(date -d@${SOURCE_DATE_EPOCH} +%F-%T)
+          modroot: ./logger
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -s /usr/bin/gitlab-logger ${{targets.contextdir}}/usr/local/bin/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-logger
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-logger-compat-${{vars.major-minor-version}}
+            real-pkg-name: ${{subpkg.name}}
+        - runs: |
+            gitlab-logger -h
+
+  - name: gitlab-shell-${{vars.major-minor-version}}
+    description: SSH access for GitLab
+    dependencies:
+      provides:
+        - gitlab-shell=${{package.full-version}}
+      runtime:
+        - openssh
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://gitlab.com/gitlab-org/gitlab-shell
+          tag: ${{vars.shell-tag}}
+          expected-commit: ${{vars.shell-commit}}
+          destination: ./shell
+      - uses: go/bump
+        with:
+          modroot: ./shell
+          deps: |-
+            golang.org/x/oauth2@v0.27.0
+            golang.org/x/crypto@v0.45.0
+      - working-directory: ./shell
+        runs: |
+          make build
+
+          BINDIR=${{targets.contextdir}}/srv/gitlab-shell/bin
+          mkdir -p "${BINDIR}"
+
+          install -m755 bin/gitlab-shell-check "${BINDIR}/gitlab-shell-check"
+          install -m755 bin/gitlab-shell "${BINDIR}/gitlab-shell"
+          install -m755 bin/gitlab-shell-authorized-keys-check "${BINDIR}/gitlab-shell-authorized-keys-check"
+          install -m755 bin/gitlab-shell-authorized-principals-check "${BINDIR}/gitlab-shell-authorized-principals-check"
+          install -m755 bin/gitlab-sshd "${BINDIR}/gitlab-sshd"
+
+          mkdir -p ${{targets.contextdir}}/srv/gitlab-shell/
+          cp LICENSE VERSION ${{targets.contextdir}}/srv/gitlab-shell/
+
+          install -d ${{targets.contextdir}}/srv/sshd
+          install -d ${{targets.contextdir}}/etc/ssh
+          install -d ${{targets.contextdir}}/var/log/gitlab-shell
+          touch ${{targets.contextdir}}/var/log/gitlab-shell/gitlab-shell.log
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-shell
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: gitaly-config-${{vars.major-minor-version}}
+    description: Config for Gitaly ${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitaly-config=${{package.full-version}}
+    pipeline:
+      - working-directory: ./gitaly
+        runs: |
+          mkdir -p "${{targets.contextdir}}/etc/gitaly"
+          cp config.toml "${{targets.contextdir}}/etc/gitaly/config.toml.tpl"
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitaly-config
+            real-pkg-name: ${{subpkg.name}}
+        - runs: stat /etc/gitaly/config.toml.tpl
+
+  - name: gitlab-webservice-ce-${{vars.major-minor-version}}
+    description: Webservice for GitLab CE ${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-webservice-ce=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-webservice/Dockerfile
+      runtime:
+        - gitlab-base-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-${{vars.major-minor-version}}=${{package.full-version}}
+        - py${{vars.python-version}}-docutils
+    pipeline:
+      - runs: |
+          # Install scripts
+          mkdir -p ${{targets.contextdir}}/scripts
+          cp -r ./gitlab-webservice/scripts/* ${{targets.contextdir}}/scripts/
+
+          # Install configs
+          mkdir -p ${{targets.contextdir}}/${{vars.gitlab-home}}/config
+          cp -r ./gitlab-webservice/configuration/* ${{targets.contextdir}}/${{vars.gitlab-home}}/config/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-webservice-ce
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/daemon-check-output
+          with:
+            start: /scripts/process-wrapper
+            timeout: 30
+            expected_output: |
+              Puma starting in cluster mode
+              Preloading application
+
+  - name: gitlab-sidekiq-ce-${{vars.major-minor-version}}
+    description: Sidekiq for GitLab CE ${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - gitlab-sidekiq-ce=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-sidekiq/Dockerfile
+      runtime:
+        - cosign
+        - gitlab-base-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-${{vars.major-minor-version}}=${{package.full-version}}
+        - openssh-client
+        - py${{vars.python-version}}-docutils
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/scripts
+          cp -r ./gitlab-sidekiq/scripts/* ${{targets.contextdir}}/scripts/
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-sidekiq-ce
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/daemon-check-output
+          with:
+            start: /scripts/process-wrapper
+            timeout: 30
+            expected_output: |
+              No queues found, you must select at least one queue
+
+  - name: gitlab-toolbox-ce-${{vars.major-minor-version}}
+    description: Toolbox for GitLab CE ${{vars.major-minor-version}}
+    options:
+      no-provides: true
+    dependencies:
+      provides:
+        - gitlab-toolbox-ce=${{package.full-version}}
+      # https://gitlab.com/gitlab-org/build/CNG/-/blob/master/gitlab-toolbox/Dockerfile
+      runtime:
+        - azcopy
+        - gitaly-backup-${{vars.major-minor-version}}
+        - gitlab-base-${{vars.major-minor-version}}=${{package.full-version}}
+        - gitlab-rails-ce-${{vars.major-minor-version}}
+        - gitlab-rails-scripts-${{vars.major-minor-version}}=${{package.full-version}}
+        - gnutar
+        - jq
+        - openssl
+        - redis-benchmark
+        - redis-cli
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}
+          # Packaging these would require packaging the Python 3.9 ecosystem again
+          # which isn't ideal given Python 3.9 goes EOL in less than two months from
+          # the time this has been introduced. When GitLab moves to 3.10, we can use
+          # our existing packages
+          pip install \
+            --ignore-installed \
+            --prefix=/usr --root=${{targets.contextdir}} \
+            'awscli<2' crcmod gsutil PyOpenSSL s3cmd
+
+          # Install scripts
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          cp -r ./gitlab-toolbox/scripts/bin/* ${{targets.contextdir}}/usr/local/bin
+
+          mkdir -p ${{targets.contextdir}}/usr/lib/ruby/vendor_ruby
+          cp -r ./gitlab-toolbox/scripts/lib/* ${{targets.contextdir}}/usr/lib/ruby/vendor_ruby
+    test:
+      environment:
+        environment:
+          CONFIG_TEMPLATE_DIRECTORY: ${{vars.gitlab-home}}/config
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-toolbox-ce
+            real-pkg-name: ${{subpkg.name}}
+        - runs: |
+            entrypoint.sh echo "Hello, there!" | grep "Hello, there!"
+        - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v18.8
+
+# Based on package size if was determined that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is not longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage
