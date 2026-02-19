@@ -16,8 +16,8 @@
 #    subpackage to be installed separately.
 package:
   name: logstash-9.2
-  version: "9.2.4"
-  epoch: 2 # go/wolfi-rsc/logstash-9.2
+  version: "9.2.5"
+  epoch: 0 # go/wolfi-rsc/logstash-9.2
   description: Logstash - transport and process your logs, events, or other data
   copyright:
     - license: Apache-2.0
@@ -91,7 +91,7 @@ pipeline:
     with:
       repository: https://github.com/elastic/logstash
       tag: v${{package.version}}
-      expected-commit: a8e90a3721f01ba577f1a12c6a350b8b58b74f8c
+      expected-commit: 5b6074ec8577b52e7afd75e5bb85ba00cce1a77e
 
   - uses: patch
     with:
@@ -152,13 +152,23 @@ pipeline:
 
   - name: Build tarball distribution
     runs: |
-      ./gradlew assembleOssTarDistribution -Pjdk_bundle_os=linux
+      ./gradlew assembleTarDistribution -Pjdk_bundle_os=linux
+
+      # Remove x-pack and bundled JDK from the tarball
+      tarball="build/logstash-${{package.version}}-SNAPSHOT.tar.gz"
+      tmpdir=$(mktemp -d)
+      tar -xzf "$tarball" --strip-components 1 -C "$tmpdir"
+      rm -rf "$tmpdir"/logstash-${{package.version}}-SNAPSHOT/x-pack
+      rm -rf "$tmpdir"/logstash-${{package.version}}-SNAPSHOT/jdk
+      rm -rf "$tmpdir"/logstash-${{package.version}}-SNAPSHOT/jdk.app
+      tar -czf "$tarball" -C "$tmpdir" .
+      rm -rf "$tmpdir"
 
   - name: Package distribution
     runs: |
-      tarball=$(find . -type f -name "logstash-oss-${{package.version}}-SNAPSHOT-no-jdk.tar.gz")
+      tarball=$(find . -type f -name "logstash-${{package.version}}-SNAPSHOT.tar.gz")
       if [ -z $tarball ]; then
-        echo "Could not find logstash-oss tarball, nothing to unpack"
+        echo "Could not find logstash tarball, nothing to unpack"
         exit 1
       fi
 
@@ -244,9 +254,9 @@ subpackages:
           mkdir -p "${dst}/config" \
                    "${dst}/pipeline"
 
-          tarball=$(find . -type f -name "logstash-oss-${{package.version}}-SNAPSHOT-no-jdk.tar.gz")
+          tarball=$(find . -type f -name "logstash-${{package.version}}-SNAPSHOT.tar.gz")
           if [ -z $tarball ]; then
-            echo "Could not find logstash-oss tarball, nothing to unpack"
+            echo "Could not find logstash tarball, nothing to unpack"
             exit 1
           fi
 
@@ -422,18 +432,27 @@ subpackages:
           done
       - name: Build tarball distribution
         runs: |
-          ./gradlew assembleOssTarDistribution -Pjdk_bundle_os=linux
+          ./gradlew assembleTarDistribution -Pjdk_bundle_os=linux
       - name: Package distribution
         runs: |
           mkdir -p ${{targets.contextdir}}/${LS_DESTINATION}
           tar --strip-components 1 \
             -C ${{targets.contextdir}}/${LS_DESTINATION} \
-            -xf $(find . -type f -name "logstash-oss-${{package.version}}-SNAPSHOT-no-jdk.tar.gz")
+            -xf $(find . -type f -name "logstash-${{package.version}}-SNAPSHOT.tar.gz")
 
           mkdir -p ${{targets.contextdir}}/usr/bin/$name
           for i in ${{targets.contextdir}}/${LS_DESTINATION}/bin/*; do
             name=$(basename $i)
             ln -sf /${LS_DESTINATION}/bin/$name ${{targets.contextdir}}/usr/bin/$name
+          done
+
+          # Remove x-pack (Elastic licensed) - we build OSS only
+          rm -rf ${{targets.contextdir}}/${LS_DESTINATION}/x-pack
+
+          # Remove bundled JDK - we use system OpenJDK
+          rm -rf ${{targets.contextdir}}/${LS_DESTINATION}/jdk
+          rm -rf ${{targets.contextdir}}/${LS_DESTINATION}/jdk.app
+
           done
       - name: Patch CVEs
         runs: |
@@ -469,6 +488,8 @@ subpackages:
               sudo -ulogstash logstash -e 'input { stdin { } } output { stdout {} }' | \
               grep 'message.*hello'
         - uses: test/tw/ldd-check
+          with:
+            extra-library-paths: /usr/share/logstash/jdk/lib/server
 
 test:
   environment:
@@ -489,6 +510,8 @@ test:
       LS_JAVA_HOME: /usr/lib/jvm/default-jvm
   pipeline:
     - uses: test/tw/ldd-check
+      with:
+        extra-library-paths: /usr/share/logstash/jdk/lib/server
     - name: Ensure default plugins were actually installed
       runs: |
         for plugin in ${{vars.separately-packaged-plugins}}
