@@ -1,7 +1,7 @@
 package:
   name: cilium-certgen-fips-0.1
   version: "0.1.20"
-  epoch: 1 # CVE-2025-68121
+  epoch: 2 # CVE-2025-68121
   description: A convenience tool to generate and store certificates for Hubble Relay mTLS.
   copyright:
     - license: Apache-2.0
@@ -56,6 +56,7 @@ test:
         bins: cilium-certgen
     - name: Generate certificates
       runs: |
+        set -euo pipefail
         # Test certificate generation functionality for v0.1.x
         # Note: v0.1.x doesn't support --config-file, only specific cert type flags
 
@@ -64,30 +65,26 @@ test:
         cd /tmp/certgen-test
 
         # Test 1: Validate help and flags (v0.1.x specific)
-        cilium-certgen --help | grep -q "ca-cert-file"
-        cilium-certgen --help | grep -q "ca-key-file"
-        cilium-certgen --help | grep -q "ca-generate"
-        cilium-certgen --help | grep -q "hubble-relay-server-cert-generate"
-        cilium-certgen --help | grep -q "hubble-server-cert-generate"
+        cilium-certgen --help | grep -F "ca-cert-file"
+        cilium-certgen --help | grep -F "ca-key-file"
+        cilium-certgen --help | grep -F "ca-generate"
+        cilium-certgen --help | grep -F "hubble-relay-server-cert-generate"
+        cilium-certgen --help | grep -F "hubble-server-cert-generate"
 
         # Test 2: Generate CA certificate and key manually for testing
         openssl req -x509 -newkey rsa:2048 -keyout test-ca.key -out test-ca.crt -days 1 -nodes \
           -subj "/CN=Test Root CA"
 
         # Test 3: Verify certificates we created
-        openssl x509 -text -noout -in test-ca.crt | grep -i "CN.*Test Root CA"
-        openssl x509 -checkend 3600 -noout -in test-ca.crt  # Check if valid for next hour
-
-        # Test 4: Try to run cilium-certgen with valid v0.1.x flags
-        # Since this tool requires Kubernetes, we'll test error handling for connection
-        if cilium-certgen --ca-cert-file=test-ca.crt --ca-key-file=test-ca.key --hubble-relay-server-cert-generate 2>&1 | grep -q "connection refused\|unable to connect\|no such host"; then
-          echo "Expected connection error when no Kubernetes cluster available - this is normal for v0.1.x"
-        fi
+        openssl x509 -text -noout -in test-ca.crt | grep "CN.*=.*Test Root CA"
+        # Verify cert is valid for next hour (fails test if expired)
+        openssl x509 -checkend 3600 -noout -in test-ca.crt
 
         echo "Certificate generation validation tests completed successfully for v0.1.x"
     - uses: test/kwok/cluster
     - name: Cluster certificate generation test
-      runs: |
+      runs: |-
+        set -euo pipefail
         # Set up kubeconfig like in nova.yaml
         kubectl config view --minify --raw > /tmp/kubeconfig.yaml
         export KUBECONFIG=/tmp/kubeconfig.yaml
@@ -124,15 +121,18 @@ test:
         kubectl get secret -n certgen-test-basic hubble-relay-server-certs --template='{{ index .data "tls.crt" }}' | base64 -d > /tmp/hubble-server.crt
         kubectl get secret -n certgen-test-basic hubble-relay-server-certs --template='{{ index .data "tls.key" }}' | base64 -d > /tmp/hubble-server.key
 
-        # Verification
-        openssl x509 -text -noout -in /tmp/test-ca.crt | grep -i "CN.*Test Root CA"
+        # Verification - verify CA certificate has correct CN (fails test if not found)
+        openssl x509 -text -noout -in /tmp/test-ca.crt | grep "CN.*=.*Test Root CA"
+        # Verify cert is valid for next hour (fails test if expired)
         openssl x509 -checkend 3600 -noout -in /tmp/test-ca.crt
+        # Verify server cert is signed by CA (fails test if verification fails)
         openssl verify -CAfile /tmp/test-ca.crt /tmp/hubble-server.crt
-        openssl x509 -subject -noout -in /tmp/hubble-server.crt | grep -i "CN.*hubble-relay.cilium.io"
+        # Verify server cert has correct CN (fails test if not found)
+        openssl x509 -subject -noout -in /tmp/hubble-server.crt | grep "CN.*=.*hubble-relay.cilium.io"
 
-        # Verify secrets were created correctly
-        kubectl get secret -n certgen-test-basic test-ca -o jsonpath='{.type}' | grep -q "Opaque"
-        kubectl get secret -n certgen-test-basic hubble-relay-server-certs -o jsonpath='{.type}' | grep -q "kubernetes.io/tls"
+        # Verify secrets were created correctly (grep -F shows output for debugging)
+        kubectl get secret -n certgen-test-basic test-ca -o jsonpath='{.type}' | grep -F "Opaque"
+        kubectl get secret -n certgen-test-basic hubble-relay-server-certs -o jsonpath='{.type}' | grep -F "kubernetes.io/tls"
 
         echo "Expected Output validation for v0.1.x:"
         echo "- CA secret test-ca created in certgen-test-basic namespace"

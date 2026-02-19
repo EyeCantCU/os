@@ -1,0 +1,104 @@
+package:
+  name: gemini-cli
+  version: "0.29.4"
+  epoch: 0
+  description: AI agent that brings Google Gemini directly into your terminal
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - nodejs
+  resources:
+    cpu: "4"
+    memory: 12Gi
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - git
+      - nodejs
+      - npm
+      - python3
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/google-gemini/gemini-cli
+      tag: v${{package.version}}
+      expected-commit: b3014337d587550e1ae1631e2af1596a095e51b8
+
+  - name: Install dependencies and build CLI and core packages
+    runs: |
+      npm ci --ignore-scripts
+      npm run generate
+      npm run build --workspace @google/gemini-cli-core
+      npm run build --workspace @google/gemini-cli
+
+  - name: Create core package tarball
+    working-directory: packages/core
+    runs: |
+      npm pack
+      mv google-gemini-cli-core-*.tgz /tmp/gemini-core.tgz
+
+  - name: Create cli package tarball
+    working-directory: packages/cli
+    runs: |
+      npm pack
+      mv google-gemini-cli-*.tgz /tmp/gemini-cli.tgz
+
+  - name: Install packages globally
+    runs: |
+      npm install -g \
+        --prefix=${{targets.destdir}}/usr \
+        --no-optional \
+        --omit=dev \
+        /tmp/gemini-core.tgz \
+        /tmp/gemini-cli.tgz
+
+  - name: Remove prebuilt binaries for non-Linux platforms
+    runs: |
+      find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "darwin-*" -o -name "win32-*" -o -name "fallbacks" \) -exec rm -rf {} +
+
+  - assertions:
+      required-steps: 1
+    pipeline:
+      - if: ${{build.arch}} == 'aarch64'
+        name: Remove x86_64 prebuilt binaries
+        runs: |
+          find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "linux-x64" -o -name "x64" \) -exec rm -rf {} +
+      - if: ${{build.arch}} == 'x86_64'
+        name: Remove aarch64 prebuilt binaries
+        runs: |
+          find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "linux-arm64" -o -name "arm64" \) -exec rm -rf {} +
+
+update:
+  enabled: true
+  github:
+    identifier: google-gemini/gemini-cli
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+      with:
+        packages: ${{package.name}}
+    - uses: test/tw/help-check
+      with:
+        bins: gemini
+    - uses: test/tw/ver-check
+      with:
+        bins: gemini
+        version: ${{package.version}}
+    - name: Verify CLI requires authentication
+      runs: |
+        set -euo pipefail
+
+        # Ensure no auth is configured in the test environment
+        unset GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENAI_USE_VERTEXAI GOOGLE_CLOUD_PROJECT
+
+        # CLI should fail without auth when running an example prompt
+        if gemini -p "Say hello from a test prompt"; then
+          echo "Expected gemini to fail without authentication, but it succeeded" >&2
+          exit 1
+        fi
