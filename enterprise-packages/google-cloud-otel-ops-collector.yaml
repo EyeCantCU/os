@@ -1,0 +1,172 @@
+package:
+  name: google-cloud-otel-ops-collector
+  version: "0.144.0"
+  epoch: 0
+  description: OpenTelemetry Operations Collector for Google Cloud
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - opentelemetry-java-contrib-jmx-metrics
+  resources:
+    cpu: 16
+    memory: 32Gi
+
+vars:
+  # Installation prefix matching upstream expectations
+  prefix: /opt/google-cloud-ops-agent
+  otelopscol-version: "v0.145.0"
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - opentelemetry-java-contrib-jmx-metrics
+      - systemd-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/GoogleCloudPlatform/opentelemetry-operations-collector
+      tag: v${{package.version}}
+      expected-commit: b4846e8c28f304f51e28ed9680baf25817b72f5b
+
+  # Install OCB and generate collector code from manifest
+  # Extract the OCB version from manifest.yaml so it stays in sync automatically
+  - runs: |
+      OCB_VERSION=$(grep -m1 'version:' otelopscol/manifest.yaml | sed 's/.*version: *v*//')
+      GOBIN=/usr/local/bin go install -trimpath -ldflags="-s -w" go.opentelemetry.io/collector/cmd/builder@v"${OCB_VERSION}"
+      cd otelopscol
+      mkdir -p _build
+      /usr/local/bin/builder --skip-compilation --config manifest.yaml
+
+  # Build the collector with CGO enabled for systemd/journald support.
+  # Embed the JMX metrics JAR hash for verification at runtime.
+  # Avoid the gpu build tag so the binary does not hard-link NVML symbols,
+  # which fail in minimal test environments without NVIDIA libraries.
+  - uses: go/build
+    with:
+      modroot: ./otelopscol/_build
+      packages: .
+      output: otelopscol
+      ldflags: |
+        -X github.com/open-telemetry/opentelemetry-collector-contrib/receiver/jmxreceiver.MetricsGathererHash=$(HASH=$(sha256sum /usr/share/java/jmx-metrics/opentelemetry-jmx-metrics-*.jar | cut -d' ' -f1); [ -n "$HASH" ] || exit 1; printf "%s" "$HASH")
+      # journald tag enables systemd/journald receiver support (requires CGO)
+      tags: journald
+
+subpackages:
+  # Compatibility subpackage that creates symlink to otelopscol binary at ops-agent expected location
+  - name: ${{package.name}}-compat
+    description: Compatibility symlink for otelopscol binary at ops-agent expected location
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}${{vars.prefix}}/subagents/opentelemetry-collector"
+          ln -sf /usr/bin/otelopscol "${{targets.contextdir}}${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: ${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol
+        - uses: test/tw/ver-check
+          with:
+            bins: ${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol
+            version: ${{vars.otelopscol-version}}
+            version-flag: "--version"
+        - uses: test/tw/help-check
+          with:
+            bins: ${{vars.prefix}}/subagents/opentelemetry-collector/otelopscol
+
+  - name: ${{package.name}}-jmx-compat
+    description: Compatibility symlink for JMX metrics JAR at ops-agent expected location
+    dependencies:
+      runtime:
+        - opentelemetry-java-contrib-jmx-metrics
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}${{vars.prefix}}/subagents/opentelemetry-collector"
+          JAR_FILE=$(ls /usr/share/java/jmx-metrics/opentelemetry-jmx-metrics-*.jar)
+          ln -sf "$JAR_FILE" "${{targets.contextdir}}${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar"
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
+update:
+  enabled: true
+  github:
+    identifier: GoogleCloudPlatform/opentelemetry-operations-collector
+    strip-prefix: v
+    use-tag: true
+    tag-filter: v
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-jmx-compat
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/contains-files
+      with:
+        files: /usr/bin/otelopscol
+    - uses: test/tw/contains-files
+      with:
+        files: ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+    - uses: test/tw/ver-check
+      with:
+        bins: otelopscol
+        version: ${{vars.otelopscol-version}}
+        version-flag: "--version"
+    - uses: test/tw/help-check
+      with:
+        bins: otelopscol
+    - name: Validate otelopscol components
+      runs: |
+        set -euo pipefail
+        otelopscol components 2>&1 | grep -F "hostmetricsreceiver"
+        otelopscol components 2>&1 | grep -F "googlecloudexporter"
+        otelopscol components 2>&1 | grep -F "jmxreceiver"
+    - name: Test otelopscol startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          tee /tmp/otel-test.yaml << 'EOF'
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+
+          processors:
+            batch:
+
+          exporters:
+            debug:
+              verbosity: detailed
+
+          service:
+            pipelines:
+              metrics:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [debug]
+          EOF
+        start: otelopscol --config=/tmp/otel-test.yaml
+        timeout: 60
+        expected_output: |
+          Everything is ready
+        post: |
+          set -euo pipefail
+          wait-for-it localhost:4317 -t 5
+          wait-for-it localhost:4318 -t 5
+    - uses: test/tw/ldd-check

@@ -1,0 +1,257 @@
+package:
+  name: ops-agent
+  version: "2.63.0"
+  epoch: 0
+  description: Google Cloud Ops Agent - unified agent for collecting logs and metrics on Google Cloud VMs
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ${{package.name}}-compat
+      - ${{package.name}}-fluent-bit-compat
+      - ${{package.name}}-systemd
+      - ${{package.name}}-wrapper
+      - fluent-bit
+      - google-cloud-otel-ops-collector
+      - google-cloud-otel-ops-collector-compat
+      - systemd
+  resources:
+    cpu: 16
+    memory: 32Gi
+
+vars:
+  # Installation prefix matching upstream expectations
+  prefix: /opt/google-cloud-ops-agent
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/GoogleCloudPlatform/ops-agent
+      tag: ${{package.version}}
+      expected-commit: 2289474b0be95150069203a21b244bce6a753b1a
+
+  # Build the configuration generator engine
+  - uses: go/build
+    with:
+      packages: ./cmd/google_cloud_ops_agent_engine
+      ldflags: |
+        -X github.com/GoogleCloudPlatform/ops-agent/internal/version.Version=${{package.version}}
+      output: google_cloud_ops_agent_engine
+
+  - name: Install configuration and directories
+    runs: |
+      mkdir -p "${{targets.destdir}}"/etc/google-cloud-ops-agent
+      mkdir -p "${{targets.destdir}}"/var/log/google-cloud-ops-agent
+      mkdir -p "${{targets.destdir}}"/var/lib/google-cloud-ops-agent
+      install -Dm644 confgenerator/default-config.yaml "${{targets.destdir}}"/etc/google-cloud-ops-agent/config.yaml
+
+subpackages:
+  - name: ${{package.name}}-wrapper
+    description: Google Cloud Ops Agent process wrapper
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/agent_wrapper
+          output: google_cloud_ops_agent_wrapper
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: /usr/bin/google_cloud_ops_agent_wrapper
+        - uses: test/tw/help-check
+          with:
+            bins: google_cloud_ops_agent_wrapper
+        - uses: test/tw/ldd-check
+
+  - name: ${{package.name}}-fluent-bit-compat
+    description: Fluent Bit compatibility symlinks for Google Cloud Ops Agent
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"${{vars.prefix}}/subagents/fluent-bit/bin
+          ln -sf /usr/bin/fluent-bit "${{targets.contextdir}}"${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
+    test:
+      environment:
+        contents:
+          packages:
+            - fluent-bit
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: ${{vars.prefix}}/subagents/fluent-bit/bin/fluent-bit
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+
+  - name: ${{package.name}}-systemd
+    description: Systemd service files for Google Cloud Ops Agent
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/usr/lib/systemd/system
+          mkdir -p "${{targets.contextdir}}"/usr/lib/systemd/system-preset
+
+          # Install and customize systemd service files with @PREFIX@ and @SYSCONFDIR@ substitution
+          for f in systemd/*.service; do
+            sed -e 's|@PREFIX@|${{vars.prefix}}|g' \
+                -e 's|@SYSCONFDIR@|/etc|g' \
+                "$f" > "${{targets.contextdir}}"/usr/lib/systemd/system/"$(basename "$f")"
+          done
+
+          # Install drop-in directories for systemd < 240 compatibility
+          # These provide RuntimeDirectory/StateDirectory/LogsDirectory as environment
+          # variables for older systemd that doesn't support the native directives.
+          for d in systemd/*.service.d; do
+            dirname="$(basename "$d")"
+            mkdir -p "${{targets.contextdir}}"/usr/lib/systemd/system/"$dirname"
+            for f in "$d"/*.conf; do
+              sed -e 's|@PREFIX@|${{vars.prefix}}|g' \
+                  -e 's|@SYSCONFDIR@|/etc|g' \
+                  "$f" > "${{targets.contextdir}}"/usr/lib/systemd/system/"$dirname"/"$(basename "$f")"
+            done
+          done
+
+          # Enable services by default
+          install -Dm644 systemd/90-google-cloud-ops-agent.preset "${{targets.contextdir}}"/usr/lib/systemd/system-preset/90-google-cloud-ops-agent.preset
+    test:
+      environment:
+        contents:
+          packages:
+            - systemd
+      pipeline:
+        - uses: test/tw/verify-service
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/lib/systemd/system
+            name: "*.service"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/lib/systemd/system
+            name: "*.conf"
+
+  - name: ${{package.name}}-compat
+    description: Compatibility package with symlinks for upstream expected paths
+    pipeline:
+      - runs: |
+          # Create symlinks from upstream expected paths to standard /usr/bin locations
+          mkdir -p "${{targets.contextdir}}"${{vars.prefix}}/libexec
+
+          # Engine binary
+          ln -sf /usr/bin/google_cloud_ops_agent_engine "${{targets.contextdir}}"${{vars.prefix}}/libexec/google_cloud_ops_agent_engine
+
+          # Wrapper binary
+          ln -sf /usr/bin/google_cloud_ops_agent_wrapper "${{targets.contextdir}}"${{vars.prefix}}/libexec/google_cloud_ops_agent_wrapper
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+            - ${{package.name}}-wrapper
+            - google-cloud-otel-ops-collector-compat
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: "true"
+        - uses: test/tw/help-check
+          with:
+            bins: |
+              ${{vars.prefix}}/libexec/google_cloud_ops_agent_engine
+              ${{vars.prefix}}/libexec/google_cloud_ops_agent_wrapper
+
+update:
+  enabled: true
+  github:
+    identifier: GoogleCloudPlatform/ops-agent
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-wrapper
+        - google-cloud-otel-ops-collector
+        - google-cloud-otel-ops-collector-jmx-compat
+        - ${{package.name}}-fluent-bit-compat
+        - fluent-bit
+        - curl
+        - jq
+        - net-tools
+        - procps
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: google_cloud_ops_agent_engine
+    - name: Test OTel collector startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create minimal OTel config for testing
+          tee /tmp/otel-test.yaml << 'EOF'
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:4317
+                http:
+                  endpoint: 0.0.0.0:4318
+
+          processors:
+            batch:
+
+          exporters:
+            debug:
+              verbosity: detailed
+
+          service:
+            pipelines:
+              metrics:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [debug]
+          EOF
+        start: otelopscol --config=/tmp/otel-test.yaml
+        timeout: 60
+        expected_output: |
+          Everything is ready
+        post: |
+          set -euo pipefail
+          # Verify the collector is listening
+          wait-for-it localhost:4317 -t 5
+          wait-for-it localhost:4318 -t 5
+    - name: Test fluent-bit startup
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create minimal fluent-bit config
+          tee /tmp/fluent-bit.conf << 'EOF'
+          [SERVICE]
+              Flush        1
+              Daemon       Off
+              Log_Level    info
+              HTTP_Server  On
+              HTTP_Listen  0.0.0.0
+              HTTP_Port    2020
+
+          [INPUT]
+              Name         dummy
+              Tag          test
+              Dummy        {"message": "test log entry"}
+              Rate         1
+
+          [OUTPUT]
+              Name         stdout
+              Match        *
+          EOF
+        start: fluent-bit --config=/tmp/fluent-bit.conf
+        timeout: 30
+        expected_output: |
+          fluent bit
+        post: |
+          set -euo pipefail
+          wait-for-it localhost:2020 -t 5
+          # Verify fluent-bit health endpoint
+          curl -sf http://localhost:2020/api/v1/health \
+            | jq -e '.["fluent-bit"] and .["fluent-bit"].version'
+    - uses: test/tw/contains-files
+      with:
+        files: ${{vars.prefix}}/subagents/opentelemetry-collector/opentelemetry-java-contrib-jmx-metrics.jar
+    - name: Validate library dependencies
+      uses: test/tw/ldd-check
