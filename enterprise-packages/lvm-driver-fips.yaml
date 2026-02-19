@@ -1,7 +1,7 @@
 package:
   name: lvm-driver-fips
   version: "1.8.1"
-  epoch: 0 # go/enterprise-rsc/lvm-driver-fips
+  epoch: 2 # CVE-2025-61732
   description: Dynamically provision Stateful Persistent Node-Local Volumes & Filesystems for Kubernetes that is integrated with a backend LVM2 data storage stack.
   copyright:
     - license: Apache-2.0
@@ -72,9 +72,11 @@ test:
   pipeline:
     - uses: test/go-fips-check
     - uses: test/kwok/cluster
+    - uses: test/tw/help-check
+      with:
+        bins: lvm-driver
     - runs: |
-        lvm-driver --help
-    - runs: |
+        set -euo pipefail
         sleep 5
         mkdir -p /var/run/secrets/kubernetes.io/serviceaccount
         mkdir -p /var/lib/kubelet/plugins/lvm-localpv
@@ -100,11 +102,26 @@ test:
         sleep 5
         kill $LMV_DRIVER_PID
 
-        if grep -q 'Listening for connections' lvm-driver.log; then
-          echo "Test passed: Found expected log output."
-        else
-          echo "Test failed: Did not find expected log output."
+        # Verify CSI driver started on the configured endpoint (proves CSI-specific functionality)
+        # Both checks must pass to prove correct CSI initialization
+        echo "Verifying CSI driver log output..."
+
+        # Check 1: Verify gRPC server is listening (fails test if not found)
+        if ! grep -F 'Listening for connections' lvm-driver.log; then
+          echo "FAIL: CSI gRPC server did not start listening"
+          echo "Expected: 'Listening for connections' indicating gRPC server started"
           echo "LVM Driver logs:"
           cat lvm-driver.log
           exit 1
         fi
+
+        # Check 2: Verify CSI socket endpoint path is configured (fails test if not found)
+        if ! grep -F '/plugin/csi.sock' lvm-driver.log; then
+          echo "FAIL: CSI endpoint path not found in logs"
+          echo "Expected: '/plugin/csi.sock' proving correct CSI endpoint configuration"
+          echo "LVM Driver logs:"
+          cat lvm-driver.log
+          exit 1
+        fi
+
+        echo "SUCCESS: CSI driver initialized and listening on unix:///plugin/csi.sock"

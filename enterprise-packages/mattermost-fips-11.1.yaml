@@ -3,7 +3,7 @@ package:
   # Note the npm version has been pinned to 10.8.3 to avoid the error:
   # "npm error notsup Required: {"node":">=18.10.0","npm":"^9.0.0 || ^10.0.0"}"
   version: "11.1.3"
-  epoch: 1 # CVE-2025-61726
+  epoch: 3 # CVE-2025-61732
   description: "Mattermost is an open source platform for secure collaboration across the entire software development lifecycle."
   copyright:
     - license: MIT
@@ -118,7 +118,11 @@ subpackages:
           ln -sf /usr/bin/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
     test:
       pipeline:
-        - runs: |
+        - name: Verify symlinks point to valid targets
+          runs: |
+            set -euo pipefail
+            # Verify all symlinks exist and show their targets (fails if symlink missing)
+            # Note: readlink -v is verbose mode, NOT version check
             readlink -v /entrypoint.sh
             readlink -v /mattermost/bin/mattermost
             readlink -v /mattermost/bin/mmctl
@@ -169,18 +173,24 @@ test:
       PGDB: mattermost_test
   pipeline:
     - uses: test/go-fips-check
-    - name: "Check binaries"
-      runs: |
-        mattermost version
-        mmctl version
-        entrypoint.sh --help
-        mattermost --help
-        mmctl --help
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          mattermost
+          mmctl
+        version-flag: version
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          mattermost
+          mmctl
+          entrypoint.sh
     - name: "Fetch database dump"
       runs: |
-        curl https://raw.githubusercontent.com/mattermost/mattermost/v${{package.version}}/server/scripts/mattermost-postgresql-6.0.0.sql -o /etc/mattermost/test/mattermost-postgresql-6.0.0.sql
+        curl -fsSL https://raw.githubusercontent.com/mattermost/mattermost/v${{package.version}}/server/scripts/mattermost-postgresql-6.0.0.sql -o /etc/mattermost/test/mattermost-postgresql-6.0.0.sql
     - name: "Prepare database"
       runs: |
+        set -euo pipefail
         sudo -u postgres initdb -D ${PGDATA}
         sudo -u postgres pg_ctl -D ${PGDATA} -l /tmp/logfile start
         sudo -u postgres createdb ${PGDB}
@@ -189,6 +199,7 @@ test:
         sudo -u postgres psql -U $PGUSER -d $PGDB -f /etc/mattermost/test/mattermost-postgresql-6.0.0.sql
     - name: "Prepare mailserver on port 10025"
       runs: |
+        set -euo pipefail
         cat <<EOF > /etc/exim/exim.conf
         # Minimal Exim configuration
 
@@ -223,7 +234,8 @@ test:
         # Additional delay required, otherwise mattermost can start before the mail server does.
         sleep 10
     - name: "Run application"
-      runs: |
+      runs: |-
+        set -euo pipefail
         # Make sure the exim mail server is still running
         ps -elf| grep "exim"
         cd /mattermost # Set working directory
@@ -248,6 +260,7 @@ test:
           if [ -z "$log" ]; then
             continue
           fi
+          # Verify expected log message is present (fails test if missing)
           if ! grep -F -i "$log" /tmp/logs.txt; then
             cat /tmp/logs.txt
             echo "Expected log '$log' not found!"
@@ -265,6 +278,7 @@ test:
           if [ -z "$log" ]; then
             continue
           fi
+          # Verify unexpected log message is absent (fails test if present)
           if grep -F -i "$log" /tmp/logs.txt; then
             cat /tmp/logs.txt
             echo "Unexpected log '$log' found!"

@@ -1,7 +1,7 @@
 package:
   name: cluster-proportional-autoscaler-fips
   version: "1.10.3"
-  epoch: 0 # CVE-2025-61729
+  epoch: 2 # CVE-2025-61732
   description: Kubernetes Cluster Proportional Autoscaler Container
   copyright:
     - license: Apache-2.0
@@ -41,10 +41,17 @@ test:
     contents:
       packages:
         - kubectl
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
   pipeline:
     - uses: test/go-fips-check
     - uses: test/kwok/cluster
-    - runs: |
+      with:
+        serviceaccount: true
+    - runs: |-
+        set -euo pipefail
+
         # Create the ConfigMap
         kubectl create configmap nginx-autoscaler --from-literal=linear='{
           "coresPerReplica": 2,
@@ -71,24 +78,27 @@ test:
         kubectl create clusterrolebinding system:nginx-autoscaler \
           --clusterrole=system:nginx-autoscaler \
           --serviceaccount=default:nginx-autoscaler
-          sleep 2
+        sleep 2
 
+        # Set up in-cluster auth for the custom nginx-autoscaler service account
         mkdir -p /var/run/secrets/kubernetes.io/serviceaccount
-        export KUBERNETES_SERVICE_HOST=127.0.0.1
-        export KUBERNETES_SERVICE_PORT=32764
         CA=$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority}')
         cp "$CA" /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
         kubectl create token nginx-autoscaler > /var/run/secrets/kubernetes.io/serviceaccount/token
-        cluster-proportional-autoscaler --namespace=default --configmap=nginx-autoscaler --target=deployment/nginx-autoscale-example --logtostderr=true --v=2 > /dev/null 2>&1 &
+
+        # Start the autoscaler daemon (log to file for debugging)
+        cluster-proportional-autoscaler --namespace=default --configmap=nginx-autoscaler --target=deployment/nginx-autoscale-example --logtostderr=true --v=2 > /tmp/autoscaler.log 2>&1 &
         sleep 2
 
         kubectl get pods -A
 
-        # get the replica count of the pod -l app=nginx-autoscale-example
+        # Verify the replica count scaled to expected value
         REPLICAS=$(kubectl get deployment nginx-autoscale-example -o jsonpath='{.spec.replicas}')
         if [ "$REPLICAS" -eq 3 ]; then
-          echo "Replica count is 3"
+          echo "SUCCESS: Replica count is 3"
         else
-          echo "Replica count is not 3"
+          echo "FAIL: Replica count is not 3, got $REPLICAS"
+          echo "Autoscaler log:"
+          cat /tmp/autoscaler.log
           exit 1
         fi

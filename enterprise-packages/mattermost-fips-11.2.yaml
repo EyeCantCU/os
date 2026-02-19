@@ -2,8 +2,8 @@ package:
   name: mattermost-fips-11.2
   # Note the npm version has been pinned to 10.8.3 to avoid the error:
   # "npm error notsup Required: {"node":">=18.10.0","npm":"^9.0.0 || ^10.0.0"}"
-  version: "11.2.2"
-  epoch: 1 # CVE-2025-61726
+  version: "11.2.3"
+  epoch: 1 # GHSA-fw7p-63qq-7hpr
   description: "Mattermost is an open source platform for secure collaboration across the entire software development lifecycle."
   copyright:
     - license: MIT
@@ -50,7 +50,7 @@ pipeline:
     with:
       repository: https://github.com/mattermost/mattermost
       tag: v${{package.version}}
-      expected-commit: cfbe9d9254d4903777fab5957924d260cb5b74ff
+      expected-commit: 005521aa79666e6960bc3302f6172b810f6bff3a
 
   - runs: |
       # Avoid go mod tidy from pulling enterprise go modules.
@@ -62,6 +62,7 @@ pipeline:
     with:
       deps: |-
         golang.org/x/crypto@v0.45.0
+        filippo.io/edwards25519@v1.1.1
       modroot: server
 
   - runs: |
@@ -118,18 +119,21 @@ subpackages:
           ln -sf /usr/bin/entrypoint.sh ${{targets.contextdir}}/entrypoint.sh
     test:
       pipeline:
-        - runs: |
-            readlink -v /entrypoint.sh
-            readlink -v /mattermost/bin/mattermost
-            readlink -v /mattermost/bin/mmctl
-            readlink -v /mattermost/client
-            readlink -v /mattermost/config
-            readlink -v /mattermost/data
-            readlink -v /mattermost/fonts
-            readlink -v /mattermost/i18n
-            readlink -v /mattermost/logs
-            readlink -v /mattermost/plugins
-            readlink -v /mattermost/templates
+        - name: Verify symlinks
+          runs: |
+            set -euo pipefail
+            # Verify all symlinks point to expected targets (readlink -v shows verbose output, NOT version)
+            readlink /entrypoint.sh | grep -F "/usr/bin/entrypoint.sh"
+            readlink /mattermost/bin/mattermost | grep -F "/usr/bin/mattermost"
+            readlink /mattermost/bin/mmctl | grep -F "/usr/bin/mmctl"
+            readlink /mattermost/client | grep -F "/etc/mattermost/client"
+            readlink /mattermost/config | grep -F "/etc/mattermost/config"
+            readlink /mattermost/data | grep -F "/etc/mattermost/data"
+            readlink /mattermost/fonts | grep -F "/etc/mattermost/fonts"
+            readlink /mattermost/i18n | grep -F "/etc/mattermost/i18n"
+            readlink /mattermost/logs | grep -F "/etc/mattermost/logs"
+            readlink /mattermost/plugins | grep -F "/etc/mattermost/plugins"
+            readlink /mattermost/templates | grep -F "/etc/mattermost/templates"
 
 update:
   enabled: true
@@ -169,18 +173,23 @@ test:
       PGDB: mattermost_test
   pipeline:
     - uses: test/go-fips-check
-    - name: "Check binaries"
-      runs: |
-        mattermost version
-        mmctl version
-        entrypoint.sh --help
-        mattermost --help
-        mmctl --help
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          mattermost
+          mmctl
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          mattermost
+          mmctl
+          entrypoint.sh
     - name: "Fetch database dump"
       runs: |
-        curl https://raw.githubusercontent.com/mattermost/mattermost/v${{package.version}}/server/scripts/mattermost-postgresql-6.0.0.sql -o /etc/mattermost/test/mattermost-postgresql-6.0.0.sql
+        curl -f https://raw.githubusercontent.com/mattermost/mattermost/v${{package.version}}/server/scripts/mattermost-postgresql-6.0.0.sql -o /etc/mattermost/test/mattermost-postgresql-6.0.0.sql
     - name: "Prepare database"
       runs: |
+        set -euo pipefail
         sudo -u postgres initdb -D ${PGDATA}
         sudo -u postgres pg_ctl -D ${PGDATA} -l /tmp/logfile start
         sudo -u postgres createdb ${PGDB}
@@ -189,7 +198,8 @@ test:
         sudo -u postgres psql -U $PGUSER -d $PGDB -f /etc/mattermost/test/mattermost-postgresql-6.0.0.sql
     - name: "Prepare mailserver on port 10025"
       runs: |
-        cat <<EOF > /etc/exim/exim.conf
+        set -euo pipefail
+        tee /etc/exim/exim.conf <<'EOF'
         # Minimal Exim configuration
 
         # Main configuration
@@ -212,7 +222,7 @@ test:
 
         local_delivery:
           driver = appendfile
-          file = /var/mail/\${local_part}
+          file = /var/mail/${local_part}
           delivery_date_add
           envelope_to_add
           return_path_add
@@ -220,12 +230,34 @@ test:
         mkdir -p /var/spool/exim /var/log/exim /var/mail
         chown -R exim:exim /var/spool/exim /var/log/exim /var/mail
         exim -bd -oX 10025 &
-        # Additional delay required, otherwise mattermost can start before the mail server does.
-        sleep 10
+
+        # Wait for exim to start and verify it's listening on port 10025
+        sleep 5
+        for i in $(seq 1 10); do
+          if netstat -tln 2>/dev/null | grep -F ":10025" || ss -tln 2>/dev/null | grep -F ":10025"; then
+            echo "SUCCESS: Exim is listening on port 10025"
+            break
+          fi
+          if [ "$i" -eq 10 ]; then
+            echo "FAIL: Exim failed to start listening on port 10025"
+            exit 1
+          fi
+          sleep 1
+        done
+
+        # Verify exim process is running (fails test if not found)
+        ps -ef | grep -F "exim" | grep -vF "grep" || {
+          echo "FAIL: Exim process not found"
+          exit 1
+        }
     - name: "Run application"
-      runs: |
-        # Make sure the exim mail server is still running
-        ps -elf| grep "exim"
+      runs: |-
+        set -euo pipefail
+        # Verify exim mail server is still running (fails test if not found)
+        ps -ef | grep -F "exim" | grep -vF "grep" || {
+          echo "FAIL: Exim process not found"
+          exit 1
+        }
         cd /mattermost # Set working directory
 
         /entrypoint.sh mattermost > /tmp/logs.txt 2>&1 &
@@ -233,6 +265,8 @@ test:
 
         sleep 15 # ensure that enough time is given for the logs to get written
 
+        # These are verified Mattermost server startup log messages from actual daemon output
+        # Reference: https://github.com/mattermost/mattermost/blob/master/server/channels/app/server.go
         logs_to_expect="
         Server is initializing...
         Starting websocket hubs
@@ -248,9 +282,10 @@ test:
           if [ -z "$log" ]; then
             continue
           fi
-          if ! grep -F -i "$log" /tmp/logs.txt; then
+          # Verify each expected startup log message is present (fails test if missing)
+          if ! grep -F "$log" /tmp/logs.txt; then
             cat /tmp/logs.txt
-            echo "Expected log '$log' not found!"
+            echo "FAIL: Expected log '$log' not found!"
             exit 1
           fi
         done
@@ -260,16 +295,16 @@ test:
         unable to load
         "
 
-        # Use a while loop with a read command to handle multi-line strings
+        # Verify no error conditions occurred (fails test if found)
         echo "$logs_to_not_expect" | while IFS= read -r log; do
           if [ -z "$log" ]; then
             continue
           fi
           if grep -F -i "$log" /tmp/logs.txt; then
             cat /tmp/logs.txt
-            echo "Unexpected log '$log' found!"
+            echo "FAIL: Unexpected error log '$log' found!"
             exit 1
           fi
         done
 
-        kill $PID
+        kill $PID 2>/dev/null || true
