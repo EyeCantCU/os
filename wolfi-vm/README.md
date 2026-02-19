@@ -37,6 +37,25 @@ dd if=output/aarch64/rpi-docker-slim/disk.raw of=/dev/sdX conv=fsync status=prog
 
 Or the official RPi imager that can be found [here](https://www.raspberrypi.com/software/)
 
+## Add local package directories
+To build an image with with local stereo package directories, modify the desired `configs/<name>/build.yaml` file by
+1. Append the following entries to the existing `config.build_respositories` key:
+
+   ```yaml
+   build_repositories:
+     - ../enterprise-packages/packages
+     - ../extra-packages/packages
+     - ../os/packages
+   ```
+2. Add the following `config.keyring` key, or append if it exists:
+
+   ```yaml
+   keyring:
+     - ../enterprise-packages/local-melange-enterprise.rsa.pub
+     - ../extra-packages/local-melange-extra.rsa.pub
+     - ../os/local-melange.rsa.pub
+   ```
+
 ## Running your VM
 Images built for a cloud have a kernel and packages built for that platform.  They aren't necessarily of any use inside qemu.
 

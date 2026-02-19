@@ -116,13 +116,17 @@ func dirToPackages(ctx context.Context, subpackages bool) (map[string]map[string
 	for dir := range dirToRepo {
 		g.Go(func() error {
 			local := fmt.Sprintf("./%s", dir)
-			pipelines := fmt.Sprintf("./%s/pipelines/", dir)
+			// Include both local and parent pipeline directories (like Makefile does)
+			pipelineDirs := []string{
+				fmt.Sprintf("./%s/pipelines/", dir),
+				"./pipelines/",
+			}
 			var pkgs map[string]*config.Configuration
 			var err error
 			if subpackages {
-				pkgs, err = NewPackages(ctx, os.DirFS(dir), local, pipelines)
+				pkgs, err = NewPackages(ctx, os.DirFS(dir), local, pipelineDirs)
 			} else {
-				pkgs, err = NewOrigins(ctx, os.DirFS(dir), local, pipelines)
+				pkgs, err = NewOrigins(ctx, os.DirFS(dir), local, pipelineDirs)
 			}
 			if err != nil {
 				return fmt.Errorf("walking %s: %w", dir, err)
@@ -149,8 +153,12 @@ func dirToOrigins(ctx context.Context) (map[string]map[string]*config.Configurat
 	for dir := range dirToRepo {
 		g.Go(func() error {
 			local := fmt.Sprintf("./%s", dir)
-			pipelines := fmt.Sprintf("./%s/pipelines/", dir)
-			pkgs, err := NewOrigins(ctx, os.DirFS(dir), local, pipelines)
+			// Include both local and parent pipeline directories (like Makefile does)
+			pipelineDirs := []string{
+				fmt.Sprintf("./%s/pipelines/", dir),
+				"./pipelines/",
+			}
+			pkgs, err := NewOrigins(ctx, os.DirFS(dir), local, pipelineDirs)
 			if err != nil {
 				return fmt.Errorf("walking %s: %w", dir, err)
 			}
@@ -168,8 +176,8 @@ func dirToOrigins(ctx context.Context) (map[string]map[string]*config.Configurat
 
 // NewPackages returns map of every package to its config, including subpackages.
 // See NewOrigins if you only care about unique build environments.
-func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (map[string]*config.Configuration, error) {
-	origins, err := NewOrigins(ctx, fsys, dirPath, pipelineDir)
+func NewPackages(ctx context.Context, fsys fs.FS, dirPath string, pipelineDirs []string) (map[string]*config.Configuration, error) {
+	origins, err := NewOrigins(ctx, fsys, dirPath, pipelineDirs)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +200,7 @@ func NewPackages(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (
 }
 
 // NewOrigins returns a map of main package to its config.
-func NewOrigins(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (map[string]*config.Configuration, error) {
+func NewOrigins(ctx context.Context, fsys fs.FS, dirPath string, pipelineDirs []string) (map[string]*config.Configuration, error) {
 	pkgs := map[string]*config.Configuration{}
 
 	var (
@@ -245,7 +253,7 @@ func NewOrigins(ctx context.Context, fsys fs.FS, dirPath, pipelineDir string) (m
 			// Resolve all `uses` used by the pipeline. This updates the set of
 			// .environment.contents.packages so the next block can include those as build deps.
 			build := &build.Build{
-				PipelineDirs:  []string{pipelineDir},
+				PipelineDirs:  pipelineDirs,
 				Configuration: c,
 			}
 			if err := build.Compile(ctx); err != nil {
