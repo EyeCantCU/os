@@ -9,7 +9,7 @@
 package:
   name: elasticsearch-fips-9.3
   version: "9.3.0"
-  epoch: 0 # Netty 4.1.130 URI fix (customer issue #2971)
+  epoch: 1 # Add log4j2.file.properties for file-based logging (customer issue #3120)
   description:
   copyright:
     - license: AGPL-3.0 AND SSPL-1.0 AND Elastic-2.0
@@ -122,6 +122,10 @@ pipeline:
       # We get this from elasticsearch-fips-9-config
       mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
 
+      # Copy log4j2.properties to log4j2.file.properties for file-based logging (customer issue #3120)
+      # The docker entrypoint uses this when ES_LOG_STYLE=file
+      cp ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.properties ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.file.properties
+
       # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
       sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
 
@@ -185,6 +189,35 @@ test:
   pipeline:
     - name: "Check for LICENSE.txt"
       runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
+    - name: "Test ES_LOG_STYLE=file entrypoint behavior"
+      runs: |
+        set -euo pipefail
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        # Run the docker entrypoint with ES_LOG_STYLE=file to verify it copies
+        # log4j2.file.properties over log4j2.properties. We temporarily replace
+        # the elasticsearch binary with a no-op stub so the entrypoint performs
+        # its setup (including the log4j2 copy) then exits cleanly without
+        # actually starting the server and leaving behind state that would
+        # interfere with the real functional test below.
+        # Back up the original console-logging config before the entrypoint overwrites it
+        cp /usr/share/elasticsearch/config/log4j2.properties /tmp/log4j2.properties.orig
+        mv /usr/share/elasticsearch/bin/elasticsearch /usr/share/elasticsearch/bin/elasticsearch.real
+        printf '#!/bin/sh\nexit 0\n' > /usr/share/elasticsearch/bin/elasticsearch
+        chmod +x /usr/share/elasticsearch/bin/elasticsearch
+        ES_LOG_STYLE=file sudo -E -u "$ES_USER" /usr/share/elasticsearch/bin/docker-entrypoint.sh eswrapper
+        mv /usr/share/elasticsearch/bin/elasticsearch.real /usr/share/elasticsearch/bin/elasticsearch
+
+        # Verify the entrypoint copied log4j2.file.properties over log4j2.properties
+        diff /usr/share/elasticsearch/config/log4j2.properties /usr/share/elasticsearch/config/log4j2.file.properties
+
+        # Restore original log4j2.properties so subsequent tests use console logging
+        mv /tmp/log4j2.properties.orig /usr/share/elasticsearch/config/log4j2.properties
+
+        # Remove any keystore created by the entrypoint so it doesn't conflict
+        # with the keystore creation in the functional test below
+        rm -f /usr/share/elasticsearch/config/elasticsearch.keystore
     - runs: |
         # Using generic tests as entire tests require creation of keystore and it requires separate env
         /usr/share/elasticsearch/bin/elasticsearch -h

@@ -1,0 +1,109 @@
+package:
+  name: linux-qemu-melange
+  version: "6.18.11"
+  epoch: 1
+  description: "the QEMU melange build linux kernel"
+  copyright:
+    - license: GPL-2.0
+  dependencies:
+    runtime:
+      # Ensure we get Chainguard branding in our VMs.
+      - chainguard-baselayout
+
+environment:
+  environment:
+    KBUILD_BUILD_USER: noreply
+    KBUILD_BUILD_HOST: chainguard.dev
+    KBUILD_BUILD_VERSION: Chainguard
+
+var-transforms:
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '$1'
+    to: flavor
+  - from: ${{package.name}}
+    match: 'linux-(.*)'
+    replace: '${{package.full-version}}-$1'
+    to: version-flavor
+  # Turn "6.12.0" into "6.12", but keep "6.12.51" as "6.12.51"
+  - from: ${{package.version}}
+    match: '^(\d+[.]\d+)(?:[.]0|([.][1-9]\d*))$'
+    replace: '$1$2'
+    to: mangled-package-version
+  - from: ${{package.version}}
+    match: '^(\d+\.\d+)\.\d+$'
+    replace: '$1'
+    to: mangled-kernel-major-version
+
+pipeline:
+  - uses: kernel/version-check
+    with:
+      moniker: longterm
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/gregkh/linux
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: ee4fb138af107455c9d6e38cf7087d932796ba8a
+
+  - uses: patch
+    with:
+      patches: |
+        patches/${{vars.mangled-kernel-major-version}}/0001-module-Make-use-of-platform-keyring-for-module-signa.patch
+        patches/${{vars.mangled-kernel-major-version}}/0001-ignore-new-warnings.patch
+
+  # remove the default CONFIG_INIT_ON_FREE_DEFAULT_ON configuration
+  # to avoid issues with Melange in Elastic Builds
+  - runs: |
+      sed -i '/# Initialize all heap variables to zero on allocation./d' kernel/configs/hardening.config
+      sed -i '/CONFIG_INIT_ON_FREE_DEFAULT_ON=y/d' kernel/configs/hardening.config
+
+  - uses: kernel/config
+    with:
+      flavor: ${{vars.flavor}}
+      make-targets: hardening.config
+      version-flavor: ${{vars.version-flavor}}
+
+  - uses: kernel/build
+    with:
+      version-flavor: ${{vars.version-flavor}}
+
+test:
+  pipeline:
+    - uses: kernel/test/kconfig/systemd
+    - uses: kernel/test/config-snippet
+      with:
+        snippet: ${{vars.flavor}}
+        # Depends on CONFIG_X86
+        aarch64_exclude: VIRTIO_PCI_ADMIN_LEGACY
+    - name: Test Basic Boot
+      uses: kernel/test/console_grep
+      with:
+        string: "Unable to mount root fs"
+    - name: Test for XFS
+      uses: kernel/test/console_grep
+      with:
+        string: "xfs"
+    - name: Test for NVME
+      uses: kernel/test/console_grep
+      with:
+        string: "nvme nvme0: pci function"
+    - name: Test for ip6tables
+      uses: kernel/test/console_grep
+      with:
+        string: "Segment Routing with IPv6"
+
+update:
+  enabled: true
+  github:
+    identifier: gregkh/linux
+    use-tag: true
+    strip-prefix: v
+    tag-filter: v6.18.
+  ignore-regex-patterns:
+    # skip mainline (x.y) release tags, wait for stable (x.y.z) release tags
+    - ^\d+[.]\d+$
+  version-transform:
+    # mainline release tag x.y to kernel version x.y.0
+    - match: ^(\d+[.]\d+)$
+      replace: $1.0
