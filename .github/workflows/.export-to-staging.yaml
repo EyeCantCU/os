@@ -1,0 +1,149 @@
+name: Export to Staging
+
+on:
+  workflow_call:
+    inputs:
+      source_path:
+        description: 'Path within stereo to export (e.g., "os")'
+        required: true
+        type: string
+      staging_repo:
+        description: 'Staging repository (e.g., "chainguard-dev/wolfi-staging")'
+        required: true
+        type: string
+      horizon:
+        description: 'Horizon commit for git-export. If set, git-export will not iterate past this commit. Use for migrations to mark where the original repo history ends.'
+        required: false
+        type: string
+        default: ''
+      excluded_paths:
+        description: 'JSON array of exclusion patterns for git-export'
+        required: false
+        type: string
+        default: '["README.internal.md"]'
+      go_validation_script:
+        description: 'Script to validate Go code after export (e.g., "go build ./... && go test ./...")'
+        required: false
+        type: string
+        default: ''
+      terraform_validation_script:
+        description: 'Script to validate Terraform after export. If provided, Terraform will be installed.'
+        required: false
+        type: string
+        default: ''
+      octo_sts_identity:
+        description: 'Identity for octo-sts authentication'
+        required: false
+        type: string
+        default: 'stereo'
+      pr_title_prefix:
+        description: 'Prefix for PR title'
+        required: true
+        type: string
+      pr_body_workflow_name:
+        description: 'Workflow name for PR body reference'
+        required: true
+        type: string
+      create_pr_events:
+        description: 'JSON array of event names that should create PRs'
+        required: false
+        type: string
+        default: '["push", "schedule"]'
+
+permissions: {}
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        with:
+          egress-policy: audit
+      # Repository checkouts
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: stereo
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+        id: git-export-sts
+        with:
+          scope: chainguard-dev/git-export
+          identity: stereo
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: chainguard-dev/git-export
+          path: git-export
+          persist-credentials: false
+          token: ${{ steps.git-export-sts.outputs.token }}
+      - uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+        id: staging-sts
+        with:
+          scope: ${{ inputs.staging_repo }}
+          identity: ${{ inputs.octo_sts_identity }}
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.staging_repo }}
+          path: staging
+          persist-credentials: false
+          fetch-depth: 0
+          token: ${{ steps.staging-sts.outputs.token }}
+      # Environment setup
+      - uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version: '1.25.7'
+      - uses: chainguard-dev/actions/setup-gitsign@081e79ee578199ef583d4ca74edc376b50b9409c # v1.6.0
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        if: inputs.terraform_validation_script != ''
+        with:
+          terraform_wrapper: false
+      - name: Install git-export
+        working-directory: git-export
+        run: go install .
+      # Export the directory
+      - name: Export
+        run: |
+          # Build exclusion flags
+          excluded_paths='${{ inputs.excluded_paths }}'
+          exclude_flags=""
+          for excl in $(echo "$excluded_paths" | jq -r '.[]'); do
+            exclude_flags="$exclude_flags --exclude \"$excl\""
+          done
+
+
+          # Build horizon flag (only if set)
+          horizon_flag=""
+          if [ -n "${{ inputs.horizon }}" ]; then
+            horizon_flag="--horizon \"${{ inputs.horizon }}\""
+          fi
+
+          # Run git-export
+          eval git-export \
+            --source "stereo/${{ inputs.source_path }}" \
+            --destination "staging" \
+            "$exclude_flags" \
+            "$horizon_flag"
+      - name: diff source
+        working-directory: stereo
+        run: git diff HEAD
+      - name: Validate export (Go)
+        if: inputs.go_validation_script != ''
+        working-directory: staging
+        run: ${{ inputs.go_validation_script }}
+      - name: Validate export (Terraform)
+        if: inputs.terraform_validation_script != ''
+        working-directory: staging
+        run: ${{ inputs.terraform_validation_script }}
+      - name: Create Pull Request
+        if: contains(fromJSON(inputs.create_pr_events), github.event_name)
+        uses: peter-evans/create-pull-request@c0f553fe549906ede9cf27b5156039d195d2ece0 # v8.1.0
+        with:
+          path: staging
+          token: ${{ steps.staging-sts.outputs.token }}
+          title: "${{ inputs.pr_title_prefix }}: ${{ github.ref }}"
+          body: |
+            This pull request was automatically generated by the ${{ inputs.pr_body_workflow_name }} action.
+            It contains the changes from [stereo/${{ inputs.source_path }}@${{ github.ref }}](https://github.com/chainguard-dev/stereo/tree/${{ github.ref }}): https://github.com/chainguard-dev/stereo/commit/${{ github.sha }}
