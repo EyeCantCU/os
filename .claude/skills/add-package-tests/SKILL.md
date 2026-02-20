@@ -548,6 +548,23 @@ cp /tmp/stereo/pipelines/test/tw/PIPELINE.yaml \
 
 ---
 
+## PR Workflow — Always Use the Fork
+
+Branches live on `dustinkirkland/stereo` (the fork). PRs always target `chainguard-dev/stereo` (upstream). **Never open a PR directly against the fork.**
+
+```bash
+# Push branch to fork
+git push -u origin BRANCH-NAME
+
+# Open PR against upstream from fork branch
+gh pr create --repo chainguard-dev/stereo --base main \
+  --head dustinkirkland:BRANCH-NAME --title "..." --body "..."
+```
+
+Do **not** use `gh pr create` without `--repo chainguard-dev/stereo` — that will open the PR against the fork instead of upstream.
+
+---
+
 ## Bump the Epoch
 
 After writing a passing test, bump the epoch by exactly **1**:
