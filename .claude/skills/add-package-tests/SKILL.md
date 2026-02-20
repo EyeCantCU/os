@@ -169,9 +169,9 @@ BINARY version
 BINARY -v
 ```
 
-## 5. Run Tests Locally Before Pushing
+## 5. Run Tests Locally — Required Before Opening a PR
 
-**Always test locally first.** CI uses real QEMU VMs; failures there are slow to debug.
+**You must run tests locally and confirm they pass before pushing or opening a PR.** Do not open a PR with untested changes. CI uses real QEMU VMs and failures there are slow and expensive to debug.
 
 ```bash
 # In /home/kirkland/src/wolfi-os (the local test repo)
@@ -184,7 +184,7 @@ cp /tmp/stereo/pipelines/test/tw/PIPELINE.yaml \
    /home/kirkland/src/wolfi-os/pipelines/test/tw/
 ```
 
-Fix any failures before pushing. Common issues:
+**Do not open a PR until the local test passes.** Fix any failures first. Common issues:
 - **Flaky tests**: Skip known-flaky upstream tests with `sed -i '...' + @pytest.mark.skip`
 - **Container-incompatible tests**: Tests that require a real kernel (microvm, eBPF, etc.) cannot run in Docker — do not add them
 - **Network-dependent tests**: Tests that call external services may be unreliable in CI
@@ -208,7 +208,7 @@ package:
 - [ ] Used `set -euo pipefail` in `runs:` blocks that contain unix pipes (omit when no pipes)
 - [ ] Used `grep -F` for literal string matching, never `grep -q`
 - [ ] Used `jq -e` for JSON validation
-- [ ] Tested locally with `MELANGE_RUNNER=docker make docker-test/PACKAGE` — **passes**
+- [ ] **Tested locally with `MELANGE_RUNNER=docker make docker-test/PACKAGE` and confirmed it passes — do not open a PR until this is done**
 - [ ] Epoch bumped by exactly 1
 - [ ] No `|| true`, no `2>/dev/null` masking failures
 
