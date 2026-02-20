@@ -124,9 +124,125 @@ grep -rl "^test:" os/*.yaml | while read f; do
 done
 ```
 
+### Section 5: Pattern Analysis — Candidates for New Pipelines
+
+Look for repeated test patterns across untested subpackages that don't yet have a dedicated pipeline. The goal: if 10+ packages need the same test logic, that logic belongs in a reusable pipeline under `os/pipelines/test/tw/`, not copy-pasted into each YAML.
+
+```bash
+python3 - <<'EOF'
+import glob, os, yaml, re
+from collections import defaultdict
+
+# Known existing pipelines for each suffix
+existing = {
+    '-static':          'test/tw/staticpackage',
+    '-doc':             'test/tw/docs',
+    '-dbg':             'test/tw/debugpackage',
+    '-debug':           'test/tw/debugpackage',
+    '-dev':             'test/pkgconf / test/tw/devpackage',
+    '-libs':            'test/tw/ldd-check',
+    '-compat':          'test/tw/symlink-check',
+    '-openrc':          'test/tw/verify-service',
+}
+
+suffix_patterns = [
+    '-bash-completion', '-zsh-completion', '-fish-completion',
+    '-openrc', '-lang', '-config', '-compat', '-static',
+    '-doc', '-dbg', '-debug', '-dev', '-libs', '-src',
+]
+
+counts = defaultdict(list)
+for path in sorted(glob.glob("os/*.yaml")):
+    pkg = os.path.basename(path)
+    try:
+        data = yaml.safe_load(open(path).read())
+    except:
+        continue
+    if not data or 'subpackages' not in data:
+        continue
+    for sub in data.get('subpackages', []):
+        if not isinstance(sub, dict) or 'test' in sub:
+            continue
+        name = str(sub.get('name', ''))
+        matched = False
+        for suffix in suffix_patterns:
+            if suffix in name:
+                counts[suffix].append((pkg, name))
+                matched = True
+                break
+        if not matched:
+            counts['_other'].append((pkg, name))
+
+print(f"{'Pattern':<25} {'Untested':>8}  {'Existing pipeline or recommendation'}")
+print("-" * 80)
+for suffix in suffix_patterns + ['_other']:
+    items = counts.get(suffix, [])
+    if not items:
+        continue
+    if suffix in existing:
+        note = f"{existing[suffix]} ✓  (just needs applying)"
+    elif suffix in ('-bash-completion', '-zsh-completion', '-fish-completion'):
+        note = "— RECOMMEND new: test/tw/shell-completion-check"
+    elif suffix == '-lang':
+        note = "— RECOMMEND new: test/tw/langpackage (check .mo/.po files exist)"
+    elif suffix == '-config':
+        note = "— RECOMMEND new: test/tw/configpackage (check config files exist, are valid)"
+    elif suffix == '-src':
+        note = "— RECOMMEND new: test/tw/srcpackage or test/tw/contains-files"
+    else:
+        note = "— inspect individually"
+    print(f"  {suffix:<23} {len(items):>8}  {note}")
+EOF
+```
+
+For each "RECOMMEND new" entry, the pattern suggests creating a new pipeline at `os/pipelines/test/tw/PIPELINE-NAME.yaml`. See **Mode 3: Propose New Pipelines** for how to do this.
+
+Also mine **existing custom `runs:` blocks** for repeated patterns — if many packages share the same shell logic in their test stanzas, that logic is a pipeline waiting to be extracted:
+
+```bash
+# Find the most common multi-line runs: patterns in test blocks
+python3 - <<'EOF'
+import glob, yaml, re
+from collections import Counter
+
+snippets = Counter()
+for path in glob.glob("os/*.yaml"):
+    try:
+        content = open(path).read()
+    except:
+        continue
+    # Extract runs: blocks inside test: sections
+    in_test = False
+    for line in content.split('\n'):
+        if line.startswith('test:'):
+            in_test = True
+        elif line and not line[0].isspace():
+            in_test = False
+        if in_test and '- runs: |' in line:
+            # Grab the next few lines as a fingerprint
+            pass  # extend if needed
+
+# Simpler: look for common command patterns in test blocks
+patterns = Counter()
+for path in glob.glob("os/*.yaml"):
+    content = open(path).read()
+    # Find test block
+    m = re.search(r'^test:.*?(?=^\w|\Z)', content, re.MULTILINE | re.DOTALL)
+    if not m:
+        continue
+    block = m.group(0)
+    for cmd in re.findall(r'(?:ldd|--help|-h|--version|-v|apk info|stat /)', block):
+        patterns[cmd] += 1
+
+print("Common commands in existing test blocks:")
+for cmd, n in patterns.most_common(15):
+    print(f"  {n:>5}x  {cmd}")
+EOF
+```
+
 ### Summarise
 
-After running all four sections, produce a short summary:
+After running all five sections, produce a short summary:
 
 ```
 COVERAGE SUMMARY
@@ -143,9 +259,13 @@ Hard/Skip:               N packages
 
 QUALITY FLAGS
 =============
-Structural-only tests:   N packages  (good candidates for enhancement)
-Masking failures:        N packages  (must fix)
-No functional runs::     N packages  (good candidates for enhancement)
+Masking failures:        N packages  (must fix — remove || true / 2>/dev/null)
+
+PIPELINE OPPORTUNITIES
+======================
+Patterns with existing pipeline not yet applied:  N subpackages
+Patterns that warrant a NEW pipeline:             N subpackages
+  (list each recommended new pipeline with count)
 ```
 
 ---
@@ -453,6 +573,83 @@ package:
 - [ ] **Tested locally with `MELANGE_RUNNER=docker make docker-test/PACKAGE` and confirmed passing — do not open a PR until this is done**
 - [ ] Epoch bumped by exactly 1
 - [ ] No `|| true`, no `2>/dev/null` masking failures
+
+---
+
+## Mode 3: Propose and Create New Test Pipelines
+
+Use this mode when the Report (Section 5) identifies a pattern where 10+ packages share the same untested structure and no existing pipeline covers it. Rather than copy-pasting the same `runs:` block into dozens of YAMLs, create a reusable pipeline once.
+
+### When to Create a New Pipeline
+
+A new pipeline is warranted when:
+- **10+ subpackages** share the same name suffix and the same required test logic
+- The test logic is **purely structural** (check files exist, check format, check no broken symlinks) — not package-specific
+- No existing pipeline already covers the pattern
+
+Current top candidates based on the report (check Section 5 output for current counts):
+
+| Pattern | Suggested pipeline | What it should check |
+|---|---|---|
+| `-bash-completion`, `-zsh-completion`, `-fish-completion` | `test/tw/shell-completion-check` | Completion files exist under `/usr/share/bash-completion/`, `/usr/share/zsh/`, or `/usr/share/fish/` |
+| `-lang` | `test/tw/langpackage` | `.mo` or locale files exist under `/usr/share/locale/` |
+| `-config` | `test/tw/configpackage` | Config files exist under `/etc/`; are non-empty |
+
+### Pipeline File Format
+
+Pipelines live at `os/pipelines/test/tw/PIPELINE-NAME.yaml`. Use an existing one as a reference:
+
+```yaml
+name: Shell Completion Check
+
+description: |
+  Validates that a package installs shell completion files in the
+  correct locations for bash, zsh, or fish.
+
+needs:
+  packages:
+    - busybox  # or a dedicated checker tool if needed
+
+inputs:
+  shell:
+    description: "Shell to check completions for: bash, zsh, or fish"
+    default: ""
+
+pipeline:
+  - name: Check shell completion files are installed
+    runs: |
+      # Detect which shell(s) this package provides completions for
+      pkg="${{context.name}}"
+      found=0
+      for dir in \
+          usr/share/bash-completion/completions \
+          usr/share/zsh/site-functions \
+          usr/share/fish/vendor_completions.d; do
+        if apk info -L "$pkg" | grep -qF "$dir/"; then
+          echo "Found completions in $dir"
+          found=1
+        fi
+      done
+      if [ "$found" -eq 0 ]; then
+        echo "ERROR: no completion files found for $pkg"
+        exit 1
+      fi
+```
+
+### Workflow
+
+1. **Verify the pattern is real** — run the Section 5 script, confirm 10+ instances
+2. **Pick one example package** — read its YAML, install it in a container, inspect the files
+3. **Draft the pipeline** — write `os/pipelines/test/tw/PIPELINE-NAME.yaml`
+4. **Test it against several packages** — apply it in a few YAMLs, run `MELANGE_RUNNER=docker make docker-test/PACKAGE` for each
+5. **Apply at scale** — once validated, add `uses: test/tw/PIPELINE-NAME` to all matching subpackages in a single PR
+6. **Update this skill** — add the new pipeline to the decision tables in Modes 0–2
+
+### After Creating a Pipeline
+
+- Add it to the **Section 5 pattern table** in the Report script (`existing` dict)
+- Add it to the **decision tables** in Mode 1 (Coverage) and Mode 2 (Enhancement)
+- Add it to CLAUDE.md's "Use test pipelines" section so all contributors know it exists
 
 ---
 
