@@ -603,6 +603,8 @@ package:
 
 **Never double-bump.** If the epoch was already bumped in this PR, do not bump again.
 
+> **Note:** Strictly speaking, bumping the epoch is not required when the only change is adding a `test:` stanza — tests don't affect the built package artifacts. However, it is good hygiene to bump anyway: it forces CI to rebuild the package from source and run the full build-and-test pipeline end-to-end, which pressure-tests the entire chain and surfaces hard-to-debug regressions that might otherwise lay dormant until a future unrelated change triggers a rebuild. If the driving user prefers to skip the epoch bump to avoid a rebuild, that is a valid choice — just be aware of the trade-off.
+
 ---
 
 ## Checklist Before Submitting
