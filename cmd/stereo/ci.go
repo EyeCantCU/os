@@ -268,12 +268,33 @@ func lint(ctx context.Context) error {
 	// name -> yaml path
 	seen := map[string]string{}
 	for repo, pkgs := range pkgss {
+		apks := map[string]string{}
+
 		for pkg, cfg := range pkgs {
 			want := path.Join(repo, cfg.Package.Name)
 			if got, ok := seen[pkg]; ok {
 				errs = append(errs, fmt.Errorf("conflict: %q in %s.yaml and %s.yaml", pkg, got, want))
 			}
 			seen[pkg] = want
+			apks[fmt.Sprintf("%s-%s.apk", pkg, cfg.Package.FullVersion())] = want
+		}
+
+		// Check that withdrawn packages are not still defined.
+		withdrawnFile := filepath.Join(repo, "withdrawn-packages.txt")
+		if _, err := os.Stat(withdrawnFile); os.IsNotExist(err) {
+			continue
+		}
+
+		withdrawn, err := loadWithdrawnPackages(withdrawnFile)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		for entry := range withdrawn {
+			if file, ok := apks[entry]; ok {
+				errs = append(errs, fmt.Errorf("%s/withdrawn-packages.txt contains %q still still defined in %s.yaml", repo, entry, file))
+			}
 		}
 	}
 
