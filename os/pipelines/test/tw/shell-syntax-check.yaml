@@ -1,0 +1,83 @@
+name: Shell Syntax Check
+
+description: |
+  Validates shell completion files and executable shell scripts installed
+  by a package, using each shell's built-in parse-only mode.
+
+  Completion files are detected by install location (shebangs not required,
+  these files are sourced rather than executed directly):
+    usr/share/bash-completion/completions/  → bash --norc -n
+    usr/share/zsh/site-functions/           → zsh -n
+    usr/share/fish/vendor_completions.d/    → fish --no-execute
+
+  Executable shell scripts in usr/bin, usr/sbin, and usr/libexec are
+  detected by their shebang (#!) line:
+    #!/bin/bash, #!/usr/bin/env bash        → bash --norc -n
+    #!/bin/sh, #!/bin/dash, #!/usr/bin/env sh|dash|ash  → sh -n
+    #!/bin/busybox sh|ash, #!/usr/bin/busybox sh|ash    → sh -n
+    #!/bin/zsh, #!/usr/bin/env zsh          → zsh -n
+    #!/usr/bin/env fish                     → fish --no-execute
+
+  Exits with an error if no shell files are found at all, or if any
+  file fails its syntax check.
+
+needs:
+  packages:
+    - bash
+    - fish
+    - zsh
+
+pipeline:
+  - name: Check shell completion and script syntax
+    runs: |
+      set -euo pipefail
+      total=0
+
+      # check_script: read shebang, pick checker, run it.
+      # Silently skips non-shell files; exits on syntax error.
+      check_script() {
+        local f="$1" shebang
+        shebang=$(head -1 "$f" 2>/dev/null) || return 0
+        case "$shebang" in
+          "#!/bin/bash"*|"#!/usr/bin/bash"*|"#!/usr/bin/env bash"*)
+            bash --norc -n "$f" ;;
+          "#!/bin/sh"*|"#!/usr/bin/env sh"*|"#!/bin/dash"*|"#!/usr/bin/env dash"*|"#!/usr/bin/ash"*|"#!/usr/bin/env ash"*|"#!/bin/busybox"*|"#!/usr/bin/busybox"*)
+            sh -n "$f" ;;
+          "#!/bin/zsh"*|"#!/usr/bin/zsh"*|"#!/usr/bin/env zsh"*)
+            zsh -n "$f" ;;
+          "#!/usr/bin/fish"*|"#!/usr/bin/env fish"*)
+            fish --no-execute "$f" ;;
+          *) return 0 ;;
+        esac
+        total=$((total + 1))
+      }
+
+      # Bash completion files (location-based, no shebang required)
+      while IFS= read -r -d '' f; do
+        bash --norc -n "$f"
+        total=$((total + 1))
+      done < <(find /usr/share/bash-completion/completions -type f ! -name '.*' -print0 2>/dev/null)
+
+      # Zsh completion files (location-based)
+      while IFS= read -r -d '' f; do
+        zsh -n "$f"
+        total=$((total + 1))
+      done < <(find /usr/share/zsh/site-functions -type f -print0 2>/dev/null)
+
+      # Fish completion files (location-based)
+      while IFS= read -r -d '' f; do
+        fish --no-execute "$f"
+        total=$((total + 1))
+      done < <(find /usr/share/fish/vendor_completions.d -type f -name '*.fish' -print0 2>/dev/null)
+
+      # Executable shell scripts (shebang-based), skips binaries automatically
+      while IFS= read -r -d '' f; do
+        check_script "$f"
+      done < <(find /usr/bin /usr/sbin /usr/libexec -type f -executable -print0 2>/dev/null)
+
+      if [ "$total" -eq 0 ]; then
+        echo "ERROR: no shell scripts or completion files found to check"
+        exit 1
+      fi
+
+      echo "Shell syntax check passed: $total file(s) checked"
