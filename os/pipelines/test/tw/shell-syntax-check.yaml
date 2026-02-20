@@ -4,6 +4,10 @@ description: |
   Validates shell completion files and executable shell scripts installed
   by a package, using each shell's built-in parse-only mode.
 
+  When the optional "files" input is specified (space-separated list of
+  paths), only those files are checked. Otherwise, all shell files
+  installed by the package are found automatically.
+
   Completion files are detected by install location (shebangs not required,
   these files are sourced rather than executed directly):
     usr/share/bash-completion/completions/  → bash --norc -n
@@ -21,6 +25,16 @@ description: |
   Exits with an error if no shell files are found at all, or if any
   file fails its syntax check.
 
+inputs:
+  files:
+    description: |
+      Optional space-separated list of files to check. When specified, only
+      these files are checked. When omitted, all shell completion files and
+      executable shell scripts installed by the package are found
+      automatically.
+    required: false
+    default: ""
+
 needs:
   packages:
     - bash
@@ -33,11 +47,11 @@ pipeline:
       set -euo pipefail
       total=0
 
-      # check_script: read shebang, pick checker, run it.
-      # Silently skips non-shell files; exits on syntax error.
-      check_script() {
+      # check_by_shebang: read shebang, pick checker, run it.
+      # Returns 0 if the file was recognised and checked, 1 if skipped.
+      check_by_shebang() {
         local f="$1" shebang
-        shebang=$(head -1 "$f" 2>/dev/null) || return 0
+        shebang=$(head -1 "$f" 2>/dev/null) || return 1
         case "$shebang" in
           "#!/bin/bash"*|"#!/usr/bin/bash"*|"#!/usr/bin/env bash"*)
             bash --norc -n "$f" ;;
@@ -47,33 +61,67 @@ pipeline:
             zsh -n "$f" ;;
           "#!/usr/bin/fish"*|"#!/usr/bin/env fish"*)
             fish --no-execute "$f" ;;
-          *) return 0 ;;
+          *) return 1 ;;
         esac
-        total=$((total + 1))
+        return 0
       }
 
-      # Bash completion files (location-based, no shebang required)
-      while IFS= read -r -d '' f; do
-        bash --norc -n "$f"
-        total=$((total + 1))
-      done < <(find /usr/share/bash-completion/completions -type f ! -name '.*' -print0 2>/dev/null)
+      # check_file: try location-based detection first, then shebang.
+      # Increments $total if the file is recognised as a shell file.
+      check_file() {
+        local f="$1"
+        case "$f" in
+          /usr/share/bash-completion/completions/*)
+            bash --norc -n "$f"
+            total=$((total + 1)) ;;
+          /usr/share/zsh/site-functions/*)
+            zsh -n "$f"
+            total=$((total + 1)) ;;
+          /usr/share/fish/vendor_completions.d/*.fish)
+            fish --no-execute "$f"
+            total=$((total + 1)) ;;
+          *)
+            if check_by_shebang "$f"; then
+              total=$((total + 1))
+            fi ;;
+        esac
+      }
 
-      # Zsh completion files (location-based)
-      while IFS= read -r -d '' f; do
-        zsh -n "$f"
-        total=$((total + 1))
-      done < <(find /usr/share/zsh/site-functions -type f -print0 2>/dev/null)
+      files="${{inputs.files}}"
 
-      # Fish completion files (location-based)
-      while IFS= read -r -d '' f; do
-        fish --no-execute "$f"
-        total=$((total + 1))
-      done < <(find /usr/share/fish/vendor_completions.d -type f -name '*.fish' -print0 2>/dev/null)
+      if [ -n "$files" ]; then
+        # Explicit file list: check only the specified files.
+        for f in $files; do
+          check_file "$f"
+        done
+      else
+        # Auto-detection: find all shell files installed by the package.
 
-      # Executable shell scripts (shebang-based), skips binaries automatically
-      while IFS= read -r -d '' f; do
-        check_script "$f"
-      done < <(find /usr/bin /usr/sbin /usr/libexec -type f -executable -print0 2>/dev/null)
+        # Bash completion files (location-based, no shebang required)
+        while IFS= read -r -d '' f; do
+          bash --norc -n "$f"
+          total=$((total + 1))
+        done < <(find /usr/share/bash-completion/completions -type f ! -name '.*' -print0 2>/dev/null)
+
+        # Zsh completion files (location-based)
+        while IFS= read -r -d '' f; do
+          zsh -n "$f"
+          total=$((total + 1))
+        done < <(find /usr/share/zsh/site-functions -type f -print0 2>/dev/null)
+
+        # Fish completion files (location-based)
+        while IFS= read -r -d '' f; do
+          fish --no-execute "$f"
+          total=$((total + 1))
+        done < <(find /usr/share/fish/vendor_completions.d -type f -name '*.fish' -print0 2>/dev/null)
+
+        # Executable shell scripts (shebang-based), skips binaries automatically
+        while IFS= read -r -d '' f; do
+          if check_by_shebang "$f"; then
+            total=$((total + 1))
+          fi
+        done < <(find /usr/bin /usr/sbin /usr/libexec -type f -executable -print0 2>/dev/null)
+      fi
 
       if [ "$total" -eq 0 ]; then
         echo "ERROR: no shell scripts or completion files found to check"
