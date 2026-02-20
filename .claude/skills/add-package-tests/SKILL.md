@@ -490,7 +490,16 @@ test:
         BINARY list | grep -F "expected entry"
 ```
 
-**Shell script rules for `runs:` blocks:**
+**Before writing a `runs:` block, ask: does this logic belong in a pipeline?**
+
+If you find yourself writing the same test logic for more than one package — or if the logic is purely structural (check files exist, check format, check syntax) and other packages of the same type would clearly benefit — **stop and create a reusable pipeline** at `os/pipelines/test/tw/` first, then use it with a single `uses:` line. See **Mode 3: Propose and Create New Test Pipelines**.
+
+Examples of logic that became (or should become) pipelines:
+- Validating all `.xml` files with `xmlwf` → `test/tw/xml-syntax-check`
+- Checking shell completion files exist → `test/tw/shell-completion-check` (proposed)
+- Checking config files are present → `test/tw/configpackage` (proposed)
+
+**Shell script rules for `runs:` blocks (when a pipeline genuinely doesn't fit):**
 - Only use `set -euo pipefail` when the block contains unix pipes
 - Use `grep -F` for literal string matching, never `grep -q`
 - Use `jq -e` for JSON validation, not `grep`/`head`/`tail`
@@ -558,6 +567,7 @@ package:
 - [ ] Every top-level package in scope has a `test:` stanza
 - [ ] Every subpackage in scope has a `test:` stanza
 - [ ] Used the simplest existing test pipeline appropriate for each package type
+- [ ] If the same `runs:` logic appears (or would appear) in more than one package, extracted it into a reusable pipeline under `os/pipelines/test/tw/` instead
 
 **Enhancement:**
 - [ ] Inspected installed files with `apk info -L` to know what the package actually contains
