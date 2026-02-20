@@ -1,6 +1,13 @@
 ---
 name: add-package-tests
 description: Add or enhance test stanzas in melange package YAML files. Three modes: (1) Report — generate a coverage report showing untested packages, difficulty estimates, and quality gaps. (2) Coverage — get at least one test on every untested package and subpackage using simple existing pipelines. (3) Enhancement — deeply investigate a package by running it in a container, inspecting installed files, parsing help/manpage output, and discovering functional tests that actually exercise the software.
+allowed-tools:
+  - Bash
+  - Read
+  - Edit
+  - Write
+  - Glob
+  - Grep
 ---
 
 # Add Package Tests Skill
