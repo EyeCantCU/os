@@ -67,8 +67,14 @@ Config syntax validation (`tool -t config`) is NOT a functional test. Functional
 ### Shell Script Rules (from CLAUDE.md)
 
 ```bash
-# Always start with this exact form — never split across separate set commands
+# Only use set -euo pipefail when the test block contains unix pipes
+# (pipefail is only meaningful when pipes are present)
 set -euo pipefail
+some_command | grep -F "expected string"
+
+# For test blocks with no pipes, omit set -euo pipefail entirely
+tool-name --version
+tool-name validate --file /etc/tool/config.yaml
 
 # Use grep -F for literal strings, never grep -q
 some_command | grep -F "expected string"
@@ -88,10 +94,12 @@ test:
         bins: tool-name
         version: ${{package.version}}
     - runs: |
-        set -euo pipefail
-        # Test actual functionality with real input → verify output
-        echo "test input" | tool-name process
+        # No pipes here — omit set -euo pipefail
         tool-name validate --file /etc/tool/config.yaml
+    - runs: |
+        set -euo pipefail
+        # Pipes present — use set -euo pipefail
+        echo "test input" | tool-name process
         tool-name list | grep -F "expected entry"
 ```
 
@@ -197,7 +205,7 @@ package:
 - [ ] Read the package YAML and understood what it installs
 - [ ] Chose the correct test type for the package (and each subpackage that needed it)
 - [ ] Functional tests validate real behavior (not just `--help`/`--version`)
-- [ ] Used `set -euo pipefail` in all `runs:` test blocks
+- [ ] Used `set -euo pipefail` in `runs:` blocks that contain unix pipes (omit when no pipes)
 - [ ] Used `grep -F` for literal string matching, never `grep -q`
 - [ ] Used `jq -e` for JSON validation
 - [ ] Tested locally with `MELANGE_RUNNER=docker make docker-test/PACKAGE` — **passes**
