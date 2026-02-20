@@ -1,16 +1,137 @@
 ---
 name: add-package-tests
-description: Add or enhance test stanzas in melange package YAML files. Two modes: (1) Coverage — get at least one test on every untested package and subpackage using simple existing pipelines. (2) Enhancement — deeply investigate a package by running it in a container, inspecting installed files, parsing help/manpage output, and discovering functional tests that actually exercise the software.
+description: Add or enhance test stanzas in melange package YAML files. Three modes: (1) Report — generate a coverage report showing untested packages, difficulty estimates, and quality gaps. (2) Coverage — get at least one test on every untested package and subpackage using simple existing pipelines. (3) Enhancement — deeply investigate a package by running it in a container, inspecting installed files, parsing help/manpage output, and discovering functional tests that actually exercise the software.
 ---
 
 # Add Package Tests Skill
 
-Two modes depending on the goal:
+Three modes depending on the goal:
 
+- **Report mode**: Generate a structured coverage report — untested packages, untested subpackages, difficulty estimates, and quality gaps in existing tests. Start here to understand scope before doing any work.
 - **Coverage mode**: Find every package/subpackage missing a `test:` stanza and add the simplest correct test for each. Goal: zero untested packages.
 - **Enhancement mode**: Take a package (or a class of packages) that already has minimal tests and write real functional tests — by actually running the package in a container, inspecting what it installed, and learning how to test it from its help output and man pages.
 
 Follow CLAUDE.md "Package Test Best Practices" section throughout.
+
+---
+
+## Mode 0: Report — Assess Coverage and Quality
+
+Run this first to understand the full picture before making any changes. The report has four sections.
+
+### Section 1: Top-Level Packages With No Tests
+
+```bash
+echo "=== TOP-LEVEL PACKAGES WITH NO TESTS ==="
+grep -rL "^test:" os/*.yaml | xargs -I{} basename {} .yaml | sort
+echo ""
+echo "Total missing: $(grep -rL "^test:" os/*.yaml | wc -l) of $(ls os/*.yaml | wc -l)"
+```
+
+### Section 2: Subpackages With No Tests
+
+Subpackages need individual inspection — read each YAML and look for `- name:` blocks under `subpackages:` that have no `test:` block. For each file that has subpackages, scan for untested ones:
+
+```bash
+echo "=== SUBPACKAGES WITH NO TESTS ==="
+python3 - <<'EOF'
+import glob, re, os
+
+for path in sorted(glob.glob("os/*.yaml")):
+    content = open(path).read()
+    pkg = os.path.basename(path)
+    # Split on subpackage boundaries
+    parts = re.split(r'\n  - name: ', content)
+    for i, part in enumerate(parts[1:], 1):  # skip preamble
+        name = part.split('\n')[0].strip()
+        # A subpackage lacks a test if there's no "    test:" before the next "  - name:"
+        next_boundary = re.split(r'\n  - name: ', part)[0]
+        if '    test:' not in next_boundary:
+            print(f"  {pkg}: {name}")
+EOF
+```
+
+### Section 3: Difficulty Estimate for Each Gap
+
+After identifying untested packages and subpackages, classify each by how easy/safe it is to add a test. Use these signals from the YAML:
+
+| Signal in YAML | Difficulty | Rationale |
+|---|---|---|
+| No `pipeline:` (meta, byproduct, compat) | **Trivial** | Single `uses:` line — `metapackage`, `byproductpackage`, `symlink-check` |
+| `split/lib`, `split/dev`, `split/static` | **Easy** | Structural tests only — `ldd-check`, `devpackage`, `staticpackage` |
+| `go/build`, `cmake/install`, `autoconf/make-install` | **Easy–Medium** | Binary with `--help`/`--version`; `ldd-check` + `help-check` |
+| Config files in `/etc/`, multiple subcommands | **Medium** | Need to understand config format and invocation |
+| Starts a daemon, listens on a port | **Medium–Hard** | Requires `daemon-check-output` with setup/teardown |
+| `microvm`, `eBPF`, kernel modules, `/dev/` access | **Hard/Risky** | Requires real kernel — cannot run in Docker; skip for now |
+| External network calls required to function | **Hard/Risky** | Unreliable in CI; mock or skip |
+
+For each gap from Sections 1 and 2, print a one-line assessment:
+```
+PACKAGE/SUBPACKAGE  [trivial|easy|medium|hard|skip]  REASON
+```
+
+Example output:
+```
+glew                   easy      library-only, ldd-check sufficient
+microvm-init           skip      requires real kernel
+prometheus-cpp         easy      library, no binaries
+ssh-import-id-compat   trivial   symlink package, symlink-check
+```
+
+### Section 4: Quality of Existing Tests
+
+Scan packages that _do_ have tests and flag ones where coverage is weak:
+
+```bash
+echo "=== EXISTING TESTS — QUALITY FLAGS ==="
+
+# Packages whose only test is byproductpackage or emptypackage (structural, no function tested)
+echo "-- Structural-only (byproductpackage / emptypackage / ldd-check alone):"
+grep -rl "^test:" os/*.yaml | while read f; do
+    pkg=$(basename $f .yaml)
+    tests=$(awk '/^test:/,/^[a-z]/' "$f" | grep -oE "uses: [a-z/A-Z_-]+" | awk '{print $2}')
+    if echo "$tests" | grep -qE "^(test/tw/byproductpackage|test/tw/emptypackage|test/tw/ldd-check)$" && \
+       ! echo "$tests" | grep -qvE "^(test/tw/byproductpackage|test/tw/emptypackage|test/tw/ldd-check)$"; then
+        echo "  $pkg: $tests"
+    fi
+done
+
+# Tests using || true or 2>/dev/null (masking failures)
+echo "-- Tests masking failures (|| true or 2>/dev/null):"
+grep -rl "^test:" os/*.yaml | xargs grep -l "|| true\|2>/dev/null" | xargs -I{} basename {} .yaml
+
+# Tests with no runs: blocks at all (only uses: pipelines, possibly worth enhancing)
+echo "-- Has only uses: pipelines, no custom runs: blocks:"
+grep -rl "^test:" os/*.yaml | while read f; do
+    pkg=$(basename $f .yaml)
+    has_runs=$(awk '/^test:/,0' "$f" | grep -c "    - runs:")
+    if [ "$has_runs" -eq 0 ]; then echo "  $pkg"; fi
+done
+```
+
+### Summarise
+
+After running all four sections, produce a short summary:
+
+```
+COVERAGE SUMMARY
+================
+Top-level packages:      NNN total,  NN missing tests  (NN%)
+Subpackages:             NNN total,  NN missing tests  (NN%)
+
+GAPS BY DIFFICULTY
+==================
+Trivial (single uses:):  N packages
+Easy:                    N packages
+Medium:                  N packages
+Hard/Skip:               N packages
+
+QUALITY FLAGS
+=============
+Structural-only tests:   N packages  (good candidates for enhancement)
+Masking failures:        N packages  (must fix)
+No functional runs::     N packages  (good candidates for enhancement)
+```
 
 ---
 
