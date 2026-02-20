@@ -449,7 +449,31 @@ zcat /$MANFILE   # man pages are often gzip-compressed
 
 Look for the `EXAMPLES` or `SYNOPSIS` section. Each example in a man page is a candidate test case — it represents the intended usage, and if it doesn't work, the package is broken.
 
-### Step 5: Experiment With Test Pipelines in the Container
+### Step 5: Check README Files in the Source Repository
+
+After installing the package, check the upstream source repository's README for usage examples. The melange YAML points to the source via `git-checkout` or `fetch` — use that URL to find the repo, then look for README files:
+
+```bash
+# Clone or browse the upstream repo (URL from the yaml's git-checkout/fetch step)
+REPO_URL=$(grep -A2 'git-checkout\|fetch' os/PACKAGE.yaml | grep 'repository:\|uri:' | head -1 | awk '{print $2}')
+
+# Clone and look for README files
+git clone --depth=1 "$REPO_URL" /tmp/pkg-src
+ls /tmp/pkg-src/README* /tmp/pkg-src/readme* 2>/dev/null
+
+# Read them and extract usage examples
+cat /tmp/pkg-src/README.md 2>/dev/null | head -200
+```
+
+README files often contain:
+- **Quick-start examples** — the simplest invocations, ideal as smoke tests
+- **Feature demonstrations** — show the core value of the tool
+- **Configuration snippets** — reveal what config options to exercise
+- **CLI examples** — often more accessible than man pages
+
+Look specifically for code blocks (triple-backtick fences) with shell commands. Each runnable example is a candidate test case. Prefer examples that don't require external services or network access.
+
+### Step 6: Experiment With Test Pipelines in the Container
 
 Try running candidate test pipelines directly inside the container before writing YAML. This lets you iterate quickly without rebuilding the package.
 
@@ -471,7 +495,7 @@ docker run --rm cgr.dev/chainguard/wolfi-base sh -c "
 
 If a command produces correct output and exits 0, it's a good test. If it exits non-zero or crashes, investigate why before proposing it.
 
-### Step 6: Write and Validate the Test Stanza
+### Step 7: Write and Validate the Test Stanza
 
 Once you know which commands work and what output to expect, write the `test:` stanza:
 
@@ -526,7 +550,7 @@ test:
           curl -sf http://localhost:8080/metrics | jq -e '.status == "healthy"'
 ```
 
-### Step 7: Run Tests Locally — Required Before Opening a PR
+### Step 8: Run Tests Locally — Required Before Opening a PR
 
 **You must run tests locally and confirm they pass before pushing or opening a PR.** CI uses real QEMU VMs; failures there are slow and expensive to debug.
 
@@ -550,15 +574,18 @@ cp /tmp/stereo/pipelines/test/tw/PIPELINE.yaml \
 
 ## PR Workflow — Always Use the Fork
 
-Branches live on `dustinkirkland/stereo` (the fork). PRs always target `chainguard-dev/stereo` (upstream). **Never open a PR directly against the fork.**
+Branches live on the fork (your personal GitHub fork of `chainguard-dev/stereo`). PRs always target `chainguard-dev/stereo` (upstream). **Never open a PR directly against the fork.**
 
 ```bash
+# Detect your GitHub username from the gh CLI
+GITHUB_ID=$(gh api user --jq .login)
+
 # Push branch to fork
 git push -u origin BRANCH-NAME
 
 # Open PR against upstream from fork branch
 gh pr create --repo chainguard-dev/stereo --base main \
-  --head dustinkirkland:BRANCH-NAME --title "..." --body "..."
+  --head "${GITHUB_ID}:BRANCH-NAME" --title "..." --body "..."
 ```
 
 Do **not** use `gh pr create` without `--repo chainguard-dev/stereo` — that will open the PR against the fork instead of upstream.
