@@ -1,50 +1,42 @@
 ---
 name: add-package-tests
-description: Add top-level test stanzas to melange package YAML files that are missing them. The primary goal is complete test coverage — every package and every subpackage must have at least one test. Start with simple existing test pipelines (ldd-check, help-check, ver-check, etc.) before writing custom functional tests.
+description: Add or enhance test stanzas in melange package YAML files. Two modes: (1) Coverage — get at least one test on every untested package and subpackage using simple existing pipelines. (2) Enhancement — deeply investigate a package by running it in a container, inspecting installed files, parsing help/manpage output, and discovering functional tests that actually exercise the software.
 ---
 
 # Add Package Tests Skill
 
-The primary goal is **complete test coverage**: every package and every subpackage in the stereo repo must have at least one `test:` stanza. Start by finding untested packages, then apply the simplest appropriate test. Only write custom `runs:` blocks when no existing pipeline fits.
+Two modes depending on the goal:
+
+- **Coverage mode**: Find every package/subpackage missing a `test:` stanza and add the simplest correct test for each. Goal: zero untested packages.
+- **Enhancement mode**: Take a package (or a class of packages) that already has minimal tests and write real functional tests — by actually running the package in a container, inspecting what it installed, and learning how to test it from its help output and man pages.
 
 Follow CLAUDE.md "Package Test Best Practices" section throughout.
 
-## 1. Find Packages and Subpackages Missing Tests
+---
+
+## Mode 1: Coverage — Fill the Gaps
+
+### Find Missing Tests
 
 ```bash
-# Find package YAMLs with no top-level test: section at all
+# Packages with no top-level test: section
 grep -rL "^test:" os/*.yaml | sort
 
-# For a specific file, check whether each subpackage has a test: block
-grep -n "^  - name:\|test:" os/PACKAGE.yaml
+# Check a specific file for untested subpackages
+grep -n "^  - name:\|    test:" os/PACKAGE.yaml
 ```
 
 Work through untested packages systematically. For each one:
 1. Read the YAML to understand what the package and each subpackage installs
-2. Add a `test:` stanza to the package and to any subpackage that lacks one
-3. Run the test locally and confirm it passes
+2. Add a `test:` stanza using the decision tables below
+3. Run locally and confirm it passes
 4. Bump the epoch and commit
 
-## 2. Understand the Package
+### Choose the Simplest Appropriate Test
 
-Read the YAML and answer these questions for the top-level package **and each subpackage**:
+**Prefer existing test pipelines over custom `runs:` blocks.** A single `uses:` line is better than a shell script to maintain.
 
-- Does it install **ELF binaries** or **`.so` libraries**? → `ldd-check`
-- Is it a **CLI tool** with `--help` / `--version`? → `help-check`, `ver-check`
-- Is it a **daemon or service**? → `daemon-check-output`
-- Is it a **meta package** (only `dependencies.runtime`, no installed files)? → `metapackage`
-- Is it a **byproduct** (lower `provider-priority`, superseded by a higher-priority provider)? → `byproductpackage`
-- Is it **intentionally empty** (only `spdx.json`)? → `emptypackage`
-- Is it a **compat / symlink-only** package? → `symlink-check`
-- Does it install a **Python module**? → `python/import`
-- Is it a **Ruby gem**? → `gem-check`
-- Does it install **systemd service files**? → `verify-service`
-
-## 3. Choose the Simplest Appropriate Test
-
-**Prefer existing test pipelines over custom `runs:` blocks.** A single `uses:` line is better than a shell script you have to maintain.
-
-### Top-Level Package Decision Table
+#### Top-Level Package
 
 | Package characteristics | Start with |
 |---|---|
@@ -52,14 +44,14 @@ Read the YAML and answer these questions for the top-level package **and each su
 | CLI tool | `test/tw/ldd-check` + `test/tw/help-check` + `test/tw/ver-check` |
 | Daemon / service | `test/tw/ldd-check` + `test/daemon-check-output` |
 | Meta package (no files, only runtime deps) | `test/metapackage` |
-| Byproduct (lower provider-priority) | `test/tw/byproductpackage` |
+| Byproduct (lower `provider-priority`, superseded by higher-priority provider) | `test/tw/byproductpackage` |
 | Intentionally empty | `test/tw/emptypackage` |
 | Compat / symlink-only | `test/tw/symlink-check` |
 | Python module | `python/import` |
 | Ruby gem | `test/tw/gem-check` |
 | Systemd service files | `test/tw/verify-service` |
 
-### Subpackage Decision Table
+#### Subpackages
 
 | Subpackage name/type | Start with |
 |---|---|
@@ -94,7 +86,7 @@ test:
         version: ${{package.version}}
 ```
 
-**Byproduct / meta / empty / symlink packages:**
+**Byproduct / meta / empty / symlink:**
 ```yaml
 test:
   pipeline:
@@ -112,44 +104,141 @@ test:
           import module_name
 ```
 
-## 4. Add Functional Tests (When a Simple Pipeline Isn't Enough)
+---
 
-Once a package has at least one test, consider whether it exercises real behavior. `ldd-check` alone for a CLI tool is a weak test — add a `runs:` block that actually invokes the binary.
+## Mode 2: Enhancement — Discover Real Functional Tests
 
-**Shell script rules for `runs:` blocks:**
+Use this mode when a package already has minimal tests (or you've just added them) and you want to write tests that actually exercise the software's functionality. The workflow is: run the package in a container → inspect what's installed → learn from help and man pages → run candidate tests → propose what works.
+
+### Step 1: Launch a Container With the Package Installed
 
 ```bash
-# Only use set -euo pipefail when the block contains unix pipes
-set -euo pipefail
-tool-name list | grep -F "expected entry"
+# Spin up a minimal wolfi container and install the package interactively
+docker run --rm -it cgr.dev/chainguard/wolfi-base sh
 
-# Omit it entirely when there are no pipes
-tool-name --version
-tool-name validate --file /etc/tool/config.yaml
-
-# Use grep -F for literal strings, never grep -q
-some_command | grep -F "expected string"
-
-# Use jq -e for JSON — not grep/head/tail
-curl -sf http://localhost:8080/api | jq -e '.status == "ok"'
+# Inside the container:
+apk add PACKAGE-NAME
 ```
 
-**CLI tool with functional test:**
+Or as a one-liner for scripted exploration:
+```bash
+docker run --rm cgr.dev/chainguard/wolfi-base sh -c "
+  apk add PACKAGE-NAME 2>/dev/null
+  COMMAND_HERE
+"
+```
+
+### Step 2: Inspect What the Package Installed
+
+```bash
+# List all files installed by the package
+apk info -L PACKAGE-NAME
+
+# Find binaries
+apk info -L PACKAGE-NAME | grep '^usr/bin/'
+
+# Find libraries
+apk info -L PACKAGE-NAME | grep '\.so'
+
+# Find config files
+apk info -L PACKAGE-NAME | grep '^etc/'
+
+# Find man pages
+apk info -L PACKAGE-NAME | grep '/man/'
+
+# Find all subpackages that got pulled in
+apk info -L PACKAGE-NAME   # shows the package itself
+apk list --installed        # shows everything installed
+```
+
+This tells you exactly what to test. Make note of:
+- Every binary → candidate for help, version, and functional tests
+- Every `.so` → candidate for `ldd-check`
+- Every man page → source of usage examples (see Step 4)
+- Config files → may reveal what modes/features to test
+
+### Step 3: Try Help and Version for Every Binary
+
+For each binary the package installs, try common help/version flags and capture the output:
+
+```bash
+# Try all common patterns — see what the binary accepts
+BINARY --help 2>&1
+BINARY -h 2>&1
+BINARY help 2>&1
+BINARY --version 2>&1
+BINARY version 2>&1
+BINARY -v 2>&1
+```
+
+Read the help output carefully. Look for:
+- **Subcommands** — each is a candidate for a test
+- **`EXAMPLES` or `USAGE` sections** — often the richest source; try running them verbatim
+- **Required arguments or config** — understand what the binary needs to run
+- **Flags that reveal features** — e.g., `--format json` → test JSON output with `jq -e`
+
+### Step 4: Mine Man Pages for Usage Examples
+
+Man pages frequently contain `EXAMPLES` sections with real invocations. Extract them:
+
+```bash
+# Inside a container with man installed
+apk add man-db PACKAGE-NAME
+man BINARY 2>&1
+
+# Or read the raw man file directly (no man command needed)
+MANFILE=$(apk info -L PACKAGE-NAME | grep '/man/man')
+zcat /$MANFILE   # man pages are often gzip-compressed
+```
+
+Look for the `EXAMPLES` or `SYNOPSIS` section. Each example in a man page is a candidate test case — it represents the intended usage, and if it doesn't work, the package is broken.
+
+### Step 5: Experiment With Test Pipelines in the Container
+
+Try running candidate test pipelines directly inside the container before writing YAML. This lets you iterate quickly without rebuilding the package.
+
+```bash
+docker run --rm cgr.dev/chainguard/wolfi-base sh -c "
+  apk add PACKAGE-NAME 2>/dev/null
+
+  # Try ldd on each binary
+  for bin in /usr/bin/BINARY; do
+    echo '=== ldd' \$bin '==='
+    ldd \$bin
+  done
+
+  # Run a candidate functional test
+  BINARY subcommand --option input-file
+  echo 'exit:' \$?
+"
+```
+
+If a command produces correct output and exits 0, it's a good test. If it exits non-zero or crashes, investigate why before proposing it.
+
+### Step 6: Write and Validate the Test Stanza
+
+Once you know which commands work and what output to expect, write the `test:` stanza:
+
 ```yaml
 test:
   pipeline:
     - uses: test/tw/ldd-check
-    - uses: test/tw/ver-check
-      with:
-        bins: tool-name
-        version: ${{package.version}}
     - runs: |
-        tool-name --help
-        tool-name validate --file /etc/tool/config.yaml
+        # Version check
+        BINARY --version
     - runs: |
         set -euo pipefail
-        tool-name list | grep -F "expected entry"
+        # Functional test derived from --help examples or man page
+        echo "sample input" | BINARY process --format json | jq -e '.result == "ok"'
+        BINARY validate --file /etc/BINARY/config.yaml
+        BINARY list | grep -F "expected entry"
 ```
+
+**Shell script rules for `runs:` blocks:**
+- Only use `set -euo pipefail` when the block contains unix pipes
+- Use `grep -F` for literal string matching, never `grep -q`
+- Use `jq -e` for JSON validation, not `grep`/`head`/`tail`
+- Never use `|| true` or redirect errors to `/dev/null`
 
 **Daemon/service:**
 ```yaml
@@ -169,11 +258,12 @@ test:
         post: |
           set -euo pipefail
           curl -sf http://localhost:8080/health | grep -F "ok"
+          curl -sf http://localhost:8080/metrics | jq -e '.status == "healthy"'
 ```
 
-## 5. Run Tests Locally — Required Before Opening a PR
+### Step 7: Run Tests Locally — Required Before Opening a PR
 
-**You must run tests locally and confirm they pass before pushing or opening a PR.** Do not open a PR with untested changes. CI uses real QEMU VMs and failures there are slow and expensive to debug.
+**You must run tests locally and confirm they pass before pushing or opening a PR.** CI uses real QEMU VMs; failures there are slow and expensive to debug.
 
 ```bash
 # In /home/kirkland/src/wolfi-os (the local test repo)
@@ -186,12 +276,14 @@ cp /tmp/stereo/pipelines/test/tw/PIPELINE.yaml \
    /home/kirkland/src/wolfi-os/pipelines/test/tw/
 ```
 
-**Do not open a PR until the local test passes.** Fix any failures first. Common issues:
+**Do not open a PR until the local test passes.** Fix any failures first:
 - **Flaky tests**: Skip known-flaky upstream tests with `sed -i '...' + @pytest.mark.skip`
 - **Container-incompatible tests**: Tests requiring a real kernel (microvm, eBPF, etc.) cannot run in Docker — do not add them
-- **Network-dependent tests**: Tests that call external services may be unreliable in CI
+- **Network-dependent tests**: Tests calling external services may be unreliable in CI
 
-## 6. Bump the Epoch
+---
+
+## Bump the Epoch
 
 After writing a passing test, bump the epoch by exactly **1**:
 
@@ -200,23 +292,35 @@ package:
   epoch: 1  # was 0 — bump by exactly 1, never more
 ```
 
-**Never double-bump.** If the epoch was already bumped for another reason in this PR, do not bump again.
+**Never double-bump.** If the epoch was already bumped in this PR, do not bump again.
 
-## 7. Checklist Before Submitting
+---
 
+## Checklist Before Submitting
+
+**Coverage:**
 - [ ] Every top-level package in scope has a `test:` stanza
 - [ ] Every subpackage in scope has a `test:` stanza
-- [ ] Used the simplest existing test pipeline that makes sense for each package type
+- [ ] Used the simplest existing test pipeline appropriate for each package type
+
+**Enhancement:**
+- [ ] Inspected installed files with `apk info -L` to know what the package actually contains
+- [ ] Tried `--help`, `-h`, `--version` for every installed binary
+- [ ] Read man pages and/or `EXAMPLES` sections for usage patterns
+- [ ] Candidate tests were run inside a container and confirmed working before writing YAML
+- [ ] Tests exercise real functionality, not just `--help`/`--version` alone
+
+**All tests:**
 - [ ] Custom `runs:` blocks use `set -euo pipefail` only when pipes are present
-- [ ] Used `grep -F` for literal string matching, never `grep -q`
-- [ ] Used `jq -e` for JSON validation
-- [ ] **Tested locally with `MELANGE_RUNNER=docker make docker-test/PACKAGE` and confirmed it passes — do not open a PR until this is done**
+- [ ] `grep -F` used for literal string matching, never `grep -q`
+- [ ] `jq -e` used for JSON validation
+- [ ] **Tested locally with `MELANGE_RUNNER=docker make docker-test/PACKAGE` and confirmed passing — do not open a PR until this is done**
 - [ ] Epoch bumped by exactly 1
 - [ ] No `|| true`, no `2>/dev/null` masking failures
 
-## 8. Examples From This Repo
+---
 
-Good examples of tests already in the repo:
+## Examples From This Repo
 
 - `ssh-import-id` — help, `gh:user`, `lp:user`, `--remove` operations
 - `postgresql-15` — database creation, read/write, service startup
