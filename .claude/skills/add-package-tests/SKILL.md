@@ -17,7 +17,7 @@ Follow CLAUDE.md "Package Test Best Practices" section throughout.
 
 ## Mode 0: Report — Assess Coverage and Quality
 
-Run this first to understand the full picture before making any changes. The report has four sections.
+**Run all four sections immediately and in sequence without pausing for confirmation.** Produce the complete report in one pass, then present it to the user.
 
 ### Section 1: Top-Level Packages With No Tests
 
@@ -30,30 +30,38 @@ echo "Total missing: $(grep -rL "^test:" os/*.yaml | wc -l) of $(ls os/*.yaml | 
 
 ### Section 2: Subpackages With No Tests
 
-Subpackages need individual inspection — read each YAML and look for `- name:` blocks under `subpackages:` that have no `test:` block. For each file that has subpackages, scan for untested ones:
+Use PyYAML to correctly parse subpackage blocks (not pipeline step names):
 
 ```bash
 echo "=== SUBPACKAGES WITH NO TESTS ==="
 python3 - <<'EOF'
-import glob, re, os
+import glob, os, yaml
 
+results = []
 for path in sorted(glob.glob("os/*.yaml")):
-    content = open(path).read()
     pkg = os.path.basename(path)
-    # Split on subpackage boundaries
-    parts = re.split(r'\n  - name: ', content)
-    for i, part in enumerate(parts[1:], 1):  # skip preamble
-        name = part.split('\n')[0].strip()
-        # A subpackage lacks a test if there's no "    test:" before the next "  - name:"
-        next_boundary = re.split(r'\n  - name: ', part)[0]
-        if '    test:' not in next_boundary:
-            print(f"  {pkg}: {name}")
+    try:
+        data = yaml.safe_load(open(path).read())
+    except Exception:
+        continue
+    if not data or 'subpackages' not in data:
+        continue
+    for sub in data.get('subpackages', []):
+        if not isinstance(sub, dict):
+            continue
+        name = sub.get('name', '?')
+        if 'test' not in sub:
+            results.append(f"  {pkg}: {name}")
+
+for r in results:
+    print(r)
+print(f"\nTotal subpackages missing tests: {len(results)}")
 EOF
 ```
 
 ### Section 3: Difficulty Estimate for Each Gap
 
-After identifying untested packages and subpackages, classify each by how easy/safe it is to add a test. Use these signals from the YAML:
+For each gap found in Sections 1 and 2, classify it using these signals from the YAML:
 
 | Signal in YAML | Difficulty | Rationale |
 |---|---|---|
