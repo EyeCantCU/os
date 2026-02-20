@@ -253,7 +253,9 @@ subpackages:
       environment:
         contents:
           packages:
+            - iproute2
             - pdns-recursor-compat
+            - util-linux-misc # unshare
             - wait-for-it
             - bind-tools
         accounts:
@@ -288,6 +290,38 @@ subpackages:
         - name: "start daemon on localhost"
           uses: test/daemon-check-output
           with:
+            setup: |
+              touch pdns-net
+              (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+              chmod +x nsenter
+              if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+                echo 'nsenter --net=pdns-net "$@"' >>nsenter
+                ./nsenter ip link set lo up
+              else
+                echo '"$@"' >>nsenter
+              fi
+            start: "./nsenter /usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup"
+            timeout: 30
+            expected_output: |
+              YAML config found and processed
+              Enabled TCP data-ready
+              Listening for queries
+              Launching worker threads
+              Launching tcpworker threads
+              Enabled multiplexer
+            post: |
+              # Wait for ports to be ready
+              ./nsenter wait-for-it -t 5 --strict localhost:8082
+              ./nsenter wait-for-it -t 5 --strict localhost:53
+        - name: "start daemon on localhost with recursion"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # Use a high port to avoid colliding with systemd-resolved.
+              cat >/etc/powerdns/recursor.d/high-port.yml <<EOF
+              incoming:
+                port: 1053
+              EOF
             start: "/usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup"
             timeout: 30
             expected_output: |
@@ -300,12 +334,12 @@ subpackages:
             post: |
               # Wait for ports to be ready
               wait-for-it -t 5 --strict localhost:8082
-              wait-for-it -t 5 --strict localhost:53
+              wait-for-it -t 5 --strict localhost:1053
 
               # Test actual DNS recursive resolution
               # Query a well-known domain and verify we get a valid response
               echo "Testing DNS recursive resolution..."
-              dig_output=$(dig @127.0.0.1 -p 53 +short A example.com)
+              dig_output=$(dig @127.0.0.1 -p 1053 +short A example.com)
 
               # Verify we got an IP address response (non-empty and valid format)
               if [ -z "$dig_output" ]; then
@@ -322,12 +356,13 @@ subpackages:
               echo "SUCCESS: DNS recursive resolution works, got: $dig_output"
 
               # Verify no SERVFAIL status for another query
-              dig_status=$(dig @127.0.0.1 -p 53 example.org SOA)
+              dig_status=$(dig @127.0.0.1 -p 1053 example.org SOA)
               if echo "$dig_status" | grep -i "SERVFAIL"; then
                 echo "ERROR: DNS query returned SERVFAIL status"
                 exit 1
               fi
 
+              rm -f /etc/powerdns/recursor.d/high-port.yml
               echo "SUCCESS: DNS resolver is functioning correctly"
 
   - name: ${{package.name}}-recursor
@@ -367,7 +402,9 @@ subpackages:
       environment:
         contents:
           packages:
+            - iproute2
             - pdns-recursor-compat
+            - util-linux-misc # unshare
             - wait-for-it
             - bind-tools
         accounts:
@@ -394,6 +431,38 @@ subpackages:
         - name: "start daemon on localhost"
           uses: test/daemon-check-output
           with:
+            setup: |
+              touch pdns-net
+              (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+              chmod +x nsenter
+              if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+                echo 'nsenter --net=pdns-net "$@"' >>nsenter
+                ./nsenter ip link set lo up
+              else
+                echo '"$@"' >>nsenter
+              fi
+            start: "./nsenter /usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup"
+            timeout: 30
+            expected_output: |
+              YAML config found and processed
+              Enabled TCP data-ready
+              Listening for queries
+              Launching worker threads
+              Launching tcpworker threads
+              Enabled multiplexer
+            post: |
+              # Wait for ports to be ready
+              ./nsenter wait-for-it -t 5 --strict localhost:8082
+              ./nsenter wait-for-it -t 5 --strict localhost:53
+        - name: "start daemon on localhost with recursion"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # Use a high port to avoid colliding with systemd-resolved.
+              cat >/etc/powerdns/recursor.d/high-port.yml <<EOF
+              incoming:
+                port: 1053
+              EOF
             start: "/usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup"
             timeout: 30
             expected_output: |
@@ -406,12 +475,12 @@ subpackages:
             post: |
               # Wait for ports to be ready
               wait-for-it -t 5 --strict localhost:8082
-              wait-for-it -t 5 --strict localhost:53
+              wait-for-it -t 5 --strict localhost:1053
 
               # Test actual DNS recursive resolution
               # Query a well-known domain and verify we get a valid response
               echo "Testing DNS recursive resolution..."
-              dig_output=$(dig @127.0.0.1 -p 53 +short A example.com)
+              dig_output=$(dig @127.0.0.1 -p 1053 +short A example.com)
 
               # Verify we got an IP address response (non-empty and valid format)
               if [ -z "$dig_output" ]; then
@@ -428,7 +497,7 @@ subpackages:
               echo "SUCCESS: DNS recursive resolution works, got: $dig_output"
 
               # Verify no SERVFAIL status for another query
-              dig_status=$(dig @127.0.0.1 -p 53 example.org SOA)
+              dig_status=$(dig @127.0.0.1 -p 1053 example.org SOA)
               if echo "$dig_status" | grep -i "SERVFAIL"; then
                 echo "ERROR: DNS query returned SERVFAIL status"
                 exit 1
@@ -618,8 +687,10 @@ test:
       packages:
         - bind-tools
         - curl
-        - wait-for-it
+        - iproute2
         - sqlite
+        - util-linux-misc # unshare
+        - wait-for-it
         - ${{package.name}}-backends-all
         - ${{package.name}}-tools-all
     accounts:
@@ -650,7 +721,16 @@ test:
           sqlite3 /var/lib/powerdns/pdns.sqlite3 < /tmp/schema.sqlite3.sql
           pdnsutil create-zone example.com ns1.example.com
           pdnsutil add-record example.com ns1 A 127.0.0.1
-        start: "pdns_server"
+          touch pdns-net
+          (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+          chmod +x nsenter
+          if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+            echo 'nsenter --net=pdns-net "$@"' >>nsenter
+            ./nsenter ip link set lo up
+          else
+            echo '"$@"' >>nsenter
+          fi
+        start: "./nsenter pdns_server"
         timeout: 30
         expected_output: |
           Listening on controlsocket
@@ -658,6 +738,6 @@ test:
           TCP server bound
           Done launching threads, ready to distribute questions
         post: |
-          wait-for-it -t 5 --strict localhost:53
-          dig @127.0.0.1 -p 53 example.com SOA +norecurse | grep -qi "NOERROR"
-          sdig 127.0.0.1 53 example.com SOA | grep -qi "No Error"
+          ./nsenter wait-for-it -t 5 --strict localhost:53
+          ./nsenter dig @127.0.0.1 -p 53 example.com SOA +norecurse | grep -qi "NOERROR"
+          ./nsenter sdig 127.0.0.1 53 example.com SOA | grep -qi "No Error"
