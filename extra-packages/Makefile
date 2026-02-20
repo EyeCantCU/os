@@ -38,7 +38,6 @@ MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += --generate-index false
 MELANGE_OPTS += --cache-dir ${CACHEDIR}
 MELANGE_OPTS += --pipeline-dirs ./pipelines/
-MELANGE_OPTS += --pipeline-dirs ../pipelines/
 MELANGE_OPTS += --package-append busybox
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
@@ -66,7 +65,6 @@ MELANGE_TEST_OPTS += --repository-append ${REPO}
 MELANGE_TEST_OPTS += --keyring-append ${KEY}.pub
 MELANGE_TEST_OPTS += --arch ${ARCH}
 MELANGE_TEST_OPTS += --pipeline-dirs ./pipelines/
-MELANGE_TEST_OPTS += --pipeline-dirs ../pipelines/
 MELANGE_TEST_OPTS += --repository-append https://packages.wolfi.dev/os
 MELANGE_TEST_OPTS += --repository-append ${EXTRAS_REPO}
 MELANGE_TEST_OPTS += --keyring-append https://packages.wolfi.dev/os/wolfi-signing.rsa.pub

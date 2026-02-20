@@ -1,0 +1,111 @@
+name: Bump Go dependencies to specified versions
+
+# Backwards-compatible wrapper for gobump using omnibump
+# This pipeline provides the same interface as the legacy go/bump pipeline
+# but uses omnibump under the hood for unified dependency management
+
+# Do not include 'go' in 'needs.packages'.
+# Some packages pin to an older version; assume it gets injected elsewhere.
+needs:
+  packages:
+    - git
+    - omnibump
+
+inputs:
+  modroot:
+    description: The root of the module
+    default: .
+  deps:
+    description: "A space-separated list of packages to update (e.g., 'github.com/foo/bar@v1.2.3')"
+    default: ""
+  replaces:
+    description: "A space-separated list of packages to replace (e.g., 'github.com/old/pkg=github.com/new/pkg@v1.0.0')"
+    default: ""
+  bump-file:
+    description: "Filename containing the list of packages to update/replace (e.g., deps.yaml, gobump-deps.yaml)"
+    default: ""
+  go-version:
+    description: "The go version to set in go.mod (handled by go mod tidy)"
+    default: ""
+  tidy:
+    default: true
+    description: Run go mod tidy command after the bump
+  tidy-compat:
+    description: "Set the go version for tidied go.mod/go.sum compatibility (not directly supported by omnibump)"
+    default: ""
+  skip-initial-tidy:
+    default: false
+    description: Skip the initial go mod tidy command (not needed with omnibump)
+  show-diff:
+    default: false
+    description: Show the difference between go.mod before and after the bump
+  show-dependency-graph:
+    default: false
+    description: Display a dependency graph of the go.mod file
+  work:
+    description: "Use go work vendor (handled automatically by omnibump when go.work exists)"
+    default: false
+
+pipeline:
+  - runs: |
+      set -euo pipefail
+
+      cd "${{inputs.modroot}}"
+
+      # Show dependency graph if requested
+      if [ "${{inputs.show-dependency-graph}}" = "true" ]; then
+        go mod graph
+      fi
+
+      # Build omnibump command
+      OMNIBUMP_CMD="omnibump --language go"
+
+      # Handle bump-file (deps file)
+      if [ -n "${{inputs.bump-file}}" ]; then
+        OMNIBUMP_CMD="${OMNIBUMP_CMD} --deps ${{inputs.bump-file}}"
+
+      # Handle inline deps (packages)
+      elif [ -n "${{inputs.deps}}" ]; then
+        OMNIBUMP_CMD="${OMNIBUMP_CMD} --packages \"${{inputs.deps}}\""
+
+      # Handle replaces
+      elif [ -n "${{inputs.replaces}}" ]; then
+        # Create temporary replaces file for omnibump
+        REPLACES_FILE="/tmp/omnibump-replaces-$$.yaml"
+        echo "replaces:" > "${REPLACES_FILE}"
+
+        # Parse space-separated replaces (format: old=new@version)
+        for replace in ${{inputs.replaces}}; do
+          OLD_PKG=$(echo "${replace}" | cut -d'=' -f1)
+          NEW_SPEC=$(echo "${replace}" | cut -d'=' -f2)
+          NEW_PKG=$(echo "${NEW_SPEC}" | cut -d'@' -f1)
+          VERSION=$(echo "${NEW_SPEC}" | cut -d'@' -f2)
+
+          echo "  - oldName: ${OLD_PKG}" >> "${REPLACES_FILE}"
+          echo "    name: ${NEW_PKG}" >> "${REPLACES_FILE}"
+          echo "    version: ${VERSION}" >> "${REPLACES_FILE}"
+        done
+
+        OMNIBUMP_CMD="${OMNIBUMP_CMD} --deps ${REPLACES_FILE}"
+      fi
+
+      # Add tidy flag if enabled (default is true)
+      if [ "${{inputs.tidy}}" = "true" ]; then
+        OMNIBUMP_CMD="${OMNIBUMP_CMD} --tidy"
+      fi
+
+      # Add show-diff flag if enabled
+      if [ "${{inputs.show-diff}}" = "true" ]; then
+        OMNIBUMP_CMD="${OMNIBUMP_CMD} --show-diff"
+      fi
+
+      # Note: We already cd'd to modroot, so omnibump should use current directory
+      # Don't pass --dir again as that would make it look in modroot/modroot
+
+      # Execute omnibump
+      eval "${OMNIBUMP_CMD}"
+
+      # Clean up temporary replaces file if created
+      if [ -n "${REPLACES_FILE:-}" ] && [ -f "${REPLACES_FILE}" ]; then
+        rm -f "${REPLACES_FILE}"
+      fi
