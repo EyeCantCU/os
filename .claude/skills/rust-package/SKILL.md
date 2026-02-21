@@ -465,8 +465,17 @@ environment:
 ### The cargo/build Pipeline
 The `cargo/build` pipeline automatically:
 - Uses `cargo-auditable` for SBOM embedding
-- Handles release builds
+- Builds in release mode (`--release`) by default via the `opts` parameter
 - Installs to the correct destination
+
+When overriding `opts`, you MUST include `--release` explicitly — the default `opts` value includes `--release`, so overriding it without `--release` will produce a debug build. For example:
+
+```yaml
+  - uses: cargo/build
+    with:
+      output: project-name
+      opts: --release --no-default-features
+```
 
 Always use `cargo/build` instead of raw `cargo build` commands.
 
