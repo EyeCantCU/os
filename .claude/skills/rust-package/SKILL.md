@@ -71,7 +71,9 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: COMMIT_HASH
 
-  - uses: rust/cargobump
+  # Only add rust/cargobump if a project-name/cargobump-deps.yaml file exists
+  # adjacent to the package YAML. Do NOT add it otherwise.
+  # - uses: rust/cargobump
 
   - uses: cargo/build
     with:
@@ -140,8 +142,6 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: COMMIT_HASH
 
-  - uses: rust/cargobump
-
   - uses: cargo/build
     with:
       output: project-name
@@ -157,8 +157,6 @@ pipeline:
       repository: https://github.com/org/project
       tag: v${{package.version}}
       expected-commit: COMMIT_HASH
-
-  - uses: rust/cargobump
 
   - uses: cargo/build
     with:
@@ -185,7 +183,7 @@ cargo tree -i hashbrown
 This shows which path in the tree has the vulnerable version.
 
 ### Step 2: Use rust/cargobump (Primary Method)
-Create `project-name/cargobump-deps.yaml`:
+Create `project-name/cargobump-deps.yaml` in a directory adjacent to and with the same name as the package YAML file:
 
 ```yaml
 packages:
@@ -195,6 +193,8 @@ packages:
     version: 4.5.6
 ```
 
+Then add the `rust/cargobump` pipeline step. **Only add `rust/cargobump` when a `cargobump-deps.yaml` file exists** — do not add it speculatively.
+
 The pipeline runs `cargo update --precise <version> --package <name>@<oldVersion>` for each entry:
 
 ```yaml
@@ -202,7 +202,7 @@ pipeline:
   - uses: git-checkout
     # ...
 
-  - uses: rust/cargobump  # Reads ./cargobump-deps.yaml if present
+  - uses: rust/cargobump
 
   - uses: cargo/build
     with:
@@ -452,6 +452,16 @@ Even if this shows blockers, **still build and scan the binary** - source analys
 
 ## 7. Gotchas and Special Handling
 
+### Linker Not Found
+If the build fails with `error: linker `aarch64-linux-gnu-gcc` not found`, set the linker explicitly via `rustflags`:
+
+```yaml
+  - uses: cargo/build
+    with:
+      output: project-name
+      rustflags: "-C linker=/usr/local/bin/gcc"
+```
+
 ### Pinning Rust Versions
 Some projects require specific Rust toolchain versions:
 
@@ -495,7 +505,7 @@ Before submitting:
 - [ ] License verified from Cargo.toml and LICENSE file
 - [ ] Correct commit hash (not annotated tag)
 - [ ] Checked upstream release build for non-default features (Nix/Docker/CI)
-- [ ] `rust/cargobump` pipeline step added
+- [ ] `rust/cargobump` pipeline step added (only if `cargobump-deps.yaml` exists)
 - [ ] `cargo/build` pipeline used (handles cargo-auditable automatically)
 - [ ] Minimal build dependencies
 
