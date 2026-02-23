@@ -85,10 +85,10 @@ func tokensNeeded(cfg *config.Configuration, subcmd string) (bool, bool, error) 
 	needsLibrariesToken := false
 
 	for _, pipeline := range pipelines {
-		if findAuthPipeline(pipeline, isGitHubPipeline) {
+		if findPipeline(pipeline, isGitHubPipeline) {
 			needsRepoToken = true
 		}
-		if findAuthPipeline(pipeline, isLibrariesPipeline) {
+		if findPipeline(pipeline, isLibrariesPipeline) {
 			needsLibrariesToken = true
 		}
 	}
@@ -121,12 +121,12 @@ func parseUsedPipelines(cfg *config.Configuration, subcmd string) ([][]config.Pi
 	return pipelines, nil
 }
 
-func findAuthPipeline(pipelines []config.Pipeline, match func(string) bool) bool {
+func findPipeline(pipelines []config.Pipeline, match func(string) bool) bool {
 	for _, pipeline := range pipelines {
 		if match(pipeline.Uses) {
 			return true
 		}
-		if findAuthPipeline(pipeline.Pipeline, match) {
+		if findPipeline(pipeline.Pipeline, match) {
 			return true
 		}
 	}
