@@ -4,7 +4,7 @@ import (
 	"chainguard.dev/melange/pkg/config"
 )
 
-const CgSccacheConfigRepo = "https://apk.cgr.dev/chainguard-private"
+const CgSccacheConfigRepo = EnterprisePackagesRepo
 
 func isSccacheEnablePipeline(uses string) bool {
 	return uses == "sccache/enable"
