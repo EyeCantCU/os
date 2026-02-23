@@ -45,9 +45,8 @@ command -v uv >/dev/null 2>&1 || {
 
 # Validate working directory
 if [[ ! -d "enterprise-packages" && ! -d ".git" ]]; then
-    echo "ERROR: Must be run from enterprise-packages repository root" >&2
+    echo "ERROR: Must be run from the stereo repository root (contains enterprise-packages/)" >&2
     echo "Current directory: $(pwd)" >&2
-    echo "Expected: /Users/matthew.ramirez/work/stereo" >&2
     exit 1
 fi
 

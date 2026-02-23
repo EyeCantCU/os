@@ -16,7 +16,7 @@ Helps maintain OSS builds of authentik by automating:
 
 ## Prerequisites
 
-- **Working directory**: enterprise-packages repository root (`/Users/matthew.ramirez/work/stereo`)
+- **Working directory**: enterprise-packages repository root (the stereo repo root)
 - **Tools required**: git, ripgrep (rg), uv
 - **MCP server**: Automatically configured when using `run-skill.sh` wrapper
 
@@ -363,7 +363,7 @@ Updated enterprise-packages/authentik-fips.yaml:
    - Review test output for enterprise-related errors
 
 4. **Create commit**:
-   - Follow stereo commit conventions (see `/Users/matthew.ramirez/work/stereo/CLAUDE.md`)
+   - Follow stereo commit conventions (see `CLAUDE.md`)
    - Format: `authentik: update to {version}`
    - **Only stage files for packages in scope**:
 
@@ -498,7 +498,7 @@ See `references/patch-patterns.md` for detailed examples.
 
 ```bash
 # Test server directly
-cd /Users/matthew.ramirez/work/stereo
+cd /path/to/stereo
 uv run --with mcp --with pyyaml --with ruamel.yaml \
     .claude/skills/authentik-patch/server.py
 ```
@@ -514,7 +514,7 @@ brew install ripgrep  # macOS
 
 Ensure you're in the enterprise-packages repository root:
 ```bash
-cd /Users/matthew.ramirez/work/stereo
+cd /path/to/stereo
 pwd  # Should show stereo repo path
 ls enterprise-packages/authentik.yaml  # Should exist
 ```
@@ -573,7 +573,7 @@ git diff version/2025.12.1 version/2025.12.3 -- authentik/
 ## References
 
 - **Upstream discussion**: https://github.com/goauthentik/authentik/discussions/18682
-- **Stereo CLAUDE.md**: `/Users/matthew.ramirez/work/stereo/CLAUDE.md`
+- **Stereo CLAUDE.md**: `CLAUDE.md`
 - **Patch patterns**: `references/patch-patterns.md`
 - **Current patches**: `enterprise-packages/authentik/*.patch`
 - **Package files**: `enterprise-packages/authentik.yaml`, `enterprise-packages/authentik-fips.yaml`

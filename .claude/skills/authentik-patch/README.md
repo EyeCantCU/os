@@ -33,9 +33,9 @@ This skill automates the tedious manual work required for each version update:
 
 ### Required Environment
 
-- **Working directory**: Must run from enterprise-packages repository root
+- **Working directory**: Must run from the stereo repository root (the directory containing `enterprise-packages/`)
   ```bash
-  cd /Users/matthew.ramirez/work/stereo
+  cd /path/to/stereo
   ```
 
 - **Python dependencies**: Automatically installed by wrapper script
@@ -48,7 +48,7 @@ This skill automates the tedious manual work required for each version update:
 ### Interactive Mode
 
 ```bash
-cd /Users/matthew.ramirez/work/stereo
+cd /path/to/stereo
 ./.claude/skills/authentik-patch/run-skill.sh
 ```
 
@@ -60,7 +60,7 @@ When Claude launches, invoke the skill:
 ### Direct Mode (Specify Version)
 
 ```bash
-cd /Users/matthew.ramirez/work/stereo
+cd /path/to/stereo
 ./.claude/skills/authentik-patch/run-skill.sh 2025.12.3
 ```
 
@@ -137,12 +137,12 @@ The skill provides 8 specialized tools accessible during the workflow:
 ## Example Session
 
 ```bash
-$ cd /Users/matthew.ramirez/work/stereo
+$ cd /path/to/stereo
 $ ./.claude/skills/authentik-patch/run-skill.sh 2025.12.3
 
 Starting authentik-patch skill...
-MCP server: /Users/matthew.ramirez/work/stereo/.claude/skills/authentik-patch/server.py
-Working directory: /Users/matthew.ramirez/work/stereo
+MCP server: /path/to/stereo/.claude/skills/authentik-patch/server.py
+Working directory: /path/to/stereo
 Registering MCP server...
 Launching Claude with version: 2025.12.3
 
@@ -169,10 +169,11 @@ Cleaning up MCP server registration...
 
 ### "ERROR: Must be run from enterprise-packages repository root"
 
-**Solution**: Navigate to the correct directory
+**Solution**: Navigate to the stereo repository root (the directory containing `enterprise-packages/`)
 ```bash
-cd /Users/matthew.ramirez/work/stereo
+cd /path/to/stereo
 pwd  # Verify you're in the right place
+ls enterprise-packages/  # Should list authentik, authentik-fips, etc.
 ```
 
 ### "ERROR: ripgrep (rg) is not installed"
@@ -239,7 +240,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 **Test Manually**:
 ```bash
-cd /Users/matthew.ramirez/work/stereo
+cd /path/to/stereo
 uv run --with mcp --with pyyaml --with ruamel.yaml \
     .claude/skills/authentik-patch/server.py
 ```
@@ -254,7 +255,7 @@ If this fails, check:
 ### Test MCP Server Standalone
 
 ```bash
-cd /Users/matthew.ramirez/work/stereo
+cd /path/to/stereo
 uv run --with-requirements .claude/skills/authentik-patch/requirements.txt \
     --with mcp --with pyyaml --with ruamel.yaml \
     .claude/skills/authentik-patch/server.py
@@ -334,7 +335,7 @@ This skill follows stereo repository conventions:
 - **YAML formatting**: Uses `ruamel.yaml` to preserve comments
 - **Linting**: Reminds to run `./lint.sh` on YAML files
 - **Testing**: Integrates with `make package/authentik` and `make test/authentik`
-- **Guardrails**: Follows patterns from `/Users/matthew.ramirez/work/stereo/CLAUDE.md`
+- **Guardrails**: Follows patterns from the repo's `CLAUDE.md`
 
 ## Contributing
 
@@ -365,7 +366,7 @@ Report issues or feature requests:
 ### References
 
 - **Upstream discussion**: https://github.com/goauthentik/authentik/discussions/18682
-- **Stereo repo conventions**: `/Users/matthew.ramirez/work/stereo/CLAUDE.md`
+- **Stereo repo conventions**: `CLAUDE.md` (in the repo root)
 - **Current patches**: `enterprise-packages/authentik/*.patch`
 - **Package definitions**: `enterprise-packages/authentik.yaml`, `enterprise-packages/authentik-fips.yaml`
 
