@@ -367,7 +367,31 @@ pipeline:
 
 ## Step 7: Bump the Epoch
 
-Increment `epoch` by exactly 1.
+Increment `epoch` by exactly 1 **relative to `origin/main`**, not relative to what was in the file when you started.
+
+**CRITICAL: Always check the current epoch on `origin/main` before committing**, because main advances continuously and may have bumped the same package since you branched (e.g. for a CVE fix):
+
+```bash
+git show origin/main:os/PACKAGE.yaml | grep "^  epoch:"
+```
+
+Your epoch must be strictly greater than what's on main. If main has caught up (both at the same value), increment again.
+
+**Before pushing, verify all changed files have a strictly higher epoch than main:**
+
+```bash
+for f in $(git diff origin/main...HEAD --name-only -- 'os/*.yaml'); do
+  our=$(grep "^  epoch:" $f | head -1 | awk '{print $2}')
+  main=$(git show origin/main:$f 2>/dev/null | grep "^  epoch:" | head -1 | awk '{print $2}')
+  if [ "${our:-0}" -le "${main:-0}" ] 2>/dev/null; then
+    echo "MISSING BUMP: $f (main=$main, ours=$our)"
+  else
+    echo "OK: $f (main=$main -> ours=$our)"
+  fi
+done
+```
+
+If any show `MISSING BUMP`, increment that package's epoch further before committing.
 
 ---
 
