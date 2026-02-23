@@ -21,6 +21,13 @@ Four modes depending on the goal:
 
 Follow CLAUDE.md "Package Test Best Practices" section throughout.
 
+## Execution Philosophy: Announce Once, Then Act
+
+**Never interrupt mid-flow to ask "shall I continue?" or "is this okay?"**
+
+- **Report mode**: fully read-only — run all sections without any confirmation.
+- **Coverage / Enhancement / New Pipelines modes**: print a one-time plan at the start listing every file that will be edited and every shell command that will be run (docker, lint, git), then execute without further interruption. The user can stop you at any time; you don't need to ask permission for each step.
+
 ---
 
 ## Mode 0: Report — Assess Coverage and Quality
@@ -273,6 +280,24 @@ Patterns that warrant a NEW pipeline:             N subpackages
 
 ## Mode 1: Coverage — Fill the Gaps
 
+### Pre-flight: Announce Plan Before Writing Anything
+
+Before editing any files, produce a short plan and get implicit confirmation by presenting it clearly:
+
+```
+COVERAGE PLAN
+=============
+Packages to add tests to: N
+Actions:
+  - Edit os/PACKAGE.yaml (add test: stanza, bump epoch) for each
+  - Run ./lint.sh os/PACKAGE.yaml after each edit
+  - Commit each file individually: "PACKAGE: add test stanzas"
+
+No docker, no git push. Proceeding now.
+```
+
+Then proceed immediately — do not pause to ask "shall I continue?" Print the plan once, then execute without further interruption.
+
 ### Find Missing Tests
 
 ```bash
@@ -364,6 +389,26 @@ test:
 ---
 
 ## Mode 2: Enhancement — Discover Real Functional Tests
+
+### Pre-flight: Announce Plan Before Any Docker or File Writes
+
+Before running any containers or editing any files, print a plan:
+
+```
+ENHANCEMENT PLAN
+================
+Package: PACKAGE-NAME
+Actions:
+  - docker run cgr.dev/chainguard/wolfi-base (read-only inspection)
+  - Read os/PACKAGE-NAME.yaml
+  - Edit os/PACKAGE-NAME.yaml (add/improve test stanza, bump epoch)
+  - Run ./lint.sh os/PACKAGE-NAME.yaml
+  - Commit: "PACKAGE-NAME: enhance test stanza"
+
+Proceeding now.
+```
+
+Print the plan once, then execute without pausing for per-step confirmation.
 
 Use this mode when a package already has minimal tests (or you've just added them) and you want to write tests that actually exercise the software's functionality. The workflow is: run the package in a container → inspect what's installed → learn from help and man pages → run candidate tests → propose what works.
 
@@ -634,6 +679,24 @@ package:
 ---
 
 ## Mode 3: Propose and Create New Test Pipelines
+
+### Pre-flight: Announce Plan Before Writing Any Pipeline Files
+
+```
+NEW PIPELINE PLAN
+=================
+Pipeline: os/pipelines/test/tw/PIPELINE-NAME.yaml  (new file)
+Validation packages: PKG1, PKG2, PKG3
+Actions:
+  - Write os/pipelines/test/tw/PIPELINE-NAME.yaml
+  - Edit os/PKG1.yaml, os/PKG2.yaml, ... (add uses: test/tw/PIPELINE-NAME, bump epochs)
+  - Run ./lint.sh on each edited file
+  - Commit: "test/tw/PIPELINE-NAME: add new pipeline; apply to N packages"
+
+Proceeding now.
+```
+
+Print the plan once, then execute without further interruption.
 
 Use this mode when the Report (Section 5) identifies a pattern where 10+ packages share the same untested structure and no existing pipeline covers it. Rather than copy-pasting the same `runs:` block into dozens of YAMLs, create a reusable pipeline once.
 
