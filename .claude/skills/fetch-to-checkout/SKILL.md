@@ -282,7 +282,19 @@ update:
 
 ### When to keep `release-monitor:`
 
-Keep `release-monitor:` when the upstream git host is NOT GitHub (savannah, gitlab, codeberg, etc.) — the GitHub poller won't work. In that case, keep the existing `release-monitor:` entry unchanged.
+**CRITICAL: The wolfictl linter enforces `git-checkout-must-use-github-updates` — if a package uses `uses: git-checkout`, its `update:` section MUST use `github:` or `git:`, never `release-monitor:`. Failing to do this will cause a lint ERROR in CI.**
+
+This means:
+- If the upstream IS on GitHub → switch `release-monitor:` to `github:` (required, not optional)
+- If the upstream is NOT on GitHub (savannah, gitlab, codeberg, etc.) → switch `release-monitor:` to `git:` pointing to the upstream git URL, or reconsider whether to convert the package at all
+
+For non-GitHub hosts the `git:` update block looks like:
+```yaml
+update:
+  enabled: true
+  git:
+    tag-filter-prefix: v  # if tags have a prefix
+```
 
 ### When to disable updates
 
@@ -587,10 +599,10 @@ Convert all streams in one batch commit. They all point to the same `repository:
 ### Already has `github:` in update section
 Some packages already have `github:` in their `update:` block but still use `fetch`. Only the pipeline needs updating; the `update:` section may only need minor adjustments (e.g., removing a `strip-prefix: v` if the tag turns out to be bare).
 
-### Non-GitHub host → keep release-monitor
+### Non-GitHub host → use `git:` update block
 For savannah, gitlab.gnome.org, gitlab.freedesktop.org, codeberg.org etc.:
-- Keep existing `release-monitor:` entry
-- Do NOT add `github:` (the poller won't work)
+- Do NOT keep `release-monitor:` — the linter will reject it when `git-checkout` is used
+- Switch to `git:` update block (the linter accepts this)
 - If `enabled: false` cited "not in an SCM", re-enable it
 
 ---
