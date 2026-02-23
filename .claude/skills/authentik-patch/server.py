@@ -163,6 +163,31 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="sync_patches",
+            description="Sync patch files from one package directory to another (e.g., authentik/ to authentik-fips/). Copies all patches, reports any pre-existing differences that were overwritten, and detects stale patches in the target.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_dir": {
+                        "type": "string",
+                        "description": "Source patch directory (default: enterprise-packages/authentik/)",
+                        "default": "enterprise-packages/authentik/"
+                    },
+                    "target_dir": {
+                        "type": "string",
+                        "description": "Target patch directory (default: enterprise-packages/authentik-fips/)",
+                        "default": "enterprise-packages/authentik-fips/"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, report what would be done without making changes (default: false)",
+                        "default": False
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
             name="update_package_yaml",
             description="Update package YAML file with new version, commit hash, and patch list. Preserves formatting and comments.",
             inputSchema={
@@ -234,6 +259,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     elif name == "validate_patches":
         patch_dir = arguments.get("patch_dir", "enterprise-packages/authentik/")
         return await validate_patches(arguments["repo_path"], patch_dir)
+    elif name == "sync_patches":
+        source_dir = arguments.get("source_dir", "enterprise-packages/authentik/")
+        target_dir = arguments.get("target_dir", "enterprise-packages/authentik-fips/")
+        dry_run = arguments.get("dry_run", False)
+        return await sync_patches(source_dir, target_dir, dry_run)
     elif name == "update_package_yaml":
         patches = arguments.get("patches")
         return await update_package_yaml(
@@ -625,6 +655,119 @@ async def validate_patches(repo_path: str, patch_dir: str) -> list[TextContent]:
     summary += "\n".join(results)
 
     return [TextContent(type="text", text=summary)]
+
+
+async def sync_patches(
+    source_dir: str,
+    target_dir: str,
+    dry_run: bool = False
+) -> list[TextContent]:
+    """Sync patch files from one package directory to another."""
+
+    source_path = Path(source_dir)
+    target_path = Path(target_dir)
+
+    if not source_path.exists():
+        return [TextContent(
+            type="text",
+            text=f"ERROR: Source directory does not exist: {source_dir}"
+        )]
+
+    if not target_path.exists():
+        return [TextContent(
+            type="text",
+            text=f"ERROR: Target directory does not exist: {target_dir}"
+        )]
+
+    source_patches = sorted(source_path.glob("*.patch"))
+    if not source_patches:
+        return [TextContent(
+            type="text",
+            text=f"No patch files found in {source_dir}"
+        )]
+
+    results = []
+    alerts = []
+
+    for source_patch in source_patches:
+        target_patch = target_path / source_patch.name
+        patch_name = source_patch.name
+
+        # Read source content
+        with open(source_patch, 'r') as f:
+            source_content = f.read()
+
+        # Check if target exists and differs
+        overwritten_diff = None
+        if target_patch.exists():
+            with open(target_patch, 'r') as f:
+                target_content = f.read()
+            if source_content != target_content:
+                # Capture diff for reporting
+                returncode, diff_output, _ = run_command([
+                    "diff", "-u",
+                    "--label", f"source ({source_dir}{patch_name})",
+                    "--label", f"target ({target_dir}{patch_name})",
+                    str(source_patch), str(target_patch)
+                ])
+                overwritten_diff = diff_output
+
+        if dry_run:
+            if target_patch.exists():
+                if overwritten_diff:
+                    results.append(f"  [WOULD OVERWRITE] {patch_name} (has differences)")
+                else:
+                    results.append(f"  [WOULD COPY] {patch_name} (identical)")
+            else:
+                results.append(f"  [WOULD CREATE] {patch_name}")
+        else:
+            shutil.copy2(str(source_patch), str(target_patch))
+            if overwritten_diff:
+                results.append(f"  COPIED {patch_name} (differences overwritten - see below)")
+                alerts.append((patch_name, overwritten_diff))
+            elif target_patch.exists():
+                results.append(f"  COPIED {patch_name} (was identical)")
+            else:
+                results.append(f"  CREATED {patch_name}")
+
+    # Check for stale patches in target that don't exist in source
+    source_patch_names = {p.name for p in source_patches}
+    target_patches = {p.name for p in target_path.glob("*.patch")}
+    stale_patches = target_patches - source_patch_names
+
+    # Build output
+    mode = "Dry Run" if dry_run else "Results"
+    output_lines = [f"## Patch Sync {mode}\n"]
+    output_lines.append(f"**Source**: {source_dir}")
+    output_lines.append(f"**Target**: {target_dir}")
+    output_lines.append(f"**Patches**: {len(source_patches)}\n")
+    output_lines.extend(results)
+
+    if stale_patches:
+        output_lines.append(f"\n### Stale Patches in Target")
+        output_lines.append("These patches exist in the target but not in the source:")
+        for name in sorted(stale_patches):
+            output_lines.append(f"  - {name} (consider removing)")
+
+    if alerts:
+        output_lines.append("\n### Overwritten Differences\n")
+        output_lines.append("The following patches had differences that were overwritten.")
+        output_lines.append("Review these diffs and re-apply any target-specific changes if needed.\n")
+        output_lines.append("**Known convention**: Some `+++ b/` paths in authentik-fips patches")
+        output_lines.append("use `authentik-fips/` instead of `authentik/` as the path prefix.\n")
+
+        for patch_name, diff in alerts:
+            output_lines.append(f"#### {patch_name}")
+            output_lines.append("```diff")
+            diff_lines = diff.split('\n')
+            if len(diff_lines) > 80:
+                output_lines.extend(diff_lines[:80])
+                output_lines.append(f"... ({len(diff_lines) - 80} more lines)")
+            else:
+                output_lines.extend(diff_lines)
+            output_lines.append("```\n")
+
+    return [TextContent(type="text", text="\n".join(output_lines))]
 
 
 async def update_package_yaml(

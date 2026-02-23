@@ -38,9 +38,23 @@ Claude will launch with an initial prompt to update to the specified version.
 
 ## Workflow
 
+### Scope Tracking
+
+**IMPORTANT**: The user's package selection in Phase 1 determines which packages are modified in ALL subsequent phases. Track the selection as `SCOPE` throughout:
+
+| SCOPE | Patch directories | YAML files | Build/test targets |
+|-------|------------------|------------|-------------------|
+| `authentik` | `enterprise-packages/authentik/` | `authentik.yaml` | `make package/authentik`, `make test/authentik` |
+| `authentik-fips` | `enterprise-packages/authentik-fips/` | `authentik-fips.yaml` | `make package/authentik-fips`, `make test/authentik-fips` |
+| `both` | Both directories | Both YAML files | Both build/test targets |
+
+**Every phase below marks scope-dependent steps with `[scope: ...]` tags. Only execute steps matching the selected SCOPE. Do NOT modify files for packages outside the selected scope.**
+
+---
+
 ### Phase 1: Gather Information
 
-**Goal**: Determine target version and current state
+**Goal**: Determine target version, current state, and package scope
 
 **Steps**:
 
@@ -54,11 +68,12 @@ Claude will launch with an initial prompt to update to the specified version.
    - Use `list_upstream_versions` tool to show recent releases
    - Confirm target version with user
 
-4. **Determine scope**:
+4. **Determine scope** (sets `SCOPE` for all remaining phases):
    - Ask which packages to update:
      - `authentik` only
      - `authentik-fips` only
      - Both (recommended)
+   - **Record the selection. Every subsequent phase MUST respect it.**
 
 **Example**:
 ```
@@ -79,6 +94,8 @@ Which packages should be updated?
   2. authentik-fips only
   3. Both (recommended)
 > 3
+
+SCOPE = both
 ```
 
 ---
@@ -101,13 +118,15 @@ Which packages should be updated?
    - Example: `find_enterprise_refs(repo_path="/tmp/authentik-patch-xxx/authentik")`
 
 3. **Analyze patch coverage**:
-   - Use `analyze_patch_coverage` tool
+   - Use `analyze_patch_coverage` tool for each package in scope
    - Compares current references with existing patches
    - Identifies:
      - **New files**: Have enterprise refs but not in patches (need new patches)
      - **Removed files**: In patches but no longer have refs (can simplify patches)
      - **Covered files**: Already patched (may need updates)
-   - Example: `analyze_patch_coverage(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
+   - **[scope: authentik]**: `analyze_patch_coverage(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
+   - **[scope: authentik-fips]**: `analyze_patch_coverage(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
+   - **[scope: both]**: Run for `enterprise-packages/authentik/` (the primary). FIPS patches will be synced from authentik in Phase 3.5.
 
 4. **Review findings with user**:
    - Display analysis results
@@ -139,6 +158,10 @@ Removed files (in patches but no refs): 1
 
 **Approach**: This phase requires user collaboration to update patch files manually. The skill provides tools to guide the process.
 
+**Target directory**:
+- **[scope: authentik or both]**: Work in `enterprise-packages/authentik/`
+- **[scope: authentik-fips]**: Work in `enterprise-packages/authentik-fips/`
+
 **For New Files** (files with enterprise refs but not in patches):
 
 1. **Generate patch template**:
@@ -151,16 +174,19 @@ Removed files (in patches but no refs): 1
    - User manually creates the patch following suggested patterns
    - Common approach:
      - Make changes in the checked-out repo
-     - Generate diff: `cd /tmp/authentik-patch-xxx/authentik && git diff path/to/file.py > /path/to/stereo/enterprise-packages/authentik/new-file.patch`
+     - Generate diff into the target patch directory:
+       - **[scope: authentik or both]**: `git diff path/to/file.py > .../enterprise-packages/authentik/new-file.patch`
+       - **[scope: authentik-fips]**: `git diff path/to/file.py > .../enterprise-packages/authentik-fips/new-file.patch`
      - Add patch header (description, author, forwarded: not-needed)
      - Or update existing patch file (e.g., `enterprise.patch`)
 
 **For Covered Files** (files already in patches):
 
 1. **Check if patches still apply**:
-   - Use `validate_patches` tool
+   - Use `validate_patches` tool against the target directory
    - Shows which patches apply cleanly and which fail
-   - Example: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
+   - **[scope: authentik or both]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
+   - **[scope: authentik-fips]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
 
 2. **Update failing patches**:
    - For each failing patch:
@@ -178,13 +204,11 @@ Removed files (in patches but no refs): 1
 
 **Validation**:
 
-After updating patches, validate they all apply cleanly:
-```
-validate_patches(repo_path="/tmp/authentik-patch-xxx/authentik",
-                 patch_dir="enterprise-packages/authentik/")
-```
+After updating patches, validate they all apply cleanly against the target directory:
+- **[scope: authentik or both]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
+- **[scope: authentik-fips]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
 
-All patches must pass validation before proceeding to Phase 4.
+All patches must pass validation before proceeding.
 
 **Key Patch Files**:
 - `root.settings.patch` - Removes enterprise from Django TENANT_APPS
@@ -198,9 +222,51 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
 
 ---
 
+### Phase 3.5: Sync Patches to FIPS
+
+**[scope: both]** -- Only run this phase when SCOPE is `both`.
+
+**Skip this phase entirely if SCOPE is `authentik` or `authentik-fips`.**
+
+**Goal**: Sync finalized patches from `authentik/` to `authentik-fips/`
+
+**Prerequisite**: Phase 3 is complete and all patches in `enterprise-packages/authentik/` validate cleanly.
+
+**Steps**:
+
+1. **Dry run first**:
+   - Use `sync_patches` tool in dry-run mode to preview changes
+   - Example: `sync_patches(dry_run=True)`
+   - Review which patches will be copied and which have pre-existing differences
+
+2. **Execute sync**:
+   - Use `sync_patches` tool to copy patches
+   - Example: `sync_patches()`
+   - All patches from `enterprise-packages/authentik/` are copied to `enterprise-packages/authentik-fips/`
+
+3. **Review overwritten differences**:
+   - If the tool reports differences were overwritten, review the diff output
+   - **Known convention**: Some `+++ b/` paths in `enterprise.patch` and `enterprise.mro.patch`
+     use `authentik-fips/` instead of `authentik/` as the path prefix in the FIPS copy
+   - Decide with user whether these path differences need to be re-applied
+   - If needed, manually edit the FIPS patch files to restore the path convention
+
+4. **Check for stale patches**:
+   - The tool reports any patches in the FIPS directory that don't exist in the source
+   - Remove stale patches if they are no longer needed
+
+5. **Validate FIPS patches**:
+   - Use `validate_patches` tool against the FIPS directory
+   - Example: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
+   - All patches must pass before proceeding to Phase 4
+
+---
+
 ### Phase 4: Update Package Files
 
 **Goal**: Update package YAML files with new version, commit, and patches (if changed)
+
+**Only update YAML files for packages in the selected SCOPE.**
 
 **Steps**:
 
@@ -218,7 +284,7 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
    - If new patches were added, include them in the list
    - Order matters: apply in dependency order
 
-2. **Update authentik.yaml**:
+2. **[scope: authentik or both]** Update `authentik.yaml`:
    - Use `update_package_yaml` tool
    - Updates:
      - `package.version` → new version
@@ -234,7 +300,7 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
      )
      ```
 
-3. **Update authentik-fips.yaml** (if selected in Phase 1):
+3. **[scope: authentik-fips or both]** Update `authentik-fips.yaml`:
    - Same process as authentik.yaml
    - Uses identical patch files
    - Example:
@@ -248,10 +314,10 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
      ```
 
 4. **Review changes**:
-   - Use `show_package_diff` or git diff to review YAML changes
+   - Use git diff to review YAML changes
    - Confirm with user before proceeding
 
-**Example**:
+**Example (scope: both)**:
 ```
 Updated enterprise-packages/authentik.yaml:
   - version: 2025.12.3
@@ -270,19 +336,18 @@ Updated enterprise-packages/authentik-fips.yaml:
 
 **Goal**: Validate the changes and commit
 
+**Only lint, build, and test packages in the selected SCOPE.**
+
 **Steps**:
 
 1. **Lint YAML files**:
-   ```bash
-   ./lint.sh enterprise-packages/authentik.yaml
-   ./lint.sh enterprise-packages/authentik-fips.yaml
-   ```
-   Fix any formatting issues.
+   - **[scope: authentik or both]**: `./lint.sh enterprise-packages/authentik.yaml`
+   - **[scope: authentik-fips or both]**: `./lint.sh enterprise-packages/authentik-fips.yaml`
+   - Fix any formatting issues.
 
-2. **Build package**:
-   ```bash
-   make package/authentik
-   ```
+2. **Build package(s)**:
+   - **[scope: authentik or both]**: `make package/authentik`
+   - **[scope: authentik-fips or both]**: `make package/authentik-fips`
    - Watch for build failures
    - Common issues:
      - Patches don't apply → Go back to Phase 3
@@ -290,9 +355,8 @@ Updated enterprise-packages/authentik-fips.yaml:
      - Build dependencies changed → Update package YAML
 
 3. **Run tests** (if build succeeds):
-   ```bash
-   make test/authentik
-   ```
+   - **[scope: authentik or both]**: `make test/authentik`
+   - **[scope: authentik-fips or both]**: `make test/authentik-fips`
    - Verify authentik starts correctly
    - Check for import errors or runtime failures
    - Review test output for enterprise-related errors
@@ -300,12 +364,30 @@ Updated enterprise-packages/authentik-fips.yaml:
 4. **Create commit**:
    - Follow stereo commit conventions (see `/Users/matthew.ramirez/work/stereo/CLAUDE.md`)
    - Format: `authentik: update to {version}`
-   - Example:
+   - **Only stage files for packages in scope**:
+
+   **[scope: authentik]**:
+     ```bash
+     git add enterprise-packages/authentik.yaml \
+             enterprise-packages/authentik/*.patch
+     ```
+
+   **[scope: authentik-fips]**:
+     ```bash
+     git add enterprise-packages/authentik-fips.yaml \
+             enterprise-packages/authentik-fips/*.patch
+     ```
+
+   **[scope: both]**:
      ```bash
      git add enterprise-packages/authentik.yaml \
              enterprise-packages/authentik-fips.yaml \
-             enterprise-packages/authentik/*.patch
+             enterprise-packages/authentik/*.patch \
+             enterprise-packages/authentik-fips/*.patch
+     ```
 
+   - Example commit:
+     ```bash
      git commit -m "$(cat <<'EOF'
      authentik: update to 2025.12.3
 
@@ -323,7 +405,7 @@ Updated enterprise-packages/authentik-fips.yaml:
    - Example: `cleanup(temp_dir="/tmp/authentik-patch-xxx")`
 
 6. **Summary**:
-   - Report what was updated
+   - Report what was updated, listing which packages were in scope
    - Note any issues encountered
    - Suggest next steps (e.g., testing in dev environment)
 
