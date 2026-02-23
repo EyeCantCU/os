@@ -1,6 +1,6 @@
 ---
-name: add-package-tests
-description: Add or enhance test stanzas in melange package YAML files. Three modes: (1) Report — generate a coverage report showing untested packages, difficulty estimates, and quality gaps. (2) Coverage — get at least one test on every untested package and subpackage using simple existing pipelines. (3) Enhancement — deeply investigate a package by running it in a container, inspecting installed files, parsing help/manpage output, and discovering functional tests that actually exercise the software.
+name: package-tests
+description: Manage test stanzas in melange package YAML files. Four modes: (1) Report — generate a coverage report showing untested packages, difficulty estimates, and quality gaps. (2) Coverage — get at least one test on every untested package and subpackage using simple existing pipelines. (3) Enhancement — deeply investigate a package by running it in a container, inspecting installed files, parsing help/manpage output, and discovering functional tests that actually exercise the software. (4) New Pipelines — propose and create reusable test pipelines for patterns that appear across many packages.
 allowed-tools:
   - Bash
   - Read
@@ -10,13 +10,14 @@ allowed-tools:
   - Grep
 ---
 
-# Add Package Tests Skill
+# Package Tests Skill
 
-Three modes depending on the goal:
+Four modes depending on the goal:
 
 - **Report mode**: Generate a structured coverage report — untested packages, untested subpackages, difficulty estimates, and quality gaps in existing tests. Start here to understand scope before doing any work.
 - **Coverage mode**: Find every package/subpackage missing a `test:` stanza and add the simplest correct test for each. Goal: zero untested packages.
 - **Enhancement mode**: Take a package (or a class of packages) that already has minimal tests and write real functional tests — by actually running the package in a container, inspecting what it installed, and learning how to test it from its help output and man pages.
+- **New Pipelines mode**: Propose and create reusable test pipelines for patterns that appear across many packages.
 
 Follow CLAUDE.md "Package Test Best Practices" section throughout.
 
