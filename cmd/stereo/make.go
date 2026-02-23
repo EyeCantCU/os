@@ -146,6 +146,12 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 		return err
 	}
 
+	sccacheOpts, err := sccacheMelangeOpts(cfg, subcmd)
+	if err != nil {
+		return err
+	}
+	opts = append(opts, sccacheOpts...)
+
 	extra = strings.Join(opts, " ")
 
 	cmd.Env = append(cmd.Env, fmt.Sprintf("MELANGE_EXTRA_OPTS=%s", extra))
