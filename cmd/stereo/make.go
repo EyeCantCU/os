@@ -157,7 +157,7 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 	}
 	defer cleanup()
 
-	if err := ensureTokens(ctx, cfg, dir, pkg, subcmd); err != nil {
+	if err := ensureTokens(ctx, cfg, sourceDir, subcmd); err != nil {
 		return err
 	}
 
