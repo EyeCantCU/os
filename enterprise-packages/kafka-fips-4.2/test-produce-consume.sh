@@ -32,7 +32,7 @@ consumed=$(timeout 10 kafka-console-consumer.sh \
   --topic "${TOPIC_NAME}" \
   --from-beginning \
   --max-messages 1 \
-  --consumer.config /tmp/client-bcfks.properties)
+  --command-config /tmp/client-bcfks.properties)
 
 test "$consumed" = "Hello Quorum BCFKS"
 
@@ -63,6 +63,6 @@ consumed=$(timeout 10 kafka-console-consumer.sh \
   --topic "${TOPIC_NAME}" \
   --from-beginning \
   --max-messages 1 \
-  --consumer.config /tmp/client-pem.properties)
+  --command-config /tmp/client-pem.properties)
 
 test "$consumed" = "Hello Quorum PEM"

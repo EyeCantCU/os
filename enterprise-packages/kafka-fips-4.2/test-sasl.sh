@@ -59,6 +59,6 @@ consumed=$(timeout 10 kafka-console-consumer.sh \
   --topic "${TOPIC_NAME}" \
   --from-beginning \
   --max-messages 1 \
-  --consumer.config /tmp/sasl-client.properties)
+  --command-config /tmp/sasl-client.properties)
 
 test "$consumed" = "Hello SCRAM"
