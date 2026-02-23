@@ -14,14 +14,8 @@ import (
 	"chainguard.dev/melange/pkg/config"
 )
 
-func ensureTokens(ctx context.Context, dir, pkg, subcmd string) error {
+func ensureTokens(ctx context.Context, cfg *config.Configuration, dir, pkg, subcmd string) error {
 	sourceDir := filepath.Join(dir, pkg)
-
-	cfg, err := compilePkgConfig(ctx, sourceDir)
-	if err != nil {
-		return err
-	}
-
 	needsRepo, needsLibraries, err := tokensNeeded(cfg, subcmd)
 	if err != nil {
 		return err
