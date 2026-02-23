@@ -752,9 +752,9 @@ async def sync_patches(
     if alerts:
         output_lines.append("\n### Overwritten Differences\n")
         output_lines.append("The following patches had differences that were overwritten.")
-        output_lines.append("Review these diffs and re-apply any target-specific changes if needed.\n")
-        output_lines.append("**Known convention**: Some `+++ b/` paths in authentik-fips patches")
-        output_lines.append("use `authentik-fips/` instead of `authentik/` as the path prefix.\n")
+        output_lines.append("These differences are expected to be safe to discard (historically")
+        output_lines.append("FIPS patches had `+++ b/authentik-fips/` path prefixes, but this was")
+        output_lines.append("a bug since melange applies patches against the unchanged `authentik/` directory).\n")
 
         for patch_name, diff in alerts:
             output_lines.append(f"#### {patch_name}")

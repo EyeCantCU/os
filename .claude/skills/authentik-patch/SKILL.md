@@ -246,10 +246,11 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
 
 3. **Review overwritten differences**:
    - If the tool reports differences were overwritten, review the diff output
-   - **Known convention**: Some `+++ b/` paths in `enterprise.patch` and `enterprise.mro.patch`
-     use `authentik-fips/` instead of `authentik/` as the path prefix in the FIPS copy
-   - Decide with user whether these path differences need to be re-applied
-   - If needed, manually edit the FIPS patch files to restore the path convention
+   - The overwritten differences are expected to be safe to discard. Historically the FIPS
+     patches had some `+++ b/` paths using `authentik-fips/` instead of `authentik/`, but
+     this was a bug - melange applies patches with `patch -p1` against the unchanged checkout
+     directory (`authentik/`), so `+++ b/authentik/` is the correct path for both packages.
+   - Do NOT re-apply the old `authentik-fips/` path prefixes.
 
 4. **Check for stale patches**:
    - The tool reports any patches in the FIPS directory that don't exist in the source
