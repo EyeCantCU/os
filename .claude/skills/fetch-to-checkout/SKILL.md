@@ -528,6 +528,19 @@ Some projects ship pre-built man pages or HTML docs in their release tarballs bu
 2. If the docs were always empty even from the tarball (pre-existing bug), replace `test/docs` with `test/tw/emptypackage`.
 3. If fixing is too complex, leave on `fetch`. Example: `gdal` (sphinx needed for man pages).
 
+#### `ci-cve-scan-db-os` fails — pre-existing transitive CVE surfaces
+
+When you modify a package (even just to convert fetch→git-checkout), the CI CVE scanner runs on the newly built APKs. It may find CVEs that **pre-existed** the conversion but were never detected by CI because the package hadn't been modified in a while.
+
+Common case for Rust packages: a transitive dependency (e.g. `ratatui → lru 0.12.5`) has a known CVE. The existing yaml may already try to fix it with a `sed` that doesn't match the actual Cargo.toml format.
+
+**Diagnosis:** Check if the CVE was already present on `origin/main` (look at the CGA advisory timestamp — if it was set weeks/months ago, it's pre-existing).
+
+**Fix options:**
+1. If the CVE is in a direct dependency: fix the `sed` pattern and verify with `cargo tree -i CRATE`.
+2. If the CVE is in a **transitive** dependency (e.g. `ratatui→lru`): upgrading requires bumping the intermediate crate, which is a separate PR.
+3. **Short-term:** revert the package from this PR; address the CVE in a dedicated PR. Example: `nushell` (ratatui 0.29.0 pulls in lru 0.12.5, GHSA-rhfx-m35p-ff5j).
+
 ### Common Test Failures After Conversion
 
 Test failures after a fetch→git-checkout conversion are usually build failures in disguise (wrong binary, missing file). Re-check the build output for errors.
