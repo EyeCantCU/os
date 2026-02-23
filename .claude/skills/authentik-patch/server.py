@@ -381,10 +381,14 @@ async def find_enterprise_refs(repo_path: str) -> list[TextContent]:
         )]
 
     # Run ripgrep to find enterprise references
+    # NOTE: Use -g '*.py' instead of -t py because ripgrep 15.x has a bug
+    # where combining -t (type filter) with -g '!' (negative glob) causes
+    # the type override and glob override to conflict, resulting in zero
+    # files being searched.
     returncode, stdout, stderr = run_command([
         "rg",
         "authentik\\.enterprise",
-        "-t", "py",
+        "-g", "*.py",
         "-g", "!authentik/enterprise/**",
         "--json"
     ], cwd=str(repo))

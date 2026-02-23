@@ -96,7 +96,7 @@ Which packages should be updated?
 
 2. **Find enterprise references**:
    - Use `find_enterprise_refs` tool on the repo path
-   - This runs: `rg "authentik\.enterprise" -t py -g '!authentik/enterprise/**' --json`
+   - This runs: `rg "authentik\.enterprise" -g '*.py' -g '!authentik/enterprise/**' --json`
    - Results are cached for later phases
    - Example: `find_enterprise_refs(repo_path="/tmp/authentik-patch-xxx/authentik")`
 
