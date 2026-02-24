@@ -1,0 +1,448 @@
+#nolint:object,srv
+package:
+  name: gitlab-rails-ce-fips-18.9
+  version: "18.9.0"
+  epoch: 0
+  description: "GitLab's core webapp, built with Ruby on Rails (FIPS)"
+  resources:
+    cpu: 64
+    memory: 128Gi
+  copyright:
+    - license: MIT
+  options:
+    # We don't want to use SCA to generate dependencies
+    # for vendored libraries and bianries
+    no-depends: true
+    # This is a ruby bundle so we don't want it to
+    # provide anything vendored
+    no-provides: true
+  dependencies:
+    provides:
+      - gitlab-rails-ce-fips=${{package.full-version}}
+    # These are dependencies that are shipped across Webservice,
+    # Sidekiq, and Toolbox and not the Rails image (useless on its
+    # own) itself.
+    runtime:
+      - bash-binsh
+      - coreutils
+      - exiftool
+      - gawk
+      - gitlab-rails-ce-assets-fips-${{vars.major-minor-version}}=${{package.full-version}}
+      - gitlab-rails-ce-doc-fips-${{vars.major-minor-version}}=${{package.full-version}}
+      - gpgme-fips
+      - graphicsmagick
+      - gzip
+      - icu
+      - krb5
+      - libcurl-openssl4
+      - libedit
+      - libffi
+      - libjpeg-turbo
+      - libpng
+      - libpq-${{vars.postgres-version}}
+      - libxml2
+      - openssl-config-fipshardened
+      - posix-libc-utils
+      - postgresql-${{vars.postgres-version}}-client
+      - python-${{vars.python-version}}
+      - ruby${{vars.ruby-version}}-bundler
+      - ruby-${{vars.ruby-version}}
+      - sed
+      - tzdata
+      - zlib
+
+vars:
+  clang-version: '20'
+  gitlab-home: '/srv/gitlab'
+  gitlab-data: '/var/opt/gitlab'
+  gitlab-logs: '/var/log/gitlab'
+  grpc-patch-version: '1.48.0'
+  node-version: '22'
+  postgres-version: '17'
+  python-version: '3.12'
+  ruby-version: '3.3'
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - clang-${{vars.clang-version}}
+      - cmake
+      - curl
+      - gawk
+      - glibc-dev
+      - go-fips
+      - gpgme-fips-dev
+      - icu-dev
+      - krb5-dev
+      - libffi-dev
+      - make
+      - node-gyp
+      - nodejs-${{vars.node-version}}
+      - pkgconf
+      - posix-libc-utils
+      - postgresql-${{vars.postgres-version}}-dev
+      - python-${{vars.python-version}}
+      - rsync
+      - ruby${{vars.ruby-version}}-bundler
+      - ruby-${{vars.ruby-version}}-dev
+      - rust
+      - tzdata
+      - yaml-dev
+      - yarn
+      - zlib-dev
+  accounts:
+    groups:
+      - groupname: git
+        gid: 1000
+    users:
+      - username: git
+        gid: 1000
+        uid: 1000
+  environment:
+    AR: llvm-ar
+    CC: clang
+    CXX: clang++
+    NM: llvm-nm
+    TZINFO_DATA: /usr/share/zoneinfo
+    RAILS_ENV: production
+    NODE_ENV: production
+    USE_DB: false
+    SKIP_STORAGE_VALIDATION: true
+    NODE_OPTIONS: "--max_old_space_size=16384"
+    RUBY_GPGME_USE_SYSTEM_LIBRARIES: "true" # Don't build gpgme from source
+
+pipeline:
+  - name: Detect dependency drift
+    runs: |
+      # Retrieve Dockerfile
+      curl --retry 3 -fo /tmp/Dockerfile.erb \
+        https://gitlab.com/gitlab-org/build/CNG/-/raw/v${{package.version}}/gitlab-rails/Dockerfile.erb?ref_type=tags
+
+      # Compare Node versions
+      DOCKERFILE_NODE_VERSION=$(grep "^ARG NODE_VERSION=" /tmp/Dockerfile.erb | awk -F '=' '{print $2}' | tr -d '\"')
+      if [ ${DOCKERFILE_NODE_VERSION#${{vars.node-version}}} = $DOCKERFILE_NODE_VERSION ]; then
+        echo "Node version in Dockerfile doesn't match buildtime Node version!"
+        echo "Found: $DOCKERFILE_NODE_VERSION"
+        echo "Expected: ${{vars.node-version}}"
+        exit 1
+      fi
+
+      # Compare Postgres versions
+      DOCKERFILE_POSTGRES_VERSION=$(grep "^ARG PG_VERSION=" /tmp/Dockerfile.erb | awk -F '=' '{print $2}' | tr -d '\"')
+      if [ ${DOCKERFILE_POSTGRES_VERSION#${{vars.postgres-version}}} = $DOCKERFILE_POSTGRES_VERSION ]; then
+        echo "Postgres version in Dockerfile doesn't match buildtime Postgres version!"
+        echo "Found: $DOCKERFILE_POSTGRES_VERSION"
+        echo "Expected: ${{vars.postgres-version}}"
+        exit 1
+      fi
+
+      # Compare Ruby versions
+      DOCKERFILE_RUBY_VERSION=$(grep "^ARG RUBY_VERSION=" /tmp/Dockerfile.erb | awk -F '=' '{print $2}' | tr -d '\"')
+      if [ ${DOCKERFILE_RUBY_VERSION#${{vars.ruby-version}}} = $DOCKERFILE_RUBY_VERSION ]; then
+        echo "Ruby version in Dockerfile doesn't match buildtime Ruby version!"
+        echo "Found: $DOCKERFILE_RUBY_VERSION"
+        echo "Expected: ${{vars.ruby-version}}"
+        exit 1
+      fi
+
+      # Fetch Webservice Dockerfile to extract Python version
+      curl --retry 3 -fo /tmp/Dockerfile.webservice.erb \
+        https://gitlab.com/gitlab-org/build/CNG/-/raw/v${{package.version}}/gitlab-webservice/Dockerfile?ref_type=tags
+
+      # Compare Python version
+      DOCKERFILE_PYTHON_VERSION=$(grep "^ARG PYTHON_TAG=" /tmp/Dockerfile.webservice.erb | awk -F '=' '{print $2}' | tr -d '\"')
+      if [ ${DOCKERFILE_PYTHON_VERSION#${{vars.python-version}}} = $DOCKERFILE_PYTHON_VERSION ]; then
+        echo "Python version in Dockerfile doesn't match runtime Python version!"
+        echo "Found: $DOCKERFILE_PYTHON_VERSION"
+        echo "Expected: ${{vars.python-version}}"
+        exit 1
+      fi
+
+  - uses: git-checkout
+    with:
+      expected-commit: 3e2b4f03bca98f558c867d0782d3343a3274eed2
+      repository: https://github.com/gitlabhq/gitlabhq.git
+      tag: v${{package.version}}
+      destination: ${{vars.gitlab-home}}
+
+  # Support new ABI in gpgme>=2
+  - name: Bump gpgme gem
+    uses: patch
+    working-directory: ${{vars.gitlab-home}}
+    with:
+      patches: /home/build/bump-gpgme.patch
+
+  - name: Build Rails
+    working-directory: ${{vars.gitlab-home}}
+    runs: |
+      # Builds slow down massively because the CompactIndex API can't be used
+      # in FIPS mode so temporarily move our FIPS OpenSSL config
+      mv /etc/ssl/openssl.cnf /tmp/openssl.cnf
+
+      # Use local path ${{vars.gitlab-home}}/vendor/bundle/ for ruby-magic gem.
+      # See: https://gitlab.com/gitlab-org/build/CNG/-/merge_requests/697/diffs
+      bundle config set --local path ${{vars.gitlab-home}}/vendor/bundle/
+      bundle config set --local clean 'true'
+      bundle config set --local deployment 'true'
+      bundle config set --local without 'development test mysql aws'
+      bundle install --jobs $(nproc) --retry 5 --verbose
+
+      # Restore FIPS OpenSSL config
+      mv /tmp/openssl.cnf /etc/ssl/openssl.cnf
+
+      # If we don't create this file at buildtime, GitLab will attempt to create
+      # it later using git at runtime (which is not bundled at runtime)
+      git log --pretty="format:%h" --abbrev=11 -n 1 > ${{vars.gitlab-home}}/REVISION
+
+  # Patch gRPC gem to use host SSL for FIPS
+  - name: Reinstall gRPC gem
+    working-directory: ${{vars.gitlab-home}}
+    runs: |
+      curl --retry 3 -fo /tmp/grpc-system-ssl-${{vars.grpc-patch-version}}.patch \
+        https://gitlab.com/gitlab-org/build/CNG/-/raw/v${{package.version}}/shared/build-scripts/patches/grpc-system-ssl-${{vars.grpc-patch-version}}.patch?ref_type=tags
+      curl --retry 3 -fo /tmp/reinstall-grpc-if-fips \
+        https://gitlab.com/gitlab-org/build/CNG/-/raw/v${{package.version}}/shared/build-scripts/reinstall-grpc-if-fips?ref_type=tags
+      chmod +x /tmp/reinstall-grpc-if-fips
+      export CXXFLAGS="-Wno-error=missing-template-arg-list-after-template-kw"
+      FIPS_MODE=1 /tmp/reinstall-grpc-if-fips /tmp
+
+  # This allows us to remediate any CVEs in devfile
+  # and build with our Go FIPS toolchain
+  - name: Rebuild devfile
+    working-directory: ${{vars.gitlab-home}}/vendor/bundle/ruby
+    runs: |
+      cd ./*/gems/*devfile*/ext
+      # Bump deps
+      # Note: Keep bumps for fips/non-fips images the same, and backport to previous versions for consistency if possible.
+      go get \
+        golang.org/x/net@v0.47.0 \
+        github.com/docker/docker@v28.0.0 \
+        golang.org/x/oauth2@v0.30.0 \
+        golang.org/x/crypto@v0.45.0 \
+        github.com/containerd/containerd@v1.7.29 \
+        github.com/cloudflare/circl@v1.6.1 \
+        github.com/go-git/go-git/v5@v5.16.5
+      go mod tidy
+
+      # Get the original binary filename first
+      DEVFILE_BIN=$(find ../out -name "devfile*" -type f | head -1)
+      DEVFILE_NAME=$(basename "$DEVFILE_BIN")
+      # Remove the old binary
+      rm "$DEVFILE_BIN"
+
+      # Rebuild devfile with the same name
+      go build \
+        -o "../out/$DEVFILE_NAME" \
+        -tags "netgo,osusergo" \
+        -ldflags "-w" \
+        -trimpath .
+
+  - name: Configure GitLab
+    working-directory: ${{vars.gitlab-home}}
+    runs: |
+      cp config/gitlab.yml.example config/gitlab.yml
+      cp config/resque.yml.example config/resque.yml
+      cp config/secrets.yml.example config/secrets.yml
+      cp config/database.yml.postgresql config/database.yml
+
+      sed --in-place "/geo:/,/^$/d" config/database.yml
+      sed --in-place "/host: localhost/d" config/gitlab.yml
+      sed --in-place "/port: 80/d" config/gitlab.yml
+      sed --in-place "s/# user:.*/user: git/" config/gitlab.yml
+      sed --in-place "s:/home/git/repositories:${{vars.gitlab-data}}/repo:" config/gitlab.yml
+
+  - name: Compile assets
+    working-directory: ${{vars.gitlab-home}}
+    runs: |
+      # Install modules used during compilation
+      yarn install --production --pure-lockfile
+
+      # Compile assets
+      bundle exec rake gettext:compile
+      bundle exec rake gitlab:assets:compile
+
+      # Remove uncompressed maps
+      find ${{vars.gitlab-home}}/public/assets/webpack -name '*.map' -type f -print -delete
+
+  - name: Setup bootsnap cache
+    working-directory: ${{vars.gitlab-home}}
+    runs: |
+      mkdir -p ./bootsnap
+      bundle exec bootsnap precompile . --gemfile \
+        --exclude '${{vars.gitlab-home}}/config/*.yml|${{vars.gitlab-home}}/public'
+
+  - name: Cleanup
+    working-directory: ${{vars.gitlab-home}}
+    runs: |
+      rm -rf node_modules/ tmp/ spec/ qa/ rubocop/ tooling/ .git/ .gitlab/ \
+             .github/ docker/ changelogs/ danger/ Dangerfile
+      find ${{vars.gitlab-home}} -name "*.git" -exec rm -rf '{}' +
+
+      # Cleanup gems
+      curl --retry 3 -fo /tmp/cleanup-gems \
+        https://gitlab.com/gitlab-org/build/CNG/-/raw/v${{package.version}}/shared/build-scripts/cleanup-gems?ref_type=tags
+      chmod +x /tmp/cleanup-gems
+      RUBY_VERSION=$(ruby -v | awk '{print $2}') /tmp/cleanup-gems
+
+  - name: Install GitLab
+    runs: |
+      mkdir -p \
+        ${{targets.contextdir}}/${{vars.gitlab-home}} \
+        ${{targets.contextdir}}/${{vars.gitlab-data}}/data \
+        ${{targets.contextdir}}/${{vars.gitlab-data}}/config \
+        ${{targets.contextdir}}/${{vars.gitlab-data}}/repo \
+        ${{targets.contextdir}}/var/log \
+        ${{targets.contextdir}}/assets/licenses \
+        ${{targets.contextdir}}/home/git/gitlab-shell
+
+      # Install Rails
+      rsync -avz ${{vars.gitlab-home}}/ ${{targets.contextdir}}${{vars.gitlab-home}}/
+
+      # Setup logs
+      mv ${{vars.gitlab-home}}/log ${{targets.contextdir}}/${{vars.gitlab-logs}}
+      ln -s ${{vars.gitlab-logs}} ${{targets.contextdir}}/${{vars.gitlab-home}}/log
+
+      # Provide license with GitLab assets
+      cp ${{vars.gitlab-home}}/LICENSE ${{targets.contextdir}}/assets/licenses
+
+      # Symlink version file for GitLab shell
+      ln -s ${{vars.gitlab-home}}/GITLAB_SHELL_VERSION ${{targets.contextdir}}/home/git/gitlab-shell/VERSION
+
+  - uses: strip
+
+  - name: Set permissions
+    working-directory: ${{targets.contextdir}}/${{vars.gitlab-home}}
+    runs: |
+      # The git user should own all the things
+      chown -R git:git ${{targets.contextdir}}
+
+      # Only give the git user rw access to database and secrets configs
+      chmod o-rwx config/database.yml
+      chmod 0600 config/secrets.yml
+
+      # Ensure (build/shared) artifacts and pages can be ran
+      chmod -R u+rwX builds/
+      chmod -R u+rwX shared/artifacts/
+      chmod -R ug+rwX shared/pages/
+
+      # Only allow git u+g access to repo data
+      chmod -R ug+rwX,o-rwx ${{targets.contextdir}}/${{vars.gitlab-data}}/repo
+      chmod -R ug-s ${{targets.contextdir}}/${{vars.gitlab-data}}/repo
+      find ${{targets.contextdir}}/${{vars.gitlab-data}}/repo -type d -print0 | xargs -0 chmod g+s
+
+      # Ensure uploaded user data is only accessible to git u+g
+      mkdir -p public/uploads
+      chown git:git public/uploads
+      chmod 0700 public/uploads
+
+      # Ensure git u+g own GitLab shell dir and home
+      chown -R git:git ${{targets.contextdir}}/home/git
+
+      # Some gems contain world writeable files
+      # We don't want that anywhere so don't do that
+      chmod -R o-w ${{targets.contextdir}}
+
+subpackages:
+  # Assets and docs are shipped separately for Workhorse
+  - name: gitlab-rails-ce-assets-fips-${{vars.major-minor-version}}
+    description: GitLab ${{vars.major-minor-version}} CE FIPS assets
+    options:
+      no-depends: true
+      no-provides: true
+    dependencies:
+      provides:
+        - gitlab-rails-ce-assets-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.gitlab-home}}
+          mv ${{targets.destdir}}/${{vars.gitlab-home}}/public ${{targets.contextdir}}/${{vars.gitlab-home}}/
+    test:
+      pipeline:
+        - uses: test/tw/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-rails-ce-assets-fips
+
+  - name: gitlab-rails-ce-doc-fips-${{vars.major-minor-version}}
+    description: GitLab ${{vars.major-minor-version}} CE FIPS documentation
+    options:
+      no-depends: true
+      no-provides: true
+    dependencies:
+      provides:
+        - gitlab-rails-ce-doc-fips=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/${{vars.gitlab-home}}
+          mv ${{targets.destdir}}/${{vars.gitlab-home}}/doc ${{targets.contextdir}}/${{vars.gitlab-home}}/
+    test:
+      pipeline:
+        - uses: test/tw/virtualpackage
+          with:
+            virtual-pkg-name: gitlab-rails-ce-doc-fips
+
+test:
+  environment:
+    contents:
+      packages:
+        - clang-${{vars.clang-version}}
+        - postgresql-${{vars.postgres-version}}
+        - postgresql-${{vars.postgres-version}}-contrib
+        - git
+        - sudo-rs
+    accounts:
+      groups:
+        - groupname: git
+          gid: 1000
+      users:
+        - username: git
+          gid: 1000
+          uid: 1000
+    environment:
+      BOOTSNAP_CACHE_DIR: ${{vars.gitlab-home}}/bootsnap
+      CONFIG_TEMPLATE_DIRECTORY: ${{vars.gitlab-home}}/config
+      EXECJS_RUNTIME: Disabled
+      LANG: C.UTF-8
+      RAILS_ENV: production
+      RUBY_OPT: '-W:no-experimental'
+      UPGRADE_STATUS_DIR: ${{vars.gitlab-data}}/.upgrade-status
+      FIPS_MODE: 1
+  pipeline:
+    # Runs through a few basic rake tasks
+    # There are tens of them, some of them require components like
+    # sidekiq and webservice to be fully running
+    # We'll cover more functionality at the image level
+    - name: Test database creation
+      working-directory: ${{vars.gitlab-home}}
+      runs: |
+        set -ouex pipefail
+        sudo -u git initdb -D /tmp/test_db
+        sudo -u git pg_ctl -D /tmp/test_db -l /tmp/logfile start
+        bundle exec rake db:prepare
+    - name: Seed issues
+      working-directory: ${{vars.gitlab-home}}
+      runs: |
+        set -ouex pipefail
+        bundle exec rake gitlab:seed:issues
+    - name: Add webhook
+      working-directory: ${{vars.gitlab-home}}
+      runs: |
+        set -ouex pipefail
+        bundle exec rake gitlab:web_hook:add URL="https://chainguard.dev"
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v18.9.
+  ignore-regex-patterns:
+    - '-rc*'
