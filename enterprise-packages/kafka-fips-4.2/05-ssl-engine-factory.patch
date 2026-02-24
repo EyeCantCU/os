@@ -1,0 +1,140 @@
+# Replace JDK PEM private key parsing with BouncyCastle FIPS PEMParser.
+# JDK's EncryptedPrivateKeyInfo uses non-FIPS algorithms (PBE with MD5/DES);
+# BouncyCastle PEMParser supports FIPS-approved decryption algorithms.
+# Also uses KeyStore.getDefaultType() for in-memory keystore creation.
+# Rejects non-BCFKS keystore types (JKS, JCEKS, PKCS12 use non-FIPS algorithms).
+diff --git a/clients/src/main/java/org/apache/kafka/common/security/ssl/DefaultSslEngineFactory.java b/clients/src/main/java/org/apache/kafka/common/security/ssl/DefaultSslEngineFactory.java
+index 0a3d587..aee2583 100644
+--- a/clients/src/main/java/org/apache/kafka/common/security/ssl/DefaultSslEngineFactory.java
++++ b/clients/src/main/java/org/apache/kafka/common/security/ssl/DefaultSslEngineFactory.java
+@@ -27,6 +27,14 @@ import org.apache.kafka.common.security.auth.SslEngineFactory;
+ import org.apache.kafka.common.utils.SecurityUtils;
+ import org.apache.kafka.common.utils.Utils;
+
++import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
++import org.bouncycastle.openssl.PEMEncryptedKeyPair;
++import org.bouncycastle.openssl.PEMKeyPair;
++import org.bouncycastle.openssl.PEMParser;
++import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
++import org.bouncycastle.openssl.jcajce.JcePEMDecryptorProviderBuilder;
++import org.bouncycastle.pkcs.PKCS8EncryptedPrivateKeyInfo;
++import org.bouncycastle.pkcs.jcajce.JcePKCSPBEInputDecryptorProviderBuilder;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+
+@@ -45,8 +53,7 @@ import java.security.PrivateKey;
+ import java.security.SecureRandom;
+ import java.security.cert.Certificate;
+ import java.security.cert.CertificateFactory;
+-import java.security.spec.InvalidKeySpecException;
+-import java.security.spec.PKCS8EncodedKeySpec;
++import java.io.StringReader;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Base64;
+@@ -60,11 +67,6 @@ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+ import java.util.stream.Collectors;
+
+-import javax.crypto.Cipher;
+-import javax.crypto.EncryptedPrivateKeyInfo;
+-import javax.crypto.SecretKey;
+-import javax.crypto.SecretKeyFactory;
+-import javax.crypto.spec.PBEKeySpec;
+ import javax.net.ssl.KeyManager;
+ import javax.net.ssl.KeyManagerFactory;
+ import javax.net.ssl.SSLContext;
+@@ -343,6 +345,10 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
+
+         FileBasedStore(String type, String path, Password password, Password keyPassword, boolean isKeyStore) {
+             Objects.requireNonNull(type, "type must not be null");
++            if (!"BCFKS".equalsIgnoreCase(type)) {
++                throw new InvalidConfigurationException(
++                    "Invalid keystore type '" + type + "': only BCFKS is supported");
++            }
+             this.type = type;
+             this.path = path;
+             this.password = password;
+@@ -460,7 +466,7 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
+
+         private KeyStore createKeyStoreFromPem(String privateKeyPem, String certChainPem, char[] keyPassword) {
+             try {
+-                KeyStore ks = KeyStore.getInstance("PKCS12");
++                KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+                 ks.load(null, null);
+                 Key key = privateKey(privateKeyPem, keyPassword);
+                 Certificate[] certChain = certs(certChainPem);
+@@ -473,7 +479,7 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
+
+         private KeyStore createTrustStoreFromPem(String trustedCertsPem) {
+             try {
+-                KeyStore ts = KeyStore.getInstance("PKCS12");
++                KeyStore ts = KeyStore.getInstance(KeyStore.getDefaultType());
+                 ts.load(null, null);
+                 Certificate[] certs = certs(trustedCertsPem);
+                 for (int i = 0; i < certs.length; i++) {
+@@ -501,36 +507,37 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
+         }
+
+         private PrivateKey privateKey(String pem, char[] keyPassword) throws Exception {
+-            List<byte[]> keyEntries = PRIVATE_KEY_PARSER.pemEntries(pem);
+-            if (keyEntries.isEmpty())
+-                throw new InvalidConfigurationException("Private key not provided");
+-            if (keyEntries.size() != 1)
+-                throw new InvalidConfigurationException("Expected one private key, but found " + keyEntries.size());
+-
+-            byte[] keyBytes = keyEntries.get(0);
+-            PKCS8EncodedKeySpec keySpec;
+-            if (keyPassword == null) {
+-                keySpec = new PKCS8EncodedKeySpec(keyBytes);
+-            } else {
+-                EncryptedPrivateKeyInfo keyInfo = new EncryptedPrivateKeyInfo(keyBytes);
+-                String algorithm = keyInfo.getAlgName();
+-                SecretKeyFactory keyFactory = SecretKeyFactory.getInstance(algorithm);
+-                SecretKey pbeKey = keyFactory.generateSecret(new PBEKeySpec(keyPassword));
+-                Cipher cipher = Cipher.getInstance(algorithm);
+-                cipher.init(Cipher.DECRYPT_MODE, pbeKey, keyInfo.getAlgParameters());
+-                keySpec = keyInfo.getKeySpec(cipher);
+-            }
++            try (PEMParser pemParser = new PEMParser(new StringReader(pem))) {
++                Object object = pemParser.readObject();
++                if (object == null) {
++                    throw new InvalidConfigurationException("Private key not provided");
++                }
+
+-            InvalidKeySpecException firstException = null;
+-            for (KeyFactory factory : KEY_FACTORIES) {
+-                try {
+-                    return factory.generatePrivate(keySpec);
+-                } catch (InvalidKeySpecException e) {
+-                    if (firstException == null)
+-                        firstException = e;
++                JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
++                if (object instanceof PEMEncryptedKeyPair) {
++                    if (keyPassword == null) {
++                        throw new InvalidConfigurationException("Encrypted private key provided but no password specified");
++                    }
++                    PEMEncryptedKeyPair encryptedKeyPair = (PEMEncryptedKeyPair) object;
++                    PEMKeyPair keyPair = encryptedKeyPair.decryptKeyPair(
++                            new JcePEMDecryptorProviderBuilder().build(keyPassword));
++                    return converter.getPrivateKey(keyPair.getPrivateKeyInfo());
++                } else if (object instanceof PKCS8EncryptedPrivateKeyInfo) {
++                    if (keyPassword == null) {
++                        throw new InvalidConfigurationException("Encrypted private key provided but no password specified");
++                    }
++                    PKCS8EncryptedPrivateKeyInfo encryptedInfo = (PKCS8EncryptedPrivateKeyInfo) object;
++                    PrivateKeyInfo keyInfo = encryptedInfo.decryptPrivateKeyInfo(
++                            new JcePKCSPBEInputDecryptorProviderBuilder().build(keyPassword));
++                    return converter.getPrivateKey(keyInfo);
++                } else if (object instanceof PEMKeyPair) {
++                    return converter.getPrivateKey(((PEMKeyPair) object).getPrivateKeyInfo());
++                } else if (object instanceof PrivateKeyInfo) {
++                    return converter.getPrivateKey((PrivateKeyInfo) object);
++                } else {
++                    throw new InvalidConfigurationException("Unexpected PEM object type: " + object.getClass().getName());
+                 }
+             }
+-            throw new InvalidConfigurationException("Private key could not be loaded", firstException);
+         }
+
+         private static KeyFactory keyFactory(String algorithm) {
