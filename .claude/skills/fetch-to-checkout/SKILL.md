@@ -166,7 +166,7 @@ Tarballs include pre-generated `configure`. Git checkouts do not.
 
 **Signs you need bootstrap:** The project uses autoconf/automake (has `configure.ac`, `Makefile.am`).
 
-**Add to environment.contents.packages:**
+**Prefer the `autoconf/configure` pipeline** (if the package isn't using it already) — it already pulls in `autoconf`, `automake`, and related deps automatically. Only add them manually to `environment.contents.packages` if you can't switch to that pipeline:
 ```yaml
 - autoconf
 - automake
@@ -649,6 +649,8 @@ git ls-remote --tags REPO_URL | grep "$VERSION" | head -20
 ```
 Look at the pattern and adjust the tag template.
 
+Some packages have no tags at all, or lack a tag for the specific version being packaged. In that case the conversion is not straightforward — file an upstream issue asking them to add tags, and skip the package for now.
+
 ### Version in tag uses different format
 Example: erlang uses dots in version but tag is `OTP-25.3.2.21`. Construct the tag accordingly.
 
@@ -657,6 +659,9 @@ The package was not a standard tarball (e.g., a `.deb` file). The git-checkout a
 
 ### Multiple packages sharing the same repo (version streams)
 Convert all streams in one batch commit. They all point to the same `repository:` URL but different `tag:` values (different version numbers).
+
+### Package is a subdirectory of a larger repository
+Some packages only use a subdirectory of the upstream repo (e.g., a library nested inside a monorepo). These require adding `working-directory:` to the `git-checkout` step or other workarounds to point the build at the right path. These cases are usually complex — inspect the existing `fetch` URI and build pipeline carefully before attempting the conversion.
 
 ### Already has `github:` in update section
 Some packages already have `github:` in their `update:` block but still use `fetch`. Only the pipeline needs updating; the `update:` section may only need minor adjustments (e.g., removing a `strip-prefix: v` if the tag turns out to be bare).
