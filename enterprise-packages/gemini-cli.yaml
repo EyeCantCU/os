@@ -16,6 +16,7 @@ environment:
   contents:
     packages:
       - busybox
+      - curl
       - git
       - nodejs
       - npm
@@ -71,6 +72,42 @@ pipeline:
         name: Remove aarch64 prebuilt binaries
         runs: |
           find "${{targets.destdir}}/usr/lib/node_modules" -type d \( -name "linux-arm64" -o -name "arm64" \) -exec rm -rf {} +
+
+subpackages:
+  # Entrypoint script from the official Node.js Docker image.
+  # This is necessary because upstream may update the entrypoint script independently.
+  # By tracking the SHA256 hash, we detect when the script changes and can review updates.
+  # If the hash verification fails, the build exits 1 to alert that the upstream
+  # entrypoint has changed and requires review.
+  - name: ${{package.name}}-entrypoint-compat
+    description: Docker entrypoint script for Node.js container configuration
+    dependencies:
+      runtime:
+        - busybox
+    pipeline:
+      - runs: |
+          set -euo pipefail
+          ENTRYPOINT_URL="https://raw.githubusercontent.com/nodejs/docker-node/main/docker-entrypoint.sh"
+          curl -fsSL -o /tmp/docker-entrypoint.sh "$ENTRYPOINT_URL"
+
+          EXPECTED_SHA256="a15ac9589c04baf9da95b08e0e79b5cf1d75ab8dc64e06a5e68e4ceb0ad7c8ea"
+          ACTUAL_SHA256=$(sha256sum /tmp/docker-entrypoint.sh | cut -d' ' -f1)
+          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "ERROR: docker-entrypoint.sh hash mismatch!"
+            echo "Expected: $EXPECTED_SHA256"
+            echo "Actual:   $ACTUAL_SHA256"
+            echo "Review changes at: https://github.com/nodejs/docker-node/blob/main/docker-entrypoint.sh"
+            exit 1
+          fi
+
+          install -Dm755 /tmp/docker-entrypoint.sh "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
+    test:
+      pipeline:
+        - runs: |
+            set -euo pipefail
+            stat /usr/bin/docker-entrypoint.sh
+            test -x /usr/bin/docker-entrypoint.sh || { echo "ERROR: not executable"; exit 1; }
+            head -1 /usr/bin/docker-entrypoint.sh | grep -F "#!/bin/sh"
 
 update:
   enabled: true
