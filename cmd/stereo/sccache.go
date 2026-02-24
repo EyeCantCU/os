@@ -19,9 +19,9 @@ func sccacheMelangeOpts(cfg *config.Configuration, subcmd string) ([]string, err
 	for _, pipeline := range pipelines {
 		if findPipeline(pipeline, isSccacheEnablePipeline) {
 			return []string{
-				"--repository-append", CgSccacheConfigRepo,
-				"--package-append", "cg-sccache-config",
-				"--env-file", "../os/sccache.env",
+				"--repository-append=" + CgSccacheConfigRepo,
+				"--package-append=cg-sccache-config",
+				"--env-file=../os/sccache.env",
 			}, nil
 		}
 	}
