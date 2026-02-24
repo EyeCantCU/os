@@ -46,9 +46,17 @@ pipeline:
       exitcode=0
       tmpdir="$(mktemp -d)"
       trap 'rm -rf $tmpdir' EXIT
+
       # cargo-culted from https://git.almalinux.org/rpms/gcc-toolset-14-gcc/src/commit/62cb63d4a3ddb6b77a5a69794f2b8f76c3a25ad1/SPECS/gcc.spec#L1149
-      readelf -Ws "${{inputs.oldlib}}" | sed -n '/\.symtab/,$d;/ UND /d;/@GLIBC_PRIVATE/d;/\(GLOBAL\|WEAK\|UNIQUE\)/p' | awk '{ if ($4 == "OBJECT") { printf "%s %s %s %s %s\n", $8, $4, $5, $6, $3 } else { printf "%s %s %s %s\n", $8, $4, $5, $6 }}' | sed 's/ UNIQUE / GLOBAL /;s/ WEAK / GLOBAL /;s/@@GLIBCXX_\(LDBL_\)\?[0-9.]*//;s/@@CXXABI_TM_[0-9.]*//;s/@@CXXABI_FLOAT128//;s/@@CXXABI_\(LDBL_\)\?[0-9.]*//' | LC_ALL=C sort -u > "$tmpdir/system.abilist"
-      readelf -Ws "${{inputs.newlib}}" | sed -n '/\.symtab/,$d;/ UND /d;/@GLIBC_PRIVATE/d;/\(GLOBAL\|WEAK\|UNIQUE\)/p' | awk '{ if ($4 == "OBJECT") { printf "%s %s %s %s %s\n", $8, $4, $5, $6, $3 } else { printf "%s %s %s %s\n", $8, $4, $5, $6 }}' | sed 's/ UNIQUE / GLOBAL /;s/ WEAK / GLOBAL /;s/@@GLIBCXX_\(LDBL_\)\?[0-9.]*//;s/@@CXXABI_TM_[0-9.]*//;s/@@CXXABI_FLOAT128//;s/@@CXXABI_\(LDBL_\)\?[0-9.]*//' | LC_ALL=C sort -u > "$tmpdir/vanilla.abilist"
+      extract_abilist() {
+        local lib="$1"
+
+        readelf -Ws "${lib}" | sed -n '/\.symtab/,$d;/ UND /d;/@GLIBC_PRIVATE/d;/\(GLOBAL\|WEAK\|UNIQUE\)/p' | awk '{ if ($4 == "OBJECT") { printf "%s %s %s %s %s\n", $8, $4, $5, $6, $3 } else { printf "%s %s %s %s\n", $8, $4, $5, $6 }}' | sed 's/ UNIQUE / GLOBAL /;s/ WEAK / GLOBAL /;s/@@GLIBCXX_\(LDBL_\)\?[0-9.]*//;s/@@CXXABI_TM_[0-9.]*//;s/@@CXXABI_FLOAT128//;s/@@CXXABI_\(LDBL_\)\?[0-9.]*//' | LC_ALL=C sort -u
+      }
+
+      extract_abilist "${{inputs.oldlib}}" > "$tmpdir/system.abilist"
+      extract_abilist "${{inputs.newlib}}" > "$tmpdir/vanilla.abilist"
+
       diff -up "$tmpdir/system.abilist" "$tmpdir/vanilla.abilist" | awk '/^\+\+\+/{next}/^\+/{print gensub(/^+(.*)$/,"\\1","1",$0)}' > "$tmpdir/system2vanilla.abilist.diff"
       if [ -n "${{inputs.cc-prefix-dir}}" ]; then
         prefix_arg="-B ${{inputs.cc-prefix-dir}}"
@@ -56,7 +64,7 @@ pipeline:
         prefix_arg=""
       fi
       GCC_SPEC_FILE=/dev/null "${{inputs.cc}}" $prefix_arg -shared -o "$tmpdir/libstdc++_nonshared.so" -Wl,--whole-archive "${{inputs.nonsharedlib}}" -Wl,--no-whole-archive "${{inputs.oldlib}}"
-      readelf -Ws "$tmpdir/libstdc++_nonshared.so" | sed -n '/\.symtab/,$d;/ UND /d;/@GLIBC_PRIVATE/d;/\(GLOBAL\|WEAK\|UNIQUE\)/p' | awk '{ if ($4 == "OBJECT") { printf "%s %s %s %s %s\n", $8, $4, $5, $6, $3 } else { printf "%s %s %s %s\n", $8, $4, $5, $6 }}' | sed 's/ UNIQUE / GLOBAL /;s/ WEAK / GLOBAL /;s/@@GLIBCXX_\(LDBL_\)\?[0-9.]*//;s/@@CXXABI_TM_[0-9.]*//;s/@@CXXABI_FLOAT128//;s/@@CXXABI_\(LDBL_\)\?[0-9.]*//' | LC_ALL=C sort -u > "$tmpdir/nonshared.abilist"
+      extract_abilist "$tmpdir/libstdc++_nonshared.so" > "$tmpdir/nonshared.abilist"
       echo ====================NONSHARED=========================
       ldd -d -r "$tmpdir/libstdc++_nonshared.so"
       ldd -u "$tmpdir/libstdc++_nonshared.so"
