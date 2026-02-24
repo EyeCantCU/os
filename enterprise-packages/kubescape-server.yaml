@@ -1,0 +1,101 @@
+package:
+  name: kubescape-server
+  version: "4.0.2"
+  epoch: 0
+  description: Kubescape HTTP server microservice for Kubernetes deployments
+  copyright:
+    - license: Apache-2.0 AND MIT
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 9aba8e4534913808434e9bd1d8981f6e7fc17e8d
+      repository: https://github.com/kubescape/kubescape
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/anchore/grype@v0.104.1
+        github.com/go-git/go-git/v5@v5.16.5
+        github.com/nwaples/rardecode/v2@v2.2.1
+
+  # Bump httphandler module dependencies
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/anchore/grype@v0.104.1
+        github.com/go-git/go-git/v5@v5.16.5
+        github.com/nwaples/rardecode/v2@v2.2.1
+      modroot: httphandler
+
+  # Build ksserver HTTP handler binary (separate module)
+  - uses: go/build
+    with:
+      modroot: httphandler
+      packages: .
+      output: ksserver
+      ldflags: -X main.version=${{package.version}}
+
+subpackages:
+  - name: ${{package.name}}-downloader
+    description: Kubescape downloader utility for fetching control files
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./downloader
+          output: downloader
+    test:
+      pipeline:
+        - uses: test/tw/help-check
+          with:
+            bins: downloader
+        - name: Test downloader functionality
+          runs: |
+            set -euo pipefail
+            downloader --framework nsa 2>&1 | grep -F "success"
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              $HOME/.kubescape/nsa.json
+              $HOME/.kubescape/controls-inputs.json
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: ksserver
+    - uses: test/tw/ver-check
+      with:
+        bins: ksserver
+    - uses: test/kwok/cluster
+    - uses: test/daemon-check-output
+      with:
+        setup: |-
+          mkdir -p /etc/kubescape
+          tee /etc/kubescape/clusterData.json << 'EOF'
+          {
+            "gatewayWebsocketURL": "",
+            "gatewayRestURL": "",
+            "kubevulnURL": "",
+            "kubescapeURL": ""
+          }
+          EOF
+        start: ksserver
+        timeout: 30
+        expected_output: "Starting Kubescape server"
+        post: |-
+          set -euo pipefail
+          wait-for-it -t 5 --strict localhost:8080
+          curl -sf http://localhost:8080/livez
+          curl -sf http://localhost:8080/readyz
+
+update:
+  enabled: true
+  github:
+    identifier: kubescape/kubescape
+    strip-prefix: v

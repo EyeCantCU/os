@@ -1,7 +1,7 @@
 package:
   name: pluto-fips
-  version: "5.22.7"
-  epoch: 2 # CVE-2025-68121
+  version: "5.22.8"
+  epoch: 0 # CVE-2025-68121
   description: A cli tool to help discover deprecated apiVersions in Kubernetes
   copyright:
     - license: Apache-2.0
@@ -11,7 +11,7 @@ pipeline:
     with:
       repository: https://github.com/FairwindsOps/pluto
       tag: v${{package.version}}
-      expected-commit: d3b74eba1b1a24e614b6daef9c613d5203c2b234
+      expected-commit: 6b3a11386420584390c3d97fe8939b30a37b5483
 
   - uses: go/build
     with:
@@ -51,18 +51,28 @@ test:
         - jq
   pipeline:
     - uses: test/go-fips-check
-    - name: "Basic version test"
-      runs: |
-        pluto version | grep -q "${{package.version}}"
-        pluto --help
+    - uses: test/tw/ver-check
+      with:
+        bins: pluto
+    - uses: test/tw/help-check
+      with:
+        bins: pluto
     - uses: test/kwok/cluster
-    - name: "Bash Completion test"
+    - name: "Test bash completion script generation"
       runs: |
-        pluto completion bash 2>&1 | grep -q "bash completion V2 for pluto"
+        set -euo pipefail
+        # Generate and verify bash completion script
+        # This tests the completion subcommand functionality
+        pluto completion bash > /tmp/completion.bash
+        # Verify file was created with content (fails if empty or missing)
+        test -s /tmp/completion.bash
+        # Verify it contains expected completion markers
+        grep -F "bash completion" /tmp/completion.bash
     - name: "Detection test"
       runs: |
+        set -euo pipefail
         # Create a sample manifest
-        cat > deprecated.yaml <<EOF
+        tee deprecated.yaml <<EOF
         apiVersion: apps/v1beta1
         kind: Deployment
         metadata:
@@ -74,13 +84,15 @@ test:
               - name: nginx
                 image: nginx
         EOF
-        # Detect issues
-        pluto detect deprecated.yaml --output json | jq '.items[]' | grep -q '"deprecated": true'
-        echo "hello"
+        # Detect issues - pluto exits 3 when deprecated APIs are found, which is expected
+        pluto detect deprecated.yaml --output json > /tmp/pluto-output.json || true
+        # Verify deprecated API is detected (fails test if no deprecated items found)
+        jq -e '.items[] | select(.deprecated == true)' /tmp/pluto-output.json
     - name: "detect-all-in-cluster"
       runs: |
+        set -euo pipefail
         # Create and apply a custom Endpoints object
-        cat > deprecated-endpoints.yaml <<EOF
+        tee deprecated-endpoints.yaml <<EOF
         apiVersion: v1
         kind: Endpoints
         metadata:
@@ -93,8 +105,11 @@ test:
             protocol: TCP
         EOF
         kubectl apply -f deprecated-endpoints.yaml
-        pluto detect-all-in-cluster --output json --ignore-deprecations --ignore-removals | grep -q "target-versions"
+        # Verify detect-all-in-cluster produces output with target-versions (fails test if not found)
+        pluto detect-all-in-cluster --output json --ignore-deprecations --ignore-removals | grep -F "target-versions"
     - name: "List Versions"
       runs: |
-        pluto list-versions | grep -q "Deployment"
-        pluto list-versions | grep -q "PodSecurityPolicy"
+        set -euo pipefail
+        # Verify known API versions are listed (fails test if not found)
+        pluto list-versions | grep -F "Deployment"
+        pluto list-versions | grep -F "PodSecurityPolicy"
