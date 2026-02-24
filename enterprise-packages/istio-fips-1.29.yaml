@@ -1,0 +1,289 @@
+package:
+  name: istio-fips-1.29
+  version: "1.29.0"
+  epoch: 0 # CVE-2025-68121
+  description: Istio is an open source service mesh that layers transparently onto existing distributed applications.
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: "10"
+    memory: 11Gi
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+# This package contains cni binaries. They can be copied out of Wolfi
+# onto older host-os During build-time link against an older glibc, to
+# ensure go-fips built cni remain ABI compatible with old foreign
+# host-os.
+environment:
+  contents:
+    packages:
+      - oldglibc~2.28
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/istio/istio
+      tag: ${{package.version}}
+      expected-commit: 2300e2458ab713c2c514a58da1ea8b03343ada7e
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/crypto@v0.45.0
+        github.com/containernetworking/plugins@v1.9.0
+
+  # Integration with our portable OpenSSL
+  - uses: patch
+    with:
+      patches: portable-libcrypto.patch
+
+subpackages:
+  - name: istio-cni-fips-${{vars.major-minor-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cni/cmd/istio-cni
+          output: istio-cni
+          go-package: go-fips
+          ldflags: |
+            -X istio.io/istio/pkg/version.buildVersion=${{package.version}}
+            -X istio.io/istio/pkg/version.buildGitRevision=$(git rev-parse HEAD)
+            -X istio.io/istio/pkg/version.buildTag=$(git describe --tags --always)
+            -X istio.io/istio/pkg/version.buildStatus="Clean"
+          extra-args: "-buildvcs=false"
+    test:
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: ${{subpkg.name}}
+        - uses: test/tw/help-check
+          with:
+            bins: istio-cni
+
+  - name: istio-cni-fips-${{vars.major-minor-version}}-compat
+    pipeline:
+      - runs: |
+          # See https://github.com/istio/istio/blob/1.20.2/cni/deployments/kubernetes/Dockerfile.install-cni
+          mkdir -p ${{targets.subpkgdir}}/opt/cni/bin
+          ln -sf /usr/bin/istio-cni ${{targets.subpkgdir}}/opt/cni/bin/istio-cni
+    dependencies:
+      provides:
+        - istio-cni-fips-compat=${{package.full-version}}
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: istio-cni-fips-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: istio-install-cni-fips-${{vars.major-minor-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cni/cmd/install-cni
+          output: install-cni
+          go-package: go-fips
+          ldflags: |
+            -X istio.io/istio/pkg/version.buildVersion=${{package.version}}
+            -X istio.io/istio/pkg/version.buildGitRevision=$(git rev-parse HEAD)
+            -X istio.io/istio/pkg/version.buildTag=$(git describe --tags --always)
+            -X istio.io/istio/pkg/version.buildStatus="Clean"
+          extra-args: "-buildvcs=false"
+    dependencies:
+      provides:
+        - istio-install-cni-fips=${{package.full-version}}
+      runtime:
+        - libcrypto3-2.34
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: istio-install-cni-fips
+            real-pkg-name: ${{subpkg.name}}
+        - uses: test/go-fips-check
+          with:
+            package-match: ${{subpkg.name}}
+        - uses: test/tw/help-check
+          with:
+            bins: install-cni
+
+  - name: istio-install-cni-fips-${{vars.major-minor-version}}-compat
+    pipeline:
+      - runs: |
+          # See https://github.com/istio/istio/blob/1.20.2/cni/deployments/kubernetes/Dockerfile.install-cni
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -sf /usr/bin/install-cni ${{targets.subpkgdir}}/usr/local/bin/install-cni
+    dependencies:
+      provides:
+        - istio-install-cni-fips-compat=${{package.full-version}}
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: istio-install-cni-fips-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: istio-pilot-agent-fips-${{vars.major-minor-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./pilot/cmd/pilot-agent
+          output: pilot-agent
+          go-package: go-fips-md5
+          # Extracted from https://github.com/istio/istio/blob/4358b84b911a80ba09ef36ac00ad85535a77e7ca/common/scripts/report_build_info.sh#L41-L48
+          # Use this instead for buildStatus once our pipeline stops dirtying the git tree: "$(if git diff-index --quiet HEAD --; then echo "Clean"; else echo "Modified"; fi)"
+          ldflags: |
+            -X istio.io/istio/pkg/version.buildVersion=${{package.version}}
+            -X istio.io/istio/pkg/version.buildGitRevision=$(git rev-parse HEAD)
+            -X istio.io/istio/pkg/version.buildTag=$(git describe --tags --always)
+            -X istio.io/istio/pkg/version.buildStatus="Clean"
+          extra-args: "-buildvcs=false"
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/var/lib/istio/envoy
+          cp ./tools/packaging/common/envoy_bootstrap.json \
+            ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
+    test:
+      environment:
+        contents:
+          packages:
+            - openssl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: ${{subpkg.name}}
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Test pilot-agent initialization
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
+
+              # Create directories pilot-agent needs (RELATIVE paths from cwd)
+              mkdir -p var/run/secrets/istio
+              mkdir -p var/run/secrets/workload-spiffe-uds
+              mkdir -p etc/istio/proxy
+
+              # Generate self-signed CA cert
+              openssl req -x509 -newkey rsa:2048 -keyout /tmp/ca-key.pem \
+                -out var/run/secrets/istio/root-cert.pem -days 1 -nodes \
+                -subj "/CN=Istio CA"
+            start: pilot-agent proxy sidecar --domain=cluster.local
+            timeout: 30
+            expected_output: "Starting"
+
+  - name: istio-pilot-agent-fips-${{vars.major-minor-version}}-compat
+    pipeline:
+      - runs: |
+          # link /usr/local/bin/pilot-agent -> /usr/bin/pilot-agent to match
+          # what the Istio Helm charts may expect.
+          mkdir -p ${{targets.subpkgdir}}/usr/local/bin
+          ln -sf /usr/bin/pilot-agent ${{targets.subpkgdir}}/usr/local/bin/pilot-agent
+    dependencies:
+      provides:
+        - istio-pilot-agent-fips-compat=${{package.full-version}}
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: istio-pilot-agent-fips-compat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: istio-pilot-discovery-fips-${{vars.major-minor-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./pilot/cmd/pilot-discovery
+          output: pilot-discovery
+          go-package: go-fips-md5
+          # Extracted from https://github.com/istio/istio/blob/4358b84b911a80ba09ef36ac00ad85535a77e7ca/common/scripts/report_build_info.sh#L41-L48
+          # Use this instead for buildStatus once our pipeline stops dirtying the git tree: "$(if git diff-index --quiet HEAD --; then echo "Clean"; else echo "Modified"; fi)"
+          ldflags: |
+            -X istio.io/istio/pkg/version.buildVersion=${{package.version}}
+            -X istio.io/istio/pkg/version.buildGitRevision=$(git rev-parse HEAD)
+            -X istio.io/istio/pkg/version.buildTag=$(git describe --tags --always)
+            -X istio.io/istio/pkg/version.buildStatus="Clean"
+          extra-args: "-buildvcs=false"
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/var/lib/istio/envoy
+          cp ./tools/packaging/common/envoy_bootstrap.json \
+            ${{targets.subpkgdir}}/var/lib/istio/envoy/envoy_bootstrap_tmpl.json
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+        environment:
+          KUBERNETES_SERVICE_HOST: "127.0.0.1"
+          KUBERNETES_SERVICE_PORT: "32764"
+      pipeline:
+        - uses: test/go-fips-check
+          with:
+            package-match: ${{subpkg.name}}
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Test pilot-discovery daemon startup
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              kubectl create namespace istio-system
+            start: pilot-discovery discovery --monitoringAddr=:15014
+            expected_output: "Starting"
+            timeout: 30
+            post: |
+              # Verify ready endpoint responds (fails test if not ready)
+              curl -sf http://localhost:8080/ready && echo "SUCCESS: ready endpoint responding"
+
+update:
+  enabled: true
+  git:
+    tag-filter-prefix: 1.29.
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+        - istio-pilot-agent-fips-${{vars.major-minor-version}}
+        - istio-pilot-discovery-fips-${{vars.major-minor-version}}
+  pipeline:
+    - uses: test/go-fips-check
+    - name: Verify version metadata for pilot-discovery and pilot-agent
+      runs: |-
+        set -euo pipefail
+
+        # check version/tag/commit are not "unknown" for pilot-discovery
+        pilot-discovery version -o json > /tmp/pd-version.json
+
+        # Verify version contains expected value (fails test if false)
+        jq -e ".clientVersion.version | contains(\"${{package.version}}\")" /tmp/pd-version.json
+
+        # Verify revision is not "unknown" (fails test if equals "unknown")
+        jq -e '.clientVersion.revision != "unknown"' /tmp/pd-version.json
+
+        # Verify tag is not "unknown" (fails test if equals "unknown")
+        jq -e '.clientVersion.tag != "unknown"' /tmp/pd-version.json
+
+        # check version/tag/commit are not "unknown" for pilot-agent
+        pilot-agent version -o json > /tmp/pa-version.json
+
+        # Verify version contains expected value (fails test if false)
+        jq -e ".clientVersion.version | contains(\"${{package.version}}\")" /tmp/pa-version.json
+
+        # Verify revision is not "unknown" (fails test if equals "unknown")
+        jq -e '.clientVersion.revision != "unknown"' /tmp/pa-version.json
+
+        # Verify tag is not "unknown" (fails test if equals "unknown")
+        jq -e '.clientVersion.tag != "unknown"' /tmp/pa-version.json
+
+        echo "SUCCESS: Version metadata verified for pilot-discovery and pilot-agent"
