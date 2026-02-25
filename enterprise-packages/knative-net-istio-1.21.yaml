@@ -1,0 +1,160 @@
+package:
+  name: knative-net-istio-1.21
+  version: "1.21.1"
+  epoch: 1
+  description: Knative net-istio defines a KIngress controller for Istio.
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: "2"
+    memory: 8Gi
+  dependencies:
+    provides:
+      - knative-net-istio=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/knative-extensions/net-istio.git
+      tag: knative-v${{package.version}}
+      expected-commit: 1dc9b2da015d1113e32944b168381548e979fbf7
+
+data:
+  - name: packages
+    items:
+      controller:
+      webhook:
+
+subpackages:
+  - name: ${{package.name}}-${{range.key}}
+    range: packages
+    description: Knative net-istio ${{range.key}} component.
+    pipeline:
+      - name: Build knative-net-istio-${{range.key}}
+        uses: go/build
+        with:
+          packages: ./cmd/${{range.key}}
+          output: ${{range.key}}
+    test:
+      environment:
+        environment:
+          SYSTEM_NAMESPACE: "knative-serving"
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: ${{range.key}}
+        - uses: test/tw/ver-check
+          with:
+            bins: ${{range.key}}
+        - uses: test/kwok/cluster
+        - uses: test/daemon-check-output
+          with:
+            start: ${{range.key}} -kubeconfig ~/.kube/config
+            timeout: 30
+            expected_output: |
+              Running with Standard leader election
+              Starting informers
+            error_strings: |
+              FATAL
+              panic
+              command not found
+
+  - name: "${{package.name}}-${{range.key}}-compat"
+    range: packages
+    description: "compatibility symlinks package for ${{package.name}}-${{range.key}}"
+    pipeline:
+      - runs: |
+          # Symlink the binary from usr/bin to /ko-app/
+          mkdir -p ${{targets.contextdir}}/ko-app
+          ln -sf /usr/bin/${{range.key}} ${{targets.contextdir}}/ko-app/${{range.key}}
+    test:
+      pipeline:
+        - name: Test compat directory
+          runs: |
+            test "$(readlink -fv /ko-app/${{range.key}})" = "/usr/bin/${{range.key}}"
+
+# Functional tests for webhook and controller components
+test:
+  environment:
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
+      SYSTEM_NAMESPACE: "knative-serving"
+    contents:
+      packages:
+        - ${{package.name}}-controller
+        - ${{package.name}}-controller-compat
+        - ${{package.name}}-webhook
+        - ${{package.name}}-webhook-compat
+        - istioctl
+  pipeline:
+    - uses: test/kwok/cluster
+    - name: Test webhook entrypoint and logs
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl apply -f https://github.com/knative/serving/releases/latest/download/serving-crds.yaml
+          kubectl apply -f https://github.com/knative/serving/releases/latest/download/serving-core.yaml
+          istioctl install -y
+          kubectl apply -f "https://github.com/knative/net-istio/releases/download/knative-v${{package.version}}/net-istio.yaml"
+        start: |
+          webhook -kubeconfig ~/.kube/config
+        timeout: 60
+        # Omit 'ERROR':
+        # * webhook throws: the object has been modified; please apply your changes to the latest version and try again
+        # similar to https://github.com/chainguard-dev/enterprise-packages/blob/bd1af8f77530611d167efdb4d1d346517d6dea27/knative-serving-1.17.yaml#L105
+        error_strings: |
+          FATAL
+          FAIL
+          Traceback.*most.recent.call
+          Exception in thread
+          panic
+          command not found
+        expected_output: |
+          Registering 1 clients
+          Registering 2 informer factories
+          Registering 3 informers
+          Registering 3 controllers
+          Running with Standard leader election
+          Starting configmap watcher
+          Starting informers
+          Informers have been synced, unblocking admission webhooks
+          Starting controllers
+          Starting controller and workers
+          Started workers
+          will run in leader-elected mode with id
+          Webhook is valid
+          Updating webhook
+          Reconcile succeeded
+    - name: Test controller entrypoint and logs
+      uses: test/daemon-check-output
+      with:
+        start: |
+          controller -kubeconfig ~/.kube/config
+        timeout: 60
+        # Omit 'ERROR':
+        # * controller throws: the object has been modified; please apply your changes to the latest version and try again
+        # similar to https://github.com/chainguard-dev/enterprise-packages/blob/bd1af8f77530611d167efdb4d1d346517d6dea27/knative-serving-1.17.yaml#L105
+        error_strings: |
+          FATAL
+          FAIL
+          Traceback.*most.recent.call
+          Exception in thread
+          panic
+          command not found
+        expected_output: |
+          Running with Standard leader election
+          Starting configmap watcher
+          Starting informers
+          Starting controllers
+          Starting controller and workers
+          Started workers
+          will run in leader-elected mode with id
+
+update:
+  enabled: true
+  github:
+    identifier: knative-extensions/net-istio
+    strip-prefix: knative-v
+    tag-filter: knative-v1.21.
