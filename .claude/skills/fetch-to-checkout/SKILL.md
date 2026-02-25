@@ -638,6 +638,24 @@ py3-d*: switch to git-checkout
 - Found GitHub: `https://github.com/m6w6/ext-http`
 - tag: `v${{package.version}}`
 
+### Go FIPS package, GitHub archive with doubled version in path (cue-fips)
+- fetch URI: `https://github.com/cue-lang/cue/archive/v${{package.version}}/v${{package.version}}.tar.gz`
+  (the doubled `v${{package.version}}` in the path is just how GitHub formats archive URLs for some tags — the repo and tag are still straightforwardly `cue-lang/cue` and `v${{package.version}}`)
+- git-checkout tag: `v${{package.version}}`
+- Lightweight tag (no `^{}` dereference needed) — `git ls-remote` returns the commit directly
+- update: already had `github: identifier: cue-lang/cue` + `strip-prefix: v` — no change needed
+- No bootstrap or extra build deps needed (Go project builds cleanly from git)
+- epoch: bumped, dropped the CVE comment (CVE epoch comments are not needed after conversion)
+
+### GitHub archive via `refs/tags/` URL path (dex-k8s-authenticator)
+- fetch URI: `https://github.com/mintel/dex-k8s-authenticator/archive/refs/tags/v${{package.version}}.tar.gz`
+  (the `/archive/refs/tags/` path form is common on GitHub but the repo/tag extraction is identical to the simpler `/archive/` form)
+- git-checkout tag: `v${{package.version}}`
+- Annotated tag — use `git ls-remote --tags REPO "refs/tags/TAG^{}"` to get the dereferenced commit
+- update: already had `github: identifier: mintel/dex-k8s-authenticator` + `strip-prefix: v` — no change needed
+- No bootstrap or extra build deps needed (Go project, `go build` runs directly on git checkout)
+- epoch: bumped, dropped the CVE comment
+
 ---
 
 ## Handling Edge Cases
