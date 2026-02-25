@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Functional test for Milvus 2.6 standalone instance.
+Functional test for Milvus 2.5 standalone instance.
 Tests basic vector database operations: create collection, insert data, search, and query.
 """
 
@@ -49,8 +49,8 @@ def check_server_version():
     """Verify server version."""
     version = utility.get_server_version()
     print(f"✓ Milvus server version: {version}")
-    if not version.startswith("2.6"):
-        print(f"✗ Expected version 2.6.x, got {version}")
+    if not version.startswith("2.5"):
+        print(f"✗ Expected version 2.5.x, got {version}")
         sys.exit(1)
 
 
@@ -221,7 +221,7 @@ def cleanup(collection):
 def main():
     """Run all tests."""
     print("=" * 60)
-    print("Milvus 2.6 Functional Test - PyMilvus Client")
+    print("Milvus 2.5 Functional Test - PyMilvus Client")
     print("=" * 60)
 
     try:
