@@ -164,6 +164,9 @@ local-wolfi: os/local-melange.rsa enterprise-packages/local-melange-enterprise.r
 	@(for p in os enterprise-packages extra-packages ; do \
 		[ -f "$$p/packages/$(ARCH)/APKINDEX.tar.gz" ] || continue ; \
 		echo "$(PACKAGES_CONTAINER_FOLDER)/$$p"; done ) >> $(TMP_REPOS_FILE)
+ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
+	@echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+endif
 	@trap 'rm -Rf "$(TMP_DIR)"' EXIT && \
 	  tok=$$(chainctl auth token --audience=apk.cgr.dev) && \
 	  ( umask 066 && printf "%s\n" "machine apk.cgr.dev" "login token" "password $$tok" > "$(TMP_DIR)/netrc" ) && \
