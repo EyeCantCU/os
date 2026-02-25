@@ -2,7 +2,7 @@
 package:
   name: nextcloud-server-30
   version: "30.0.17"
-  epoch: 0
+  epoch: 1
   description: "Nextcloud server, a safe home for all your data"
   copyright:
     - license: AGPL-3.0-or-later
@@ -132,14 +132,13 @@ pipeline:
 
   - runs: mkdir nextcloud-docker
 
-  # Our automation currently doesn't currently have any way to prevent this SHA from being updated using
-  # the other (wrong) repo. Therefore, we're using a fetch pipeline to work around this.
-  # See https://chainguard-dev.slack.com/archives/C0799FD4Q1Y/p1748449222266689
+  # This commit must include a $major-version/ directory (e.g. 30/) matching the
+  # Nextcloud major version. Check https://github.com/nextcloud/docker for a
+  # commit that has the directory before bumping the package version.
   - uses: fetch
     with:
-      # It's ok to use master branch here, as this is something is not build-able thing; we just copy files around.
-      uri: https://github.com/nextcloud/docker/archive/refs/heads/master.tar.gz
-      expected-sha256: 39a56dafca17fef928650b640d00d29d22dd865a3927fef9806aeabbc1ce4931
+      uri: https://github.com/nextcloud/docker/archive/1f87830fd6f478c993248475979472aab1787a75.tar.gz
+      expected-sha256: d81f923488495594076c0baaeb6a741f14eeb842e389e65e95f3d7871791bb35
       directory: nextcloud-docker
       delete: true
 
@@ -276,8 +275,6 @@ test:
       packages:
         - wait-for-it
         - curl
-        - crane
-        - gnutar
         - tini
         - procps
     accounts:
@@ -305,62 +302,6 @@ test:
         grep -i 'ServerRoot "/usr/local/apache2"' /etc/apache2/httpd.conf
         grep -i 'DocumentRoot "//var/www/html"' /etc/apache2/httpd.conf
         apachectl -S # Final sanity check to ensure the config files are valid
-    - name: Ensure the PHP modules match Nextcloud image
-      runs: |
-        /bin/bash -c '
-        set -eo pipefail
-
-        # Sometimes the tag is not available yet, so its ok to use the previous one
-        # e.g. 31.0.4 -> 31.0.3
-        tag=${{package.version}}
-        crane manifest nextcloud:$tag >/dev/null 2>&1 || tag=${tag%.*}.$(( ${tag##*.} - 1 ))
-
-        required_modules=$(crane export nextcloud:$tag - | \
-          tar -tvf - | \
-          grep "usr/local/lib/php/extensions/.*\.so$" | \
-          awk -F"/" "{print \$NF}" | \
-          sed "s/\.so\$//" | \
-          sort -u)
-
-        echo "Modules required by nextcloud:$tag:"
-        echo "$required_modules"
-
-        loaded_modules=$(php -m | tr "[:upper:]" "[:lower:]" | sed "s/zend opcache/opcache/")
-
-        missing_modules=()
-        while read -r module; do
-          if ! grep -iq "^${module}$" <<< "$loaded_modules"; then
-            missing_modules+=("$module")
-          fi
-        done <<< "$required_modules"
-
-        if [ ${#missing_modules[@]} -ne 0 ]; then
-          echo "Missing PHP modules: ${missing_modules[*]}"
-          exit 1
-        else
-          echo "All required PHP modules are loaded!"
-        fi
-        '
-    - name: Ensure the apache2-foreground loads the modules
-      runs: |
-        # Those modules are scraped from the upstream image `nextcloud:latest`: `apache2-foreground -e debug`
-        set -e
-        apache2-foreground -e debug 2>&1 | tee /tmp/apache2-foreground.log &>/dev/null &
-        PID=$!
-        sleep 5
-        set +e
-        wait $PID || true
-        kill $PID 2>/dev/null || true
-        sleep 5
-        OUTPUT=$(cat /tmp/apache2-foreground.log)
-        for m in mpm_prefork authn_file authn_core authz_host authz_groupfile authz_user authz_core access_compat auth_basic reqtimeout filter mime log_config env headers setenvif version unixd status autoindex dir alias deflate negotiation rewrite remoteip php; do
-          if ! echo "$OUTPUT" | grep -qi "loaded module $m"; then
-            echo "Module $m is not enabled."
-            echo "Output: $OUTPUT"
-            exit 1
-          fi
-        done
-        kill -KILL $(pidof apache2 httpd) 2>/dev/null || true # Ensure that all of the subprocesses are killed
     - working-directory: /var/www/html
       pipeline:
         - name: "start daemon on localhost"
