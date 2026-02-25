@@ -1,0 +1,254 @@
+package:
+  name: milvus-2.5
+  version: "2.5.27"
+  epoch: 0
+  description: High-performance, cloud-native vector database built for scalable vector ANN search
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 16
+    memory: 64Gi
+  dependencies:
+    runtime:
+      - libatomic
+    provides:
+      - milvus=${{package.full-version}}
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+vars:
+  milvus-home: /usr/share/milvus
+  data-dir: /var/lib/milvus
+
+environment:
+  contents:
+    packages:
+      - apache-arrow-dev
+      - autoconf
+      - automake
+      - bash
+      - boost-dev
+      - build-base
+      - busybox
+      - cargo-auditable
+      - ccache
+      - cmake
+      - coreutils
+      - curl
+      - dpkg
+      - elfutils-dev
+      - fmt-dev
+      - gcc-12-default
+      - gettext-dev
+      - git
+      - go
+      - jemalloc-dev
+      - lcov
+      - libaio-dev
+      - libatomic
+      - libclang-cpp
+      - librdkafka
+      - libstdc++-12-dev
+      - libtool
+      - libunwind-dev
+      - libuuid
+      - linux-headers
+      - lld
+      - llvm-19
+      - llvm-libcxx-19
+      - llvm-libcxx-19-dev
+      - m4
+      - make
+      - ncurses
+      - ninja
+      - openblas-dev
+      - openssl-dev
+      - patch
+      - pkgconf
+      - py3-build-base-dev
+      - py3-numpy-2.2
+      - python3
+      - rust
+      - util-linux-dev
+      - uv # For installing Conan 1.64.1 (minimum required: 1.61)
+      - wget
+      - zip
+      - zlib-dev
+  environment:
+    CGO_ENABLED: "1"
+    GO111MODULE: "on"
+    CARGO_HOME: /usr
+    CMAKE_POLICY_VERSION_MINIMUM: "3.5" # vcpkg bootstrap uses old CMakeRC.cmake incompatible with newer CMake
+    CONAN_VERSION: 1.64.1 # pinned here https://github.com/milvus-io/milvus/blob/92c0c38e241454b55662f84bd2227ea8a731f5ab/scripts/install_deps.sh#L27
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/milvus-io/milvus
+      tag: v${{package.version}}
+      expected-commit: bf8da831eec2029877f92e69167217e19f82dffe
+
+  - uses: patch
+    with:
+      patches: |-
+        0001-fix-avoid-current-working-directory-in-library-searc.patch
+
+  - name: Remove rustup-specific syntax from CMake
+    runs: |
+      # Milvus CMake uses 'cargo +X.YZ' which only works with rustup
+      # We use system rust (apk), so remove the +version syntax
+      sed -i 's/cargo +[0-9]\+\.[0-9]\+ /cargo /g' internal/core/thirdparty/tantivy/CMakeLists.txt
+      sed -i 's/cargo +[0-9]\+\.[0-9]\+ /cargo /g' internal/core/thirdparty/opendal/CMakeLists.txt
+
+  - name: Upgrade sonic for Go 1.25 compatibility
+    runs: |
+      # Upgrade sonic to latest version for Go 1.25 compatibility
+      # See: https://github.com/milvus-io/milvus/issues/44038
+      # sonic v1.13.2 lacks GoMapIterator type needed for Go 1.25+
+      go get github.com/bytedance/sonic@latest
+
+  - name: Bump nats-server to fix CVE-2026-27571
+    runs: |
+      go get github.com/nats-io/nats-server/v2@v2.11.12
+
+  - name: Fix OpenBLAS float16 header for g++-12 on aarch64
+    runs: |
+      # OpenBLAS 0.3.31 openblas_config.h guards _Float16 with __GNUC__ >= 12,
+      # but g++-12 doesn't support _Float16 in C++ mode (added in GCC 13).
+      # Fix the guard to also check for __cplusplus with older g++ versions.
+      sed -i 's/#if defined(__GNUC__) && (__GNUC__ >= 12)/#if defined(__GNUC__) \&\& (__GNUC__ >= 12) \&\& (!defined(__cplusplus) || (__GNUC__ >= 13))/' \
+        /usr/include/openblas_config.h
+
+  - name: Setup build environment
+    runs: |
+      # Create symlink early for C++ linker
+      ln -sf libatomic.so.1 /usr/lib/libatomic.so
+
+      # Milvus CMake hardcodes ~/.cargo/bin/ path, create it and symlink cargo
+      # Handle both root and build users (aarch64 runs as 'build' user)
+      for cargo_dir in /root/.cargo/bin /home/build/.cargo/bin; do
+        mkdir -p "$cargo_dir"
+        ln -sf /usr/bin/cargo "$cargo_dir/cargo"
+        ln -sf /usr/bin/rustc "$cargo_dir/rustc"
+      done
+
+  - name: Install Python dependencies and setup Conan
+    runs: |
+      # Install Conan using uv
+      uv pip install --system conan==${CONAN_VERSION}
+
+      # Add Milvus Conan remote repository for custom packages (like rocksdb@milvus/dev)
+      conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
+
+      # Initialize Conan profile
+      conan profile new default --detect
+      conan profile update settings.compiler.libcxx=libstdc++11 default
+
+      # Set CMake policy to handle older CMake requirements in Conan packages
+      # This fixes compatibility issues with aws-c-common and other packages
+      conan profile update 'env.CMAKE_POLICY_VERSION_MINIMUM=3.5' default
+
+  - name: Build Milvus binary
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/bin
+      mkdir -p ${{targets.destdir}}/usr/lib
+      mkdir -p ${{targets.destdir}}/usr/share/milvus/lib
+      mkdir -p ${{targets.destdir}}/usr/share/milvus/configs
+      # Build the main Milvus Go binary
+      # Add /root/.cargo/bin to PATH so cargo-auditable can find cargo
+      export PATH="/root/.cargo/bin:$PATH"
+      export BUILD_TAGS="dynamic,sonic,with_jemalloc"
+      export INSTALL_PATH="${{targets.destdir}}/usr/bin"
+      export LIBRARY_PATH="${{targets.destdir}}/usr/lib"
+      export CARGO_HOME=/usr
+      export CXXFLAGS="${CXXFLAGS} -Wno-error=deprecated-declarations"
+      # Set RPATH to runtime library locations
+      export RPATH="/usr/share/milvus/lib:/usr/share/milvus/lib64"
+      make milvus
+      install -Dm755 ./bin/milvus "${{targets.destdir}}/usr/bin"
+
+      # Install C++ shared libraries from lib directory
+      cp -a internal/core/output/lib/*.so* ${{targets.destdir}}/usr/share/milvus/lib/
+
+      # Install C++ shared libraries from lib64 directory (including rocksdb)
+      mkdir -p ${{targets.destdir}}/usr/share/milvus/lib64
+      cp -a internal/core/output/lib64/*.so* ${{targets.destdir}}/usr/share/milvus/lib/
+
+      cp -r configs/* ${{targets.destdir}}/usr/share/milvus/configs/
+      mkdir -p ${{targets.destdir}}/var/lib/milvus
+      chmod 700 ${{targets.destdir}}/var/lib/milvus
+
+  - uses: strip
+
+subpackages:
+  - name: "${{package.name}}-compat"
+    description: "Compatibility package to place files in expected upstream path"
+    dependencies:
+      runtime:
+        - tini
+      provides:
+        - milvus-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/milvus/bin
+          ln -sf /usr/bin/milvus ${{targets.subpkgdir}}/milvus/bin/milvus
+          ln -sf /usr/share/milvus/lib ${{targets.subpkgdir}}/milvus/lib
+          ln -sf /usr/share/milvus/configs ${{targets.subpkgdir}}/milvus/configs
+          ln -sf /usr/bin/tini ${{targets.subpkgdir}}/tini
+
+test:
+  environment:
+    contents:
+      packages:
+        - mc
+        - curl
+        - wait-for-it
+        - py3-pymilvus
+        - python3
+        - milvus-compat
+        - minio
+    environment:
+      LD_LIBRARY_PATH: /usr/share/milvus/lib:/usr/share/milvus/lib64
+      MILVUS_HOST: localhost
+      MILVUS_PORT: "19530"
+      METRICS_PORT: "9091"
+      DEPLOY_MODE: "STANDALONE"
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: "/var/lib/milvus/etcd"
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Start MinIO
+      runs: |
+        mkdir -p /tmp/minio-data
+        minio server /tmp/minio-data --address :9000 --console-address :9001 > /tmp/minio.log 2>&1 &
+        wait-for-it -t 120 localhost:9000
+
+        # Configure MinIO client and create bucket
+        mc alias set myminio http://localhost:9000 minioadmin minioadmin
+        mc mb myminio/milvus-bucket || echo "Bucket may already exist"
+    - name: Start Milvus
+      runs: |
+        # cannot use test/daemon-check-output pipeline, we need to be in milvus dir see https://github.com/milvus-io/milvus/issues/29487#issuecomment-3488000789
+        cd /milvus
+        /milvus/bin/milvus run standalone > /tmp/milvus.log 2>&1 &
+
+        wait-for-it -t 60 localhost:${MILVUS_PORT}
+        wait-for-it -t 60 localhost:${METRICS_PORT}
+    - name: Test metrics endpoint
+      runs: |
+        curl -sf http://localhost:${METRICS_PORT}/metrics | grep -F "milvus_rootcoord"
+    - name: Test vector database functionality with pymilvus
+      runs: |
+        python test.py
+
+update:
+  enabled: true
+  github:
+    identifier: milvus-io/milvus
+    strip-prefix: v
+    tag-filter-prefix: v2.5
+    use-tag: true
