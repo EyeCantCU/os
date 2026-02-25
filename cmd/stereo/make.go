@@ -140,6 +140,18 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 		opts = append(opts, fmt.Sprintf("--keyring-append ../%s/%s", sub, dirToKeys[sub]))
 	}
 
+	sourceDir := filepath.Join(dir, pkg)
+	cfg, err := compilePkgConfig(ctx, sourceDir)
+	if err != nil {
+		return err
+	}
+
+	sccacheOpts, err := sccacheMelangeOpts(cfg, subcmd)
+	if err != nil {
+		return err
+	}
+	opts = append(opts, sccacheOpts...)
+
 	extra = strings.Join(opts, " ")
 
 	cmd.Env = append(cmd.Env, fmt.Sprintf("MELANGE_EXTRA_OPTS=%s", extra))
@@ -151,7 +163,7 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 	}
 	defer cleanup()
 
-	if err := ensureTokens(ctx, dir, pkg, subcmd); err != nil {
+	if err := ensureTokens(ctx, cfg, sourceDir, subcmd); err != nil {
 		return err
 	}
 
