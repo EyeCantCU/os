@@ -1,0 +1,352 @@
+package:
+  name: elasticsearch-9.3
+  version: "9.3.0"
+  epoch: 2
+  description: Free and Open Source, Distributed, RESTful Search Engine
+  copyright:
+    - license: AGPL-3.0 AND SSPL-1.0 AND Elastic-2.0
+      license-path: licenses/AGPL-3.0+SSPL-1.0+ELASTIC-LICENSE-2.0.txt
+    - license: Apache-2.0
+      license-path: licenses/APACHE-LICENSE-2.0.txt
+    - license: Elastic-2.0
+      license-path: licenses/ELASTIC-LICENSE-2.0.txt
+  resources:
+    cpu: 6
+    memory: 30Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-config
+      - bash # some helper scripts use bash
+      - coreutils # eck operator init container runs date with iso format
+      - curl # eck operator init container does a health check
+      - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+      - merged-usrsbin
+      - openjdk-25-default-jdk
+      - wolfi-baselayout
+    provides:
+      - elasticsearch-${{vars.major-version}}=${{package.full-version}}
+      - elasticsearch=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - libudev
+      - openjdk-25-default-jdk
+      - wolfi-base
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/elasticsearch
+      tag: v${{package.version}}
+      expected-commit: 17b451d8979a29e31935fe1eb901310350b30e62
+
+  - uses: patch
+    with:
+      patches: |
+        update-reactor-netty.patch
+        update-build-tools-internal-dependencies.patch
+        log4j-CVE-2025-68161.patch
+
+  - runs: |
+      # 1.55.4 includes a bump of log4j required for CVE remediation, as it
+      # doesn't honour the top-level version configuration.
+      # https://github.com/elastic/apm-agent-java/commit/6749feeb56a087d9c2f6bd7ff1500922d11f6f91
+      sed -i 's/co.elastic.apm:elastic-apm-agent-java8:1.55.0/co.elastic.apm:elastic-apm-agent-java8:1.55.4/' modules/apm/build.gradle
+
+  - runs: |
+      # Regenerate verification metadata for updated dependencies
+      export LANG=en_US.UTF-8
+      ./gradlew --write-verification-metadata sha256
+
+      # Build elasticsearch
+      ./gradlew localDistro -Dbuild.snapshot=false -Dlicense.key=public.key
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/logs
+
+      ARCH=${{build.arch}}
+      # https://github.com/elastic/elasticsearch/blob/d87b93f3174e82a86f4fad0ea8b85ac7b454f96d/plugins/examples/settings.gradle#L59-L76
+      if [ "$ARCH" = "aarch64" ]; then
+        BUILD_DIR="linux-aarch64-tar"
+      else
+        BUILD_DIR="linux-tar"
+      fi
+
+      find distribution/archives
+      install -dm777 ${{targets.destdir}}/usr/share/elasticsearch/
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/bin ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/lib ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/config ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/modules ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
+      cp distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
+
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
+      # Set permissions to read/write the config dir
+      chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
+        name=$(basename "$i")
+        ln -sf /usr/share/elasticsearch/bin/"$name" ${{targets.destdir}}/usr/bin/"$name"
+      done
+
+      # We get this from elasticsearch-config
+      mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Copy log4j2.properties to log4j2.file.properties for file-based logging (customer issue #3120)
+      # The docker entrypoint uses this when ES_LOG_STYLE=file
+      cp ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.properties ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.file.properties
+
+      # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
+      sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
+
+subpackages:
+  - name: ${{package.name}}-config
+    description: Creates a usable elasticsearch.yml config
+    dependencies:
+      provides:
+        - elasticsearch-config-${{vars.major-version}}=${{package.full-version}}
+        - elasticsearch-config=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/share/elasticsearch/config
+          install -m644 elasticsearch.yml ${{targets.contextdir}}/usr/share/elasticsearch/config/elasticsearch.yml
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: elasticsearch-config
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: ${{package.name}}-iamguarded
+    description: ElasticSearch for Iamguarded
+    dependencies:
+      provides:
+        - elasticsearch-iamguarded=${{package.full-version}}
+      runtime:
+        - bash # some helper scripts use bash
+        - busybox
+        - coreutils # eck operator init container runs date with iso format
+        - curl # eck operator init container does a health check
+        - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+        - merged-usrsbin
+        - openjdk-25-default-jdk
+        - posix-libc-utils # required for helm install
+        - wolfi-baselayout
+        - yq
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: elasticsearch
+          version: ${{vars.major-version}}
+      - runs: |
+          mkdir -p /opt/iamguarded/elasticsearch
+
+          # I know this is awful, but iamguarded init scripts do not like symlinks
+          cp -r ${{targets.destdir}}/usr/share/elasticsearch/* /opt/iamguarded/elasticsearch
+
+          mkdir -p /opt/iamguarded/elasticsearch/config.default
+          cp -r /opt/iamguarded/elasticsearch/config/* \
+            /opt/iamguarded/elasticsearch/config.default/
+
+          bash /opt/iamguarded/scripts/elasticsearch/postunpack.sh
+
+          # Set java home
+          sed -i 's|export JAVA_HOME=/opt/iamguarded/java|export JAVA_HOME=/usr/lib/jvm/java-25-openjdk|' /opt/iamguarded/scripts/elasticsearch/run.sh
+          sed -i 's|export ES_JAVA_HOME=/opt/iamguarded/java|export ES_JAVA_HOME=/usr/lib/jvm/java-25-openjdk|' /opt/iamguarded/scripts/elasticsearch/run.sh
+
+          # Set wide permissions
+          chmod -R 775 /opt/iamguarded/elasticsearch
+
+          # Remove non-iamguarded entrypoint script
+          rm /opt/iamguarded/elasticsearch/bin/docker-entrypoint.sh
+
+          # Symlink binaries to path
+          mkdir -p ${{targets.contextdir}}/usr/bin
+          for i in /opt/iamguarded/elasticsearch/bin/*; do
+            name=$(basename "$i")
+            ln -sf /opt/iamguarded/elasticsearch/bin/"$name" ${{targets.contextdir}}/usr/bin/"$name"
+          done
+
+          mkdir -p /iamguarded/elasticsearch/data
+          mkdir -p /iamguarded/elasticsearch/plugins
+
+          mkdir -p ${{targets.contextdir}}/docker-entrypoint-initdb.d
+          chmod -R 775 ${{targets.contextdir}}/docker-entrypoint-initdb.d
+      - uses: iamguarded/finalize-compat
+        with:
+          package: elasticsearch
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: elasticsearch
+              gid: 1000
+          users:
+            - username: elasticsearch
+              uid: 1000
+              gid: 1000
+          run-as: 0
+        contents:
+          packages:
+            - bash
+            - busybox
+            - coreutils
+            - sudo
+            - wolfi-base
+            - yq
+        environment:
+          ES_JAVA_HOME: /usr/lib/jvm/java-25-openjdk
+          ES_USER: elasticsearch
+          KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+          SHELL: /bin/bash
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: elasticsearch
+            version: ${{vars.major-version}}
+        - name: "Setup Elasticsearch configuration for Iamguarded"
+          runs: |
+            set -x
+
+            chown -R "${ES_USER}:${ES_USER}" /opt/iamguarded/elasticsearch
+
+            keytool -v -keystore /opt/iamguarded/elasticsearch/config/server.keystore \
+            -alias "localhost" \
+            -genkeypair \
+            -sigalg SHA512withRSA -keyalg RSA \
+            -dname CN="localhost" \
+            -storepass "$KEYSTORE_PASSWORD" -keypass "$KEYSTORE_PASSWORD"
+            cat >/opt/iamguarded/elasticsearch/config/elasticsearch.yml <<EOF
+            cluster.name: "docker-cluster"
+            network.host: 0.0.0.0
+            node.store.allow_mmap: false
+            EOF
+
+            # Run the iamguarded elasticsearch binary
+            sudo -E -u "$ES_USER" /opt/iamguarded/elasticsearch/bin/elasticsearch -d -p /tmp/elasticsearch.pid
+            kill "$(cat /tmp/elasticsearch.pid)"
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: elasticsearch-iamguarded
+            real-pkg-name: ${{subpkg.name}}
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/elasticsearch
+    strip-prefix: v
+    tag-filter: v9.3.
+
+# This test is mostly commented out because elasticsearch requires changing kernel
+# settings to run properly. The host must run this command first:
+# ```
+# sysctl -w vm.max_map_count=262144
+# ```
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: elasticsearch
+          gid: 1000
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 1000
+      run-as: 0
+    contents:
+      packages:
+        - bash
+        - coreutils
+        - curl
+        - sudo
+    environment:
+      ES_JAVA_HOME: /usr/lib/jvm/java-25-openjdk
+      ES_USER: elasticsearch
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+      SHELL: /bin/bash
+  pipeline:
+    - name: "Check for LICENSE.txt"
+      runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
+    - name: "Test ES_LOG_STYLE=file entrypoint behavior"
+      runs: |
+        set -euo pipefail
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        # Run the docker entrypoint with ES_LOG_STYLE=file to verify it copies
+        # log4j2.file.properties over log4j2.properties. We temporarily replace
+        # the elasticsearch binary with a no-op stub so the entrypoint performs
+        # its setup (including the log4j2 copy) then exits cleanly without
+        # actually starting the server and leaving behind state that would
+        # interfere with the real functional test below.
+        # Back up the original console-logging config before the entrypoint overwrites it
+        cp /usr/share/elasticsearch/config/log4j2.properties /tmp/log4j2.properties.orig
+        mv /usr/share/elasticsearch/bin/elasticsearch /usr/share/elasticsearch/bin/elasticsearch.real
+        printf '#!/bin/sh\nexit 0\n' > /usr/share/elasticsearch/bin/elasticsearch
+        chmod +x /usr/share/elasticsearch/bin/elasticsearch
+        ES_LOG_STYLE=file sudo -E -u "$ES_USER" /usr/share/elasticsearch/bin/docker-entrypoint.sh eswrapper
+        mv /usr/share/elasticsearch/bin/elasticsearch.real /usr/share/elasticsearch/bin/elasticsearch
+
+        # Verify the entrypoint copied log4j2.file.properties over log4j2.properties
+        diff /usr/share/elasticsearch/config/log4j2.properties /usr/share/elasticsearch/config/log4j2.file.properties
+
+        # Restore original log4j2.properties so subsequent tests use console logging
+        mv /tmp/log4j2.properties.orig /usr/share/elasticsearch/config/log4j2.properties
+
+        # Remove any keystore created by the entrypoint so it doesn't conflict
+        # with the keystore creation in the functional test below
+        rm -f /usr/share/elasticsearch/config/elasticsearch.keystore
+    - name: "Setup Elasticsearch configuration"
+      runs: |
+        set -x
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        keytool -v -keystore /usr/share/elasticsearch/config/server.keystore \
+        -alias "localhost" \
+        -genkeypair \
+        -sigalg SHA512withRSA -keyalg RSA \
+        -dname CN="localhost" \
+        -storepass "$KEYSTORE_PASSWORD" -keypass "$KEYSTORE_PASSWORD"
+        cat >/usr/share/elasticsearch/config/elasticsearch.yml <<EOF
+        cluster.name: "docker-cluster"
+        network.host: 0.0.0.0
+        node.store.allow_mmap: false
+        EOF
+
+        # Ignore the error, vm.max_map_count needs to be increased.
+        sudo -E -u "$ES_USER" elasticsearch -d -p /tmp/elasticsearch.pid
+
+        # # Reset the password
+        ELASTIC_PASSWORD=$(sudo -E -u "$ES_USER" elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')
+        curl --insecure -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}"
+        curl --insecure -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+            {
+              "name": "John Doe",
+              "age": 30,
+              "about": "I love to go rock climbing"
+            }' || exit 1
+        curl --insecure -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+
+        kill "$(cat /tmp/elasticsearch.pid)"
+    - uses: test/virtualpackage
+      with:
+        virtual-pkg-name: elasticsearch
+        real-pkg-name: ${{package.name}}

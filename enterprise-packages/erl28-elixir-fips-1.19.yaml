@@ -1,7 +1,7 @@
 package:
   name: erl28-elixir-fips-1.19
   version: "1.19.5"
-  epoch: 2 # go/enterprise-rsc/erl28-elixir-fips-1.19
+  epoch: 3 # go/enterprise-rsc/erl28-elixir-fips-1.19
   description: General-purpose programming language and runtime environment
   copyright:
     - license: Apache-2.0
@@ -67,32 +67,50 @@ test:
       with:
         real-pkg-name: "${{package.name}}"
         virtual-pkg-name: elixir-fips
-    - name: Smoke test
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          elixir
+          elixirc
+          iex
+          mix
+    - uses: test/tw/help-check
+      with:
+        bins: mix
+    - name: Verify Erlang/OTP build linkage
       runs: |
-        elixir --version | grep -F -e "compiled with Erlang/OTP ${{vars.erlMM}}"
-        elixir --version | grep -F -e "${{package.version}}"
-        elixirc --version | grep -F -e "${{package.version}}"
-        iex --version | grep -F -e "${{package.version}}"
-        mix --version | grep -F -e "${{package.version}}"
-        mix --help | grep -e "Mix is a build tool for Elixir"
+        set -euo pipefail
+        # Functional test: Verify elixir was built against the correct Erlang/OTP version
+        # This validates the build process by checking a specific field in the version output
+        version_output=$(elixir --version)
+        # Verify the compiled Erlang/OTP version matches expected version (fails test if not)
+        echo "$version_output" | grep -F "compiled with Erlang/OTP ${{vars.erlMM}}" || {
+          echo "FAIL: Expected elixir to be compiled with Erlang/OTP ${{vars.erlMM}}"
+          echo "Actual version output: $version_output"
+          exit 1
+        }
     - name: Ensure FIPS provider functionality
       runs: |
-        elixir -e "IO.inspect(:crypto.info())" | grep -F -e "fips_provider_available: true"
+        set -euo pipefail
+        elixir -e "IO.inspect(:crypto.info())" | grep -F "fips_provider_available: true"
         tee bad_hash.exs <<EOF
         :crypto.enable_fips_mode(true)
         :crypto.hash(:md5, "Linky")
         EOF
         {
           elixir ./bad_hash.exs || true
-        } 2>&1 | grep -F -e "Bad digest type in FIPS"
+        } 2>&1 | grep -F "Bad digest type in FIPS"
     - name: Basic script test
       runs: |
+        set -euo pipefail
         ELIXIR_FILE="$(mktemp)"
         printf "%s" 'IO.puts("Hello, Wolfi!")' | tee "${ELIXIR_FILE}"
 
-        elixir "${ELIXIR_FILE}" | grep -e "^Hello, Wolfi!$"
-    - name:
-      runs: |
+        # Verify script execution produces expected output (fails test if not)
+        elixir "${ELIXIR_FILE}" | grep -F "Hello, Wolfi!"
+    - name: Test Mix project with Plug/Cowboy web server
+      runs: |-
+        set -euo pipefail
         mkdir -p ./zzz/lib/zzz ./zzz/test
 
         tee ./zzz/lib/zzz.ex <<'EOF'
@@ -175,4 +193,5 @@ test:
         mix release
         _build/dev/rel/zzz/bin/zzz daemon
         wait-for-it --strict -t 10 "${HOST_IP}:${HARDCODED_PORT}"
-        curl -s "${HOST_IP}:${HARDCODED_PORT}" | grep "Hello, Elixir!"
+        # Verify web server responds correctly (fails test if not)
+        curl -sf "${HOST_IP}:${HARDCODED_PORT}" | grep -F "Hello, Elixir!"

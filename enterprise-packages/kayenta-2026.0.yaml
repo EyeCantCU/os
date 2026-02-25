@@ -1,0 +1,110 @@
+package:
+  name: kayenta-2026.0
+  version: "2026.0.2"
+  epoch: 0 # GHSA-gjx9-j8f8-7j74
+  description: Automated Canary Service
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - busybox
+      - curl
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openjdk-${{vars.java-version}}-jre
+      - wget
+    provides:
+      - kayenta=${{package.full-version}}
+
+vars:
+  java-version: 17 # https://github.com/spinnaker/spinnaker/blob/kayenta-2025.2.2/kayenta/Dockerfile.slim#L3
+
+# Upstream uses kayenta-2025.4-3 (hyphen) not kayenta-2025.4.3 (dot) for patch releases
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.(\d+)$
+    replace: $1-$2
+    to: mangled-package-version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - openjdk-${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jvm
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx2g -Xms2g"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/spinnaker/spinnaker
+      expected-commit: 6e1a64976a812b9dab7b61d08e96f0b22b9ed24c
+      tag: kayenta-${{vars.mangled-package-version}}
+
+  - uses: auth/gradle
+
+  - uses: patch
+    with:
+      patches: upgrade-dependencies.patch
+
+  - runs: |
+      ./gradlew :kayenta:kayenta-web:installDist
+
+      mkdir -p ${{targets.contextdir}}/opt/kayenta
+      cp -r kayenta/kayenta-web/build/install/kayenta/* ${{targets.contextdir}}/opt/kayenta
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+        - valkey
+        - curl
+        - wait-for-it
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+  pipeline:
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          # redis-server in setup runs in the foreground if --daemonize yes not used
+          redis-server --daemonize yes
+          wait-for-it -t 5 --strict localhost:6379
+        start: /opt/kayenta/bin/kayenta
+        timeout: 120
+        expected_output: |
+          Started Main
+          Tomcat started
+          Instance is UP
+        post: |
+          sleep 5 # Allow some time for the service to start
+          # Test health endpoint
+          wait-for-it -t 5 --strict localhost:8090
+          echo "Testing /health endpoint:"
+          curl -s http://localhost:8090/health | jq -e '.status' | grep -q "UP"
+          curl -sSf "http://localhost:8090/health" | jq '.components.redisHealth.status' | grep -q "UP"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - "version-"
+    - "v[0-9]+\\.[0-9]+\\.[0-9]+" # Avoid generic semver tags
+    - "spinnaker-release-"
+    - "rosco"
+    - "orca"
+    - "keel"
+    - "kayenta-main"
+    - "igor"
+    - "halyard"
+    - "front50"
+    - "gate"
+    - "fiat"
+    - "echo"
+    - "deck"
+    - "clouddriver"
+    - "bn-"
+  git:
+    strip-prefix: kayenta-
+    tag-filter-prefix: kayenta-2026.0.

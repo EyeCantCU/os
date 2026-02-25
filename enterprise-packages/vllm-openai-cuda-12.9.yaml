@@ -1,8 +1,8 @@
-#nolint:valid-pipeline-git-checkout-tag
+#nolint:valid-pipeline-git-checkout-tag,valid-pipeline-git-checkout-commit
 package:
   name: vllm-openai-cuda-12.9
-  version: "0.14.1"
-  epoch: 0 # CVE-2025-69223, CVE-2025-68131, CVE-2026-21441
+  version: "0.15.1"
+  epoch: 0
   description: A high-throughput and memory-efficient inference and serving engine for LLMs
   target-architecture:
     - x86_64
@@ -52,6 +52,7 @@ package:
       - py${{vars.python-version}}-opencv-python-headless # use system OpenCV instead of PyPI wheel to avoid vendored OpenSSL, needed for FIPS
       - py${{vars.python-version}}-pip # needed for JIT compilation, core performance feature of vLLM
       - py${{vars.python-version}}-pyzmq # use system pyzmq (links to system zeromq) to avoid vendored libsodium, needed for FIPS
+      - py${{vars.python-version}}-setuptools<81
       - python-${{vars.python-version}}
       - python-${{vars.python-version}}-dev # needed for JIT compilation, core performance feature of vLLM
       # Core system libraries (glibc provides so:libc.so.6, so:libm.so.6, so:libpthread.so.0, so:librt.so.1, so:libdl.so.2)
@@ -74,18 +75,7 @@ vars:
   cudnn-major-version: 9
   import: vllm
   pypi-package: vllm
-  flashinfer-cubin-version: "0.5.3"
-  flashinfer-jit-cache-version: "0.5.3"
-  install-kv-connectors: "false" # toggle to true to match upstream kv connectors layer
-  # For support of open-ai server, we also fix bitsandbytes version as per upstream and they are different for different archs
-  # It is critical for vllm-openai so please change when upstream changes
-  # for now we only ship x86_64
-  bitsandbytes-x86-version: "0.46.1"
-  timm-version: "1.0.17"
-  runai-model-streamer-version: "0.15.3"
   python-version: 3.12
-  # DeepGEMM commit from upstream vLLM 0.13.0 tools/install_deepgemm.sh
-  deepgemm-commit: "594953acce41793ae00a1233eb516044d604bcb6"
 
 var-transforms:
   - from: ${{package.name}}
@@ -96,23 +86,21 @@ var-transforms:
     match: '.*cuda-(\d+)\.\d+$'
     replace: '$1'
     to: cuda-major-version
-  # Converts cuda-version 12.9 to 129 for wheel index URLs (e.g., cu129)
   - from: ${{vars.cuda-version}}
     match: '(\d+)\.(\d+)'
     replace: '$1$2'
-    to: pytorch-cuda-suffix
+    to: cuda-wheel-version
 
 environment:
   contents:
     packages:
       - busybox
-      - ccache
       - cmake
       - cuda-toolkit-${{vars.cuda-version}}-dev
+      - jq
       - ncurses-dev
       - nvcc-${{vars.cuda-version}}-gcc-default
       - nvidia-cuda-cccl-${{vars.cuda-version}}
-      - nvidia-cuda-profiler-api-${{vars.cuda-version}}
       - py3-supported-build-base-dev
       - python-${{vars.python-version}}
       - samurai
@@ -129,199 +117,138 @@ environment:
     USE_CUDA: 1
     USE_CUDNN: 1
     VERBOSE: 1
-    TORCH_CUDA_ARCH_LIST: "7.0 7.2 7.5 8.0 8.6 8.7 8.9 9.0 10.0 10.1 12.0" # https://github.com/vllm-project/vllm/blob/7df0289782ab500b2713b7521979c28de2b21cac/CMakeLists.txt#L100C29-L100C75
     MAX_JOBS: "64"
     CMAKE_BUILD_TYPE: Release
-    # Use ccache
-    CC: ccache gcc
-    CXX: ccache g++
     UV_LINK_MODE: copy
+    UV_INDEX_STRATEGY: "unsafe-best-match"
+    UV_HTTP_TIMEOUT: 500
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/vllm-project/vllm.git
       tag: v${{package.version}}
-      expected-commit: d7de043d55d1dd629554467e23874097e1c48993
+      expected-commit: 1892993bc18e243e2c05841314c5e9c06a80c70d
 
-  - runs: ccache -F 0 -M 0
-
-  - name: Detect dependency drift vs upstream
+  - name: Detect dependency drift
     runs: |
-      set -eu
+      set -oue pipefail
 
-      DOCKERFILE="docker/Dockerfile"
+      versions="docker/versions.json"
 
-      # CUDA
-      MELANGE_CUDA_MINOR="${{vars.cuda-version}}"
-      ARG_CUDA="$(grep -E '^[[:space:]]*ARG[[:space:]]+CUDA_VERSION=' "$DOCKERFILE" | head -1 | awk -F '=' '{print $2}' | tr -d '\"')"
-      echo "Dockerfile (upstream): $(grep -n '^[[:space:]]*ARG[[:space:]]\+CUDA_VERSION=' "$DOCKERFILE" | head -1)"
-      [ -n "${ARG_CUDA:-}" ] || { echo "CUDA_VERSION ARG not found"; exit 1; }
-      UPSTREAM_CUDA_MINOR="$(echo "$ARG_CUDA" | awk -F. '{print $1"."$2}')"
-      echo "CUDA  -> upstream=$UPSTREAM_CUDA_MINOR  melange=${MELANGE_CUDA_MINOR}"
-      [ "$UPSTREAM_CUDA_MINOR" = "$MELANGE_CUDA_MINOR" ] || { echo "CUDA drift"; exit 1; }
+      our_cuda_version="${{vars.cuda-version}}"
+      their_cuda_version=$(jq -r '.variable.CUDA_VERSION.default |
+                           split(".")[:2] | join(".")' "$versions")
 
-      # Python
-      MELANGE_PY="${{vars.python-version}}"
-      ARG_PY="$(grep -E '^[[:space:]]*ARG[[:space:]]+PYTHON_VERSION=' "$DOCKERFILE" | head -1 | awk -F '=' '{print $2}' | tr -d '\"')"
-      echo "Dockerfile (upstream): $(grep -n '^[[:space:]]*ARG[[:space:]]\+PYTHON_VERSION=' "$DOCKERFILE" | head -1)"
-      [ -n "${ARG_PY:-}" ] || { echo "PYTHON_VERSION ARG not found"; exit 1; }
-      echo "Python-> upstream=$ARG_PY  melange=${MELANGE_PY}"
-      case "$ARG_PY" in ${MELANGE_PY}*) ;; *) echo "Python drift"; exit 1 ;; esac
-
-      # FlashInfer via cubin + jit-cache
-      MELANGE_FLASH_CUBIN="${{vars.flashinfer-cubin-version}}"
-      MELANGE_FLASH_JIT="${{vars.flashinfer-jit-cache-version}}"
-
-      expected="ARG FLASHINFER_VERSION=${MELANGE_FLASH_CUBIN}"
-      if ! grep -q "$expected" "$DOCKERFILE"; then
-        echo "ERROR: FlashInfer cubin drift: missing expected string: $expected"
+      if [ "$their_cuda_version" != "$our_cuda_version" ]; then
+        echo "Invalid CUDA version detected!"
+        echo "Our CUDA version: $our_cuda_version"
+        echo "Their CUDA version: $their_cuda_version"
+        echo "Please update the CUDA version used by this package."
         exit 1
       fi
 
-      expected="flashinfer-cubin==\${FLASHINFER_VERSION}"
-      if ! grep -q "$expected" "$DOCKERFILE"; then
-        echo "ERROR: FlashInfer cubin drift: missing expected string: $expected"
+      our_python_version="${{vars.python-version}}"
+      their_python_version=$(jq -r '.variable.PYTHON_VERSION.default' "$versions")
+
+      if [ "$their_python_version" != "$our_python_version" ]; then
+        echo "Invalid Python version detected!"
+        echo "Our Python version: $our_python_version"
+        echo "Their Python version: $their_python_version"
+        echo "Please update the Python version used by this package."
         exit 1
       fi
 
-      expected="flashinfer-jit-cache==\${FLASHINFER_VERSION}"
-      if ! grep -q "$expected" "$DOCKERFILE"; then
-        echo "ERROR: FlashInfer jit-cache drift: missing expected string: $expected"
-        exit 1
-      fi
-
-      # bitsandbytes
-      MELANGE_BNB="${{vars.bitsandbytes-x86-version}}"
-      echo "Dockerfile (upstream) BNB lines:"
-      grep -n 'BITSANDBYTES_VERSION' "$DOCKERFILE"
-      echo "BnB   -> upstream: see lines above  melange=${MELANGE_BNB}"
-      if grep -Eq 'BITSANDBYTES_VERSION="?'"${MELANGE_BNB}"'"?' "$DOCKERFILE"; then
-        :
-      else
-        echo "bitsandbytes drift (melange=${MELANGE_BNB} not present in Dockerfile)"
-        exit 1
-      fi
-
-      # timm (simple lower-bound check: verify 'timm>=<melange>' appears in the Dockerfile)
-      MELANGE_TIMM="${{vars.timm-version}}"
-      echo "Dockerfile (upstream) timm lines:"
-      grep -n "timm>=" "$DOCKERFILE"
-      echo "timm  -> upstream: see lines above  melange>='${MELANGE_TIMM}'"
-      if grep -Eq "[\"']timm>="?${MELANGE_TIMM}"[\"']" "$DOCKERFILE"; then
-        :
-      else
-        echo "timm drift (expected 'timm>=${MELANGE_TIMM}' not found in Dockerfile)"
-        exit 1
-      fi
-
-      # runai-model-streamer (verify 'runai-model-streamer[s3,gcs]>=<melange>' appears in the Dockerfile)
-      MELANGE_RUNAI="${{vars.runai-model-streamer-version}}"
-      echo "Dockerfile (upstream) runai-model-streamer lines:"
-      grep -n "runai-model-streamer" "$DOCKERFILE"
-      echo "runai-model-streamer -> upstream: see lines above  melange>='${MELANGE_RUNAI}'"
-      if grep -Eq "runai-model-streamer\[s3,gcs\]>=${MELANGE_RUNAI}" "$DOCKERFILE"; then
-        :
-      else
-        echo "runai-model-streamer drift (expected 'runai-model-streamer[s3,gcs]>=${MELANGE_RUNAI}' not found in Dockerfile)"
-        exit 1
-      fi
-
-      # DeepGEMM commit check (from tools/install_deepgemm.sh)
-      MELANGE_DEEPGEMM="${{vars.deepgemm-commit}}"
-      DEEPGEMM_SCRIPT="tools/install_deepgemm.sh"
-      echo "Checking DeepGEMM commit in $DEEPGEMM_SCRIPT:"
-      grep -n "DEEPGEMM_GIT_REF=" "$DEEPGEMM_SCRIPT" | head -1
-      if grep -Fq "${MELANGE_DEEPGEMM}" "$DEEPGEMM_SCRIPT"; then
-        echo "DeepGEMM -> commit ${MELANGE_DEEPGEMM} found"
-      else
-        echo "DeepGEMM drift (expected commit ${MELANGE_DEEPGEMM} not found in $DEEPGEMM_SCRIPT)"
-        exit 1
-      fi
-
-      echo "No drift detected."
-
-  - name: Install build CUDA dependencies for vLLM wheel
+  - name: Install build dependencies
     runs: |
-      export UV_HTTP_TIMEOUT=500
-      export UV_INDEX_STRATEGY="unsafe-best-match"
-
       uv pip install \
         --system \
-        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
-        -r requirements/cuda.txt
-
-  - name: Install build dependencies for vLLM wheel
-    runs: |
-      export UV_HTTP_TIMEOUT=500
-      export UV_INDEX_STRATEGY="unsafe-best-match"
-
-      uv pip install \
-        --system \
-        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.cuda-wheel-version}}" \
         -r requirements/build.txt
 
-  - name: Build vLLM wheel
+  - name: Build wheel
     runs: |
-      set -eux
-      python3 setup.py bdist_wheel --dist-dir dist --py-limited-api=cp38
+      python${{vars.python-version}} setup.py bdist_wheel --dist-dir dist --py-limited-api=cp38
 
-  - name: Install vLLM wheel into site-packages
+  - name: Install wheel
     runs: |
-      set -eux
-      export UV_INDEX_STRATEGY="unsafe-best-match"
-
       uv pip install \
         --system --prefix ${{targets.contextdir}}/usr \
-        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.cuda-wheel-version}}" \
         dist/*.whl
+
+  - name: Install CUDA dependencies
+    runs: |
+      uv pip install \
+        --system --prefix ${{targets.contextdir}}/usr \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.cuda-wheel-version}}" \
+        -r requirements/cuda.txt
 
   # OpenAI-server parity extras (mirrors vllm-openai-base)
   - name: Install OpenAI server extras
     runs: |
-      set -eux
+      set -oue pipefail
+
+      versions="docker/versions.json"
+      bitsandbytes_version=$(jq -r '.variable.BITSANDBYTES_VERSION_X86.default' "$versions")
+      timm_version=$(jq -r '.variable.TIMM_VERSION.default' "$versions")
+      runai_version=$(jq -r '.variable.RUNAI_MODEL_STREAMER_VERSION.default' "$versions")
 
       uv pip install \
         --system --prefix ${{targets.contextdir}}/usr \
         accelerate hf_transfer modelscope \
-        "bitsandbytes>=${{vars.bitsandbytes-x86-version}}" \
-        "timm>=${{vars.timm-version}}" \
-        "runai-model-streamer[s3,gcs]>=${{vars.runai-model-streamer-version}}"
+        "bitsandbytes>=${bitsandbytes_version}" \
+        "timm${timm_version}" \
+        "runai-model-streamer[s3,gcs]${runai_version}"
+
+  # Right about here we run out of disk space
+  - name: Purge cache
+    runs: uv cache clean
 
   # FlashInfer — mirror upstream precompiled cubin + JIT cache (no AOT, no git)
   - name: Install FlashInfer cubin + jit-cache
     runs: |
-      set -eux
+      set -oue pipefail
+
+      versions="docker/versions.json"
+      flashinfer_version=$(jq -r '.variable.FLASHINFER_VERSION.default' "$versions")
 
       uv pip install \
         --system --prefix ${{targets.contextdir}}/usr \
-        "flashinfer-cubin==${{vars.flashinfer-cubin-version}}"
+        "flashinfer-cubin==${flashinfer_version}"
 
       uv pip install \
         --system --prefix ${{targets.contextdir}}/usr \
-        --extra-index-url "https://flashinfer.ai/whl/cu${{vars.pytorch-cuda-suffix}}" \
-        "flashinfer-jit-cache==${{vars.flashinfer-jit-cache-version}}"
+        --extra-index-url "https://flashinfer.ai/whl/cu${{vars.cuda-wheel-version}}" \
+        "flashinfer-jit-cache==${flashinfer_version}"
 
   # DeepGEMM — FP8 GEMM kernels for Hopper/Blackwell (SM 9.0a/10.0a)
   # Provides ~5.5% throughput improvement, enabled by default in vLLM 0.11+
-  # Upstream pins by commit (not tag), so we use branch+expected-commit with nolint
+  # Upstream pins by commit (not tag) in versions.json
   - uses: git-checkout
     with:
       repository: https://github.com/deepseek-ai/DeepGEMM.git
       branch: main
-      expected-commit: ${{vars.deepgemm-commit}}
-      recurse-submodules: true
       destination: deepgemm
+      depth: -1
+
+  - name: Pin DeepGEMM to upstream commit
+    working-directory: deepgemm
+    runs: |
+      set -oue pipefail
+
+      deepgemm_commit=$(jq -r '.variable.DEEPGEMM_GIT_REF.default' "../docker/versions.json")
+
+      git checkout "$deepgemm_commit"
+      git submodule update --init --recursive
 
   - name: Build and install DeepGEMM
     working-directory: deepgemm
     runs: |
-      set -eux
-
       # Build for Hopper (9.0a) and Blackwell (10.0a) only - matches upstream
       export TORCH_CUDA_ARCH_LIST="9.0a 10.0a"
 
-      python3 setup.py bdist_wheel --dist-dir dist
+      python${{vars.python-version}} setup.py bdist_wheel --dist-dir dist
 
       uv pip install \
         --system --prefix ${{targets.contextdir}}/usr \
@@ -330,49 +257,15 @@ pipeline:
   # Install build.txt into runtime for JIT compilation
   - name: Install build-time deps into runtime (for JIT)
     runs: |
-      set -eux
-      export UV_INDEX_STRATEGY="unsafe-best-match"
-
       uv pip install \
         --system --prefix ${{targets.contextdir}}/usr \
-        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.pytorch-cuda-suffix}}" \
+        --extra-index-url "https://download.pytorch.org/whl/cu${{vars.cuda-wheel-version}}" \
         -r requirements/build.txt
-
-  # Remediate CVEs in Python dependencies
-  # The scan shows vulnerabilities in transitive dependencies that need explicit upgrades
-  - name: Remediate CVEs in Python dependencies
-    runs: |
-      set -eux
-
-      # Remediate aiohttp CVEs (CVE-2025-69223 High, CVE-2025-69226-69230 Low/Medium)
-      # Fixed in 3.13.3
-      uv pip install \
-        --system --prefix "${{targets.contextdir}}/usr" \
-        "aiohttp>=3.13.3"
-
-      # Remediate CVE-2026-21441 (High) in urllib3
-      # Fixed in 2.6.3
-      uv pip install \
-        --system --prefix "${{targets.contextdir}}/usr" \
-        "urllib3>=2.6.3"
-
-      # Remediate CVE-2025-68131 (Medium) in cbor2
-      # Fixed in 5.8.0
-      uv pip install \
-        --system --prefix "${{targets.contextdir}}/usr" \
-        "cbor2>=5.8.0"
-
-      # Upgrade ray to latest version - vllm requires ray[cgraph]>=2.48.0
-      uv pip install \
-        --system --prefix "${{targets.contextdir}}/usr" \
-        "ray[cgraph]>=2.53.0"
 
   # Patch ray's vendored dependencies that have CVEs
   # Ray bundles its own aiohttp and log4j which the scanner detects
   - name: Patch ray vendored dependencies
     runs: |
-      set -eux
-
       SITE_PACKAGES="${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages"
       RAY_SITE="${SITE_PACKAGES}/ray"
 
@@ -380,29 +273,22 @@ pipeline:
       # Ray bundles aiohttp in ray/_private/runtime_env/agent/thirdparty_files/
       # Copy the already-installed fixed aiohttp from system site-packages
       THIRDPARTY_DIR="${RAY_SITE}/_private/runtime_env/agent/thirdparty_files"
-      if [ -d "${THIRDPARTY_DIR}" ]; then
-        # Remove old aiohttp directories (both package and dist-info)
-        for item in "${THIRDPARTY_DIR}"/aiohttp*; do
-          if [ -e "$item" ]; then
-            rm -rf "$item"
-          fi
-        done
 
-        # Copy fixed aiohttp from system site-packages (already installed >=3.13.3)
-        cp -r "${SITE_PACKAGES}"/aiohttp "${THIRDPARTY_DIR}/"
-        cp -r "${SITE_PACKAGES}"/aiohttp-*.dist-info "${THIRDPARTY_DIR}/"
-      fi
+      # Remove old aiohttp directories (both package and dist-info)
+      rm -r "${THIRDPARTY_DIR}"/aiohttp*
+
+      # Copy up-to-date aiohttp from system site-packages
+      cp -r "${SITE_PACKAGES}"/aiohttp "${THIRDPARTY_DIR}/"
+      cp -r "${SITE_PACKAGES}"/aiohttp-*.dist-info "${THIRDPARTY_DIR}/"
 
       # Patch ray's log4j in ray_dist.jar (CVE-2025-68161)
       # ray/jars/ray_dist.jar contains log4j-core 2.17.1
       # vllm doesn't use ray's Java components, so we can remove the vulnerable JAR
       # to eliminate the CVE. If Java support is needed, this would need to be
       # rebuilt with updated log4j.
-      if [ -f "${RAY_SITE}/jars/ray_dist.jar" ]; then
-        echo "Removing ray_dist.jar containing vulnerable log4j-core 2.17.1"
-        echo "vllm uses ray for Python-based distributed computing, not Java"
-        rm -f "${RAY_SITE}/jars/ray_dist.jar"
-      fi
+      echo "Removing ray_dist.jar containing vulnerable log4j-core"
+      echo "vllm uses ray for Python-based distributed computing, not Java"
+      rm "${RAY_SITE}/jars/ray_dist.jar"
 
   - name: Prune incompatible GPU extras
     runs: |
@@ -412,16 +298,19 @@ pipeline:
       #        which are not available in our ecosystem. Unlike upstream, we don't ship XPU support. We will mention in Compat Notes
       # - rocm*: requires AMD HIP libraries (libhipblas.so, libhipsparse.so, libhipblaslt.so)
       #          which are not available in our ecosystem. Unlike upstream, we don't ship ROCm support.
-      rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda118.so
-      rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda130.so
+      mv ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda${{vars.cuda-wheel-version}}.so \
+         ${{package.srcdir}}/
+      rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_cuda*.so
       rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_xpu.so
-      rm -f ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_rocm*.so
+      rm ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/libbitsandbytes_rocm*.so
+      mv ${{package.srcdir}}/libbitsandbytes_cuda${{vars.cuda-wheel-version}}.so \
+         ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/bitsandbytes/
 
       # CuPy and its vendor backends are optional for vLLM; safest is to remove CuPy entirely:
       # upstream also removed but it is optionally used by ray
       # If we ship it then we have to pull in cudnn8 which is not compatible with cudnn9 we ship
       # https://github.com/vllm-project/vllm/pull/3625
-      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" cupy-cuda12x
+      uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" cupy-cuda${{vars.cuda-major-version}}x
 
       # Remove PyPI opencv-python-headless in favor of system package (py3.12-opencv-python-headless)
       # The PyPI wheel vendors OpenSSL 1.1 which is not FIPS compliant; our system package uses system OpenSSL
@@ -447,7 +336,7 @@ pipeline:
       uv pip uninstall --system --prefix "${{targets.contextdir}}/usr" setuptools
 
       # Remove uv lockfile (world-writable, triggers linter)
-      rm -f ${{targets.contextdir}}/usr/.lock
+      rm ${{targets.contextdir}}/usr/.lock
 
 subpackages:
   - name: ${{package.name}}-dev
@@ -498,7 +387,7 @@ test:
 
         # Run it; allow non-zero; then assert the expected failure text
         set +e
-        python3 test-vllm-cpu-smoke.py > /tmp/vllm.log 2>&1
+        python${{vars.python-version}} test-vllm-cpu-smoke.py > /tmp/vllm.log 2>&1
         set -e
 
         if grep -F "Device string must not be empty" /tmp/vllm.log; then
@@ -552,4 +441,3 @@ update:
   github:
     identifier: vllm-project/vllm
     strip-prefix: v
-    use-tag: true

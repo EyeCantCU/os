@@ -1,0 +1,183 @@
+package:
+  name: eks-distro-1.35
+  version: "1.35.6"
+  epoch: 0 # GHSA-527x-5wrf-22m2
+  description: EKS Distro 1.35 components
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - eks-distro=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - libcap-utils
+  environment:
+    BUILD_ARTIFACTS: "true" # New Makefile changes in 2025/07 need this to checkout the repo properly
+
+# Transform the full version that EKS talks about. They use a form:
+# 1-30-eks-12, where 1-30 is the k8s version, 12 is the eks-distro release.
+var-transforms:
+  - from: ${{package.version}}
+    match: '\.'
+    replace: '-'
+    to: package-version
+  - from: ${{vars.package-version}}
+    match: '(\d+-\d+-)(\d+)'
+    replace: '$2'
+    to: eks-version
+  - from: ${{vars.package-version}}
+    match: '(\d+-\d+)(-\d+)'
+    replace: '$1-eks$2'
+    to: mangled-package-version
+  - from: ${{vars.package-version}}
+    match: '(\d+-\d+)-\d+'
+    replace: '$1'
+    to: kubernetes-version
+  - from: ${{package.version}}
+    match: '(\d+\.\d+)(\.\d+)'
+    replace: '$1'
+    to: kubernetes-major-minor
+
+# There are also things like kubectl, kubeadm, kubelet at least.
+# But there are no eks-distro containers for them, nor releases,
+# so we don't build them yet.
+data:
+  - name: kubernetes-components
+    items:
+      kube-scheduler:
+      kube-proxy:
+      kube-controller-manager:
+      kube-apiserver:
+
+vars:
+  # Projects
+  coredns: "coredns/coredns"
+  kubernetes: "kubernetes/kubernetes"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/aws/eks-distro
+      tag: v${{vars.mangled-package-version}}
+      expected-commit: 7f9247828c9f9eb161059ffcca0a811baf50fcf3
+
+  # Patch the bootstrap script to use local files instead of AWS S3
+  - uses: patch
+    with:
+      patches: patch-bootstrap-use-local.patch
+
+  - runs: |
+      sed -i 's/1.12.4/1.14.0/' ./projects/${{vars.coredns}}/1-35/GIT_TAG
+
+  # Checkout EKS distro projects
+  - runs: |
+      export RELEASE_BRANCH="${{vars.kubernetes-version}}"
+      projectdir="$(pwd)/projects"
+      for project in "${{vars.kubernetes}}" "${{vars.coredns}}"; do
+        # Go to project
+        cd "${projectdir}/${project}"
+        # Checkout and patch project
+        make checkout-repo
+        # Return to projects dir
+        cd "${projectdir}"
+      done
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/opencontainers/selinux@v1.13.0
+      modroot: ./projects/kubernetes/kubernetes/kubernetes
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/expr-lang/expr@v1.17.7
+      modroot: ./projects/coredns/coredns/coredns
+
+  - runs: |
+      export GOWORK=off
+
+subpackages:
+  - name: eks-distro-kubernetes-pause-${{vars.kubernetes-major-minor}}
+    description: "kubernetes pause package"
+    dependencies:
+      provides:
+        - eks-distro-kubernetes-pause=${{package.full-version}}
+    pipeline:
+      - working-directory: /home/build/projects/kubernetes/kubernetes/kubernetes/build/pause
+        runs: |
+          mkdir -p ${{targets.contextdir}}/usr/bin/
+          CFLAGS="$CFLAGS -static -DVERSION=v$(grep '^TAG ?=' Makefile | awk '{print $3}')-${{package.version}}"
+          gcc ${CFLAGS} -o "${{targets.contextdir}}"/usr/bin/pause linux/pause.c
+          ln -sf /usr/bin/pause ${{targets.contextdir}}/pause
+    test:
+      pipeline:
+        - name: kubernetes pause version check
+          runs: /usr/bin/pause -V
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: eks-distro-kubernetes-pause
+            real-pkg-name: ${{subpkg.name}}
+
+  - range: kubernetes-components
+    name: eks-distro-${{range.key}}-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-${{range.key}}=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./cmd/${{range.key}}
+          output: ${{range.key}}
+          modroot: ./projects/${{vars.kubernetes}}/kubernetes
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/usr/local/bin
+          ln -s /usr/bin/${{range.key}} ${{targets.contextdir}}/usr/local/bin/${{range.key}}
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: eks-distro-${{range.key}}
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: eks-distro-coredns-${{vars.kubernetes-major-minor}}
+    dependencies:
+      provides:
+        - eks-distro-coredns=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: .
+          output: coredns
+          modroot: ./projects/${{vars.coredns}}/coredns
+      - runs: |
+          setcap cap_net_bind_service=+ep ${{targets.contextdir}}/usr/bin/coredns
+          ln -s /usr/bin/coredns ${{targets.contextdir}}/coredns
+    test:
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: eks-distro-coredns
+            real-pkg-name: ${{subpkg.name}}
+
+update:
+  enabled: true
+  version-transform:
+    - match: 'eks-'
+      replace: ''
+    - match: '-'
+      replace: '.'
+  github:
+    identifier: aws/eks-distro
+    strip-prefix: v
+    tag-filter: v1-35
+
+# Based on package contents inspection, it was found that this origin package is empty apart from its own SBOM and this test was added to confirm it is empty and will fail if the package is no longer empty (contains more than an SBOM)
+test:
+  pipeline:
+    - uses: test/emptypackage
+    - uses: test/virtualpackage
+      with:
+        virtual-pkg-name: eks-distro

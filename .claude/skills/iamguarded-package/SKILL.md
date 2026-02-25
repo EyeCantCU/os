@@ -1,3 +1,8 @@
+---
+name: iamguarded-package
+description: Create IAMGuarded compat subpackages for images in enterprise-packages. Use after creating chart packages with iamguarded-chart skill.
+---
+
 # Build IAMGuarded Compat Packages
 
 Automates creation of IAMGuarded compat subpackages for images in enterprise-packages.
