@@ -1,0 +1,455 @@
+package:
+  name: pact-broker-docker
+  # Compound version: <docker-version>.<gem-version> (see var-transforms and update section)
+  version: "2.137.0.2.118.0"
+  epoch: 0
+  description: Pact Broker container runtime - stores and shares consumer-driven contracts
+  copyright:
+    - license: MIT
+  # no-depends/no-provides: vendor/bundle contains bundled gems that should
+  # not be exposed as system providers or generate automatic dependencies.
+  options:
+    no-depends: true
+    no-provides: true
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+      - libpq-17
+      - libxml2
+      - libxslt
+      - mariadb-connector-c
+      - pact-broker
+      - ruby${{vars.ruby-version}}-bundler
+      - ruby-${{vars.ruby-version}}
+      - sqlite-libs
+      - tzdata
+      - yaml
+
+vars:
+  ruby-version: "3.3"
+  pact-broker-home: "/pact_broker"
+
+# Extract docker and gem versions from the compound package.version.
+# Upstream tags like "2.137.0-pactbroker2.118.0" become version "2.137.0.2.118.0"
+# via the update section's version-transform.
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+\.\d+)\.\d+\.\d+\.\d+$
+    replace: "$1"
+    to: docker-version
+  - from: ${{package.version}}
+    match: ^\d+\.\d+\.\d+\.(\d+\.\d+\.\d+)$
+    replace: "$1"
+    to: pact-broker-gem-version
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - libxml2-dev
+      - libxslt-dev
+      - mariadb-connector-c-dev
+      - pact-broker=${{vars.pact-broker-gem-version}}
+      - postgresql-17-dev
+      - ruby${{vars.ruby-version}}-bundler
+      - ruby-${{vars.ruby-version}}-dev
+      - sqlite-dev
+      - yaml-dev
+      - zlib-dev
+  accounts:
+    groups:
+      - groupname: ruby
+        gid: 1000
+    users:
+      - username: ruby
+        uid: 1000
+        gid: 1000
+  environment:
+    RACK_ENV: production
+    RUBYOPT: "-W:no-experimental"
+    # Use system libraries for native extensions
+    NOKOGIRI_USE_SYSTEM_LIBRARIES: "true"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/pact-foundation/pact-broker-docker
+      tag: ${{vars.docker-version}}-pactbroker${{vars.pact-broker-gem-version}}
+      expected-commit: e9d04d1d034e64b0ccd0f01345028839424d4b48
+      destination: pact-broker-docker
+
+  - name: Prepare Gemfile
+    working-directory: pact-broker-docker/pact_broker
+    runs: |
+      set -euo pipefail
+
+      GEM_PATH="/usr/lib/ruby/gems/${{vars.ruby-version}}.0/gems/pact_broker-${{vars.pact-broker-gem-version}}"
+
+      # Verify the system gem from pact-broker is available
+      stat "$GEM_PATH/pact_broker.gemspec"
+
+      # The gemspec reads .gitignore to compute file lists; create an empty
+      # one so bundler can parse the gemspec from the installed gem directory.
+      touch "$GEM_PATH/.gitignore"
+
+      # Point the pact_broker gem at the system gem built from source by
+      # pact-broker, instead of downloading from RubyGems.
+      sed -i "s|^gem \"pact_broker\".*|gem \"pact_broker\", path: \"$GEM_PATH\"|" Gemfile
+
+      echo "=== Production Gemfile ==="
+      cat Gemfile
+      echo "=========================="
+
+      # Remove the lockfile and regenerate to pick up the path source
+      rm -f Gemfile.lock
+      bundle lock --add-platform ruby
+
+      echo "=== Lockfile pact_broker source ==="
+      grep -A 5 "^PATH" Gemfile.lock
+      echo "=== Lockfile platforms ==="
+      grep -A 5 "^PLATFORMS" Gemfile.lock
+      echo "=========================="
+
+  - name: Install Ruby bundle
+    working-directory: pact-broker-docker/pact_broker
+    runs: |
+      set -euo pipefail
+
+      # Configure bundler
+      bundle config set --local path 'vendor/bundle'
+      bundle config set --local without 'development test'
+      bundle config set --local no-cache 'true'
+      bundle config set --local jobs "$(nproc)"
+      bundle config set --local frozen 'true'
+      # CRITICAL: Force building native extensions from source (no precompiled binaries)
+      bundle config set --local force_ruby_platform 'true'
+
+      # Install gems (builds native extensions from source)
+      bundle install --retry 3
+
+      # Verify no precompiled platform-specific gems were downloaded.
+      # The 2>/dev/null suppresses expected "no matches" from glob expansion
+      # when no precompiled gems exist (the success case).
+      GEMS_DIR="vendor/bundle/ruby/*/gems"
+      if ls -d ${GEMS_DIR}/*-{aarch64,x86_64,arm64}-{linux,darwin}* 2>/dev/null | grep -F .; then
+        echo "ERROR: Found precompiled platform-specific gems!"
+        exit 1
+      fi
+      echo "Verified: No precompiled platform-specific gems found"
+
+      # Clean up build artifacts
+      rm -rf vendor/bundle/ruby/*/cache
+      rm -rf vendor/bundle/ruby/*/gems/*/.git
+      find vendor/bundle -name "*.o" -delete
+      find vendor/bundle -name "*.c" -delete
+      find vendor/bundle -name "*.h" -delete
+
+      # Remove sample/test credential files from gem fixtures to avoid scanner false positives.
+      # https://github.com/pact-foundation/pact-broker-docker/blob/master/Dockerfile#L38-L40
+      find vendor/bundle \( -name "*.pem" -o -name "*.key" \) \( -path "*sample*" -o -path "*test*" -o -path "*spec*" \) -delete
+
+  - name: Install Pact Broker application
+    working-directory: pact-broker-docker/pact_broker
+    runs: |
+      set -euo pipefail
+
+      mkdir -p "${{targets.contextdir}}${{vars.pact-broker-home}}"
+      mkdir -p "${{targets.contextdir}}/usr/bin"
+
+      # Copy the entire pact_broker application directory, matching what the
+      # upstream Dockerfile does (COPY pact_broker $HOME/). All files in this
+      # directory are needed at runtime: config.ru, docker_configuration.rb,
+      # basic_auth.rb, resource_access_rules.rb, Rakefile, config/puma.rb, etc.
+      cp -r .bundle vendor config script public \
+        Gemfile Gemfile.lock Rakefile config.ru \
+        docker_configuration.rb custom_env_loader.rb \
+        basic_auth.rb pact_broker_resource_access_policy.rb resource_access_rules.rb \
+        "${{targets.contextdir}}${{vars.pact-broker-home}}/"
+
+      # Install entrypoint and clean scripts with executable permissions
+      install -Dm755 entrypoint.sh "${{targets.contextdir}}${{vars.pact-broker-home}}/entrypoint.sh"
+      install -Dm755 clean.sh "${{targets.contextdir}}/usr/bin/pact-broker-clean"
+
+      # Symlink db helper scripts matching upstream Dockerfile
+      ln -sf "${{vars.pact-broker-home}}/script/db-migrate.sh" "${{targets.contextdir}}/usr/bin/db-migrate"
+      ln -sf "${{vars.pact-broker-home}}/script/db-version.sh" "${{targets.contextdir}}/usr/bin/db-version"
+
+      # Create directories needed at runtime
+      mkdir -p "${{targets.contextdir}}${{vars.pact-broker-home}}/tmp"
+      mkdir -p "${{targets.contextdir}}${{vars.pact-broker-home}}/log"
+
+      # Create empty crontab file for supercronic
+      touch "${{targets.contextdir}}${{vars.pact-broker-home}}/crontab"
+
+      # Set ownership
+      chown -R ruby:ruby "${{targets.contextdir}}${{vars.pact-broker-home}}"
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compatibility package for pact-broker container image
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - busybox
+        - supercronic
+    pipeline:
+      - runs: |
+          set -euo pipefail
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+
+          # Upstream places scripts/symlinks in /usr/local/bin/. Create matching
+          # symlinks for compatibility with entrypoint.sh and operator tooling.
+          ln -sf /usr/bin/pact-broker-clean "${{targets.contextdir}}/usr/local/bin/clean"
+          ln -sf /usr/bin/supercronic "${{targets.contextdir}}/usr/local/bin/supercronic"
+          ln -sf /usr/bin/db-migrate "${{targets.contextdir}}/usr/local/bin/db-migrate"
+          ln -sf /usr/bin/db-version "${{targets.contextdir}}/usr/local/bin/db-version"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - runs: |
+            set -euo pipefail
+            stat /usr/bin/pact-broker-clean
+            stat /usr/bin/db-migrate
+            stat /usr/bin/db-version
+            stat /usr/local/bin/clean
+            stat /usr/local/bin/supercronic
+            stat /usr/local/bin/db-migrate
+            stat /usr/local/bin/db-version
+            stat "${{vars.pact-broker-home}}/entrypoint.sh"
+            stat "${{vars.pact-broker-home}}/docker_configuration.rb"
+            stat "${{vars.pact-broker-home}}/basic_auth.rb"
+            stat "${{vars.pact-broker-home}}/config/puma.rb"
+            stat "${{vars.pact-broker-home}}/Rakefile"
+
+  - name: ${{package.name}}-doc
+    description: Documentation for pact-broker
+    pipeline:
+      - runs: |
+          set -euo pipefail
+
+          mkdir -p "${{targets.contextdir}}/usr/share/doc/pact-broker"
+
+          # Copy documentation from the docker repo
+          cd pact-broker-docker
+          if [ -f "README.md" ]; then
+            cp README.md "${{targets.contextdir}}/usr/share/doc/pact-broker/"
+          fi
+          if [ -f "LICENSE.txt" ]; then
+            cp LICENSE.txt "${{targets.contextdir}}/usr/share/doc/pact-broker/"
+          fi
+          if [ -f "CHANGELOG.md" ]; then
+            cp CHANGELOG.md "${{targets.contextdir}}/usr/share/doc/pact-broker/"
+          fi
+    test:
+      pipeline:
+        - uses: test/tw/docs
+
+test:
+  environment:
+    contents:
+      packages:
+        - postgresql-17
+        - postgresql-17-client
+        - sudo-rs
+        - curl
+        - jq
+    accounts:
+      groups:
+        - groupname: ruby
+          gid: 1000
+        - groupname: postgres
+          gid: 70
+      users:
+        - username: ruby
+          uid: 1000
+          gid: 1000
+        - username: postgres
+          uid: 70
+          gid: 70
+    environment:
+      RACK_ENV: "production"
+  pipeline:
+    - name: Verify installation
+      runs: |
+        set -euo pipefail
+        stat "${{vars.pact-broker-home}}/config.ru"
+        stat "${{vars.pact-broker-home}}/Gemfile"
+        stat "${{vars.pact-broker-home}}/Gemfile.lock"
+        stat "${{vars.pact-broker-home}}/Rakefile"
+        stat "${{vars.pact-broker-home}}/.bundle/config"
+        stat "${{vars.pact-broker-home}}/vendor/bundle"
+        stat "${{vars.pact-broker-home}}/docker_configuration.rb"
+        stat "${{vars.pact-broker-home}}/custom_env_loader.rb"
+        stat "${{vars.pact-broker-home}}/basic_auth.rb"
+        stat "${{vars.pact-broker-home}}/pact_broker_resource_access_policy.rb"
+        stat "${{vars.pact-broker-home}}/resource_access_rules.rb"
+        stat "${{vars.pact-broker-home}}/config/puma.rb"
+        stat "${{vars.pact-broker-home}}/entrypoint.sh"
+        stat "${{vars.pact-broker-home}}/script/db-migrate.sh"
+        stat "${{vars.pact-broker-home}}/script/db-version.sh"
+    - uses: test/tw/ldd-check
+    - name: Verify bundle installation
+      working-directory: ${{vars.pact-broker-home}}
+      runs: |
+        set -euo pipefail
+        # Verify pact_broker can be loaded and its version matches the expected gem version
+        bundle exec ruby -e "require 'pact_broker'; puts 'PactBroker version: ' + PactBroker::VERSION"
+        bundle exec ruby -e "require 'pact_broker'; raise \"version mismatch: #{PactBroker::VERSION} != ${{vars.pact-broker-gem-version}}\" unless PactBroker::VERSION == '${{vars.pact-broker-gem-version}}'"
+    - name: Start Pact Broker with PostgreSQL
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          set -euo pipefail
+
+          # Initialize PostgreSQL
+          mkdir -p /var/lib/postgresql/data /run/postgresql
+          chown -R postgres:postgres /var/lib/postgresql /run/postgresql
+
+          sudo -u postgres initdb -D /var/lib/postgresql/data
+          sudo -u postgres pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/logfile start
+
+          # Wait for PostgreSQL to be ready
+          wait-for-it localhost:5432 -t 30
+
+          # Create database and user
+          sudo -u postgres psql -c "CREATE USER pactbroker WITH PASSWORD 'pactbroker';"
+          sudo -u postgres psql -c "CREATE DATABASE pactbroker OWNER pactbroker;"
+
+          # Set environment variables for docker_configuration.rb
+          export PACT_BROKER_DATABASE_URL="postgres://pactbroker:pactbroker@localhost:5432/pactbroker"
+          export PACT_BROKER_BASE_URL="http://localhost:9292"
+        start: |
+          sh -c "cd /pact_broker && \
+            PACT_BROKER_DATABASE_URL='postgres://pactbroker:pactbroker@localhost:5432/pactbroker' \
+            PACT_BROKER_BASE_URL='http://localhost:9292' \
+            PACT_BROKER_PORT=9292 \
+            ./entrypoint.sh"
+        timeout: 90
+        expected_output: |
+          Puma starting
+        error_strings: |
+          Gem::MissingSpecError
+          LoadError
+          cannot load such file
+        post: |
+          set -euo pipefail
+
+          # Wait for server to be fully ready
+          wait-for-it localhost:9292 -t 30
+
+          # Health and root endpoints
+          curl -sf http://localhost:9292/diagnostic/status/heartbeat | jq -e '.ok == true'
+          curl -sf http://localhost:9292/ | jq -e '._links.self.href'
+
+          # Publish a sample pact
+          tee /tmp/sample-pact.json <<'PACT'
+          {
+            "consumer": { "name": "TestConsumer" },
+            "provider": { "name": "TestProvider" },
+            "interactions": [
+              {
+                "description": "a request for user",
+                "request": { "method": "GET", "path": "/user/1" },
+                "response": {
+                  "status": 200,
+                  "headers": { "Content-Type": "application/json" },
+                  "body": { "id": 1, "name": "Test User" }
+                }
+              }
+            ],
+            "metadata": { "pactSpecification": { "version": "2.0.0" } }
+          }
+          PACT
+
+          curl -sf -X PUT \
+            -H "Content-Type: application/json" \
+            -d @/tmp/sample-pact.json \
+            "http://localhost:9292/pacts/provider/TestProvider/consumer/TestConsumer/version/1.0.0" | jq -e '._links.self'
+
+          # Verify the pact was stored and pacticipants were created
+          curl -sf "http://localhost:9292/pacticipants/TestConsumer" | jq -e '.name == "TestConsumer"'
+          curl -sf "http://localhost:9292/pacticipants/TestProvider" | jq -e '.name == "TestProvider"'
+
+          # Publish a verification result
+          curl -sf 'http://localhost:9292/pacts/provider/TestProvider/consumer/TestConsumer/latest' | tee /tmp/pact-response.json
+          # Extract verification URL from _links (HAL format)
+          VERIFY_URL=$(jq -r '._links["pb:publish-verification-results"].href // ._links["pact-publication:publish-verification-results"].href // empty' /tmp/pact-response.json)
+          echo "Verification URL: $VERIFY_URL"
+          if [ -z "$VERIFY_URL" ]; then
+            echo "ERROR: No verification URL found in HAL response"
+            jq '._links | keys' /tmp/pact-response.json
+            exit 1
+          fi
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"success": true, "providerApplicationVersion": "2.0.0"}' \
+            "$VERIFY_URL" | jq -e '.success == true'
+
+          # Can-i-deploy (matrix query)
+          curl -sf --get "http://localhost:9292/matrix" \
+            --data-urlencode "q[][pacticipant]=TestConsumer" \
+            --data-urlencode "q[][version]=1.0.0" \
+            --data-urlencode "latestby=cvp" | tee /tmp/matrix-response.json
+          jq -e '.matrix | length > 0' /tmp/matrix-response.json
+
+          # Version tagging
+          curl -sf -X PUT \
+            -H "Content-Type: application/json" \
+            "http://localhost:9292/pacticipants/TestConsumer/versions/1.0.0/tags/prod" | jq -e '.name == "prod"'
+          # Verify tag was created by fetching the specific tag
+          curl -sf "http://localhost:9292/pacticipants/TestConsumer/versions/1.0.0/tags/prod" | jq -e '.name == "prod"'
+
+          # Diagnostic dependencies (validates DB connectivity through the app)
+          curl -sf "http://localhost:9292/diagnostic/status/dependencies" | jq -e '.database.ok == true'
+
+          # Webhook creation
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"events":[{"name":"contract_content_changed"}],"request":{"method":"POST","url":"https://example.org/webhook","headers":{"Content-Type":"application/json"},"body":{"pact_url":"${pactbroker.pactUrl}"}}}' \
+            "http://localhost:9292/webhooks" | tee /tmp/webhook-response.json
+          jq -e '._links.self.href' /tmp/webhook-response.json
+
+          # Verify webhook was stored by fetching it via the self link
+          WEBHOOK_URL=$(jq -r '._links.self.href' /tmp/webhook-response.json)
+          curl -sf "$WEBHOOK_URL" | jq -e '.uuid'
+
+          # Environment and deployment tracking ("production" is pre-seeded by default)
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/hal+json" \
+            -d '{"name":"staging","displayName":"Staging","production":false}' \
+            "http://localhost:9292/environments" | tee /tmp/env-response.json
+          ENV_UUID=$(jq -r '.uuid' /tmp/env-response.json)
+          jq -e '.uuid' /tmp/env-response.json
+
+          # Record a deployment of the provider to that environment
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/hal+json" \
+            -d '{"applicationInstance":"main"}' \
+            "http://localhost:9292/pacticipants/TestProvider/versions/2.0.0/deployed-versions/environment/$ENV_UUID" | jq -e '.currentlyDeployed == true'
+
+          # Verify the environment was created
+          curl -sf -H "Accept: application/hal+json" \
+            "http://localhost:9292/environments" | jq -e '._embedded.environments | length > 0'
+
+update:
+  enabled: true
+  # Upstream tags are compound: "2.137.0-pactbroker2.118.0" (docker + gem versions).
+  # version-transform converts "-pactbroker" to "." so package.version becomes
+  # "2.137.0.2.118.0", then var-transforms extracts both component versions.
+  # The gem package (pact-broker) must be updated first when the gem
+  # version changes — it auto-updates independently from pact-foundation/pact_broker.
+  version-transform:
+    - match: -pactbroker
+      replace: "."
+  git:
+    tag-filter-prefix: "2."

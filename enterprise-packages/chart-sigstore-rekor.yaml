@@ -1,0 +1,131 @@
+package:
+  name: chart-sigstore-rekor
+  version: "1.7.7"
+  epoch: 0
+  description: Part of the sigstore project, Rekor is a timestamping server and transparency log for storing signatures, as well as an API based server for validation
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - chart-sigstore-trillian
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/sigstore/helm-charts
+      tag: rekor-${{package.version}}
+      expected-commit: aed704fb63842bafdb9192cef27588e6ae1e0a64
+
+  # Upstream values.yaml is missing the version field for mysql.image, but the
+  # template expects it via the rekor.image helper. Add it so the image is configurable.
+  - runs: |
+      yq -i '.mysql.image.version = ""' charts/rekor/values.yaml
+
+  - uses: charts/package
+    with:
+      chart-path: charts/rekor
+      images: |
+        curl:
+          values:
+            initContainerImage:
+              curl:
+                registry: ${registry}
+                repository: ${repo}
+                version: ${digest}
+        redis:
+          values:
+            redis:
+              image:
+                registry: ${registry}
+                repository: ${repo}
+                version: ${digest}
+        rekor-server:
+          values:
+            server:
+              image:
+                registry: ${registry}
+                repository: ${repo}
+                version: ${pseudo_tag}
+        createtree:
+          values:
+            createtree:
+              image:
+                registry: ${registry}
+                repository: ${repo}
+                version: ${digest}
+        backfill-redis:
+          values:
+            backfillredis:
+              image:
+                registry: ${registry}
+                repository: ${repo}
+                version: ${digest}
+        db-server:
+          values:
+            mysql:
+              image:
+                registry: ${registry}
+                repository: ${repo}
+                version: ${digest}
+        cloud-sql-proxy:
+          values:
+            mysql:
+              gcp:
+                cloudsql:
+                  registry: ${registry}
+                  repository: ${repo}
+                  version: ${digest}
+      test: |
+        # Disable the trillian subchart for testing: its images are validated by
+        # chart-sigstore-trillian, and its values paths are not in rekor values.yaml.
+        values:
+          trillian:
+            enabled: false
+        cases:
+          - name: default
+            images: [curl, redis, rekor-server, createtree]
+          - name: with-backfillredis
+            images: [curl, redis, rekor-server, createtree, backfill-redis]
+            values:
+              backfillredis:
+                enabled: true
+          - name: with-mysql
+            images: [curl, redis, rekor-server, createtree, db-server]
+            values:
+              mysql:
+                enabled: true
+                serviceAccount:
+                  create: true
+                  name: ""
+                service:
+                  ports:
+                    - name: 3306-tcp
+                      port: 3306
+                      protocol: TCP
+                      targetPort: 3306
+                persistence:
+                  enabled: false
+                  mountPath: /var/lib/mysql
+                  subPath: ""
+                resources: {}
+          - name: with-gcp
+            images: [curl, redis, rekor-server, createtree, cloud-sql-proxy]
+            values:
+              mysql:
+                gcp:
+                  enabled: true
+                  instance: test-project:us-central1:test-instance
+
+test:
+  pipeline:
+    - uses: test/chart-standards
+
+update:
+  enabled: true
+  github:
+    identifier: sigstore/helm-charts
+    strip-prefix: rekor-
+    use-tag: true
+    tag-filter-prefix: rekor-
