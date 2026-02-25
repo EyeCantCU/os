@@ -37,7 +37,7 @@ MELANGE_OPTS += --env-file build-${ARCH}.env
 MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += --generate-index false
 MELANGE_OPTS += --cache-dir ${CACHEDIR}
-MELANGE_OPTS += --pipeline-dir ./pipelines/
+MELANGE_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_OPTS += --package-append busybox
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 

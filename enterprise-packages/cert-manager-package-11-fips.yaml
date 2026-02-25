@@ -1,20 +1,20 @@
 # Provides Debian CA certificates for cert-manager's trust-manager to inject into pods.
 # How it works: Extracts ca-certificates from Debian repos, converts to JSON, packages with
-# FIPS-validated copyandmaybepause binary. trust-manager runs this as init container to inject
+# copyandmaybepause binary. trust-manager runs this as init container to inject
 # CA bundles into application containers, enabling them to trust the same CAs as Debian systems.
 # This reverse-engineers upstream's GitHub Actions build process (FIPS variant for compliance).
 # Ref: https://github.com/cert-manager/trust-manager/tree/main/trust-packages
 package:
   name: cert-manager-package-11-fips
-  version: "20210119.4" # Debian 11 (Bullseye) ca-certificates
-  epoch: 0
+  version: 20210119.4 # Debian 11 (Bullseye) ca-certificates
+  epoch: 1
   description: Debian 11 CA bundle for cert-manager trust-manager init containers (FIPS)
   copyright:
     - license: Apache-2.0
   dependencies:
     runtime:
       - tini
-      - trust-package-fips # FIPS-validated copyandmaybepause binary
+      - trust-package-fips # copyandmaybepause binary
 
 environment:
   contents:
@@ -27,11 +27,11 @@ environment:
       - xz
 
 pipeline:
-  # Symlink copyandmaybepause at root
+  # Create ko-app directory structure
   - runs: |
-      mkdir -p ${{targets.destdir}}
-      # Create symlink to the binary provided by trust-package-fips
-      ln -s /usr/bin/copyandmaybepause ${{targets.destdir}}/copyandmaybepause
+      mkdir -p ${{targets.destdir}}/ko-app
+      # Symlink to match upstream's /ko-app/debian-bundle-static location
+      ln -s /usr/bin/copyandmaybepause ${{targets.destdir}}/ko-app/debian-bundle-static
 
   # Fetch and process the Debian ca-certificates package
   # Replicates upstream: make/debian-trust-package-fetch.sh
@@ -62,10 +62,12 @@ pipeline:
       ar x "ca-certificates_${target_ca_certificates_version}_all.deb"
       tar -xf data.tar.xz
 
-      # Concatenate all mozilla certificates Debian default
+      # Concatenate all certificates from Debian ca-certificates package
+      # Create complete CA bundle with ALL Debian certificates (not just Mozilla)
+      # This matches upstream behavior which uses the full /etc/ssl/certs/ca-certificates.crt
       > ca-bundle.crt
-      for cert in usr/share/ca-certificates/mozilla/*.crt; do
-        [ -f "$cert" ] && cat "$cert" >> ca-bundle.crt
+      find usr/share/ca-certificates -name "*.crt" -type f | sort | while read -r cert; do
+        cat "$cert" >> ca-bundle.crt
       done
 
       installed_version="${target_ca_certificates_version}"
@@ -149,8 +151,8 @@ test:
         # Simulate an init container scenario
         mkdir -p /tmp/packages
 
-        # Use copyandmaybepause as an init container would
-        /copyandmaybepause /debian-package /tmp/packages
+        # Use debian-bundle-static as an init container would
+        /ko-app/debian-bundle-static /debian-package /tmp/packages
 
         # Verify the package was copied correctly
         stat /tmp/packages/cert-manager-package-debian.json
