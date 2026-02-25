@@ -15,11 +15,15 @@ package:
       - python-${{vars.python-version}}
 
 vars:
+  # upstream ships image with 3.11 version
+  # docker run --rm -it --entrypoint=bash netflixoss/metaflow_metadata_service:v2.5.0 -c 'python --version'
+  # https://github.com/Netflix/metaflow-service/blob/v2.5.0/setup.py#L49
   python-version: "3.11"
   venv-home: "/opt/latest"
 
 environment:
   environment:
+    # https://github.com/Netflix/metaflow-service/blob/v2.5.0/Dockerfile#L15-L16
     UI_ENABLED: 1
     UI_VERSION: "v1.3.13"
   contents:
@@ -39,8 +43,13 @@ pipeline:
       tag: v${{package.version}}
       expected-commit: 9e47d2d85e127d2673d457dde7ae535a3341de0f
 
+  - name: "Check upstream UI_VERSION hasn't drifted"
+    runs: |
+      grep -F 'ARG UI_VERSION="'"$UI_VERSION"'"' Dockerfile \
+        || { echo "ERROR: upstream UI_VERSION doesn't match $UI_VERSION, update UI_VERSION env var"; exit 1; }
+
   - name: "Create virtual environment with system site packages"
-    runs: uv venv ${{vars.venv-home}} --system-site-packages
+    runs: uv venv ${{vars.venv-home}} --python ${{vars.python-version}} --system-site-packages
 
   - uses: auth/uv
     with:
@@ -51,9 +60,7 @@ pipeline:
       # requires EPOCH to be later than 1980
       export SOURCE_DATE_EPOCH=315532800
 
-      # Activate virtual environment
       source ${{vars.venv-home}}/bin/activate
-
       # Install services to /root/services/ (upstream layout)
       mkdir -p ${{targets.destdir}}/root/services
       cp services/__init__.py ${{targets.destdir}}/root/services/
@@ -147,7 +154,7 @@ test:
       MF_METADATA_DB_PSWD: ""
   pipeline:
     - uses: test/tw/ldd-check
-    - uses: test/go-fips-check
+    # - uses: test/tw/pip-check
     - name: Verify FIPS OpenSSL
       runs: |
         set -euo pipefail
@@ -174,11 +181,12 @@ test:
         "
     - name: "Start PostgreSQL and create database"
       runs: |
+        set -euo pipefail
         useradd $PGUSER
         sudo -u $PGUSER initdb -D $PGDATA
         sudo -u $PGUSER pg_ctl -D $PGDATA -l /tmp/logfile start
         createdb $MF_METADATA_DB_NAME
-        psql -lqt | cut -d \| -f 1 | grep -qw metaflow
+        psql -lqt | cut -d \| -f 1 | grep -Fw metaflow
         wait-for-it -t 10 localhost:5432
     - name: Test metadata service startup
       uses: test/daemon-check-output
@@ -192,10 +200,10 @@ test:
         post: |
           set -euo pipefail
           # Test ping endpoint
-          curl -sf http://localhost:8080/ping | grep -F "pong"
+          curl -fsSL http://localhost:8080/ping | grep -F "pong"
 
           # Test version endpoint
-          curl -sf http://localhost:8080/version
+          curl -fsSL http://localhost:8080/version
 
 update:
   enabled: true
