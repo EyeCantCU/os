@@ -56,10 +56,16 @@ func supportsApkoArchitecture(cfg *apko_types.ImageConfiguration, arch string) b
 	return false
 }
 
+const (
+	OsRepo                 = "https://apk.cgr.dev/chainguard"
+	ExtraPackagesRepo      = "https://apk.cgr.dev/extra-packages"
+	EnterprisePackagesRepo = "https://apk.cgr.dev/chainguard-private"
+)
+
 var dirToRepo map[string]string = map[string]string{
-	"os":                  "https://apk.cgr.dev/chainguard",
-	"extra-packages":      "https://apk.cgr.dev/extra-packages",
-	"enterprise-packages": "https://apk.cgr.dev/chainguard-private",
+	"os":                  OsRepo,
+	"extra-packages":      ExtraPackagesRepo,
+	"enterprise-packages": EnterprisePackagesRepo,
 }
 
 // dirToWithdrawnRepo creates a mapping from directory names to withdrawn repository paths
