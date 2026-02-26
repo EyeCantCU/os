@@ -1,7 +1,7 @@
 package:
   name: litellm
-  version: "1.81.3.0"
-  epoch: 1
+  version: "1.81.12.1"
+  epoch: 0
   description: OpenAI Proxy Server (LLM Gateway) to call 100+ LLMs in a unified interface & track spend, set budgets per virtual key/user
   copyright:
     - license: MIT
@@ -67,7 +67,7 @@ pipeline:
     with:
       repository: https://github.com/BerriAI/litellm
       tag: ${{vars.git-tag}}
-      expected-commit: 61ed8f9e03557f1a04509cfeb1d24bdcca6d4ce2
+      expected-commit: 7e4e4545c5da303ed4586a3231ccb3369d9c63d4
 
   - uses: auth/uv
     with:
@@ -92,16 +92,10 @@ pipeline:
       sed -i '/nodejs-wheel-binaries/d' requirements.txt
       # Already a requirement of litellm
       sed -i '/tokenizers/d' requirements.txt
-      uv pip install -r requirements.txt --no-build-isolation
+      uv pip install -r requirements.txt --no-build-isolation --only-binary :all:
       uv pip install aurelio-sdk semantic_router
 
       uv pip install dist/*.whl --no-build-isolation
-
-      # Fix CVE-2025-67221 / GHSA-hx9q-6w63-j58v by upgrading orjson to 3.11.5+
-      uv pip install --upgrade "orjson>=3.11.5"
-
-      uv pip install --upgrade "python-multipart>=0.0.22"
-      uv pip install --upgrade "cryptography~=46.0.5"
 
       # Generate Prisma client
       export PRISMA_BINARY_CACHE_DIR=${{targets.contextdir}}/usr/share/prisma-cli
@@ -174,7 +168,21 @@ pipeline:
       cd -
 
       # Remove duplicate UI files from site-packages now that we have them in /var/lib
-      rm -rf ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/litellm/proxy/_experimental/out
+      rm -r ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/litellm/proxy/_experimental/out
+      ln -s /var/lib/litellm/ui ${{targets.contextdir}}/usr/lib/python${{vars.python-version}}/site-packages/litellm/proxy/_experimental/out
+
+  - name: Remove incompatible prisma query engines
+    runs: |
+      if [ ${{build.arch}} = "aarch64" ]; then
+        # Used for x64, not arm64
+        rm ${{targets.contextdir}}/usr/share/prisma-cli/node_modules/prisma/*-debian*
+      else
+        # We use OpenSSL 3
+        rm ${{targets.contextdir}}/usr/share/prisma-cli/node_modules/prisma/*-openssl-1.1.x*
+      fi
+
+      # We use glibc, not musl
+      rm ${{targets.contextdir}}/usr/share/prisma-cli/node_modules/prisma/*-musl*
 
   - uses: strip
 
@@ -269,8 +277,14 @@ subpackages:
               Application startup complete
               Uvicorn running on
             post: |
+              set -euo pipefail
+
               cleanup() {
+                # Kill Ollama and all its children
                 OLLAMA_PID=$(cat /tmp/ollama.pid)
+                echo "Killing Ollama PID: $OLLAMA_PID"
+
+                # Kill the process group to get all children
                 pkill -P $OLLAMA_PID 2>/dev/null || true
                 kill -9 $OLLAMA_PID 2>/dev/null || true
               }
@@ -279,10 +293,10 @@ subpackages:
               wait-for-it localhost:4001
 
               # Test healthcheck
-              curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4001/health | jq '.unhealthy_count == 0' || exit 1
+              curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4001/health | jq -e '.unhealthy_count == 0'
 
               # Test models endpoint - should return our test model
-              curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4001/v1/models | jq -e '.data[] | select(.id == "test-ollama-compat")' || exit 1
+              curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4001/v1/models | jq -e '.data[] | select(.id == "test-ollama-compat")'
 
               RESPONSE=$( \
                 curl -sf -X POST \
@@ -292,13 +306,11 @@ subpackages:
                 http://localhost:4001/v1/chat/completions \
               )
 
-              # Check that we used the correct model
-              echo $RESPONSE | jq -e --arg model "ollama/$OLLAMA_TEST_MODEL" '.model == $model'
-
-              # Check that we received a valid response with content
-              echo $RESPONSE | jq '.object == "chat.completion"'
-              echo $RESPONSE | jq '.choices[] | select(.index == 0) | .finish_reason == "stop"'
-              echo $RESPONSE | jq '.choices[] | select(.index == 0) | .message.content != null'
+              # Check that we received a valid response - litellm returns the model alias name
+              echo "$RESPONSE" | jq -e '.model == "test-ollama-compat"'
+              echo "$RESPONSE" | jq -e '.object == "chat.completion"'
+              echo "$RESPONSE" | jq -e '.choices[0].finish_reason == "stop"'
+              echo "$RESPONSE" | jq -e '.choices[0].message.content != null'
 
 update:
   enabled: true
@@ -309,6 +321,7 @@ update:
     - staging
   git:
     tag-filter-prefix: v
+    tag-filter-contains: -stable
   version-transform:
     - match: ^v(\d+\.\d+\.\d+)-stable$
       replace: $1.0
@@ -414,6 +427,8 @@ test:
           Application startup complete
           Uvicorn running on
         post: |
+          set -euo pipefail
+
           # Function to cleanup ollama processes
           cleanup() {
             # Kill Ollama and all its children
@@ -430,10 +445,10 @@ test:
           wait-for-it localhost:4000
 
           # Test healthcheck
-          curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4000/health | jq '.unhealthy_count == 0' || exit 1
+          curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4000/health | jq -e '.unhealthy_count == 0'
 
           # Test models endpoint - should return our test model
-          curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4000/v1/models | jq -e '.data[] | select(.id == "test-ollama")' || exit 1
+          curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" http://localhost:4000/v1/models | jq -e '.data[] | select(.id == "test-ollama")'
 
           RESPONSE=$( \
             curl -sf -X POST \
@@ -443,10 +458,8 @@ test:
             http://localhost:4000/v1/chat/completions \
           )
 
-          # Check that we used the correct model
-          echo $RESPONSE | jq -e --arg model "ollama/$OLLAMA_TEST_MODEL" '.model == $model'
-
-          # Check that we received a valid response with content
-          echo $RESPONSE | jq '.object == "chat.completion"'
-          echo $RESPONSE | jq '.choices[] | select(.index == 0) | .finish_reason == "stop"'
-          echo $RESPONSE | jq '.choices[] | select(.index == 0) | .message.content != null'
+          # Check that we received a valid response - litellm returns the model alias name
+          echo "$RESPONSE" | jq -e '.model == "test-ollama"'
+          echo "$RESPONSE" | jq -e '.object == "chat.completion"'
+          echo "$RESPONSE" | jq -e '.choices[0].finish_reason == "stop"'
+          echo "$RESPONSE" | jq -e '.choices[0].message.content != null'
