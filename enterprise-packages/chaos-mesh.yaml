@@ -1,13 +1,24 @@
 package:
   name: chaos-mesh
   version: "2.8.1"
-  epoch: 2 # CVE-2025-61732
+  epoch: 4
   description: A chaos engineering platform for kuberenetes
   copyright:
     - license: Apache-2.0
   resources:
     cpu: "8"
     memory: 15Gi
+
+vars:
+  # https://github.com/chaos-mesh/chaos-mesh/blob/v2.8.1/images/build-env/Dockerfile#L14
+  nodejs-version: "22"
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - nodejs-${{vars.nodejs-version}}
+      - pnpm
 
 pipeline:
   - uses: git-checkout
@@ -19,23 +30,104 @@ pipeline:
   - uses: go/bump
     with:
       deps: |-
+        filippo.io/edwards25519@v1.1.1
         github.com/docker/docker@v28.0.0
         github.com/containerd/containerd@v1.7.29
         github.com/opencontainers/selinux@v1.13.0
         golang.org/x/crypto@v0.45.0
+
+  - name: Build dashboard UI
+    working-directory: ui
+    runs: |
+      pnpm install --frozen-lockfile
+      pnpm build
+
+  - name: Embed UI assets
+    runs: |
+      go run tools/assets_generate/main.go ui_server
+      mv assets_vfsdata.go pkg/dashboard/uiserver/embedded_assets_handler.go
 
   - uses: go/build
     with:
       packages: cmd/chaos-controller-manager/main.go
       output: chaos-controller-manager
 
+  - uses: go/build
+    with:
+      packages: cmd/chaos-dashboard/main.go
+      output: chaos-dashboard
+      tags: ui_server
+
 subpackages:
+  - name: ${{package.name}}-dashboard
+    description: Chaos Mesh Dashboard web UI and API server
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/bin"
+          mv "${{targets.destdir}}/usr/bin/chaos-dashboard" "${{targets.subpkgdir}}/usr/bin/"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - jq
+            - kubectl
+            - wait-for-it
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: /usr/bin/chaos-dashboard
+        - uses: test/kwok/cluster
+          with:
+            serviceaccount: true
+        - name: Install CRDs
+          runs: kubectl apply --server-side -f https://raw.githubusercontent.com/chaos-mesh/chaos-mesh/v${{package.version}}/manifests/crd.yaml
+        - name: "Test dashboard run"
+          uses: test/daemon-check-output
+          with:
+            start: /usr/bin/chaos-dashboard
+            timeout: 30
+            expected_output: |
+              Chaos Dashboard Version:
+              Listening and serving HTTP on 0.0.0.0:2333
+              Starting collector
+              Starting database TTL controller
+            error_strings: |
+              no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
+            post: |
+              set -euo pipefail
+              wait-for-it localhost:2333 -t 10
+              wait-for-it localhost:2334 -t 10
+              curl -sf http://localhost:2333/api/common/config | jq -e '.cluster_mode'
+              curl -sf http://localhost:2334/metrics | grep -F "go_goroutines"
+
+  - name: ${{package.name}}-dashboard-compat
+    description: Compatibility package for chaos-mesh-dashboard
+    dependencies:
+      runtime:
+        - ${{package.name}}-dashboard
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf ../../bin/chaos-dashboard "${{targets.subpkgdir}}/usr/local/bin/chaos-dashboard"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-dashboard
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/tw/help-check
+          with:
+            bins: /usr/local/bin/chaos-dashboard
+
   - name: ${{package.name}}-compat
     description: Compatibility package
     pipeline:
       - runs: |
           mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
-          ln -sf /usr/bin/chaos-controller-manager "${{targets.subpkgdir}}/usr/local/bin/chaos-controller-manager"
+          ln -sf ../../bin/chaos-controller-manager "${{targets.subpkgdir}}/usr/local/bin/chaos-controller-manager"
     test:
       environment:
         contents:
@@ -43,8 +135,6 @@ subpackages:
             - ${{package.name}}
       pipeline:
         - uses: test/tw/symlink-check
-          with:
-            allow-absolute: true
         - uses: test/tw/help-check
           with:
             bins: /usr/local/bin/chaos-controller-manager
@@ -59,6 +149,7 @@ test:
         - mkcert
         - nss
         - curl
+        - wait-for-it
   pipeline:
     - uses: test/tw/ldd-check
     - uses: test/tw/help-check
@@ -88,16 +179,9 @@ test:
         error_strings: |
           no matches for kind "Workflow" in version "chaos-mesh.org/v1alpha1"
         post: |
-          sleep 3
-          STATUS=$(curl -k -s -o /dev/null -w "%{http_code}" http://localhost:10080/metrics)
-          # Check if the status code is 200, if so exit 0, otherwise exit 1
-          if [ "$STATUS" -eq 200 ]; then
-              echo "Health check passed with status code 200"
-              exit 0
-          else
-              echo "Health check failed with status code $STATUS"
-              exit 1
-          fi
+          set -euo pipefail
+          wait-for-it localhost:10080 -t 10
+          curl -fsSL http://localhost:10080/metrics | grep -F "go_goroutines"
 
 update:
   enabled: true
