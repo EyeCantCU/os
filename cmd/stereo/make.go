@@ -9,9 +9,11 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
+	"chainguard.dev/apko/pkg/build/types"
 	"github.com/spf13/cobra"
 )
 
@@ -141,7 +143,7 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 	}
 
 	sourceDir := filepath.Join(dir, pkg)
-	cfg, err := compilePkgConfig(ctx, sourceDir)
+	cfg, err := compilePkgConfig(ctx, sourceDir, types.ParseArchitecture(runtime.GOARCH))
 	if err != nil {
 		return err
 	}
