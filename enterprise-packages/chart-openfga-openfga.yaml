@@ -1,0 +1,77 @@
+package:
+  name: chart-openfga-openfga
+  version: "0.2.55"
+  epoch: 0
+  description: A Kubernetes Helm chart for the OpenFGA project.
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    packages:
+      - chart-iamguarded-common
+      - chart-iamguarded-mysql
+      - chart-iamguarded-postgresql
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/openfga/helm-charts
+      tag: openfga-${{package.version}}
+      expected-commit: a7166191f072c92f44976f309e3937dfff091fa3
+
+  # Relax subchart version constraints to match our iamguarded chart APKs.
+  # Upstream pins specific bitnami versions (postgresql 12.x, mysql 9.x,
+  # common 2.13.x) but the actual dependency is just the standard bitnami
+  # service templates and config patterns, which are stable across major
+  # versions. The subcharts are optional (disabled by default) and only
+  # provide database services when explicitly enabled.
+  - runs: |
+      yq -i '(.dependencies[] | select(.name == "postgresql")).version = "17.x.x"' charts/openfga/Chart.yaml
+      yq -i '(.dependencies[] | select(.name == "mysql")).version = "14.x.x"' charts/openfga/Chart.yaml
+      yq -i '(.dependencies[] | select(.name == "common")).version = "2.x.x"' charts/openfga/Chart.yaml
+
+  - uses: charts/package
+    with:
+      chart-path: charts/openfga
+      images: |
+        openfga:
+          values:
+            image:
+              repository: ${registry_repo}
+              tag: ${pseudo_tag}
+        k8s-wait-for:
+          values:
+            initContainer:
+              repository: ${registry_repo}
+              tag: ${pseudo_tag}
+      test: |
+        values:
+          # Disable subcharts for testing
+          postgresql:
+            enabled: false
+          mysql:
+            enabled: false
+        cases:
+          - name: default
+            images: [openfga]
+          - name: with-migrations-wait
+            images: [openfga, k8s-wait-for]
+            values:
+              datastore:
+                engine: postgres
+                uri: postgres://user:pass@host:5432/db
+                applyMigrations: true
+                waitForMigrations: true
+
+test:
+  pipeline:
+    - uses: test/chart-standards
+
+update:
+  enabled: true
+  github:
+    identifier: openfga/helm-charts
+    strip-prefix: openfga-
+    use-tag: true
+    tag-filter-prefix: openfga-
