@@ -41,6 +41,25 @@ test_debug_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(test_debug_targets): test-debug/%: $(STEREO)
 	$(STEREO) make test-debug $*
 
+# eco-2-28: rebuild packages with manylinux 2.28 ABI toolchain
+# Mirrors the eco-2-28 CI configuration from mono/env/enforce.dev/iac/400-build/build.tf
+ECO_228_REPOS = \
+	--repository-append https://apk.cgr.dev/chainguard \
+	--repository-append https://apk.cgr.dev/chainguard-private \
+	--repository-append https://apk.cgr.dev/chainguard-2.28
+ECO_228_BUILD_OPTS = $(ECO_228_REPOS) \
+	--package-append ct-manylinux-2.28 \
+	--package-append gcc-14-default
+
+eco-package/%: $(STEREO)
+	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make package $*
+
+eco-test/%: $(STEREO)
+	MELANGE_EXTRA_OPTS="$(ECO_228_REPOS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make test $*
+
+eco-debug/%: $(STEREO)
+	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make debug $*
+
 # Fallback rules when stereo doesn't exist yet - build it first, then re-invoke make
 ifeq ($(pkgs),)
 package/%: $(STEREO)

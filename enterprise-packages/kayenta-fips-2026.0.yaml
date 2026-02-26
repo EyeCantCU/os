@@ -1,0 +1,219 @@
+package:
+  name: kayenta-fips-2026.0
+  version: "2026.0.2"
+  epoch: 0 # Bump netty to 4.1.130.Final
+  description: Automated Canary Service
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - busybox
+      - curl
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openjdk-${{vars.java-version}}-jre
+      - openssl-config-fipshardened
+      - wget
+    provides:
+      - kayenta-fips=${{package.full-version}}
+
+vars:
+  java-version: 17 # https://github.com/spinnaker/spinnaker/blob/kayenta-2025.2.2/kayenta/Dockerfile.slim#L3
+
+# Upstream uses kayenta-2025.4-3 (hyphen) not kayenta-2025.4.3 (dot) for patch releases
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.(\d+)$
+    replace: $1-$2
+    to: mangled-package-version
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - openjdk-${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jvm
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx2g -Xms2g"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/spinnaker/spinnaker
+      expected-commit: 6e1a64976a812b9dab7b61d08e96f0b22b9ed24c
+      tag: kayenta-${{vars.mangled-package-version}}
+
+  - uses: auth/gradle
+
+  - uses: patch
+    with:
+      patches: upgrade-dependencies.patch
+
+  - runs: |
+      ./gradlew :kayenta:kayenta-web:installDist
+
+      mkdir -p ${{targets.contextdir}}/opt/kayenta
+      cp -r kayenta/kayenta-web/build/install/kayenta/* ${{targets.contextdir}}/opt/kayenta
+
+test:
+  environment:
+    contents:
+      packages:
+        - bcfips-policy-140-3-j${{vars.java-version}}
+        - jq
+        - valkey
+        - curl
+        - openjdk-${{vars.java-version}}-default-jdk
+        - openssl-config-fipshardened
+        - wait-for-it
+    environment:
+      JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      PASS: "KayentaSSLTest123!"
+      CLASSPATH: "/usr/share/java/bouncycastle-fips/*:./*:."
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStore=/opt/kayenta/conf/cacerts.bcfks -Djavax.net.ssl.trustStoreType=BCFKS -Djavax.net.ssl.trustStorePassword=KayentaSSLTest123! -Djavax.net.ssl.keyStore=/opt/kayenta/conf/kayenta-keystore.bcfks -Djavax.net.ssl.keyStoreType=BCFKS -Djavax.net.ssl.keyStorePassword=KayentaSSLTest123!"
+  pipeline:
+    - name: "Generate FIPS KeyStore and TrustStore"
+      runs: |
+        mkdir -p /opt/kayenta/conf
+
+        # CA (BCFKS)
+        keytool -v \
+        -keystore /opt/kayenta/conf/ca.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -alias kayenta-ca \
+        -genkeypair -keyalg RSA -keysize 3072 -sigalg SHA256withRSA \
+        -dname "CN=Kayenta Test CA" \
+        -ext bc=ca:true -ext keyUsage=keyCertSign,cRLSign \
+        -storepass "$PASS" -keypass "$PASS" -validity 3650
+
+        # Export CA cert
+        keytool -v \
+        -keystore /opt/kayenta/conf/ca.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -alias kayenta-ca -exportcert -rfc \
+        -storepass "$PASS" \
+        -file /opt/kayenta/conf/kayenta-ca.crt
+
+        keytool -v \
+        -keystore /opt/kayenta/conf/kayenta-keystore.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -alias kayenta-server \
+        -genkeypair -keyalg RSA -keysize 2048 -sigalg SHA256withRSA \
+        -dname "CN=localhost" \
+        -ext san=dns:localhost \
+        -ext eku=serverAuth \
+        -ext keyUsage=digitalSignature,keyEncipherment \
+        -storepass "$PASS" -keypass "$PASS" -validity 365
+
+        # CSR
+        keytool -v \
+        -keystore /opt/kayenta/conf/kayenta-keystore.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -alias kayenta-server -certreq \
+        -file /opt/kayenta/conf/kayenta-server.csr \
+        -storepass "$PASS"
+
+        # CA signs the CSR → server leaf cert
+        keytool -v \
+        -keystore /opt/kayenta/conf/ca.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -alias kayenta-ca -gencert \
+        -infile /opt/kayenta/conf/kayenta-server.csr \
+        -outfile /opt/kayenta/conf/kayenta-server.crt \
+        -rfc \
+        -ext eku=serverAuth \
+        -ext san=dns:localhost \
+        -ext keyUsage=digitalSignature,keyEncipherment \
+        -storepass "$PASS" -validity 365
+
+        # Import CA cert (as trusted) into the server keystore, then the signed leaf
+        keytool -v \
+        -keystore /opt/kayenta/conf/kayenta-keystore.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -alias kayenta-ca -importcert -noprompt \
+        -file /opt/kayenta/conf/kayenta-ca.crt \
+        -storepass "$PASS"
+
+        keytool -v \
+        -keystore /opt/kayenta/conf/kayenta-keystore.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -alias kayenta-server -importcert -noprompt \
+        -file /opt/kayenta/conf/kayenta-server.crt \
+        -storepass "$PASS"
+
+        # Convert JDK cacerts (JKS) → BCFKS
+        JHOME="$(/usr/libexec/java_home -v 17 2>/dev/null || echo "$JAVA_HOME")"
+        keytool -importkeystore \
+        -srckeystore "$JHOME/lib/security/cacerts" \
+        -srcstoretype JKS \
+        -srcstorepass changeit \
+        -destkeystore /opt/kayenta/conf/cacerts.bcfks \
+        -deststoretype BCFKS -destprovidername BCFIPS \
+        -deststorepass "$PASS"
+
+        # Also trust your internal CA
+        keytool -keystore /opt/kayenta/conf/cacerts.bcfks \
+        -storetype BCFKS -providername BCFIPS \
+        -storepass "$PASS" \
+        -importcert -alias kayenta-ca \
+        -file /opt/kayenta/conf/kayenta-ca.crt -noprompt
+
+        export JDK_JAVA_OPTIONS="${JDK_JAVA_OPTIONS} \
+        -Djavax.net.ssl.trustStore=/opt/kayenta/conf/cacerts.bcfks \
+        -Djavax.net.ssl.trustStoreType=BCFKS \
+        -Djavax.net.ssl.trustStorePassword=${PASS} \
+        -Djavax.net.ssl.keyStore=/opt/kayenta/conf/kayenta-keystore.bcfks \
+        -Djavax.net.ssl.keyStoreType=BCFKS \
+        -Djavax.net.ssl.keyStorePassword=${PASS}"
+    - name: "Test Kayenta with HTTPS/TLS (FIPS BCFKS)"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # redis-server in setup runs in the foreground if --daemonize yes not used
+          redis-server --daemonize yes
+          wait-for-it -t 5 --strict localhost:6379
+        start: |
+          /opt/kayenta/bin/kayenta \
+          --server.port=8090 \
+          --server.ssl.enabled=true \
+          --server.ssl.key-store=/opt/kayenta/conf/kayenta-keystore.bcfks \
+          --server.ssl.key-store-type=BCFKS \
+          --server.ssl.key-store-password=KayentaSSLTest123! \
+          --server.ssl.key-alias=kayenta-server
+        expected_output: |
+          Started Main
+          Tomcat started
+          Instance is UP
+        timeout: 45
+        post: |-
+          sleep 30 # Allow some extra time for the server to be fully ready
+          wait-for-it -t 10 --strict localhost:8090
+          echo "Testing /health endpoint (HTTPS/TLS):"
+          curl --cacert /opt/kayenta/conf/kayenta-ca.crt -fsSL https://localhost:8090/health | jq '.status' | grep -q "UP"
+          curl --cacert /opt/kayenta/conf/kayenta-ca.crt -fsSL https://localhost:8090/health | jq '.components.redisHealth.status' | grep -q "UP"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - "version-"
+    - "v[0-9]+\\.[0-9]+\\.[0-9]+" # Avoid generic semver tags
+    - "spinnaker-release-"
+    - "rosco"
+    - "orca"
+    - "keel"
+    - "kayenta-main"
+    - "igor"
+    - "halyard"
+    - "front50"
+    - "gate"
+    - "fiat"
+    - "echo"
+    - "deck"
+    - "clouddriver"
+    - "bn-"
+  git:
+    strip-prefix: kayenta-
+    tag-filter-prefix: kayenta-2026.0.
