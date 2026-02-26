@@ -1,0 +1,163 @@
+package:
+  name: maxscale-22.08
+  version: "22.08.19"
+  epoch: 0
+  description: MariaDB MaxScale 22.08 - Advanced database proxy, router, and firewall
+  copyright:
+    - license: "BSL-1.1"
+  checks:
+    disabled:
+      - setuidgid
+      - tempdir
+  dependencies:
+    provides:
+      - maxscale=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bison
+      - boost-dev
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake-3
+      - curl-dev
+      - cyrus-sasl-dev
+      - flex
+      - git
+      - glibc-dev
+      - gnutls-dev
+      - hiredis-dev
+      - icu-dev
+      - jansson-dev
+      - krb5-dev
+      - libatomic_ops-dev
+      - libmemcached-dev
+      - libmicrohttpd-dev
+      - libpq-17
+      - librdkafka-dev
+      - libssh-dev
+      - libtool
+      - libxml2-dev
+      - linux-pam-dev
+      - make
+      - mariadb-connector-c-dev
+      - ncurses-dev
+      - nodejs
+      - npm
+      - openssl-dev
+      - pcre2-dev
+      - perl
+      - pkgconf
+      - python3
+      - samurai
+      - sqlite-dev
+      - systemd-dev
+      - tcl
+      - tcl-dev
+      - unixodbc-dev
+      - util-linux-dev
+      - wget
+      - xz-dev
+      - zlib-dev
+      - zstd-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/mariadb-corporation/MaxScale
+      tag: maxscale-${{package.version}}
+      expected-commit: 741a03925a13ce5c379f60ba508fd8ebbea05c7b
+      recurse-submodules: true
+
+  - runs: |
+      # Remove -Werror from CMake files to allow building with warnings
+      find . -name "CMakeLists.txt" -exec sed -i 's/-Werror=[^ "]*//g;s/-Werror//g' {} \;
+      # Also fix the nullptr_t issue
+      if [ -f maxutils/maxsimd/src/canonical.cc ]; then
+        sed -i 's/\([^:]\)nullptr_t/\1std::nullptr_t/g' maxutils/maxsimd/src/canonical.cc
+      fi
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -GNinja \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DBUNDLE=N \
+        -DFORCE_BUNDLE=OFF \
+        -DBUILD_MAXCTRL=OFF \
+        -DBUILD_GUI=OFF \
+        -DBUILD_TESTS=OFF \
+        -DCMAKE_C_FLAGS="-Wno-error" \
+        -DCMAKE_CXX_FLAGS="-Wno-error"
+
+  - runs: |
+      # Create symlinks to system libraries for BUNDLE=N build
+      cd output
+      mkdir -p connector-c/install/lib/mariadb
+      mkdir -p connector-c/install/include
+
+      # Link the MariaDB library
+      if [ -f /usr/lib/libmariadb.a ]; then
+        ln -sf /usr/lib/libmariadb.a connector-c/install/lib/mariadb/libmariadbclient.a
+      elif [ -f /usr/lib/libmariadb.so ]; then
+        ln -sf /usr/lib/libmariadb.so connector-c/install/lib/mariadb/libmariadbclient.a
+      fi
+
+      # Link include directory
+      if [ -d /usr/include/mariadb ]; then
+        ln -sf /usr/include/mariadb connector-c/install/include/
+      fi
+
+  - runs: |
+      # Build with ninja
+      cd output
+      ninja
+
+  - uses: cmake/install
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    description: Development files for MaxScale 22.08
+
+  - name: ${{package.name}}-doc
+    pipeline:
+      - uses: split/manpages
+    description: Documentation for MaxScale 22.08
+
+update:
+  enabled: true
+  github:
+    identifier: mariadb-corporation/MaxScale
+    strip-prefix: maxscale-
+    use-tag: true
+    tag-filter: maxscale-22.08
+
+test:
+  environment:
+    contents:
+      packages:
+        - scanelf
+  pipeline:
+    - name: Verify MaxScale installation
+      runs: |
+        set -euo pipefail
+        stat /usr/bin/maxscale
+    - name: Check MaxScale version
+      runs: |
+        set -euo pipefail
+        maxscale --version
+    - name: Verify MaxScale library dependencies
+      runs: |
+        set -euo pipefail
+        scanelf -n /usr/bin/maxscale | grep -F "libmaxscale-common.so"
