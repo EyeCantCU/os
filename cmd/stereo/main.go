@@ -95,6 +95,7 @@ func main() {
 	root.AddCommand(buildDepsCmd())
 	root.AddCommand(bumpCmd())
 	root.AddCommand(checkCmd())
+	root.AddCommand(compileCmd())
 	root.AddCommand(editCmd())
 	root.AddCommand(imageDependenciesCmd())
 	root.AddCommand(lintCmd())
