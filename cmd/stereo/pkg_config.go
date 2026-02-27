@@ -7,13 +7,15 @@ import (
 	"os"
 	"path/filepath"
 
+	"chainguard.dev/apko/pkg/build/types"
 	"chainguard.dev/melange/pkg/build"
 	"chainguard.dev/melange/pkg/config"
 )
 
-func compilePkgConfig(ctx context.Context, sourceDir string) (*config.Configuration, error) {
+func compilePkgConfig(ctx context.Context, sourceDir string, arch types.Architecture) (*config.Configuration, error) {
+	dir := filepath.Dir(sourceDir)
 	configPath := fmt.Sprintf("%s.yaml", sourceDir)
-	pipelineDir := filepath.Join(filepath.Dir(sourceDir), "pipelines")
+	pipelineDir := filepath.Join(dir, "pipelines")
 
 	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create package source dir %s: %w", sourceDir, err)
@@ -21,11 +23,15 @@ func compilePkgConfig(ctx context.Context, sourceDir string) (*config.Configurat
 
 	bc, err := build.New(
 		ctx,
+		build.WithArch(arch),
 		build.WithConfigFileRepositoryURL("unused"),
 		build.WithConfigFileRepositoryCommit("unused"),
 		build.WithConfig(configPath),
+		build.WithEnvFiles([]string{filepath.Join(dir, fmt.Sprintf("build-%s.env", arch.ToAPK()))}),
 		build.WithSourceDir(sourceDir),
 		build.WithPipelineDir(pipelineDir),
+		// This is gross but it's hardcoded in all our Makefiles and elastic builds.
+		build.WithExtraPackages([]string{"busybox"}),
 	)
 	if err != nil {
 		return nil, err
