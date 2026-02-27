@@ -1,0 +1,382 @@
+package:
+  name: apache-pulsar-fips-4.0
+  version: "4.0.9"
+  epoch: 0
+  description: FIPS-compliant Pulsar distributed pub-sub messaging platform with BCFIPS cryptographic provider
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - apache-pulsar-fips=${{package.full-version}}
+    runtime:
+      - bash-binsh
+      - bcfips-policy-140-3-j${{vars.java-version}}
+      - bind-tools
+      - busybox
+      - coreutils
+      - curl
+      - glibc
+      - libgcc
+      - libstdc++
+      - libuuid
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openssl-config-fipshardened
+      - procps
+      - py3-grpcio
+      - py3-kazoo
+      - py3-pip
+      - py3-protobuf
+      - py3-pulsar-client
+      - py3-pyyaml
+      - python3
+      - tzdata
+  resources:
+    cpu: "4"
+    memory: 19Gi
+
+vars:
+  # https://github.com/apache/pulsar/blob/master/pip/pip-421.md
+  # https://github.com/apache/pulsar/blob/master/README.md#33--pulsar-ver--40
+  java-version: 21
+  pulsar-home: /usr/share/java/pulsar
+
+environment:
+  contents:
+    packages:
+      - bouncycastle-fips~2.1
+      - busybox
+      - ca-certificates-bundle
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_OPTS: "-Xms8g -Xmx8g"
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/pulsar
+      tag: v${{package.version}}
+      expected-commit: 6d812924514bee525557aa4d2ce955c04cbdaf5d
+
+  - name: Sanity check for JDK version
+    runs: |
+      DOCKERFILE_JDK=$(cat docker/pulsar/Dockerfile \
+        | grep '^ARG IMAGE_JDK_MAJOR_VERSION=' \
+        | cut -d'=' -f2)
+      if [ "$DOCKERFILE_JDK" != "${{vars.java-version}}" ]; then
+        echo "JDK version mismatch! Dockerfile JDK: $DOCKERFILE_JDK, Runtime JDK: ${{vars.java-version}}"
+        exit 1
+      fi
+
+  - uses: maven/pombump
+
+  - name: Build
+    runs: |
+      ./mvnw package \
+        -T$(nproc)C \
+        -am -B -ntp \
+        -DskipTests \
+        --no-transfer-progress \
+        --fail-fast
+
+  - name: Install
+    runs: |
+      dest="${{targets.contextdir}}/${{vars.pulsar-home}}"
+      mkdir -p "${dest}"
+
+      tar -zxf ./distribution/server/target/apache-pulsar-${{package.version}}-bin.tar.gz -C "${dest}" --strip-components=1
+      rm -rf "${dest}"/bin/*.cmd
+
+      # Create directories expected by Pulsar at runtime
+      for dir in data download logs instances/deps packages-storage; do
+        mkdir -p "${dest}/${dir}"
+      done
+
+      # Copy docker helper scripts from upstream
+      for f in docker/pulsar/scripts/*; do
+        install -Dm755 "$f" "${dest}/bin/$(basename "$f")"
+      done
+
+  - name: Remove non-FIPS cryptographic JARs
+    runs: |
+      dest="${{targets.contextdir}}/${{vars.pulsar-home}}"
+
+      # In FIPS mode Pulsar uses BCJSSE for TLS, not Netty-TCNative/BoringSSL.
+      # Remove all BoringSSL JARs and native libs — they are unused non-FIPS crypto.
+      find "${dest}" -name '*boringssl*' -print -delete
+
+      # Remove the non-FIPS Pulsar BouncyCastle wrapper; the FIPS wrapper
+      # (bouncy-castle-bcfips) is installed in the next step.
+      find "${dest}" -type f -name '*bouncy-castle-bc-*' -print -delete
+
+      # Remove non-FIPS BouncyCastle JARs (bcprov-jdk18on, bcpkix-jdk18on, etc.)
+      # shipped in the distribution tarball. The FIPS-validated equivalents
+      # (bc-fips, bcpkix-fips, bctls-fips) are symlinked from the system below.
+      find "${dest}" -type f \( \
+          -name "bcprov-*.jar" -o \
+          -name "bcpkix-*.jar" -o \
+          -name "bcutil-*.jar" -o \
+          -name "bctls-*.jar" \
+        \) ! -name "*fips*" -print -delete
+
+  - name: Install Pulsar BCFIPS provider module
+    runs: |
+      bcfips_jar="bouncy-castle/bcfips/target/bouncy-castle-bcfips-${{package.version}}-pkg.jar"
+      install -Dm644 "$bcfips_jar" "${{targets.contextdir}}/${{vars.pulsar-home}}/lib//$(basename "$bcfips_jar")"
+
+  - name: Symlink FIPS 140-3 validated BouncyCastle JARs (bc-fips, bcpkix-fips, and bctls-fips)
+    runs: ln -sf /usr/share/java/bouncycastle-fips/*.jar "${{targets.contextdir}}/${{vars.pulsar-home}}/lib/"
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    dependencies:
+      provides:
+        - apache-pulsar-fips-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"
+          ln -sf ${{vars.pulsar-home}} "${{targets.contextdir}}/pulsar"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: apache-pulsar-fips-compat
+            real-pkg-name: ${{package.name}}-compat
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - .*candidate.*
+  github:
+    identifier: apache/pulsar
+    use-tag: true
+    strip-prefix: v
+    tag-filter: v4.0.
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: pulsar
+          gid: 10000
+      users:
+        - username: pulsar
+          gid: 10000
+          uid: 10000
+    contents:
+      packages:
+        - ${{package.name}}-compat
+        - curl
+        - openjdk-${{vars.java-version}}-default-jdk
+        - wait-for-it
+    environment:
+      CLASSPATH: /usr/share/java/bouncycastle-fips/*:./*:.
+      JAVA_HOME: /usr/lib/jvm/default-jvm
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStore=/tmp/tls/system-truststore.bcfks -Djavax.net.ssl.trustStoreType=BCFKS -Djavax.net.ssl.trustStorePassword=changeit"
+      PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/pulsar/bin:/usr/lib/jvm/default-jvm/bin:$PATH
+      LANG: C.UTF-8
+      PULSAR_PID_DIR: /pulsar/logs
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: /usr/share/java/pulsar/bin/bookkeeper /usr/share/java/pulsar/bin/pulsar /usr/share/java/pulsar/bin/pulsar-admin /usr/share/java/pulsar/bin/pulsar-client /usr/share/java/pulsar/bin/pulsar-daemon /usr/share/java/pulsar/bin/pulsar-perf /usr/share/java/pulsar/bin/pulsar-shell
+    - uses: test/tw/contains-files
+      with:
+        dir: "/usr/share/java/pulsar/bin"
+        name: "*.py"
+    - uses: test/tw/contains-files
+      with:
+        dir: "/usr/share/java/pulsar/bin"
+        name: "*.sh"
+    - uses: test/tw/contains-files
+      with:
+        dir: "/usr/share/java/pulsar/conf"
+        name: "*.conf"
+    - uses: test/tw/contains-files
+      with:
+        dir: "/usr/share/java/pulsar/lib"
+        name: "*.jar"
+    - name: Ensure required folders exist
+      runs: |
+        for dir in data download logs instances/deps packages-storage; do
+          if [ ! -d "/usr/share/java/pulsar/${dir}" ]; then
+            echo "Directory /usr/share/java/pulsar/${dir} does not exist"
+            exit 1
+          fi
+        done
+    - name: Verify BCFIPS JARs are present in Pulsar lib
+      uses: test/tw/contains-files
+      with:
+        files: |
+          /usr/share/java/pulsar/lib/bc-fips.jar
+          /usr/share/java/pulsar/lib/bcpkix-fips.jar
+          /usr/share/java/pulsar/lib/bctls-fips.jar
+          /usr/share/java/pulsar/lib/bouncy-castle-bcfips-${{package.version}}-pkg.jar
+    - name: FIPS rejection tests
+      runs: |
+        set -euo pipefail
+        java /home/build/FipsCheck.java 2>&1 | grep -Fi "PASS"
+    - name: Create BCFKS system truststore
+      runs: |
+        set -euo pipefail
+        mkdir -p /tmp/tls
+        # Convert JDK CA certificates from JKS to BCFKS format.
+        # BCJSSE requires a BCFKS truststore; the default JDK cacerts is JKS
+        # which BCJSSE cannot parse, causing "DER length more than 4 bytes".
+        keytool -importkeystore \
+          -srckeystore "$JAVA_HOME/lib/security/cacerts" \
+          -srcstoretype JKS \
+          -srcstorepass changeit \
+          -destkeystore /tmp/tls/system-truststore.bcfks \
+          -deststoretype BCFKS \
+          -deststorepass changeit \
+          -providername BCFIPS \
+          -noprompt
+    - name: Test standalone server with TLS over HTTPS
+      uses: test/daemon-check-output
+      with:
+        timeout: 120
+        setup: |
+          set -euo pipefail
+          PASS="PulsarFIPSTest123!"
+
+          # Generate a BCFKS keystore with a self-signed certificate
+          keytool -v -keystore /pulsar/conf/pulsar-keystore.bcfks \
+            -storetype BCFKS \
+            -providername BCFIPS \
+            -alias pulsar-server \
+            -genkeypair -keyalg RSA -keysize 2048 -sigalg SHA256withRSA \
+            -dname "CN=localhost" \
+            -storepass "$PASS" \
+            -keypass "$PASS" \
+            -validity 365
+
+          # Export the self-signed certificate for curl to verify against
+          keytool -v -keystore /pulsar/conf/pulsar-keystore.bcfks \
+            -storetype BCFKS \
+            -providername BCFIPS \
+            -alias pulsar-server \
+            -exportcert -rfc \
+            -storepass "$PASS" \
+            -file /pulsar/conf/pulsar-server.crt
+
+          # Create a BCFKS truststore with the server certificate
+          keytool -v -keystore /pulsar/conf/pulsar-truststore.bcfks \
+            -storetype BCFKS \
+            -providername BCFIPS \
+            -alias pulsar-server \
+            -importcert -noprompt \
+            -file /pulsar/conf/pulsar-server.crt \
+            -storepass "$PASS"
+
+          # Enable TLS on the Pulsar standalone web service
+          echo >> /pulsar/conf/standalone.conf
+          tee -a /pulsar/conf/standalone.conf << EOF
+          webServicePortTls=8443
+          tlsEnabledWithKeyStore=true
+          tlsKeyStoreType=BCFKS
+          tlsKeyStore=/pulsar/conf/pulsar-keystore.bcfks
+          tlsKeyStorePassword=$PASS
+          tlsTrustStoreType=BCFKS
+          tlsTrustStore=/pulsar/conf/pulsar-truststore.bcfks
+          tlsTrustStorePassword=$PASS
+          EOF
+        start: sh -c 'cd /pulsar && bin/pulsar standalone'
+        expected_output: |
+          "c-standalone-fw-localhost-8080" : {
+          "originalNumAssignments" : 0,
+          "finalNumAssignments" : 0,
+          "instancesAdded" : 0,
+          "instancesRemoved" : 0,
+          "instancesUpdated" : 0,
+          "alive" : true
+        # error_strings overridden to omit ERROR; BookKeeper logs an expected ERROR
+        # on first start: "Problems reading from .../lastMark (this is okay if it
+        # is the first time starting this bookie"
+        # Reproducible: docker run --rm apachepulsar/pulsar /pulsar/bin/pulsar standalone
+        # FAIL also omitted, as some logs contains "fail" in the class names.
+        error_strings: |
+          FATAL
+          Traceback.*most.recent.call
+          Exception in thread
+          java.lang.NullPointerException
+          java.lang.RuntimeException
+          command not found
+          "msg":"error"
+          "level":"error"
+          "panic"
+          "fatal"
+          failed
+          Error:
+          error:
+          denied
+        post: |
+          set -euo pipefail
+          wait-for-it -t 30 localhost:8080
+
+          # Verify HTTPS admin endpoint is accessible using BCFIPS TLS
+          curl --cacert /pulsar/conf/pulsar-server.crt -fsSL https://localhost:8443/admin/v2/clusters | grep -F "standalone"
+
+          # Verify broker health over HTTPS
+          curl --cacert /pulsar/conf/pulsar-server.crt -fsSL https://localhost:8443/admin/v2/brokers/health
+
+          # Verify tenants endpoint over HTTPS
+          curl --cacert /pulsar/conf/pulsar-server.crt -fsSL https://localhost:8443/admin/v2/tenants | grep -F "public"
+
+          # Verify BCFKS truststore type is active in daemon output
+          grep -F "[javax.net.ssl.trustStoreType]: BCFKS" "$(dirname "$0")/out"
+    - name: Test standalone as background process / create topic / produce and consume message
+      uses: test/daemon-check-output
+      with:
+        start: sh -c 'cd /pulsar && bin/pulsar-daemon start standalone'
+        timeout: 120
+        expected_output: |
+          doing start standalone ...
+          starting standalone, logging to
+        # error_strings overridden to omit ERROR; BookKeeper logs an expected ERROR
+        # on first start: "Problems reading from .../lastMark (this is okay if it
+        # is the first time starting this bookie"
+        # Reproducible: docker run --rm apachepulsar/pulsar /pulsar/bin/pulsar standalone
+        # FAIL also omitted, as some logs contains "fail" in the class names.
+        error_strings: |
+          FATAL
+          Traceback.*most.recent.call
+          Exception in thread
+          java.lang.NullPointerException
+          java.lang.RuntimeException
+          command not found
+          "msg":"error"
+          "level":"error"
+          "panic"
+          "fatal"
+          failed
+          Error:
+          error:
+          denied
+        post: |
+          set -euo pipefail
+          wait-for-it -t 30 localhost:8080
+
+          # Test creating a topic (gives no output on success)
+          /pulsar/bin/pulsar-admin topics create persistent://public/default/fips-test-topic
+
+          # Test producing a message
+          /pulsar/bin/pulsar-client produce fips-test-topic --messages "Hello FIPS Chainguard!" | grep -F "1 messages successfully produced"
+
+          # Test consuming one message
+          /pulsar/bin/pulsar-client consume fips-test-topic -s fips-subscription -p Earliest -n 1 | grep -F "content:Hello FIPS Chainguard!"
