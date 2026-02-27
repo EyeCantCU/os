@@ -5,7 +5,7 @@
 package:
   name: opensearch-fips-3
   version: "3.5.0"
-  epoch: 0
+  epoch: 1
   description: Open source distributed and RESTful search engine.
   copyright:
     - license: Apache-2.0
@@ -17,6 +17,9 @@ package:
       - openjdk-bcfips-policy-140-3-j21 # use our jars - opensearch has/may ship with new versions without cmvp cert
 
 vars:
+  # OpenSearch 3.x requires JDK 21. Bump when upstream OpenSearch changes its minimum JDK requirement.
+  # ref: https://github.com/opensearch-project/OpenSearch/blob/3.5.0/buildSrc/src/main/resources/minimumRuntimeVersion
+  java-version: "21"
   plugin_version_qualifier: "0"
 
 var-transforms:
@@ -27,6 +30,10 @@ var-transforms:
     match: ^(\d+\.\d+)\.\d+$
     replace: $1.[0-9]*
     to: plugin_version
+  - from: ${{package.version}}
+    match: ^(\d+)\.\d+\.\d+$
+    replace: "$1"
+    to: major-version
 
 environment:
   contents:
@@ -109,15 +116,18 @@ pipeline:
       tag: ${{package.version}}
       expected-commit: bbc94f0bdc3a759011e6529ecfe52840856f91a3
 
+  # Drift check: fail early if upstream changes its minimum Java version
+  - runs: |
+      grep -qFx "${{vars.java-version}}" buildSrc/src/main/resources/minimumRuntimeVersion || {
+        echo "ERROR: upstream Java version changed, update vars.java-version and openjdk dependencies"
+        exit 1
+      }
+
   # opensearch-env script hard codes its own internal classpath
   # patch it to also include the system provided bcfips jars
   - uses: patch
     with:
       patches: opensearch-env.patch
-
-  - runs: |
-      # Bump netty to 4.2.8-Final: GHSA-84h7-rjj3-6jx4
-      sed -i 's/^\(netty.*\)4.2.7/\14.2.8/' gradle/libs.versions.toml
 
   - runs: |
       echo "org.gradle.daemon=false" >> gradle.properties
@@ -439,6 +449,218 @@ subpackages:
               echo "All k-nn JNI native libraries verified"
             fi
 
+  - name: ${{package.name}}-iamguarded-compat
+    description: "Compatibility package for iamguarded variant of OpenSearch"
+    dependencies:
+      provides:
+        - opensearch-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - bash
+        - curl
+        - gzip
+        - coreutils
+        - glibc-locale-en
+        - libgomp
+        - libstdc++
+        - posix-libc-utils
+        - procps
+        - yq-fips
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: opensearch
+          version: ${{vars.major-version}}
+      - runs: |
+          # Run postunpack scripts to match upstream Dockerfile (1:1 image fs)
+          /opt/iamguarded/scripts/opensearch/postunpack.sh
+          /opt/iamguarded/scripts/java/postunpack.sh
+          mkdir -p /opt/iamguarded/opensearch
+          install -d -m 755 /opt/iamguarded/opensearch
+          install -d -m 755 /opt/iamguarded/opensearch/config
+          install -d -m 755 /opt/iamguarded/opensearch/config.default
+          install -d -m 755 /opt/iamguarded/opensearch/logs
+          install -d -m 755 /opt/iamguarded/opensearch/data
+          install -d -m 755 /opt/iamguarded/scripts/opensearch
+          install -d -m 755 /opt/iamguarded/opensearch/tmp
+          install -d -m 775 /docker-entrypoint-initdb.d
+          # Create symlink for Java (required by iamguarded scripts)
+          ln -sf /usr/lib/jvm/java-${{vars.java-version}}-openjdk /opt/iamguarded/java
+          # Create symlinks to the main opensearch installation
+          # Remove dirs first — postunpack.sh created them, and ln -sf into an existing dir creates nested symlinks
+          for dir in bin lib modules plugins agent; do
+            rm -rf /opt/iamguarded/opensearch/${dir}
+            ln -sf /usr/share/opensearch/${dir} /opt/iamguarded/opensearch/${dir}
+          done
+          # Copy config to both config and config.default (entrypoint copies config.default to config at startup)
+          cp -r "${{targets.destdir}}/usr/share/opensearch/config/"* /opt/iamguarded/opensearch/config/
+          cp -r "${{targets.destdir}}/usr/share/opensearch/config/"* /opt/iamguarded/opensearch/config.default/
+          # Remove keystore files copied from main package — OpenSearch creates these at startup
+          rm -f /opt/iamguarded/opensearch/config/opensearch.keystore*
+          rm -f /opt/iamguarded/opensearch/config.default/opensearch.keystore*
+          find /opt/iamguarded/opensearch/config /opt/iamguarded/opensearch/config.default -type d -exec chmod 755 {} +
+          find /opt/iamguarded/opensearch/config /opt/iamguarded/opensearch/config.default -type f -exec chmod 644 {} +
+          # Symlink security plugin config so it's accessible via OPENSEARCH_PATH_CONF
+          ln -sf /usr/share/opensearch/config/opensearch-security /opt/iamguarded/opensearch/config/opensearch-security
+          ln -sf /usr/share/opensearch/config/opensearch-security /opt/iamguarded/opensearch/config.default/opensearch-security
+          # Volume mount points and init directory expected by iamguarded entrypoint
+          install -d -m 755 "${{targets.destdir}}/iamguarded/opensearch/data"
+          install -d -m 775 "${{targets.destdir}}/docker-entrypoint-initdb.d"
+          ln -sf /opt/iamguarded/scripts/opensearch/entrypoint.sh "${{targets.destdir}}/entrypoint.sh"
+          ln -sf /opt/iamguarded/scripts/opensearch/run.sh "${{targets.destdir}}/run.sh"
+          chmod -R g+rwX /opt/iamguarded
+      - uses: iamguarded/finalize-compat
+        with:
+          package: opensearch
+          version: ${{vars.major-version}}
+    test:
+      environment:
+        accounts:
+          groups:
+            - groupname: opensearch
+              gid: 1000
+          users:
+            - username: opensearch
+              uid: 1000
+              gid: 1000
+          run-as: 0
+        contents:
+          packages:
+            - ${{package.name}}
+            - opensearch-fips-3-security
+            - openjdk-${{vars.java-version}}-default-jvm
+            - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
+            - curl
+            - shadow
+            - wait-for-it
+        environment:
+          JAVA_HOME: /usr/lib/jvm/default-jvm
+          JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips/"
+          OPENSEARCH_JAVA_OPTS: "--module-path=/usr/share/java/bouncycastle-fips/"
+          # FIPS requires 112-bit passwords (14+ chars) for opensearch keystore/truststore
+          KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+          TRUSTSTORE_PASSWORD: "TrustStoreP@ssword123"
+          OPENSEARCH_PATH_CONF: "/opt/iamguarded/opensearch/config"
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: opensearch
+            version: ${{vars.major-version}}
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - name: "Test iamguarded directory structure"
+          uses: test/tw/contains-files
+          with:
+            files: |
+              /opt/iamguarded/opensearch/bin
+              /opt/iamguarded/opensearch/lib
+              /opt/iamguarded/opensearch/modules
+              /opt/iamguarded/opensearch/plugins
+              /opt/iamguarded/opensearch/agent
+        - name: "Test iamguarded opensearch daemon startup"
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              CONF_DIR="/opt/iamguarded/opensearch/config"
+              # Generate BCFKS keystore with self-signed cert for FIPS TLS validation
+              keytool -genkeypair \
+                -alias opensearch \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 365 \
+                -dname "CN=localhost,OU=Test,O=OpenSearch,L=Test,ST=Test,C=US" \
+                -keystore "${CONF_DIR}/keystore.bcfks" \
+                -storetype BCFKS \
+                -storepass "${KEYSTORE_PASSWORD}" \
+                -providername BCFIPS \
+                -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
+              # Export cert in DER for truststore and PEM for curl --cacert
+              keytool -exportcert \
+                -alias opensearch \
+                -keystore "${CONF_DIR}/keystore.bcfks" \
+                -storetype BCFKS \
+                -storepass "${KEYSTORE_PASSWORD}" \
+                -providername BCFIPS \
+                -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
+                -file /tmp/opensearch.crt
+              keytool -exportcert \
+                -alias opensearch \
+                -keystore "${CONF_DIR}/keystore.bcfks" \
+                -storetype BCFKS \
+                -storepass "${KEYSTORE_PASSWORD}" \
+                -providername BCFIPS \
+                -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
+                -rfc -file /tmp/opensearch-ca.pem
+              keytool -importcert \
+                -alias opensearch \
+                -file /tmp/opensearch.crt \
+                -keystore "${CONF_DIR}/truststore.bcfks" \
+                -storetype BCFKS \
+                -storepass "${TRUSTSTORE_PASSWORD}" \
+                -noprompt \
+                -providername BCFIPS \
+                -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
+              # Configure opensearch for single-node FIPS testing
+              # node.store.allow_mmap=false bypasses vm.max_map_count kernel check
+              tee "${CONF_DIR}/opensearch.yml" <<EOF
+              cluster.name: test-cluster
+              node.name: test-node
+              discovery.type: single-node
+              node.store.allow_mmap: false
+              network.host: 0.0.0.0
+              plugins.security.ssl.transport.enabled: true
+              plugins.security.ssl.transport.keystore_type: BCFKS
+              plugins.security.ssl.transport.keystore_filepath: keystore.bcfks
+              plugins.security.ssl.transport.keystore_password: ${KEYSTORE_PASSWORD}
+              plugins.security.ssl.transport.truststore_type: BCFKS
+              plugins.security.ssl.transport.truststore_filepath: truststore.bcfks
+              plugins.security.ssl.transport.truststore_password: ${TRUSTSTORE_PASSWORD}
+              plugins.security.ssl.http.enabled: true
+              plugins.security.ssl.http.keystore_type: BCFKS
+              plugins.security.ssl.http.keystore_filepath: keystore.bcfks
+              plugins.security.ssl.http.keystore_password: ${KEYSTORE_PASSWORD}
+              plugins.security.ssl.http.truststore_type: BCFKS
+              plugins.security.ssl.http.truststore_filepath: truststore.bcfks
+              plugins.security.ssl.http.truststore_password: ${TRUSTSTORE_PASSWORD}
+              plugins.security.allow_default_init_securityindex: true
+              EOF
+              cp "${CONF_DIR}/opensearch.yml" /opt/iamguarded/opensearch/config.default/opensearch.yml
+              # Add FIPS keystore/truststore JVM options
+              tee -a "${CONF_DIR}/jvm.options" <<EOF
+              -Djavax.net.ssl.keyStore=${CONF_DIR}/keystore.bcfks
+              -Djavax.net.ssl.keyStorePassword=${KEYSTORE_PASSWORD}
+              -Djavax.net.ssl.keyStoreType=BCFKS
+              -Djavax.net.ssl.trustStore=${CONF_DIR}/truststore.bcfks
+              -Djavax.net.ssl.trustStorePassword=${TRUSTSTORE_PASSWORD}
+              EOF
+              # Set permissions for opensearch user
+              chown -R opensearch:opensearch /iamguarded
+              chown -R opensearch:opensearch /opt/iamguarded
+              # Create opensearch keystore with FIPS-compliant password (112-bit / 14+ chars)
+              printf '%s\n%s\n' "${KEYSTORE_PASSWORD}" "${KEYSTORE_PASSWORD}" | /usr/share/opensearch/bin/opensearch-keystore create -p
+              chown opensearch:opensearch "${CONF_DIR}/opensearch.keystore"
+            start: /opt/iamguarded/scripts/opensearch/entrypoint.sh /opt/iamguarded/scripts/opensearch/run.sh
+            expected_output: |
+              Starting Opensearch setup
+              Opensearch setup finished!
+              Starting Opensearch
+              initialized successfully
+            timeout: 120
+            error_strings: please-dont-match-anything
+            post: |-
+              set -euo pipefail
+              CURL="curl -sfL --retry=3 --cacert /tmp/opensearch-ca.pem -u admin:admin"
+              URL="https://localhost:9200"
+              wait-for-it localhost:9200 -t 90
+              wait-for-it localhost:9300 -t 90
+              # Verify cluster health is green over HTTPS
+              $CURL --retry 12 --retry-delay 5 --retry-all-errors "${URL}/_cluster/health?pretty" | grep -F '"status" : "green"'
+              $CURL -X PUT "${URL}/test-index" -H "Content-Type: application/json" -d '{"settings": {"number_of_shards": 1, "number_of_replicas": 0}}'
+              $CURL -X POST "${URL}/test-index/_doc/1" -H "Content-Type: application/json" -d '{"title": "FIPS Test", "content": "OpenSearch running in FIPS-140-3 mode"}'
+              $CURL -X POST "${URL}/test-index/_refresh"
+              $CURL "${URL}/test-index/_search" | grep -F "FIPS Test"
+              $CURL -X DELETE "${URL}/test-index"
+
 update:
   enabled: true
   ignore-regex-patterns:
@@ -493,7 +715,7 @@ test:
           -providername BCFIPS \
           -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider
 
-        # Export cert from BCFKS keystore for truststore
+        # Export cert from BCFKS keystore for truststore (DER) and curl (PEM)
         keytool -exportcert \
           -alias opensearch \
           -keystore /usr/share/opensearch/config/keystore.bcfks \
@@ -502,6 +724,14 @@ test:
           -providername BCFIPS \
           -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
           -file /tmp/opensearch.crt
+        keytool -exportcert \
+          -alias opensearch \
+          -keystore /usr/share/opensearch/config/keystore.bcfks \
+          -storetype BCFKS \
+          -storepass "${KEYSTORE_PASSWORD}" \
+          -providername BCFIPS \
+          -provider org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider \
+          -rfc -file /tmp/opensearch-ca.pem
 
         # Create BCFKS truststore and import the certificate
         keytool -importcert \
@@ -576,12 +806,12 @@ test:
         fi
 
         sleep 15 # port can be up, but cluster health not available yet? esp in arm ci, really slow
-        # Verify cluster is healthy (using HTTPS with self-signed cert and default admin creds)
-        curl -sf -k -u admin:admin 'https://localhost:9200/_cluster/health?pretty'
+        # Verify cluster is healthy (using HTTPS with proper TLS verification)
+        curl -sf --cacert /tmp/opensearch-ca.pem -u admin:admin 'https://localhost:9200/_cluster/health?pretty'
 
         # Test basic functionality - add and retrieve a document over TLS
-        curl -sf -k -u admin:admin -X PUT 'https://localhost:9200/test-index/_doc/1' \
+        curl -sf --cacert /tmp/opensearch-ca.pem -u admin:admin -X PUT 'https://localhost:9200/test-index/_doc/1' \
           -H 'Content-Type: application/json' \
           -d '{"name": "FIPS Test", "message": "OpenSearch running in FIPS mode with TLS"}'
         sleep 15 # takes time to ingest and index doc, esp in arm ci
-        curl -sf -k -u admin:admin 'https://localhost:9200/test-index/_doc/1' | grep -F "FIPS Test"
+        curl -sf --cacert /tmp/opensearch-ca.pem -u admin:admin 'https://localhost:9200/test-index/_doc/1' | grep -F "FIPS Test"
