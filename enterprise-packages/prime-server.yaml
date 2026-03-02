@@ -1,0 +1,88 @@
+package:
+  name: prime-server
+  version: 0.7.2
+  epoch: 0
+  description: Non-blocking HTTP framework for distributed computing
+  copyright:
+    - license: BSD-2-Clause
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - cmake
+      - curl-dev
+      - czmq-dev
+      - samurai
+      - zeromq-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 77e61628d78e97ce59eea6e1eeb254d1e68edcb6
+      recurse-submodules: true
+      repository: https://github.com/kevinkreiser/prime_server
+      tag: ${{package.version}}
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DBUILD_SHARED_LIBS=ON
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development headers and libraries
+    pipeline:
+      - uses: split/dev
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+
+update:
+  enabled: true
+  github:
+    identifier: kevinkreiser/prime_server
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test prime_server daemons initialize and accept connections
+      runs: |
+        set -euo pipefail
+
+        cleanup() {
+          kill $ECHO_PID $HTTPD_PID 2>/dev/null || true
+        }
+        trap cleanup EXIT
+
+        # Verify the echo daemon initializes ZMQ and binds successfully
+        prime_echod tcp://*:8003 &
+        ECHO_PID=$!
+        sleep 1
+        kill -0 $ECHO_PID
+
+        # Verify the HTTP frontend initializes and listens
+        # Uses IPC for internal ZMQ sockets (no backend needed for startup test)
+        prime_httpd tcp://*:8002 ipc:///tmp/proxy ipc:///tmp/result ipc:///tmp/interrupt &
+        HTTPD_PID=$!
+
+        # Verify the HTTP server accepts TCP connections
+        wait-for-it localhost:8002 -t 10
+        kill -0 $HTTPD_PID

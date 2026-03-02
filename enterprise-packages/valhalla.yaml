@@ -1,0 +1,244 @@
+package:
+  name: valhalla
+  version: 3.6.3
+  epoch: 0
+  description: Open source routing engine for OpenStreetMap
+  copyright:
+    - license: MIT
+  dependencies:
+    runtime:
+      - luajit
+      - python3
+  resources:
+    cpu: 30
+    memory: 40Gi
+
+environment:
+  environment:
+    # GCC 15 treats deprecated std::atomic_{store,load}_explicit for shared_ptr as errors
+    # with -Werror. Valhalla 3.6.3 still uses the old API in incident_singleton.h.
+    # Also suppress -Werror=unused-result for protobuf ParseFromString nodiscard in triplegbuilder_utils.h.
+    CXXFLAGS: "-Wno-error=deprecated-declarations -Wno-error=unused-result"
+  contents:
+    packages:
+      - abseil-cpp-dev
+      - boost-dev
+      - build-base
+      - cmake
+      - curl-dev
+      - czmq-dev
+      - geos-dev
+      - libgeotiff-dev
+      - libspatialite-dev
+      - luajit-dev
+      - lz4-dev
+      - openssl-dev
+      - pkgconf
+      - prime-server-dev
+      - proj-dev
+      - protobuf-dev
+      - samurai
+      - sqlite-dev
+      - zeromq-dev
+      - zlib-dev
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: e2f017b16080f49203de245a211b09efab09cf72
+      recurse-submodules: true
+      repository: https://github.com/valhalla/valhalla
+      tag: ${{package.version}}
+
+  - uses: cmake/configure
+    with:
+      opts: |
+        -DCMAKE_BUILD_TYPE=Release \
+        -DENABLE_TOOLS=ON \
+        -DENABLE_DATA_TOOLS=ON \
+        -DENABLE_SERVICES=ON \
+        -DENABLE_HTTP=ON \
+        -DENABLE_PYTHON_BINDINGS=OFF \
+        -DENABLE_NODE_BINDINGS=OFF \
+        -DENABLE_TESTS=OFF \
+        -DENABLE_CCACHE=OFF \
+        -DENABLE_COVERAGE=OFF \
+        -DENABLE_SANITIZERS=OFF \
+        -DINSTALL_TEST_LIB=ON \
+        -DPREFER_EXTERNAL_DEPS=ON \
+        -DBUILD_SHARED_LIBS=ON
+
+  - uses: cmake/build
+
+  - uses: cmake/install
+
+  - uses: strip
+
+subpackages:
+  # testlib must come before -dev so test-specific files are moved before split/dev runs
+  - name: ${{package.name}}-testlib
+    description: Valhalla test library and GoogleTest/GMock for C++ development
+    dependencies:
+      runtime:
+        - ${{package.name}}-dev
+    pipeline:
+      - runs: |
+          set -euo pipefail
+
+          # Move valhalla test library
+          mkdir -p "${{targets.subpkgdir}}/usr/lib"
+          mv "${{targets.destdir}}"/usr/lib/libvalhalla_test.so* "${{targets.subpkgdir}}/usr/lib/"
+
+          # Move GoogleTest/GMock shared libraries
+          mv "${{targets.destdir}}"/usr/lib/libgtest*.so* "${{targets.subpkgdir}}/usr/lib/"
+          mv "${{targets.destdir}}"/usr/lib/libgmock*.so* "${{targets.subpkgdir}}/usr/lib/"
+
+          # Move GoogleTest/GMock CMake config
+          mkdir -p "${{targets.subpkgdir}}/usr/lib/cmake"
+          mv "${{targets.destdir}}/usr/lib/cmake/GTest" "${{targets.subpkgdir}}/usr/lib/cmake/"
+
+          # Move GoogleTest/GMock pkg-config files
+          mkdir -p "${{targets.subpkgdir}}/usr/lib/pkgconfig"
+          mv "${{targets.destdir}}"/usr/lib/pkgconfig/gtest*.pc "${{targets.subpkgdir}}/usr/lib/pkgconfig/"
+          mv "${{targets.destdir}}"/usr/lib/pkgconfig/gmock*.pc "${{targets.subpkgdir}}/usr/lib/pkgconfig/"
+
+          # Move valhalla test headers
+          mkdir -p "${{targets.subpkgdir}}/usr/include/valhalla"
+          for header in test.h gurka.h tile_server.h; do
+            mv "${{targets.destdir}}/usr/include/valhalla/${header}" "${{targets.subpkgdir}}/usr/include/valhalla/"
+          done
+
+          # Move GoogleTest/GMock headers
+          mkdir -p "${{targets.subpkgdir}}/usr/include"
+          mv "${{targets.destdir}}/usr/include/gtest" "${{targets.subpkgdir}}/usr/include/"
+          mv "${{targets.destdir}}/usr/include/gmock" "${{targets.subpkgdir}}/usr/include/"
+    test:
+      pipeline:
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+        - name: Verify test library and headers
+          runs: |
+            set -euo pipefail
+            stat /usr/lib/libvalhalla_test.so
+            stat /usr/lib/libgtest.so
+            stat /usr/lib/libgmock.so
+            stat /usr/include/valhalla/test.h
+            stat /usr/include/valhalla/gurka.h
+            stat /usr/include/valhalla/tile_server.h
+            stat /usr/include/gtest/gtest.h
+            stat /usr/include/gmock/gmock.h
+
+  - name: ${{package.name}}-dev
+    description: ${{package.name}} development headers and libraries
+    pipeline:
+      - uses: split/dev
+      # valhalla_build_config is a Python script needed at runtime (used by configure_valhalla.sh
+      # and users generating config). split/dev grabs all of /usr/bin, so move it back.
+      - runs: |
+          mkdir -p "${{targets.destdir}}/usr/bin"
+          mv "${{targets.subpkgdir}}/usr/bin/valhalla_build_config" "${{targets.destdir}}/usr/bin/"
+    dependencies:
+      runtime:
+        - ${{package.name}}
+    test:
+      environment:
+        contents:
+          packages:
+            - jq
+            - python3
+      pipeline:
+        - uses: test/pkgconf
+        - uses: test/tw/ldd-check
+          with:
+            packages: ${{subpkg.name}}
+        - name: Generate and validate config
+          runs: |
+            set -euo pipefail
+            cd "$(mktemp -d)"
+
+            # Generate a default Valhalla configuration
+            valhalla_build_config --mjolnir-tile-dir /tmp/tiles > config.json
+            stat config.json
+
+            # Validate the config is valid JSON with expected fields
+            jq -e '.mjolnir.tile_dir' config.json
+            jq -e '.service_limits' config.json
+
+  - name: ${{package.name}}-compat
+    description: Docker entrypoint scripts and directory structure for Valhalla containers
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - bash
+        - curl
+        - jq
+        - moreutils
+    pipeline:
+      - runs: |
+          set -euo pipefail
+
+          # Install docker entrypoint scripts
+          install -Dm755 docker/scripts/docker-entrypoint.sh "${{targets.subpkgdir}}/valhalla/scripts/docker-entrypoint.sh"
+          install -Dm755 docker/scripts/configure_valhalla.sh "${{targets.subpkgdir}}/valhalla/scripts/configure_valhalla.sh"
+          install -Dm755 docker/scripts/helpers.sh "${{targets.subpkgdir}}/valhalla/scripts/helpers.sh"
+
+          # Create expected directory structure
+          mkdir -p "${{targets.subpkgdir}}/custom_files"
+          mkdir -p "${{targets.subpkgdir}}/gtfs_feeds"
+    test:
+      pipeline:
+        - name: Verify scripts and directories
+          runs: |
+            set -euo pipefail
+
+            # Verify scripts exist and are executable
+            stat /valhalla/scripts/docker-entrypoint.sh
+            stat /valhalla/scripts/configure_valhalla.sh
+            stat /valhalla/scripts/helpers.sh
+            test -x /valhalla/scripts/docker-entrypoint.sh || { echo "ERROR: docker-entrypoint.sh is not executable"; exit 1; }
+            test -x /valhalla/scripts/configure_valhalla.sh || { echo "ERROR: configure_valhalla.sh is not executable"; exit 1; }
+            test -x /valhalla/scripts/helpers.sh || { echo "ERROR: helpers.sh is not executable"; exit 1; }
+
+            # Verify expected directories exist
+            stat /custom_files
+            stat /gtfs_feeds
+
+update:
+  enabled: true
+  github:
+    identifier: valhalla/valhalla
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - valhalla-dev
+        - wait-for-it
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Test valhalla_service starts and serves requests
+      runs: |
+        set -euo pipefail
+
+        # valhalla_service needs many file descriptors for ZMQ IPC sockets
+        ulimit -n 4096 2>/dev/null || ulimit -n 2048 2>/dev/null || ulimit -n 1024 2>/dev/null || true
+
+        mkdir -p /tmp/tiles
+        valhalla_build_config --mjolnir-tile-dir /tmp/tiles | \
+          jq '.concurrency = 1' > /tmp/valhalla.json
+
+        cleanup() { kill $SVC_PID 2>/dev/null || true; }
+        trap cleanup EXIT
+
+        valhalla_service /tmp/valhalla.json &
+        SVC_PID=$!
+
+        # Wait for HTTP port to be ready
+        wait-for-it localhost:8002 -t 15
+
+        # Verify the routing service responds to status requests
+        curl -sf http://localhost:8002/status | jq -e '.version'
