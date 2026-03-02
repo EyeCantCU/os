@@ -1,7 +1,7 @@
 package:
   name: flux-fips-2.5
   version: "2.5.1"
-  epoch: 16 # go/enterprise-rsc/flux-fips-2.5
+  epoch: 19 # GHSA-q9hv-hpm4-hj6x
   description: Open and extensible continuous delivery solution for Kubernetes. Powered by GitOps Toolkit.
   copyright:
     - license: Apache-2.0
@@ -34,8 +34,9 @@ pipeline:
   - uses: go/bump
     with:
       deps: |-
-        github.com/cloudflare/circl@v1.6.1
         golang.org/x/crypto@v0.45.0
+        github.com/go-git/go-git/v5@v5.16.5
+        github.com/cloudflare/circl@v1.6.3
       modroot: tests/integration
 
   - uses: go/bump
@@ -45,9 +46,10 @@ pipeline:
         github.com/golang-jwt/jwt/v4@v4.5.2
         github.com/golang-jwt/jwt/v5@v5.2.2
         golang.org/x/net@v0.38.0
-        github.com/cloudflare/circl@v1.6.1
         helm.sh/helm/v3@v3.18.5
         golang.org/x/crypto@v0.45.0
+        github.com/go-git/go-git/v5@v5.16.5
+        github.com/cloudflare/circl@v1.6.3
 
   - runs: |
       mkdir -p "${{targets.destdir}}"/usr/bin
@@ -69,9 +71,20 @@ subpackages:
           mkdir -p "${{targets.subpkgdir}}"/usr/local/bin
           ln -sf /usr/bin/flux ${{targets.subpkgdir}}/usr/local/bin/flux
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
       pipeline:
-        - runs: |
+        - name: Verify symlink exists and is functional
+          runs: |
+            set -euo pipefail
+            # Verify symlink exists and points to correct target (fails test if symlink broken)
             readlink -v /usr/local/bin/flux
+            # Verify symlink is functional by generating manifests through the compat path (fails test if broken)
+            /usr/local/bin/flux install --export > /tmp/flux-compat-test.yaml
+            # Verify output was generated (fails test if empty or malformed)
+            grep -F "kind:" /tmp/flux-compat-test.yaml
 
 update:
   enabled: true
@@ -86,10 +99,21 @@ test:
       packages:
         - ${{package.name}}-compat
   pipeline:
-    # the flux when passing the -h flag exit with error code 2
-    - runs: |
-        set +e
-        flux version --client
-        flux --version
-        flux --help
+    # FIPS check must be first for Go FIPS packages
     - uses: test/go-fips-check
+    - uses: test/tw/ver-check
+      with:
+        bins: flux
+    - uses: test/tw/help-check
+      with:
+        bins: flux
+    - name: Test flux manifest generation
+      runs: |-
+        set -euo pipefail
+        # Test that flux can generate manifests (install command with export)
+        flux install --export > /tmp/flux-manifests.yaml
+        # Verify manifest file was created and has content (fails test if missing)
+        stat /tmp/flux-manifests.yaml
+        # Verify it contains expected Kubernetes resources (fails test if not found)
+        grep -F "kind:" /tmp/flux-manifests.yaml
+        grep -F "apiVersion:" /tmp/flux-manifests.yaml

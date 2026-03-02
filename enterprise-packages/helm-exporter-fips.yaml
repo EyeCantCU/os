@@ -1,0 +1,101 @@
+package:
+  name: helm-exporter-fips
+  version: "1.3.0"
+  epoch: 0
+  description: FIPS-enabled helm-exporter - exports helm release, chart, and version statistics in Prometheus format
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/sstarcher/helm-exporter
+      tag: ${{package.version}}
+      expected-commit: 109c2ba29ed29bf6c9fbb55526947fc067293c45
+
+  - uses: go/bump
+    with:
+      deps: golang.org/x/crypto@v0.45.0
+
+  - uses: go/build
+    with:
+      packages: .
+      output: helm-exporter
+      go-package: go-fips
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for upstream Docker image
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+          # Relative symlink: from /usr/local/bin/ up 2 levels then down to bin/
+          ln -sf ../../bin/helm-exporter "${{targets.contextdir}}/usr/local/bin/helm-exporter"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+update:
+  enabled: true
+  github:
+    identifier: sstarcher/helm-exporter
+
+test:
+  environment:
+    contents:
+      packages:
+        - helm
+        - curl
+        - wait-for-it
+    environment:
+      HELM_CACHE_HOME: /tmp/helm-cache
+      HELM_CONFIG_HOME: /tmp/helm-config
+      HELM_DATA_HOME: /tmp/helm-data
+      KUBECONFIG: /root/.kwok/clusters/kwok/kubeconfig.yaml
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/ldd-check
+    - uses: test/kwok/cluster
+    - name: Test helm-exporter with kwok cluster and helm release
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          # Create a simple helm chart
+          mkdir -p /tmp/test-chart/templates
+          tee /tmp/test-chart/Chart.yaml <<EOF
+          apiVersion: v2
+          name: test-chart
+          version: 1.0.0
+          appVersion: "1.0"
+          description: A test chart for helm-exporter
+          EOF
+
+          tee /tmp/test-chart/templates/configmap.yaml <<EOF
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: test-configmap
+          data:
+            test: "value"
+          EOF
+
+          # Install the helm chart
+          helm install test-release /tmp/test-chart --namespace default --debug
+          helm list
+        start: helm-exporter -log-level info
+        timeout: 60
+        expected_output: |
+          Watching namespace
+        post: |
+          set -euo pipefail
+          # Wait for metrics endpoint to be available
+          wait-for-it localhost:9571 -t 30
+          curl -fsSL http://localhost:9571/metrics | tee /tmp/metrics.txt
+
+          # Check for helm_chart_info metric with value 1 (deployed)
+          grep 'helm_chart_info{.*} 1' /tmp/metrics.txt
+          echo "helm-exporter successfully exported metrics for test-release"

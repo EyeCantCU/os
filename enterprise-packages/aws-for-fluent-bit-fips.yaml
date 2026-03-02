@@ -1,6 +1,6 @@
 package:
   name: aws-for-fluent-bit-fips
-  version: "3.2.0"
+  version: "3.2.3"
   epoch: 0
   description: AWS provides a Fluent Bit image with plugins for both CloudWatch Logs and Kinesis Data Firehose.
   copyright:
@@ -28,7 +28,7 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/aws/aws-for-fluent-bit
-      expected-commit: 21bc4444f6cf0d6195ef4cbb9323c593e1b174d5
+      expected-commit: 0c6b09b695f5cf22481c8b4cdb5652bb9dd57a29
       tag: v${{package.version}}
 
   - runs: |
@@ -38,7 +38,7 @@ pipeline:
       cp -r ./ecs/* ${{targets.destdir}}/etc/ecs
       cp fluent-bit.conf "${{targets.destdir}}"/etc/fluent-bit/etc/
       cp ./entrypoint.sh "${{targets.destdir}}"/etc/fluent-bit/entrypoint.sh
-      cp AWS_FOR_FLUENT_BIT_VERSION "${{targets.destdir}}"/etc/fluent-bit/AWS_FOR_FLUENT_BIT_VERSION
+      echo "${{package.version}}" > "${{targets.destdir}}"/etc/fluent-bit/AWS_FOR_FLUENT_BIT_VERSION
       chmod +x "${{targets.destdir}}"/etc/fluent-bit/entrypoint.sh
 
   - runs: |
@@ -74,13 +74,15 @@ subpackages:
       - uses: strip
     # test added by a robot (compat)
     test:
+      environment:
+        contents:
+          packages:
+            - aws-for-fluent-bit-fips
       pipeline:
-        - runs: |
-            readlink -v /ecs/ecs
-            readlink -v /fluent-bit/bin/fluent-bit
-            readlink -v /fluent-bit/configs
-            readlink -v /fluent-bit/fluent-bit
-            readlink -v /fluent-bit/parsers
+        - uses: test/tw/symlink-check
+          with:
+            packages: aws-for-fluent-bit-compat-fips
+            allow-absolute: true
 
 update:
   enabled: true
@@ -91,9 +93,39 @@ update:
 
 test:
   pipeline:
-    - name: "Forward dummy log stream and verify output"
+    - uses: test/go-fips-check
+      with:
+        package-match: fluent-bit
+    - name: "Verify package-installed configuration files"
       runs: |
-        cat <<EOF > dummy.conf
+        set -euo pipefail
+
+        # Verify main configuration file exists (fails test if missing)
+        stat /etc/fluent-bit/etc/fluent-bit.conf
+
+        # Verify entrypoint script exists and is executable (fails test if missing or not executable)
+        stat /etc/fluent-bit/entrypoint.sh
+        test -x /etc/fluent-bit/entrypoint.sh || { echo "FAIL: entrypoint.sh is not executable"; exit 1; }
+
+        # Verify version file exists and contains correct version (fails test if missing or wrong version)
+        stat /etc/fluent-bit/AWS_FOR_FLUENT_BIT_VERSION
+        grep -F "${{package.version}}" /etc/fluent-bit/AWS_FOR_FLUENT_BIT_VERSION
+
+        # Verify configs directory and files exist (fails test if missing)
+        stat /etc/fluent-bit/configs
+        stat /etc/fluent-bit/configs/parse-json.conf
+        stat /etc/fluent-bit/configs/minimize-log-loss.conf
+
+        # Verify parsers directory and files exist (fails test if missing)
+        stat /etc/fluent-bit/parsers
+        stat /etc/fluent-bit/etc/parsers.conf
+
+        echo "SUCCESS: All configuration files verified"
+    - name: "Forward dummy log stream and verify output"
+      runs: |-
+        set -euo pipefail
+
+        tee dummy.conf <<'EOF'
         [SERVICE]
           Flush        1
           Daemon       Off
@@ -106,8 +138,13 @@ test:
             Name         stdout
             Match        *
         EOF
+
         fluent-bit -c dummy.conf > /tmp/fluent-bit.log 2>&1 &
         PID=$!
         sleep 5
-        kill $PID
-        grep "test-message" /tmp/fluent-bit.log
+        kill $PID 2>/dev/null || true
+
+        # Verify test-message appears in output (fails test if missing)
+        grep -F "test-message" /tmp/fluent-bit.log
+
+        echo "SUCCESS: Fluent-bit processed dummy log stream correctly"

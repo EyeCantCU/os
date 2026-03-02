@@ -1,0 +1,229 @@
+# Garage maintains two concurrent versions, based on the release tags. Raised
+# upstream request for documented support policy: https://github.com/deuxfleurs-org/garage/issues/10.
+package:
+  name: garage-2.2
+  version: "2.2.0"
+  epoch: 2 # GHSA-434x-w66g-qw3r
+  description: S3-compatible distributed object storage service for self-hosting
+  copyright:
+    - license: AGPL-3.0-only
+  dependencies:
+    provides:
+      - garage=${{package.full-version}}
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - cargo-auditable
+      - rust
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/deuxfleurs-org/garage
+      tag: v${{package.version}}
+      expected-commit: 582b168b6a985108c68aca45effae1d73203d6c3
+
+  - uses: rust/cargobump
+
+  # Upstream release builds enable these non-default features (release=true in compile.nix):
+  # https://git.deuxfleurs.fr/Deuxfleurs/garage/src/branch/main-v1/nix/compile.nix
+  - uses: cargo/build
+    with:
+      output: garage
+      opts: --release --features fjall,consul-discovery,kubernetes-discovery,telemetry-otlp,syslog,journald
+    environment:
+      # # Set GIT_VERSION to avoid "-modified" suffix being added to the version, when cargobump is used.
+      GIT_VERSION: v${{package.version}}
+
+  - uses: strip
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for upstream Docker image (binary at /garage)
+    dependencies:
+      provides:
+        - garage-compat=${{package.full-version}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"
+          ln -sf /usr/bin/garage "${{targets.contextdir}}/garage"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - '-rc'
+    - '-beta'
+    - '-internal'
+  github:
+    identifier: deuxfleurs-org/garage
+    use-tag: true
+    strip-prefix: v
+    tag-filter-prefix: v2.2.
+
+test:
+  environment:
+    contents:
+      packages:
+        - aws-cli-v2
+        - curl
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: garage
+    - uses: test/tw/ver-check
+      with:
+        bins: garage
+        version: v${{package.version}} \[features
+        match-type: regex
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/garage/meta /tmp/garage/data
+          cp test-config.toml /tmp/garage.toml
+        start: garage -c /tmp/garage.toml server
+        timeout: 60
+        expected_output: "Admin API server listening"
+        error_strings: ""
+        post: |
+          set -euo pipefail
+          export GARAGE_CONFIG_FILE=/tmp/garage.toml
+
+          # Configure cluster layout
+          # Garage requires layout config before storing data - assign node to
+          # zone dc1 with 1GB capacity, then apply to activate the cluster
+          garage status
+          NODE_ID=$(garage status | grep -E "^[a-f0-9]+" | awk "{print \$1}" | head -1)
+          garage layout assign -z dc1 -c 1G "$NODE_ID"
+          garage layout apply --version 1
+
+          # Test health endpoint
+          # Verify admin API responds to health checks on port 3903
+          curl -sf http://127.0.0.1:3903/health
+
+          # Test key management
+          # Create API credentials for S3 access and verify key appears in list
+          KEY_OUTPUT=$(garage key create test-key)
+          ACCESS_KEY=$(echo "$KEY_OUTPUT" | grep -F "Key ID:" | awk "{print \$3}")
+          SECRET_KEY=$(echo "$KEY_OUTPUT" | grep -F "Secret key:" | awk "{print \$3}")
+          garage key list | grep -F "test-key"
+
+          # Test bucket management
+          # Create bucket, grant read/write/owner permissions to test-key
+          garage bucket create test-bucket
+          garage bucket list | grep -F "test-bucket"
+          garage bucket allow --read --write --owner test-bucket --key test-key
+          garage bucket info test-bucket | grep -F "test-key"
+
+          # Configure AWS CLI
+          # Garage is S3-compatible, so we use standard AWS CLI to test the API
+          export AWS_ACCESS_KEY_ID="$ACCESS_KEY"
+          export AWS_SECRET_ACCESS_KEY="$SECRET_KEY"
+          export AWS_DEFAULT_REGION="garage"
+          export AWS_ENDPOINT_URL="http://127.0.0.1:3900"
+
+          # Test S3 upload/download/delete
+          # Basic S3 operations: put, get, list, delete, verify deletion
+          echo "Hello from Garage S3 storage" > /tmp/testfile.txt
+          aws s3 cp /tmp/testfile.txt s3://test-bucket/testfile.txt
+          aws s3 ls s3://test-bucket/ | grep -F "testfile.txt"
+          aws s3 cp s3://test-bucket/testfile.txt /tmp/downloaded.txt
+          diff /tmp/testfile.txt /tmp/downloaded.txt
+          aws s3 rm s3://test-bucket/testfile.txt
+          ! aws s3 ls s3://test-bucket/ | grep -F "testfile.txt"
+
+          # Test multipart upload
+          # Upload 10MB file which triggers multipart upload (>5MB threshold)
+          dd if=/dev/urandom of=/tmp/largefile.bin bs=1M count=10 status=none
+          aws s3 cp /tmp/largefile.bin s3://test-bucket/largefile.bin
+          aws s3api head-object --bucket test-bucket --key largefile.bin
+
+          # Test CopyObject
+          # Server-side copy without re-uploading data
+          aws s3api copy-object --bucket test-bucket --key largefile-copy.bin --copy-source test-bucket/largefile.bin
+          aws s3 ls s3://test-bucket/ | grep -F "largefile-copy.bin"
+
+          # Test presigned URL
+          # Generate temporary signed URL and verify download works without creds
+          PRESIGNED_URL=$(aws s3 presign s3://test-bucket/largefile.bin --expires-in 60)
+          curl -sf "$PRESIGNED_URL" -o /tmp/presigned-download.bin
+          diff /tmp/largefile.bin /tmp/presigned-download.bin
+
+          # Test HEAD object
+          # Verify object metadata returns correct size (10MB = 10485760 bytes)
+          CONTENT_LENGTH=$(aws s3api head-object --bucket test-bucket --key largefile.bin --query ContentLength --output text)
+          test "$CONTENT_LENGTH" = "10485760"
+
+          # Test static website serving
+          # Enable website mode on bucket and fetch via web endpoint on port 3902
+          echo "<html><body><h1>Garage Test Site</h1></body></html>" > /tmp/index.html
+          aws s3 cp /tmp/index.html s3://test-bucket/index.html
+          garage bucket website --allow test-bucket
+          curl -sf -H "Host: test-bucket.web.garage.localhost" http://127.0.0.1:3902/ | grep -F "Garage Test Site"
+
+          # Test metrics endpoint
+          # Verify Prometheus metrics exposed on admin API with auth token
+          curl -sf -H "Authorization: Bearer testmetricstoken1234567890abcd" http://127.0.0.1:3903/metrics | grep -F "cluster_healthy"
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Test kubernetes discovery feature with kwok
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/garage-k8s/meta /tmp/garage-k8s/data
+          cp test-config-k8s.toml /tmp/garage-k8s.toml
+        start: garage -c /tmp/garage-k8s.toml server
+        timeout: 90
+        expected_output: "garage_rpc::kubernetes"
+        post: |
+          set -o pipefail
+          # Verify garage created the GarageNode CRD
+          kubectl get crd garagenodes.deuxfleurs.fr
+          # Verify garage registered itself as a GarageNode
+          kubectl get garagenodes -n default -l garage.deuxfleurs.fr/service=garage-test
+    - name: Test fjall database backend feature
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/garage-fjall/meta /tmp/garage-fjall/data
+          cp test-config-fjall.toml /tmp/garage-fjall.toml
+        start: garage -c /tmp/garage-fjall.toml server
+        timeout: 30
+        expected_output: "Opening Fjall database"
+    - name: Test syslog logging
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /tmp/garage-syslog/meta /tmp/garage-syslog/data
+          cp test-config-syslog.toml /tmp/garage-syslog.toml
+        start: sh -c "GARAGE_LOG_TO_SYSLOG=true garage -c /tmp/garage-syslog.toml server"
+        timeout: 30
+        expected_output: "garage_db::sqlite_adapter: Opening Sqlite database"
+        # Custom error patterns for Rust binary - excludes "ERROR" which
+        # false-positives on syslog format priority markers
+        error_strings: |
+          panic
+          FATAL
+    - name: Test journald logging feature
+      runs: |
+        set -eu
+        mkdir -p /tmp/garage-journald/meta /tmp/garage-journald/data
+        cp test-config-journald.toml /tmp/garage-journald.toml
+        # Should fail with journald connection error (no journald in container)
+        # This proves the journald feature is compiled in
+        # Note: garage exits non-zero when journald unavailable, so we capture output and check it
+        OUTPUT=$(GARAGE_LOG_TO_JOURNALD=true garage -c /tmp/garage-journald.toml server 2>&1) || true
+        echo "$OUTPUT" | grep -F "Couldn't connect to journald"

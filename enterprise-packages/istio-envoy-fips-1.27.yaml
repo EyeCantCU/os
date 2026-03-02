@@ -1,6 +1,6 @@
 package:
   name: istio-envoy-fips-1.27
-  version: "1.27.5"
+  version: "1.27.7"
   epoch: 0
   description: Envoy with additional Istio plugins (wasm, telemetry, etc)
   copyright:
@@ -23,7 +23,7 @@ environment:
       - bash
       - bazel-7
       - binutils
-      - boringssl-fips-static-${{vars.boringssl}}-newapi
+      - boringssl-fips-static-${{vars.boringssl}}
       - build-base
       - busybox
       - ca-certificates-bundle
@@ -40,7 +40,7 @@ environment:
       - llvm-libcxx-18-dev
       - llvm-libcxxabi-18
       - llvm-lld-18~18
-      - openjdk-21
+      - openjdk-21-default-jdk
       - patch
       - python3-dev
       - samurai
@@ -51,14 +51,14 @@ environment:
     LC_ALL: en_US.UTF-8
 
 vars:
-  boringssl: "2023042800"
+  boringssl: "20240407"
 
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/istio/proxy
       tag: ${{package.version}}
-      expected-commit: e80fb95f44230b7843849f2894289eca1652fb59
+      expected-commit: 0ba73dcebc4c11bd3833a4a78b503e0167702b20
 
   - name: Apply patches, to vendored envoy and quiche vendored in envoy
     uses: patch
@@ -67,7 +67,7 @@ pipeline:
 
   - name: Build envoy
     runs: |
-      export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+      export CARGO_BAZEL_REPIN=true
       mkdir -p .cache/bazel/_bazel_root
 
       # isitio-envoy won't build with FORTIFY_SOURCE set to 3 which our clang-18 version is setting
@@ -111,6 +111,7 @@ test:
         - netcat-openbsd
         - procps
         - jq
+        - openssl
   pipeline:
     - name: "Verify binary installation"
       runs: |
@@ -120,12 +121,10 @@ test:
         envoy_version=$(envoy --version | sed -n 's|.*/BoringSSL-FIPS-\(.*\)|\1|p')
         [ "$envoy_version" = "${{vars.boringssl}}" ]
         /usr/bin/bssl-test_fips
-        bssl_version=$(/usr/bin/bssl-test_fips | sed -n 's|^Module version: \(.*\)|\1|p')
-        [ "$bssl_version" = "${{vars.boringssl}}" ]
+        /usr/bin/bssl-test_fips | grep "^Module: 'BoringCrypto', version: ${{vars.boringssl}} hash:$"
     - uses: test/cmvp-fips-certification-check
       with:
-        certificate-number: 4953
-        software-version: ${{vars.boringssl}}
+        certificate-number: 5104
     - name: "Test Envoy admin interface startup"
       uses: test/daemon-check-output
       with:
@@ -185,4 +184,30 @@ test:
           if ! ps -p $first_pid > /dev/null; then
             echo "Original Envoy process not found"
             exit 1
+          fi
+    - name: "Test TLS ciphers"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          # Generate self-signed certificate for TLS listener
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout serverkey.pem \
+            -out servercert.pem \
+            -days 1 \
+            -subj "/CN=localhost"
+        start: envoy --config-path envoy-demo-tls.yaml
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          # Test that curl works
+          curl --cacert servercert.pem  -o /dev/null https://localhost:10000
+          # Force CHACHA20 connection, and ensure it doesn't work
+          result=$(echo Q | OPENSSL_CONF=/dev/null openssl s_client -tls1_3 -CAfile servercert.pem -ciphersuites TLS_CHACHA20_POLY1305_SHA256  -connect localhost:10000 2>&1| tail -n1)
+          if [ "$result" = "DONE" ]; then
+             echo Error: non-approved TLS_CHACHA20_POLY1305_SHA256 connection successful
+             exit 1
           fi

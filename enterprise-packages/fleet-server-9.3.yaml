@@ -1,0 +1,118 @@
+package:
+  name: fleet-server-9.3
+  version: "9.3.1"
+  epoch: 0
+  description: The Fleet server allows managing a fleet of Elastic Agents.
+  copyright:
+    - license: Elastic-2.0
+  dependencies:
+    provides:
+      - fleet-server=${{package.full-version}}
+  resources:
+    cpu: 8
+    memory: 64Gi
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/fleet-server
+      tag: v${{package.version}}
+      expected-commit: acc6ce9163cb4d0000e2ebf5de753538b8047e9e
+
+  - uses: go/build
+    with:
+      packages: ./
+      output: fleet-server
+      ldflags: -X 'github.com/elastic/fleet-server/build.Version=${{package.version}}' -X 'github.com/elastic/fleet-server/build.CommitSHA=$(git rev-parse HEAD)'
+
+  - name: copy fleet-server.yml
+    runs: |
+      mkdir -p ${{targets.destdir}}/usr/share/fleet-server
+      cp fleet-server.yml ${{targets.destdir}}/usr/share/fleet-server/fleet-server.yml
+
+update:
+  enabled: true
+  github:
+    strip-prefix: v
+    identifier: elastic/fleet-server
+    use-tag: true
+    tag-filter-prefix: v9.3.
+
+test:
+  environment:
+    accounts:
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 0
+      run-as: 0
+    contents:
+      packages:
+        - bash
+        - curl
+        - elasticsearch
+        - jq
+        - kibana
+        - sudo
+        - wait-for-it
+    environment:
+      ELASTICSEARCH_HOSTS: localhost:9200
+      ES_JAVA_HOME: /usr/lib/jvm/java-25-openjdk
+  pipeline:
+    - name: Generate configuration
+      runs: |
+        # Test fleet-server setup with default Elasticsearch and Kibana services running
+        cat <<EOF > /tmp/config.yml
+        output:
+          elasticsearch:
+            hosts: '\${ELASTICSEARCH_HOSTS:https://localhost:9200}'
+            ssl.verification_mode: none  # Disable SSL ver
+
+        fleet:
+          agent:
+            id: '\${FLEET_SERVER_AGENT_ID:dev-fleet-server}'
+
+        inputs:
+          - type: fleet-server
+            policy.id: '\${FLEET_SERVER_POLICY_ID:fleet-server-policy}'
+
+        logging:
+          to_stderr: true
+          pretty: true
+          level: '\${LOG_LEVEL:DEBUG}'
+
+        http.enabled: true
+        EOF
+    - name: Test auditbeat setup and test
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          chown -R elasticsearch:root /usr/share/elasticsearch
+          touch /tmp/elasticsearch.pid
+          chown -R elasticsearch:root /tmp/elasticsearch.pid
+
+          # Start up Elasticsearch with no username/password
+          sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+            -Ediscovery.type=single-node \
+            -Expack.security.enabled=false \
+            -p /tmp/elasticsearch.pid
+
+          wait-for-it localhost:9200 --timeout=120
+
+          # Confirm Elasticsearch status before continuing
+          curl --retry 10 -sf -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status' | grep "green"
+
+          # Run Kibana
+          echo -e "elasticsearch.hosts: [\"http://localhost:9200\"]" > kibana.yml
+          /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
+          wait-for-it localhost:5601 --timeout=120 || cat kibana.log
+          wait-for-it localhost:5601 --timeout=3
+        start: fleet-server -c /tmp/config.yml
+        expected_output: |
+          Http server started
+          Listening on
+          Running
+          HEALTHY
+        timeout: 120
+        post: |
+          curl "http://localhost:5601/api/fleet/agents" -H "kbn-xsrf: true"

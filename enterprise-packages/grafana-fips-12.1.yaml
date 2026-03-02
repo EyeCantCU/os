@@ -1,9 +1,7 @@
 package:
   name: grafana-fips-12.1
-  version: "12.1.6"
-  epoch: 0 # GHSA-73rr-hh4g-fpgx
-  # When bumping, check if we can unpin nodejs-22.
-  # Remove this comment when nodejs-22 is unpinned.
+  version: "12.1.8"
+  epoch: 2 # GHSA-q9hv-hpm4-hj6x
   description: The open and composable observability and data visualization platform.
   copyright:
     - license: AGPL-3.0-or-later
@@ -23,14 +21,7 @@ environment:
       - findutils
       - go-fips-md5
       - jq
-      # Dear traveler, if you find yourself looking at this package
-      # and you find why is this pinned, this is because upstream is having
-      # issues compiling webpacks with latest nodejs-22.18.0.
-      # More information can be found in upstream issue:
-      # https://github.com/grafana/grafana/issues/109218
-      # If by any chance you find that the issue is fixed, please do unpin.
-      # And remove these comments.
-      - nodejs-22=~22.17.1
+      - nodejs-22
       - npm
       - openssl-config-fipshardened
       - posix-libc-utils
@@ -45,11 +36,15 @@ var-transforms:
     match: ^(\d+\.\d+\.\d+)\.(\d+)$
     replace: "${1}+security-${2}"
     to: mangled-package-version
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
 
 pipeline:
   - uses: git-checkout
     with:
-      expected-commit: 00d95b43e16d3df830282983ed177453b17e0910
+      expected-commit: 01fc51ec19bfcb0752542364963074a809488f9c
       repository: https://github.com/grafana/grafana
       tag: v${{vars.mangled-package-version}}
 
@@ -62,6 +57,12 @@ pipeline:
       # build` fails without this, and we can't use `go work use` because it's
       # a noop until some parts of `make build` have run
       sed -i 's/go 1.24.2/go 1.24.3/' go.work
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/go-git/go-git/v5@v5.16.5
+        github.com/cloudflare/circl@v1.6.3
 
   - name: Fix GHSA-73rr-hh4g-fpgx
     runs: |
@@ -96,6 +97,86 @@ subpackages:
       - runs: |
           mkdir -p ${{targets.subpkgdir}}/opt/grafana
           mv ./packaging/docker/run.sh ${{targets.subpkgdir}}/opt/grafana/
+
+  - name: ${{package.name}}-iamguarded-compat
+    dependencies:
+      provides:
+        - grafana-fips-iamguarded-compat=${{package.full-version}}
+      runtime:
+        - grafana-fips-${{vars.major-minor-version}}
+        - bash
+        - coreutils
+        - grep
+        - posix-libc-utils
+        - sed
+        - ini-file
+        - mysql-client
+    pipeline:
+      - uses: iamguarded/build-compat
+        with:
+          package: grafana
+          version: ${{vars.major-minor-version}}
+      - runs: |
+          # Disable problematic commands in postunpack.sh
+          sed -i 's/ensure_user_exists/# ensure_user_exists/g' /opt/iamguarded/scripts/grafana/postunpack.sh
+          sed -i 's/configure_permissions_ownership/# configure_permissions_ownership/g' /opt/iamguarded/scripts/grafana/postunpack.sh
+
+          # Create conf directory with config files so postunpack.sh can find them
+          mkdir -p /opt/iamguarded/grafana/conf
+          cp ${{targets.destdir}}/usr/share/grafana/conf/sample.ini /opt/iamguarded/grafana/conf/sample.ini
+          cp ${{targets.destdir}}/usr/share/grafana/conf/defaults.ini /opt/iamguarded/grafana/conf/defaults.ini
+
+          # Add grafana binaries to PATH and set homepath so grafana CLI can find config defaults
+          export PATH="${{targets.destdir}}/usr/bin:$PATH"
+          export GF_PATHS_HOME="${{targets.destdir}}/usr/share/grafana"
+
+          # Run postunpack.sh (important!)
+          /opt/iamguarded/scripts/grafana/postunpack.sh
+
+          # Remove default-plugins installed by postunpack.sh plugins are installed at runtime
+          rm -rf /opt/iamguarded/grafana/default-plugins
+
+          mkdir -p /opt/iamguarded/grafana/bin
+          mkdir -p /opt/iamguarded/grafana/data
+          mkdir -p /opt/iamguarded/grafana/logs
+          ln -sf /usr/bin/grafana /opt/iamguarded/grafana/bin/grafana
+          ln -sf /usr/bin/grafana-cli /opt/iamguarded/grafana/bin/grafana-cli
+          ln -sf /usr/bin/grafana-server /opt/iamguarded/grafana/bin/grafana-server
+          ln -sf /usr/bin/grafana.md5 /opt/iamguarded/grafana/bin/grafana.md5
+          ln -sf /usr/bin/grafana-cli.md5 /opt/iamguarded/grafana/bin/grafana-cli.md5
+          ln -sf /usr/bin/grafana-server.md5 /opt/iamguarded/grafana/bin/grafana-server.md5
+          # Remove real conf dir created for postunpack.sh, then replace with symlink
+          rm -rf /opt/iamguarded/grafana/conf
+          # Create symlinks for public, conf, scripts - DON'T mkdir first or ln creates inside dir
+          ln -sf /usr/share/grafana/public /opt/iamguarded/grafana/public
+          ln -sf /usr/share/grafana/conf /opt/iamguarded/grafana/conf
+          ln -sf /usr/share/grafana/scripts /opt/iamguarded/grafana/scripts
+          # Add conf.default with actual copies (not symlinks) for Bitnami chart compatibility
+          # When chart mounts emptyDir at conf/, entrypoint can copy from conf.default/
+          mkdir -p /opt/iamguarded/grafana/conf.default
+          cp -r ${{targets.destdir}}/usr/share/grafana/conf/* /opt/iamguarded/grafana/conf.default/
+
+          # Add /post-init.sh for Bitnami entrypoint compatibility
+          # The entrypoint calls this after setup.sh - just needs to exist and exit 0
+          echo -e '#!/bin/bash\nexit 0' | install -m 755 /dev/stdin ${{targets.subpkgdir}}/post-init.sh
+          chmod g+rwX /opt/iamguarded
+      - uses: iamguarded/finalize-compat
+        with:
+          package: grafana
+          version: ${{vars.major-minor-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: iamguarded/test-compat
+          with:
+            package: grafana
+            version: ${{vars.major-minor-version}}
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
 update:
   enabled: true

@@ -1,0 +1,530 @@
+package:
+  name: beats-9.2
+  version: "9.2.6"
+  epoch: 1 # GHSA-9h8m-3fm2-qjrq
+  description: >
+    The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (logs, metrics, network data). They send the data to Elasticsearch directly or via Logstash.
+
+  resources:
+    cpu: 16
+    memory: 32Gi
+  copyright:
+    - license: Apache-2.0
+    - license: Elastic-2.0
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\.\d+$
+    replace: "$1"
+    to: major-minor-version
+
+environment:
+  contents:
+    packages:
+      - mage
+      - rsync
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/beats
+      tag: v${{package.version}}
+      expected-commit: 4bfcbbed07565fb73e42c6b171e722834304d0a9
+      cherry-picks: |
+        main/6e42552a23ce: CVE-2026-0528 security patch
+
+  - uses: go/bump
+    with:
+      deps: |-
+        filippo.io/edwards25519@v1.1.1
+        go.opentelemetry.io/otel/sdk@v1.40.0
+
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/go-quark
+      tag: v0.3.0
+      expected-commit: b1e9f90b2e1b5d6e52ec17ab5b611fe147d4815e
+      destination: patched-go-quark
+
+  - uses: patch
+    working-directory: ${{package.srcdir}}/patched-go-quark
+    with:
+      patches: ${{package.srcdir}}/0001-quark-link-against-arch-specific-fmemopen-symbol.patch
+
+  - runs: |
+      echo 'replace github.com/elastic/go-quark v0.3.0 => ${{package.srcdir}}/patched-go-quark' >> go.mod
+
+subpackages:
+  - name: auditbeat-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - auditbeat=${{package.full-version}}
+    pipeline:
+      - name: Build auditbeat
+        runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/auditbeat \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/data \
+            ${{targets.subpkgdir}}/usr/share/auditbeat/logs
+
+          cd auditbeat
+
+          mage build
+          mage fields
+
+          cp -r auditbeat.docker.yml auditbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
+          cp module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
+          mv ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.docker.yml ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.yml
+
+          mv auditbeat ${{targets.subpkgdir}}/usr/bin/
+          ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
+
+          # Match the dashboards on the counterpart image
+          cd ../x-pack/auditbeat
+          mage dashboards
+          cp -r build/kibana/ ${{targets.subpkgdir}}/usr/share/auditbeat/
+
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/auditbeat && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/auditbeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/auditbeat/data "${{targets.subpkgdir}}"/usr/share/auditbeat/logs
+      - uses: strip
+    test:
+      environment:
+        accounts:
+          users:
+            - username: elasticsearch
+              uid: 1000
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - bash
+            - curl
+            - elasticsearch-9
+            - jq
+            - kibana-${{vars.major-minor-version}}
+            - openjdk-21
+            - sudo
+            - wait-for-it
+        environment:
+          ELASTICSEARCH_HOSTS: localhost:9200
+          ES_JAVA_HOME: /usr/lib/jvm/java-21-openjdk
+      pipeline:
+        - name: Test build
+          runs: auditbeat version | grep ${{package.version}}
+        - name: Test exporting
+          working-directory: /usr/share/auditbeat
+          runs: |
+            auditbeat export config
+            auditbeat export ilm-policy
+            auditbeat export index-pattern
+            auditbeat export template
+        - name: Test keystore
+          working-directory: /usr/share/auditbeat
+          runs: |
+            auditbeat keystore create | grep "Created auditbeat keystore"
+            echo BAR | auditbeat keystore add FOO --stdin | grep "Successfully updated the keystore"
+            auditbeat keystore list | grep FOO
+            auditbeat keystore remove FOO | grep "successfully removed key: FOO"
+        - name: Test auditbeat setup and test
+          working-directory: /usr/share/auditbeat
+          runs: |
+            chown -R elasticsearch:root /usr/share/elasticsearch
+
+            touch /tmp/elasticsearch.pid
+            chown -R elasticsearch:root /tmp/elasticsearch.pid
+            # Start up Elasticsearch with no username/password
+            sudo -E -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch -d \
+              -Ediscovery.type=single-node \
+              -Expack.security.enabled=false \
+              -p /tmp/elasticsearch.pid
+
+            wait-for-it localhost:9200 --timeout=60
+
+            # Confirm Elasticsearch status before continuing
+            es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+            echo "Elasticsearch status: $es_status"
+
+            timer_start=$(date +%s)
+            while [ $es_status != "green" ]
+            do
+              timer_now=$(date +%s)
+              es_status=$(curl -s -X GET "http://localhost:9200/_cluster/health?pretty" | jq -r '.status')
+              echo "Elasticsearch status: $es_status"
+              if [ $(( timer_now - timer_start )) -gt 60 ]
+              then
+                echo "Timed out waiting for Elasticsearch!"
+                exit 1
+              fi
+              sleep 2
+            done
+
+            # Run Kibana
+            printf "elasticsearch.hosts: [\"http://localhost:9200\"]\n" > kibana.yml
+            /usr/share/kibana/bin/kibana --config kibana.yml --allow-root > kibana.log 2>&1 &
+            wait-for-it localhost:5601 --timeout=60
+
+            # Test auditbeat setup with default Elasticsearch and Kibana services running
+            for try in $(seq 1 5)
+            do
+              if ! auditbeat setup
+              then
+                sleep 5
+              else
+                break
+              fi
+            done
+
+            auditbeat test output
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: auditbeat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: auditbeat-${{vars.major-minor-version}}-oci-entrypoint
+    dependencies:
+      provides:
+        - auditbeat-oci-entrypoint=${{package.full-version}}
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd auditbeat
+          sed 's/{{ \.BeatName }}/auditbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      environment:
+        contents:
+          packages:
+            - auditbeat-${{vars.major-minor-version}}
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: stat /usr/local/bin/docker-entrypoint
+        - name: Test auditbeat startup through docker entrypoint
+          uses: test/daemon-check-output
+          working-directory: /usr/share/auditbeat
+          with:
+            start: /usr/local/bin/docker-entrypoint --environment container > /dev/null 2>&1 &
+            expected_output: |
+              Syscall filter successfully installe
+            error_strings: |
+              Error:
+              denied
+              "not found"
+              "no such file or directory"
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: auditbeat-oci-entrypoint
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: metricbeat-${{vars.major-minor-version}}
+    dependencies:
+      runtime:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
+      provides:
+        - metricbeat=${{package.full-version}}
+    pipeline:
+      - uses: go/bump
+        with:
+          deps: |-
+            github.com/golang-jwt/jwt/v4@v4.5.2
+      - uses: go/build
+        with:
+          packages: ./x-pack/metricbeat
+          output: metricbeat
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/modules.d
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/module
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/metricbeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/metricbeat/NOTICE.txt
+          cp x-pack/metricbeat/metricbeat.docker.yml "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat.yml
+          cp x-pack/metricbeat/metricbeat.reference.yml "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat.reference.yml
+          cp README.md "${{targets.subpkgdir}}"/usr/share/metricbeat/README.md
+          rsync -av --include='*/' --include='*.yml' --exclude='*' x-pack/metricbeat/module/ "${{targets.subpkgdir}}"/usr/share/metricbeat/module
+          mv x-pack/metricbeat/modules.d/ "${{targets.subpkgdir}}"/usr/share/metricbeat/
+
+          cd metricbeat
+          mage dashboards
+          mv build/kibana "${{targets.subpkgdir}}"/usr/share/metricbeat/
+
+          ln -sf /usr/bin/metricbeat "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/metricbeat/data "${{targets.subpkgdir}}"/usr/share/metricbeat/logs
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/metricbeat && \
+            find "${{targets.subpkgdir}}"/usr/share/metricbeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/metricbeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/metricbeat/metricbeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/metricbeat/modules.d && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/metricbeat/data "${{targets.subpkgdir}}"/usr/share/metricbeat/logs
+      - uses: strip
+    test:
+      pipeline:
+        - runs: |
+            metricbeat version
+            cd /usr/share/metricbeat
+            metricbeat modules list
+            metricbeat --help
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: metricbeat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: metricbeat-${{vars.major-minor-version}}-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd metricbeat
+          sed 's/{{ \.BeatName }}/metricbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
+  - name: filebeat-${{vars.major-minor-version}}
+    dependencies:
+      runtime:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
+      provides:
+        - filebeat=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./x-pack/filebeat
+          output: filebeat
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/module
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/data
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/logs
+
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/filebeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/filebeat/NOTICE.txt
+          cp README.md "${{targets.subpkgdir}}"/usr/share/filebeat/README.md
+
+          cp x-pack/filebeat/filebeat.docker.yml "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat.yml
+          cp x-pack/filebeat/filebeat.reference.yml "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat.reference.yml
+
+          cp -R ./x-pack/filebeat/module/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+          cp -R ./x-pack/filebeat/modules.d/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+          cp -R ./filebeat/module/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+          cp -R ./filebeat/modules.d/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+
+          ln -sf /usr/bin/filebeat "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat
+
+
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/filebeat && \
+            find "${{targets.subpkgdir}}"/usr/share/filebeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/filebeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/filebeat/data "${{targets.subpkgdir}}"/usr/share/filebeat/logs
+      - working-directory: x-pack/filebeat
+        runs: |
+          mage fields
+          cp ./fields.yml "${{targets.subpkgdir}}"/usr/share/filebeat/
+          mage dashboards
+          mv build/kibana "${{targets.subpkgdir}}"/usr/share/filebeat/
+      - uses: strip
+    test:
+      pipeline:
+        - runs: |
+            filebeat version
+            cd /usr/share/filebeat
+            filebeat modules list
+            filebeat --help
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: filebeat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: filebeat-${{vars.major-minor-version}}-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd filebeat
+          sed 's/{{ \.BeatName }}/filebeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
+  - name: heartbeat-${{vars.major-minor-version}}
+    dependencies:
+      provides:
+        - heartbeat=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./x-pack/heartbeat
+          output: heartbeat
+      - name: Build heartbeat
+        runs: |
+          mkdir -p \
+            ${{targets.subpkgdir}}/usr/bin \
+            ${{targets.subpkgdir}}/usr/share/heartbeat
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/heartbeat/NOTICE.txt
+
+          cd heartbeat
+
+          mage fields
+
+          ln -sf /usr/bin/heartbeat "${{targets.subpkgdir}}"/usr/share/heartbeat/heartbeat
+
+          cp -r heartbeat.docker.yml heartbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/heartbeat/
+          cp -r monitors.d ${{targets.subpkgdir}}/usr/share/heartbeat/
+          mv ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.docker.yml ${{targets.subpkgdir}}/usr/share/heartbeat/heartbeat.yml
+          cp README.md "${{targets.subpkgdir}}"/usr/share/heartbeat/README.md
+
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/heartbeat && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type d -exec chmod 0755 {} \; && \
+          find "${{targets.subpkgdir}}"/usr/share/heartbeat -type f -exec chmod 0644 {} \; && \
+          chmod 0755 "${{targets.subpkgdir}}"/usr/share/heartbeat/fiheartbeatlebeat && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/modules.d && \
+          chmod 0775 "${{targets.subpkgdir}}"/usr/share/heartbeat/data "${{targets.subpkgdir}}"/usr/share/heartbeat/logs
+      - uses: strip
+    test:
+      environment:
+        accounts:
+          users:
+            - username: nonroot
+              uid: 65532
+              gid: 0
+          run-as: 0
+        contents:
+          packages:
+            - curl
+            - nginx
+            - sudo
+            - openssl
+      pipeline:
+        - runs: |
+            cd /usr/share/heartbeat
+            heartbeat export config >/dev/null
+            heartbeat test config
+            heartbeat --help
+        - name: "Test http monitor"
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              # setup is not running with error handling
+              set -eu -o pipefail -x
+              certs_dir=/etc/nginx/certs
+              # Generate root CA (FIPS-compliant: 4096-bit RSA key)
+              mkdir -p $certs_dir
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $certs_dir/ca.key
+              openssl req -x509 -new -nodes -key $certs_dir/ca.key -sha256 -days 1024 -out $certs_dir/ca.crt -subj "/CN=localhost"
+
+              # Generate SSL certificates for server (FIPS-compliant: 4096-bit RSA key)
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $certs_dir/server.key
+              openssl req -new -key $certs_dir/server.key -out $certs_dir/server.csr -subj "/CN=localhost"
+              openssl x509 -req -in $certs_dir/server.csr -CA $certs_dir/ca.crt -CAkey $certs_dir/ca.key -CAcreateserial -out $certs_dir/server.crt -days 365
+              chown nonroot: -fR /etc/nginx/certs
+
+              echo TEST >/var/lib/nginx/html/test.html
+              echo TEST >/var/lib/nginx/html/test-tls.html
+              mkdir -p /var/lib/nginx/tmp /run/nginx
+              chown nonroot -fR /var/lib/nginx /run/nginx
+
+              cp test-nginx.conf /etc/nginx/nginx.conf
+              sudo -u nonroot nginx -c /etc/nginx/nginx.conf
+
+              curl -v http://localhost:8080/test.html || echo "HTTP test failed"
+              curl -v -k https://localhost:8443/test-tls.html || echo "HTTPS test failed"
+
+              cp test-heartbeat.yml /usr/share/heartbeat/heartbeat.yml
+            start: /usr/share/heartbeat/heartbeat run -e -c /usr/share/heartbeat/heartbeat.yml
+            expected_output: |
+              Setup Beat
+              heartbeat start running
+              scheduler/scheduler.go
+            post: |
+              # kill the nginx processes
+              pkill nginx
+              if ! grep "/test\\.html" /tmp/nginx.log ; then
+                echo "Heartbeat http request not found in nginx log:"
+                cat /tmp/nginx.log
+                exit 1
+              fi
+              if ! grep "/test-tls\\.html" /tmp/nginx.log ; then
+                echo "Heartbeat https request not found in nginx log:"
+                cat /tmp/nginx.log
+                exit 1
+              fi
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: heartbeat
+            real-pkg-name: ${{subpkg.name}}
+
+  - name: heartbeat-${{vars.major-minor-version}}-oci-entrypoint
+    dependencies:
+      runtime:
+        - tini
+        - tini-compat
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          cd heartbeat
+          sed 's/{{ \.BeatName }}/heartbeat/g' ../dev-tools/packaging/templates/docker/docker-entrypoint.tmpl > "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          chmod 755 "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint
+          mkdir -p "${{targets.subpkgdir}}/usr/local/bin"
+          ln -sf /usr/bin/docker-entrypoint "${{targets.subpkgdir}}"/usr/local/bin/docker-entrypoint
+    test:
+      pipeline:
+        - name: "Check expected scripts exist"
+          runs: |
+            stat /usr/local/bin/docker-entrypoint
+
+test:
+  pipeline:
+    - uses: test/emptypackage
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - .*-rc.*
+    - .*-alpha.*
+    - .*-beta.*
+    - .*\+build[0-9]*$
+  github:
+    strip-prefix: v
+    tag-filter: v9.2.
+    identifier: elastic/beats

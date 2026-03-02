@@ -1,7 +1,7 @@
 package:
   name: rancher-webhook-fips-0.4
   version: "0.4.18"
-  epoch: 9 # CVE-2025-61730
+  epoch: 11 # CVE-2025-61732
   description: Rancher webhook for Kubernetes
   copyright:
     - license: Apache-2.0
@@ -41,13 +41,50 @@ update:
     tag-filter-prefix: v0.4.
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - openssl
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
   pipeline:
     - uses: test/go-fips-check
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
     - name: "start daemon"
       uses: test/daemon-check-output
       with:
+        setup: |
+          # Create the cattle-system namespace required by the webhook
+          kubectl create namespace cattle-system
+          # Generate TLS certificates for webhook server (controller-runtime default location)
+          mkdir -p /tmp/k8s-webhook-server/serving-certs
+          openssl req -x509 -newkey rsa:2048 \
+            -keyout /tmp/k8s-webhook-server/serving-certs/tls.key \
+            -out /tmp/k8s-webhook-server/serving-certs/tls.crt \
+            -days 1 -nodes \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
         start: "webhook"
-        timeout: 15
+        timeout: 30
         expected_output: |
-          starting
-          Waiting for server to become available
+          Rancher-webhook version
+        post: |
+          set -euo pipefail
+          # Verify webhook server is listening on HTTPS port
+          wait-for-it localhost:9443 -t 10
+
+          # Check webhook responds to HTTPS requests (any HTTP response proves it's serving)
+          set +e
+          http_code=$(curl -s --max-time 5 --insecure -o /dev/null -w '%{http_code}' https://localhost:9443/)
+          set -e
+
+          if [ "$http_code" != "000" ]; then
+            echo "SUCCESS: Webhook responding with HTTP $http_code"
+          else
+            echo "FAIL: Webhook not responding on port 9443"
+            exit 1
+          fi

@@ -1,7 +1,7 @@
 package:
   name: rke2-runtime-1.31
   version: "1.31.14.2.1"
-  epoch: 6 # GHSA-cfpf-hrx2-8rv6
+  epoch: 8 # CVE-2026-21438, CVE-2026-21434, CVE-2026-21435
   description: Rancher Kubernetes Engine 2 (RKE2) is a fully conformant Kubernetes distribution with minimal dependencies
   copyright:
     - license: Apache-2.0
@@ -62,16 +62,24 @@ pipeline:
       tag: v${{vars.mangled-package-version}}
       expected-commit: a594ea8cf80ad7b2b55f1b0286b34c8af7d53c30
 
+  # GHSA-g6x7-jq8p-6q9q: webtransport-go@v0.10.0 fixes CVE-2026-21438, CVE-2026-21434, CVE-2026-21435
+  # GHSA-9f3f-wv7r-qc8r: pion/dtls/v3@v3.0.11 fixes CVE-2026-26014
+  # quic-go@v0.59.0: required by webtransport-go@v0.10.0
+  # go-libp2p@v0.47.0: required for quic-go@v0.59.0 API compatibility (http3.Server)
+  # edwards25519@v1.1.1: fixes CVE-2026-26958
   - uses: go/bump
     with:
       deps: |-
         golang.org/x/crypto@v0.45.0
-        golang.org/x/net@v0.43.0
-        github.com/quic-go/quic-go@v0.54.1
-        github.com/libp2p/go-libp2p@v0.44.0
+        golang.org/x/net@v0.45.0
         github.com/opencontainers/selinux@v1.13.0
         github.com/containernetworking/plugins@v1.9.0
         github.com/expr-lang/expr@v1.17.7
+        github.com/libp2p/go-libp2p@v0.47.0
+        github.com/pion/dtls/v3@v3.0.11
+        github.com/quic-go/quic-go@v0.59.0
+        github.com/quic-go/webtransport-go@v0.10.0
+        filippo.io/edwards25519@v1.1.1
 
   # Upstream extracts runtime image binaries to '/bin'
   # This patch modifies the extractPath func to use '/usr/bin' to work with our setup
@@ -80,27 +88,36 @@ pipeline:
     with:
       patches: bootstrap.go.patch
 
+  - name: Extract ETCD build date from upstream
+    runs: |
+      # Extract build date from upstream build-images script
+      ETCD_BUILD_DATE=$(grep "hardened-etcd:" scripts/build-images | grep -o "build[0-9]*")
+      echo "Extracted ETCD build date from upstream: $ETCD_BUILD_DATE"
+      echo "$ETCD_BUILD_DATE" > /tmp/etcd-build-date
+
   - runs: |
-      cat > build.sh <<'EOF'
+      ETCD_BUILD_DATE=$(cat /tmp/etcd-build-date)
+
+      cat > build.sh <<EOF
       #!/bin/bash
       set -e
       source scripts/version.sh
 
       LDFLAGS="
-        -X ${K3S_PKG}/pkg/version.GitCommit=$(git rev-parse HEAD)
-        -X ${K3S_PKG}/pkg/version.Program=${PROG}
-        -X ${K3S_PKG}/pkg/version.Version=${{vars.mangled-package-version}}
-        -X ${K3S_PKG}/pkg/version.UpstreamGolang=$(go env GOVERSION)
-        -X ${RKE2_PKG}/pkg/images.DefaultRegistry=${REGISTRY}
-        -X ${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:${ETCD_VERSION}-build20251017
-        -X ${RKE2_PKG}/pkg/images.DefaultKubernetesImage=rancher/hardened-kubernetes:${KUBERNETES_IMAGE_TAG}
-        -X ${RKE2_PKG}/pkg/images.DefaultPauseImage=rancher/mirrored-pause:${PAUSE_VERSION}
-        -X ${RKE2_PKG}/pkg/images.DefaultRuntimeImage=${REPO}/${PROG}-runtime:v${{vars.image-version}}
-        -X ${RKE2_PKG}/pkg/images.DefaultCloudControllerManagerImage=rancher/rke2-cloud-provider:${CCM_VERSION}
+        -X \${K3S_PKG}/pkg/version.GitCommit=\$(git rev-parse HEAD)
+        -X \${K3S_PKG}/pkg/version.Program=\${PROG}
+        -X \${K3S_PKG}/pkg/version.Version=${{vars.mangled-package-version}}
+        -X \${K3S_PKG}/pkg/version.UpstreamGolang=\$(go env GOVERSION)
+        -X \${RKE2_PKG}/pkg/images.DefaultRegistry=\${REGISTRY}
+        -X \${RKE2_PKG}/pkg/images.DefaultEtcdImage=rancher/hardened-etcd:\${ETCD_VERSION}-${ETCD_BUILD_DATE}
+        -X \${RKE2_PKG}/pkg/images.DefaultKubernetesImage=rancher/hardened-kubernetes:\${KUBERNETES_IMAGE_TAG}
+        -X \${RKE2_PKG}/pkg/images.DefaultPauseImage=rancher/mirrored-pause:\${PAUSE_VERSION}
+        -X \${RKE2_PKG}/pkg/images.DefaultRuntimeImage=\${REPO}/\${PROG}-runtime:v${{vars.image-version}}
+        -X \${RKE2_PKG}/pkg/images.DefaultCloudControllerManagerImage=rancher/rke2-cloud-provider:\${CCM_VERSION}
       "
 
       mkdir -p ${{targets.destdir}}/usr/bin
-      go build -tags "${BUILD_TAGS}" \-o ${{targets.destdir}}/usr/bin/rke2 -ldflags "${LDFLAGS}"
+      go build -tags "\${BUILD_TAGS}" \\-o ${{targets.destdir}}/usr/bin/rke2 -ldflags "\${LDFLAGS}"
       EOF
 
       chmod +x build.sh

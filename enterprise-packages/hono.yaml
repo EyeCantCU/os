@@ -1,0 +1,541 @@
+package:
+  name: hono
+  version: "2.7.0"
+  epoch: 2
+  description: "Eclipse Hono - IoT connectivity framework"
+  copyright:
+    - license: EPL-2.0
+
+vars:
+  # Java 21 for both build and runtime, matching upstream.
+  # Upstream builds with JDK 21 in all CI workflows (ci.yml, release-and-publish.yml, etc.)
+  # and ships eclipse-temurin:21-jre-ubi9-minimal as the runtime base image.
+  # The compiler target is Java 17 bytecode (maven.compiler.release=17) but the
+  # build JDK itself is 21. Quarkus 3.27.2 fully supports Java 21.
+  # https://github.com/eclipse-hono/hono/blob/2.7.0/.github/workflows/ci.yml#L88-L92
+  # https://github.com/eclipse-hono/hono/blob/2.7.0/bom/pom.xml#L41
+  java-version: 21
+
+environment:
+  contents:
+    packages:
+      - bash
+      - busybox
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    MAVEN_OPTS: "-Xmx2048m"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/eclipse-hono/hono
+      tag: ${{package.version}}
+      expected-commit: 83840ed90d064d368fd83938a0f3477b2553636d
+
+  - uses: auth/maven
+
+  - uses: maven/configure-mirror
+
+  - uses: maven/pombump
+    with:
+      patch-file: pombump-deps.yaml
+      pom: pom.xml
+      debug: true
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties-bom.yaml
+      pom: bom/pom.xml
+      debug: true
+
+  - runs: |
+      # -Pbuild-docker-image: pulls in netty-transport-native-epoll (linux) and kqueue (macOS)
+      #   classified JARs that upstream ships in its container images for optimized I/O.
+      # -Ddocker.skip=true: globally disables the fabric8 docker-maven-plugin (checked before
+      #   Docker connection is attempted) since we don't have Docker in the build environment.
+      # No -T flag: docker-maven-plugin is not thread-safe and parallel builds cause Quarkus
+      #   ARC CDI bean resolution failures in command-router-infinispan.
+      mvn clean package -DskipTests -Ddocker.skip=true \
+        -Pbuild-docker-image,metrics-prometheus \
+        -pl services/command-router-infinispan,services/auth,services/device-registry-jdbc,adapters/mqtt,cli \
+        -am
+
+subpackages:
+  - name: ${{package.name}}-service-command-router
+    description: "Eclipse Hono Command Router Service"
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jvm
+        - run-java-sh
+    pipeline:
+      - runs: |
+          install -d "${{targets.contextdir}}/usr/share/java"
+          cp -r services/command-router-infinispan/target/quarkus-app "${{targets.contextdir}}/usr/share/java/hono-service-command-router"
+          ln -sf ../../../bin/run-java.sh "${{targets.contextdir}}/usr/share/java/hono-service-command-router/run-java.sh"
+          install -d "${{targets.contextdir}}/opt"
+          ln -sf ../usr/share/java/hono-service-command-router "${{targets.contextdir}}/opt/hono"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-service-command-router
+            - run-java-sh
+            - kafka
+            - uuidgen
+            - shadow
+            - wait-for-it
+            - curl
+        environment:
+          JAVA_APP_DIR: /opt/hono
+          JAVA_APP_JAR: quarkus-run.jar
+          JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-command-router/app
+            name: "hono-service-command-router-*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-command-router/lib/main
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-command-router/lib/boot
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-command-router/quarkus
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/share/java/hono-service-command-router/run-java.sh
+              /usr/share/java/hono-service-command-router/quarkus-run.jar
+        - name: Test Command Router with Kafka
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              export PATH="/usr/lib/kafka/bin:$PATH"
+              export JAVA_HOME="/usr/lib/jvm/default-jvm"
+
+              CLUSTER_ID="$(kafka-storage.sh random-uuid)"
+              kafka-storage.sh format -t "$CLUSTER_ID" -c /usr/lib/kafka/config/server.properties.original --standalone
+              kafka-server-start.sh /usr/lib/kafka/config/server.properties.original > /tmp/kafka.log 2>&1 &
+              wait-for-it -t 30 localhost:9092
+
+              # Inline config: upstream has no standalone test configs; Hono relies on Helm/K8s for deployment config.
+              mkdir -p /tmp/hono-config
+              tee /tmp/hono-config/infinispan-embedded.xml << 'INFINISPAN_EOF'
+              <infinispan xmlns="urn:infinispan:config:14.0">
+                <cache-container>
+                  <local-cache name="command-router"/>
+                </cache-container>
+              </infinispan>
+              INFINISPAN_EOF
+
+              tee /tmp/hono-config/application.yml << 'EOF'
+              hono:
+                app:
+                  maxInstances: 1
+                  amqpMessagingDisabled: true
+                  kafkaMessagingDisabled: false
+                kafka:
+                  commonClientConfig:
+                    bootstrap.servers: localhost:9092
+                  commandInternal:
+                    producerConfig:
+                      max.block.ms: 500
+                      request.timeout.ms: 750
+                      delivery.timeout.ms: 2500
+                commandRouter:
+                  amqp:
+                    insecurePortEnabled: true
+                    insecurePortBindAddress: 0.0.0.0
+                    insecurePort: 5673
+                  svc:
+                    kubernetesBasedAdapterInstanceStatusServiceEnabled: false
+                  cache:
+                    embedded:
+                      configurationFile: /tmp/hono-config/infinispan-embedded.xml
+              quarkus:
+                http:
+                  port: 8088
+                  host: 0.0.0.0
+              EOF
+            start: sh -c "cd /opt/hono && JAVA_OPTIONS='-Dquarkus.config.locations=/tmp/hono-config/application.yml -Djava.util.logging.manager=org.jboss.logmanager.LogManager' /opt/hono/run-java.sh"
+            timeout: 30
+            expected_output: |
+              Quarkus
+              Command Router
+              started in
+              successfully configured embedded cache
+              successfully deployed AMQP server verticle
+            post: |
+              set -euo pipefail
+              wait-for-it -t 10 localhost:8088
+              curl -fsSL http://localhost:8088/started
+              curl -fsSL http://localhost:8088/liveness
+
+  - name: ${{package.name}}-service-auth
+    description: "Eclipse Hono Authentication Server"
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jvm
+        - run-java-sh
+    pipeline:
+      - runs: |
+          install -d "${{targets.contextdir}}/usr/share/java"
+          cp -r services/auth/target/quarkus-app "${{targets.contextdir}}/usr/share/java/hono-service-auth"
+          ln -sf ../../../bin/run-java.sh "${{targets.contextdir}}/usr/share/java/hono-service-auth/run-java.sh"
+          install -d "${{targets.contextdir}}/opt"
+          ln -sf ../usr/share/java/hono-service-auth "${{targets.contextdir}}/opt/hono"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-service-auth
+            - run-java-sh
+            - curl
+            - wait-for-it
+        environment:
+          JAVA_APP_DIR: /opt/hono
+          JAVA_APP_JAR: quarkus-run.jar
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-auth/app
+            name: "hono-service-auth-*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-auth/lib/main
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-auth/lib/boot
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-auth/quarkus
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/share/java/hono-service-auth/run-java.sh
+              /usr/share/java/hono-service-auth/quarkus-run.jar
+        - name: Test Auth Service startup
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tmp/hono-auth/config
+              tee /tmp/hono-auth/config/permissions.json << 'EOF'
+              {
+                "test-client": {
+                  "authorities": [
+                    "hono-component",
+                    "protocol-adapter",
+                    "credentials-reader"
+                  ]
+                }
+              }
+              EOF
+              tee /tmp/hono-auth/config/application.yml << 'EOF'
+              hono:
+                auth:
+                  amqp:
+                    insecurePortEnabled: true
+                    insecurePortBindAddress: 0.0.0.0
+                    insecurePort: 5672
+                  svc:
+                    permissionsPath: /tmp/hono-auth/config/permissions.json
+                    signing:
+                      sharedSecret: "test-secret-key-for-signing-jwt-tokens-minimum-32-chars"
+                      tokenExpiration: 600
+              quarkus:
+                http:
+                  port: 8088
+                  host: 0.0.0.0
+              EOF
+            start: sh -c "cd /opt/hono && JAVA_OPTIONS='-Dquarkus.config.locations=file:///tmp/hono-auth/config/application.yml -Djava.util.logging.manager=org.jboss.logmanager.LogManager' /opt/hono/run-java.sh"
+            timeout: 30
+            expected_output: |
+              Hono Authentication Server
+              starting Hono Authentication Server
+              using shared secret
+              started in
+            post: |
+              set -euo pipefail
+              wait-for-it -t 30 localhost:8088
+              curl -fsSL http://localhost:8088/started
+              curl -fsSL http://localhost:8088/liveness
+              curl -fsSL http://localhost:8088/readiness
+              curl -fsSL http://localhost:8088/validating-keys | grep -F '"keys"'
+
+  - name: ${{package.name}}-service-device-registry-jdbc
+    description: "Eclipse Hono Device Registry Service with JDBC backend"
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jvm
+        - run-java-sh
+    pipeline:
+      - runs: |
+          install -d "${{targets.contextdir}}/usr/share/java"
+          cp -r services/device-registry-jdbc/target/quarkus-app "${{targets.contextdir}}/usr/share/java/hono-service-device-registry-jdbc"
+          ln -sf ../../../bin/run-java.sh "${{targets.contextdir}}/usr/share/java/hono-service-device-registry-jdbc/run-java.sh"
+          install -d "${{targets.contextdir}}/opt"
+          ln -sf ../usr/share/java/hono-service-device-registry-jdbc "${{targets.contextdir}}/opt/hono"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-service-device-registry-jdbc
+            - run-java-sh
+            - curl
+            - wait-for-it
+        environment:
+          JAVA_APP_DIR: /opt/hono
+          JAVA_APP_JAR: quarkus-run.jar
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-device-registry-jdbc/app
+            name: "hono-service-device-registry-jdbc-*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-device-registry-jdbc/lib/main
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-device-registry-jdbc/lib/boot
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-service-device-registry-jdbc/quarkus
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/share/java/hono-service-device-registry-jdbc/run-java.sh
+              /usr/share/java/hono-service-device-registry-jdbc/quarkus-run.jar
+        - name: Test Device Registry JDBC with REST API
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tmp/hono-device-registry/config
+              # Configure with dual-datasource architecture and Kafka notifications (dummy)
+              # Inline config: upstream has no standalone test configs; Hono relies on Helm/K8s for deployment config.
+              tee /tmp/hono-device-registry/config/application.yml << 'EOF'
+              hono:
+                app:
+                  maxInstances: 1
+                kafka:
+                  commonClientConfig:
+                    bootstrap.servers: localhost:9092
+                registry:
+                  amqp:
+                    insecurePortEnabled: true
+                    insecurePortBindAddress: 0.0.0.0
+                    insecurePort: 5672
+                  http:
+                    insecurePortEnabled: true
+                    insecurePortBindAddress: 0.0.0.0
+                    insecurePort: 8080
+                    authenticationRequired: false
+                  jdbc:
+                    adapter:
+                      url: jdbc:h2:mem:device-registry;DB_CLOSE_DELAY=-1
+                      driverClass: org.h2.Driver
+                    management:
+                      url: jdbc:h2:mem:device-registry;DB_CLOSE_DELAY=-1
+                      driverClass: org.h2.Driver
+                  svc:
+                    maxBcryptCostFactor: 4
+                tenant:
+                  jdbc:
+                    adapter:
+                      url: jdbc:h2:mem:device-registry;DB_CLOSE_DELAY=-1
+                      driverClass: org.h2.Driver
+                    management:
+                      url: jdbc:h2:mem:device-registry;DB_CLOSE_DELAY=-1
+                      driverClass: org.h2.Driver
+              quarkus:
+                http:
+                  port: 8088
+                  host: 0.0.0.0
+              EOF
+            start: sh -c "cd /opt/hono && JAVA_OPTIONS='-Dquarkus.config.locations=file:///tmp/hono-device-registry/config/application.yml -Djava.util.logging.manager=org.jboss.logmanager.LogManager' /opt/hono/run-java.sh"
+            timeout: 30
+            expected_output: |
+              Hono JDBC Device Registry
+              deploying 1 Hono JDBC Device Registry instances
+              successfully deployed AMQP server verticle
+              started in
+            post: |
+              set -euo pipefail
+              wait-for-it -t 30 localhost:8080
+              # tenant creation
+              curl -fsSL -X POST -H "content-type: application/json" \
+                --data-binary '{}' http://localhost:8080/v1/tenants/test-tenant
+              # device registration
+              curl -fsSL -X POST -H "content-type: application/json" \
+                --data-binary '{}' http://localhost:8080/v1/devices/test-tenant/test-device
+              # device retrieval
+              curl -fsSL http://localhost:8080/v1/devices/test-tenant/test-device
+
+  - name: ${{package.name}}-adapter-mqtt
+    description: "Eclipse Hono MQTT Protocol Adapter"
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jvm
+        - run-java-sh
+    pipeline:
+      - runs: |
+          install -d "${{targets.contextdir}}/usr/share/java"
+          cp -r adapters/mqtt/target/quarkus-app "${{targets.contextdir}}/usr/share/java/hono-adapter-mqtt"
+          ln -sf ../../../bin/run-java.sh "${{targets.contextdir}}/usr/share/java/hono-adapter-mqtt/run-java.sh"
+          install -d "${{targets.contextdir}}/opt"
+          ln -sf ../usr/share/java/hono-adapter-mqtt "${{targets.contextdir}}/opt/hono"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-adapter-mqtt
+            - run-java-sh
+            - curl
+            - wait-for-it
+        environment:
+          JAVA_APP_DIR: /opt/hono
+          JAVA_APP_JAR: quarkus-run.jar
+          # Unset GCP credentials so adapter uses Kafka only; avoids Pub/Sub PERMISSION_DENIED in CI
+          GOOGLE_APPLICATION_CREDENTIALS: ""
+          GOOGLE_CLOUD_PROJECT: ""
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-adapter-mqtt/app
+            name: "hono-adapter-mqtt-*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-adapter-mqtt/lib/main
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-adapter-mqtt/lib/boot
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            dir: /usr/share/java/hono-adapter-mqtt/quarkus
+            name: "*.jar"
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/share/java/hono-adapter-mqtt/run-java.sh
+              /usr/share/java/hono-adapter-mqtt/quarkus-run.jar
+        - name: Test MQTT Adapter startup
+          uses: test/daemon-check-output
+          with:
+            setup: |
+              mkdir -p /tmp/hono-mqtt/config
+              # Inline config: upstream has no standalone test configs; Hono relies on Helm/K8s for deployment config.
+              tee /tmp/hono-mqtt/config/application.yml << 'EOF'
+              hono:
+                app:
+                  maxInstances: 1
+                mqtt:
+                  bindAddress: 0.0.0.0
+                  insecurePortEnabled: true
+                  insecurePort: 1883
+                kafka:
+                  commonClientConfig:
+                    bootstrap.servers: localhost:9092
+                commandRouter:
+                  host: localhost
+                  port: 5672
+              quarkus:
+                http:
+                  port: 8088
+                  host: 0.0.0.0
+              EOF
+            start: sh -c "env -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CLOUD_PROJECT sh -c 'cd /opt/hono && JAVA_OPTIONS=\"-Dquarkus.config.locations=file:///tmp/hono-mqtt/config/application.yml -Djava.util.logging.manager=org.jboss.logmanager.LogManager\" /opt/hono/run-java.sh'"
+            timeout: 30
+            # In CI, GCP metadata provides ADC so Hono uses PubSubBasedInternalCommandConsumer
+            # and logs ERROR (PERMISSION_DENIED). Omit "ERROR" so we still validate startup/liveness.
+            error_strings: |
+              FAIL
+              FATAL
+              Exception in thread
+              java.lang.NullPointerException
+              java.lang.RuntimeException
+              command not found
+            expected_output: |
+              Hono MQTT Adapter
+              started in
+              MQTT server running on 0.0.0.0:1883
+            post: |
+              set -euo pipefail
+              wait-for-it -t 30 localhost:8088
+              curl -fsSL http://localhost:8088/started
+
+  - name: ${{package.name}}-cli
+    description: "Eclipse Hono CLI"
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jvm
+    pipeline:
+      - runs: |
+          # CLI is built as an uber-jar (quarkus.package.jar.type=uber-jar) with -exec suffix
+          install -d "${{targets.contextdir}}/usr/share/java/hono-cli"
+          cp cli/target/hono-cli-${{package.version}}-exec.jar "${{targets.contextdir}}/usr/share/java/hono-cli/hono-cli.jar"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-cli
+        environment:
+          JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/share/java/hono-cli/hono-cli.jar
+        - name: Test Hono CLI
+          runs: |
+            set -euo pipefail
+            java -jar /usr/share/java/hono-cli/hono-cli.jar --help
+            java -jar /usr/share/java/hono-cli/hono-cli.jar --version
+
+  - name: ${{package.name}}-compat
+    description: "Compatibility symlink providing /opt/java/openjdk for images migrating from Eclipse Temurin base images"
+    dependencies:
+      runtime:
+        - openjdk-${{vars.java-version}}-default-jvm
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/opt/java"
+          ln -sf ../../usr/lib/jvm/default-jvm "${{targets.contextdir}}/opt/java/openjdk"
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}-compat
+      pipeline:
+        - uses: test/tw/symlink-check
+        - runs: |
+            set -euo pipefail
+            stat /opt/java/openjdk
+            /opt/java/openjdk/bin/java -version
+
+update:
+  enabled: true
+  github:
+    identifier: eclipse-hono/hono
+    use-tag: true
+
+test:
+  pipeline:
+    - uses: test/emptypackage

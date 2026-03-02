@@ -1,0 +1,132 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"chainguard.dev/melange/pkg/config"
+)
+
+func ensureTokens(ctx context.Context, cfg *config.Configuration, sourceDir, subcmd string) error {
+	needsRepo, needsLibraries, err := tokensNeeded(cfg, subcmd)
+	if err != nil {
+		return err
+	}
+
+	if needsRepo {
+		if err := generateGitHubToken(ctx, sourceDir); err != nil {
+			return err
+		}
+	}
+
+	if needsLibraries {
+		if err := generateLibrariesToken(ctx, sourceDir); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func tokensNeeded(cfg *config.Configuration, subcmd string) (bool, bool, error) {
+	pipelines, err := parseUsedPipelines(cfg, subcmd)
+	if err != nil {
+		return false, false, err
+	}
+
+	needsRepoToken := false
+	needsLibrariesToken := false
+
+	for _, pipeline := range pipelines {
+		if findPipeline(pipeline, isGitHubPipeline) {
+			needsRepoToken = true
+		}
+		if findPipeline(pipeline, isLibrariesPipeline) {
+			needsLibrariesToken = true
+		}
+	}
+
+	return needsRepoToken, needsLibrariesToken, nil
+}
+
+func isGitHubPipeline(uses string) bool {
+	return uses == "auth/github"
+}
+
+func isLibrariesPipeline(uses string) bool {
+	return strings.HasPrefix(uses, "auth/") && !strings.HasSuffix(uses, "github")
+}
+
+func generateGitHubToken(ctx context.Context, sourceDir string) error {
+	log.Printf("creating github token in %s", sourceDir)
+	dest := filepath.Join(sourceDir, ".github.token")
+	prog := "chainctl"
+	args := []string{"auth", "octo-sts", "--identity=guarded-package-repos", "--scope=chainguard-dev"}
+	return atomicCmdOutToFile(ctx, dest, prog, args)
+}
+
+func generateLibrariesToken(ctx context.Context, sourceDir string) error {
+	log.Printf("creating libraries token in %s", sourceDir)
+	dest := filepath.Join(sourceDir, ".libraries.token")
+	prog := "chainctl"
+	args := []string{"auth", "token", "--audience", "libraries.cgr.dev"}
+	return atomicCmdOutToFile(ctx, dest, prog, args)
+}
+
+func atomicCmdOutToFile(ctx context.Context, dest string, prog string, args []string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+".tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}()
+
+	cmd := exec.CommandContext(ctx, prog, args...)
+	cmd.Stdout = tmp
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s failed to create file: %w", prog, err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		return fmt.Errorf("failed to rename file: %w", err)
+	}
+
+	return nil
+}
+
+func cleanupTokens(dir, pkg string) error {
+	pkgDir := filepath.Join(dir, pkg)
+	matches, err := filepath.Glob(filepath.Join(pkgDir, ".*.token*"))
+	if err != nil {
+		return fmt.Errorf("failed to glob tokens: %w", err)
+	}
+
+	var errs []error
+	for _, match := range matches {
+		if err := os.Remove(match); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}

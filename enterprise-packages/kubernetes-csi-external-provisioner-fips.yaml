@@ -1,7 +1,7 @@
 package:
   name: kubernetes-csi-external-provisioner-fips
-  version: "6.1.0"
-  epoch: 3 # CVE-2025-61731
+  version: "6.2.0"
+  epoch: 0 # GHSA-9h8m-3fm2-qjrq
   description: A dynamic provisioner for Kubernetes CSI plugins.
   copyright:
     - license: Apache-2.0
@@ -18,13 +18,8 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/kubernetes-csi/external-provisioner
-      expected-commit: 4bb965e898b01faa405758f558affd3cd00b1bf3
+      expected-commit: 4f8ed53be40718152d081eb485fcc388e7bd77fd
       tag: v${{package.version}}
-
-  - uses: go/bump
-    with:
-      deps: |-
-        golang.org/x/crypto@v0.45.0
 
   - uses: go/build
     with:
@@ -36,9 +31,49 @@ pipeline:
   - uses: strip
 
 test:
+  environment:
+    contents:
+      packages:
+        - socat
   pipeline:
     - uses: test/go-fips-check
-    - runs: csi-provisioner --version | grep ${{package.version}}
+    - uses: test/tw/ver-check
+      with:
+        bins: csi-provisioner
+    - uses: test/kwok/cluster
+    - name: Test csi-provisioner startup with mock CSI socket
+      runs: |
+        set -euo pipefail
+
+        # Setup mock CSI socket
+        mkdir -p /run/csi
+        socat UNIX-LISTEN:/run/csi/socket,fork EXEC:'sleep 3600' &
+        SOCAT_PID=$!
+
+        # Wait for socket to be ready
+        timeout 5 sh -c 'while [ ! -S /run/csi/socket ]; do :; done'
+
+        # Start csi-provisioner in background, capturing output
+        /usr/bin/csi-provisioner --csi-address=/run/csi/socket --kubeconfig ~/.kube/config > /tmp/provisioner.log 2>&1 &
+        PROV_PID=$!
+
+        # Wait for startup and initial connection attempt
+        sleep 5
+
+        # Check if "Version" appears in output (per skill guidance for external-provisioner)
+        # This proves the binary started and attempted its job
+        if grep -F "Version" /tmp/provisioner.log; then
+          echo "SUCCESS: csi-provisioner started and reported version info"
+        else
+          echo "FAIL: Expected 'Version' in output"
+          echo "Actual output:"
+          cat /tmp/provisioner.log
+          exit 1
+        fi
+
+        # Cleanup (process may already be dead due to exit-on-disconnect behavior)
+        kill $PROV_PID 2>/dev/null || true
+        kill $SOCAT_PID 2>/dev/null || true
 
 update:
   enabled: true
