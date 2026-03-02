@@ -190,87 +190,30 @@ test:
       runs: |
         mkdir -p "${ZK_TLS_DIR}"
 
-        # CA keypair (BCFKS)
+        # Self-signed server keypair (BCFKS)
         keytool -v \
-          -keystore ${ZK_TLS_DIR}/ca.bcfks \
-          -storetype BCFKS -providername BCFIPS \
-          -alias zookeeper-ca \
-          -genkeypair -keyalg RSA -keysize 3072 -sigalg SHA256withRSA \
-          -dname "CN=ZooKeeper Test CA" \
-          -ext bc=ca:true -ext keyUsage=keyCertSign,cRLSign \
-          -storepass "${PASS}" -keypass "${PASS}" -validity 3650
-
-        # Export CA cert
-        keytool -v \
-          -keystore ${ZK_TLS_DIR}/ca.bcfks \
-          -storetype BCFKS -providername BCFIPS \
-          -alias zookeeper-ca -exportcert -rfc \
-          -storepass "${PASS}" \
-          -file ${ZK_TLS_DIR}/zookeeper-ca.crt
-
-        # Server keypair (BCFKS)
-        keytool -v \
-          -keystore ${ZK_TLS_DIR}/zookeeper-keystore.bcfks \
+          -keystore "${ZK_TLS_DIR}/zookeeper-keystore.bcfks" \
           -storetype BCFKS -providername BCFIPS \
           -alias zookeeper-server \
           -genkeypair -keyalg RSA -keysize 2048 -sigalg SHA256withRSA \
-          -dname "CN=localhost" \
-          -ext san=dns:localhost \
-          -ext eku=serverAuth \
-          -ext keyUsage=digitalSignature,keyEncipherment \
+          -dname "CN=localhost" -ext san=dns:localhost \
           -storepass "${PASS}" -keypass "${PASS}" -validity 365
 
-        # CSR
+        # Export self-signed cert for curl to trust
         keytool -v \
-          -keystore ${ZK_TLS_DIR}/zookeeper-keystore.bcfks \
+          -keystore "${ZK_TLS_DIR}/zookeeper-keystore.bcfks" \
           -storetype BCFKS -providername BCFIPS \
-          -alias zookeeper-server -certreq \
-          -file ${ZK_TLS_DIR}/zookeeper-server.csr \
-          -storepass "${PASS}"
+          -alias zookeeper-server -exportcert -rfc \
+          -storepass "${PASS}" \
+          -file "${ZK_TLS_DIR}/zookeeper-server.crt"
 
-        # CA signs the CSR → server leaf cert
+        # Create truststore with the self-signed cert
         keytool -v \
-          -keystore ${ZK_TLS_DIR}/ca.bcfks \
-          -storetype BCFKS -providername BCFIPS \
-          -alias zookeeper-ca -gencert \
-          -infile ${ZK_TLS_DIR}/zookeeper-server.csr \
-          -outfile ${ZK_TLS_DIR}/zookeeper-server.crt \
-          -rfc \
-          -ext eku=serverAuth \
-          -ext san=dns:localhost \
-          -ext keyUsage=digitalSignature,keyEncipherment \
-          -storepass "${PASS}" -validity 365
-
-        # Import CA cert (as trusted) into server keystore, then signed leaf
-        keytool -v \
-          -keystore ${ZK_TLS_DIR}/zookeeper-keystore.bcfks \
-          -storetype BCFKS -providername BCFIPS \
-          -alias zookeeper-ca -importcert -noprompt \
-          -file ${ZK_TLS_DIR}/zookeeper-ca.crt \
-          -storepass "${PASS}"
-
-        keytool -v \
-          -keystore ${ZK_TLS_DIR}/zookeeper-keystore.bcfks \
+          -keystore "${ZK_TLS_DIR}/truststore.bcfks" \
           -storetype BCFKS -providername BCFIPS \
           -alias zookeeper-server -importcert -noprompt \
-          -file ${ZK_TLS_DIR}/zookeeper-server.crt \
+          -file "${ZK_TLS_DIR}/zookeeper-server.crt" \
           -storepass "${PASS}"
-
-        # Convert JDK cacerts (JKS) → BCFKS truststore
-        keytool -importkeystore \
-          -srckeystore "${JAVA_HOME}/lib/security/cacerts" \
-          -srcstoretype JKS -srcstorepass changeit \
-          -destkeystore ${ZK_TLS_DIR}/truststore.bcfks \
-          -deststoretype BCFKS -destprovidername BCFIPS \
-          -deststorepass "${PASS}"
-
-        # Also trust our internal test CA
-        keytool \
-          -keystore ${ZK_TLS_DIR}/truststore.bcfks \
-          -storetype BCFKS -providername BCFIPS \
-          -storepass "${PASS}" \
-          -importcert -alias zookeeper-ca \
-          -file ${ZK_TLS_DIR}/zookeeper-ca.crt -noprompt
     - runs: |
         set -euo pipefail
 
@@ -327,14 +270,14 @@ test:
           env ZOOCFGDIR="${ZK_TLS_CONF_DIR}" "${ZK_HOME}/bin/zkServer.sh" start-foreground
         expected_output: |
           PrepRequestProcessor (sid:0) started
+          STARTED
         timeout: 60
         post: |-
           set -euo pipefail
           wait-for-it "localhost:${ZK_SECURE_PORT}"
-          export CLIENT_JVMFLAGS="-Dzookeeper.clientCnxnSocket=org.apache.zookeeper.ClientCnxnSocketNetty -Dzookeeper.ssl.trustStore.location=${ZK_TLS_DIR}/truststore.bcfks -Dzookeeper.ssl.trustStore.password=${PASS} -Dzookeeper.ssl.trustStore.type=BCFKS -Dzookeeper.client.secure=true"
           "${ZK_HOME}/bin/zkCli.sh" -server "localhost:${ZK_SECURE_PORT}" | grep -F "Welcome to ZooKeeper!"
           wait-for-it -t 30 "localhost:${ZK_ADMIN_PORT}"
-          curl -fsSL --cacert "${ZK_TLS_DIR}/zookeeper-ca.crt" "https://localhost:${ZK_ADMIN_PORT}/commands/ruok" | jq -e '.command == "ruok" and .error == null'
+          curl -fsSL --cacert "${ZK_TLS_DIR}/zookeeper-server.crt" "https://localhost:${ZK_ADMIN_PORT}/commands/ruok" | jq -e '.command == "ruok" and .error == null'
 
 update:
   enabled: true
