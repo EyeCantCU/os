@@ -1,7 +1,7 @@
 package:
   name: envoy-fips-1.35
   version: "1.35.8"
-  epoch: 1
+  epoch: 2
   description: Cloud-native high-performance edge/middle/service proxy
   copyright:
     - license: Apache-2.0
@@ -20,15 +20,13 @@ environment:
       - bash
       - bazel-7
       - binutils
-      - boringssl-fips-static-${{vars.boringssl}}-newapi
+      - boringssl-fips-static-${{vars.boringssl}}
       - build-base
       - busybox
       - ca-certificates-bundle
       - clang-18
       - cmake
       - coreutils
-      # We need to stick to gcc 12 for now, envoy doesn't build with gcc >= 13
-      - gcc-12-default
       - git
       - libtool
       - linux-headers
@@ -39,14 +37,14 @@ environment:
       - llvm-libcxxabi-18
       - llvm-lld-18~18
       - ncurses~6.4_p20230722
-      - openjdk-21
+      - openjdk-21-default-jdk
       - patch
-      - python3-dev<3.13
+      - python3-dev
       - samurai
       - wolfi-baselayout
 
 vars:
-  boringssl: "2023042800"
+  boringssl: "20240407"
 
 var-transforms:
   - from: ${{package.name}}
@@ -68,9 +66,10 @@ pipeline:
       patches: |
         ../0001-version-Print-FIPS-module-version.patch
         ../0001-Add-quiche.patch
+        ../0001-fips-always-set-ssl_compliance_policy_fips_202205.patch
 
   - runs: |
-      export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+      export CARGO_BAZEL_REPIN=true
       mkdir -p .cache/bazel/_bazel_root
 
       cd envoy
@@ -178,15 +177,44 @@ update:
     tag-filter-prefix: v1.35.
 
 test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - openssl
   pipeline:
     - runs: envoy --version
     - runs: |
         envoy_version=$(envoy --version | sed -n 's|.*/BoringSSL-FIPS-\(.*\)|\1|p')
         [ "$envoy_version" = "${{vars.boringssl}}" ]
         /usr/bin/bssl-test_fips
-        bssl_version=$(/usr/bin/bssl-test_fips | sed -n 's|^Module version: \(.*\)|\1|p')
-        [ "$bssl_version" = "${{vars.boringssl}}" ]
+        /usr/bin/bssl-test_fips | grep "^Module: 'BoringCrypto', version: ${{vars.boringssl}} hash:$"
     - uses: test/cmvp-fips-certification-check
       with:
-        certificate-number: 4953
-        software-version: ${{vars.boringssl}}
+        certificate-number: 5104
+    - name: "Test TLS ciphers"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          # Generate self-signed certificate for TLS listener
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout serverkey.pem \
+            -out servercert.pem \
+            -days 1 \
+            -subj "/CN=localhost"
+        start: envoy --config-path envoy-demo-tls.yaml
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          # Test that curl works
+          curl --cacert servercert.pem  -o /dev/null https://localhost:10000
+          # Force CHACHA20 connection, and ensure it doesn't work
+          result=$(echo Q | OPENSSL_CONF=/dev/null openssl s_client -tls1_3 -CAfile servercert.pem -ciphersuites TLS_CHACHA20_POLY1305_SHA256  -connect localhost:10000 2>&1| tail -n1)
+          if [ "$result" = "DONE" ]; then
+             echo Error: non-approved TLS_CHACHA20_POLY1305_SHA256 connection successful
+             exit 1
+          fi
