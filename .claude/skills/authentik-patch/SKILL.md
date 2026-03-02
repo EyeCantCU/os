@@ -1,82 +1,118 @@
 # Authentik Enterprise Patch Updates
 
-Automates the process of updating authentik package versions and regenerating enterprise module patches.
+Automates the process of updating authentik package
+versions and regenerating enterprise module patches.
 
 ## What This Skill Does
 
 Helps maintain OSS builds of authentik by automating:
+
 - Checking out upstream authentik at specific versions
 - Finding all authentik.enterprise module references
 - Comparing with existing patches to identify changes
 - Guiding patch file creation/updates
-- Updating package YAML files with new version and commit
+- Updating package YAML files with new version and
+  commit
 - Validating patches apply cleanly
 
-**Problem**: Authentik's upstream code unconditionally loads enterprise components despite licensing restrictions (see [upstream discussion #18682](https://github.com/goauthentik/authentik/discussions/18682)). Every version update requires manually finding and patching enterprise references.
+**Problem**: Authentik's upstream code unconditionally
+loads enterprise components despite licensing
+restrictions (see [upstream discussion #18682][disc-18682]).
+Every version update requires manually finding and
+patching enterprise references.
+
+[disc-18682]: https://github.com/goauthentik/authentik/discussions/18682
 
 ## Prerequisites
 
-- **Working directory**: enterprise-packages repository root (the stereo repo root)
+- **Working directory**: enterprise-packages repository
+  root (the stereo repo root)
 - **Tools required**: git, ripgrep (rg), uv
-- **MCP server**: Automatically configured when using `run-skill.sh` wrapper
+- **MCP server**: Automatically configured when using
+  `run-skill.sh` wrapper
 
 ## How to Run
 
-**Recommended**: Use the wrapper script which manages the MCP server lifecycle:
+**Recommended**: Use the wrapper script which manages
+the MCP server lifecycle:
 
-**Option 1: Interactive mode**
+### Option 1: Interactive mode
+
 ```bash
 ./.claude/skills/authentik-patch/run-skill.sh
 ```
-Then invoke this skill with `/authentik-patch` when Claude launches.
 
-**Option 2: Direct invocation with version**
+Then invoke this skill with `/authentik-patch` when
+Claude launches.
+
+### Option 2: Direct invocation with version
+
 ```bash
 ./.claude/skills/authentik-patch/run-skill.sh 2025.12.3
 ```
-Claude will launch with an initial prompt to update to the specified version.
+
+Claude will launch with an initial prompt to update
+to the specified version.
 
 ## Workflow
 
 ### Scope Tracking
 
-**IMPORTANT**: The user's package selection in Phase 1 determines which packages are modified in ALL subsequent phases. Track the selection as `SCOPE` throughout:
+**IMPORTANT**: The user's package selection in Phase 1
+determines which packages are modified in ALL
+subsequent phases. Track the selection as `SCOPE`
+throughout.
 
-| SCOPE | Patch directories | YAML files | Build/test targets |
-|-------|------------------|------------|-------------------|
-| `authentik` | `enterprise-packages/authentik/` | `authentik.yaml` | `make package/authentik`, `make test/authentik` |
-| `authentik-fips` | `enterprise-packages/authentik-fips/` | `authentik-fips.yaml` | `make package/authentik-fips`, `make test/authentik-fips` |
-| `both` | Both directories | Both YAML files | Both build/test targets |
+All paths below are relative to
+`enterprise-packages/`.
 
-**Every phase below marks scope-dependent steps with `[scope: ...]` tags. Only execute steps matching the selected SCOPE. Do NOT modify files for packages outside the selected scope.**
+| SCOPE            | Patches           | YAML                  |
+| ---------------- | ----------------- | --------------------- |
+| `authentik`      | `authentik/`      | `authentik.yaml`      |
+| `authentik-fips` | `authentik-fips/` | `authentik-fips.yaml` |
+| `both`           | Both dirs         | Both YAMLs            |
+
+Build/test targets follow the pattern
+`make package/<name>` and `make test/<name>`.
+
+**Every phase below marks scope-dependent steps with
+`[scope: ...]` tags. Only execute steps matching the
+selected SCOPE. Do NOT modify files for packages
+outside the selected scope.**
 
 ---
 
 ### Phase 1: Gather Information
 
-**Goal**: Determine target version, current state, and package scope
+**Goal**: Determine target version, current state,
+and package scope
 
 **Steps**:
 
-1. **Get target version** from user (or from launch argument)
+1. **Get target version** from user (or from launch
+   argument)
 
 2. **Check current version**:
    - Read `enterprise-packages/authentik.yaml`
    - Note current version and expected-commit
 
 3. **Show available versions**:
-   - Use `list_upstream_versions` tool to show recent releases
+   - Use `list_upstream_versions` tool to show recent
+     releases
    - Confirm target version with user
 
-4. **Determine scope** (sets `SCOPE` for all remaining phases):
+4. **Determine scope** (sets `SCOPE` for all remaining
+   phases):
    - Ask which packages to update:
      - `authentik` only
      - `authentik-fips` only
      - Both (recommended)
-   - **Record the selection. Every subsequent phase MUST respect it.**
+   - **Record the selection. Every subsequent phase
+     MUST respect it.**
 
 **Example**:
-```
+
+```text
 What version would you like to update to?
 > 2025.12.3
 
@@ -102,38 +138,54 @@ SCOPE = both
 
 ### Phase 2: Checkout and Analyze
 
-**Goal**: Checkout target version and analyze enterprise references
+**Goal**: Checkout target version and analyze
+enterprise references
 
 **Steps**:
 
 1. **Checkout authentik**:
    - Use `checkout_authentik` tool with target version
    - Store returned repo path and commit hash
-   - Example: `checkout_authentik(version="2025.12.3")`
+   - Example:
+     `checkout_authentik(version="2025.12.3")`
 
 2. **Find enterprise references**:
    - Use `find_enterprise_refs` tool on the repo path
-   - This runs: `rg "authentik\.enterprise" -g '*.py' -g '!authentik/enterprise/**' --json`
+   - This runs:
+     `rg "authentik\.enterprise" -g '*.py'`
+     `-g '!authentik/enterprise/**' --json`
    - Results are cached for later phases
-   - Example: `find_enterprise_refs(repo_path="/tmp/authentik-patch-xxx/authentik")`
+   - Example:
+     `find_enterprise_refs(repo_path="/tmp/...")`
 
 3. **Analyze patch coverage**:
-   - Use `analyze_patch_coverage` tool for each package in scope
+   - Use `analyze_patch_coverage` tool for each
+     package in scope
    - Compares current references with existing patches
    - Identifies:
-     - **New files**: Have enterprise refs but not in patches (need new patches)
-     - **Removed files**: In patches but no longer have refs (can simplify patches)
-     - **Covered files**: Already patched (may need updates)
-   - **[scope: authentik]**: `analyze_patch_coverage(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
-   - **[scope: authentik-fips]**: `analyze_patch_coverage(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
-   - **[scope: both]**: Run for `enterprise-packages/authentik/` (the primary). FIPS patches will be synced from authentik in Phase 3.5.
+     - **New files**: Have enterprise refs but not in
+       patches (need new patches)
+     - **Removed files**: In patches but no longer
+       have refs (can simplify patches)
+     - **Covered files**: Already patched (may need
+       updates)
+   - **[scope: authentik]**:
+     `analyze_patch_coverage(repo_path="/tmp/...",`
+     `patch_dir="enterprise-packages/authentik/")`
+   - **[scope: authentik-fips]**:
+     `analyze_patch_coverage(repo_path="/tmp/...",`
+     `patch_dir="enterprise-packages/authentik-fips/")`
+   - **[scope: both]**: Run for
+     `enterprise-packages/authentik/` (the primary).
+     FIPS patches will be synced in Phase 3.5.
 
 4. **Review findings with user**:
    - Display analysis results
    - Discuss approach for new/changed files
 
 **Example Output**:
-```
+
+```text
 ## Patch Coverage Analysis
 
 Current enterprise references: 15 files
@@ -142,7 +194,7 @@ New files (not in patches): 3
 Removed files (in patches but no refs): 1
 
 ### New Files Needing Patches:
-  - authentik/providers/oauth2/api/tokens.py (2 references)
+  - authentik/providers/oauth2/api/tokens.py (2 refs)
   - authentik/core/api/permissions.py (1 reference)
   - authentik/stages/email/api.py (1 reference)
 
@@ -156,43 +208,70 @@ Removed files (in patches but no refs): 1
 
 **Goal**: Update patches for the new version
 
-**Approach**: This phase requires user collaboration to update patch files manually. The skill provides tools to guide the process.
+**Approach**: This phase requires user collaboration
+to update patch files manually. The skill provides
+tools to guide the process.
 
 **Target directory**:
-- **[scope: authentik or both]**: Work in `enterprise-packages/authentik/`
-- **[scope: authentik-fips]**: Work in `enterprise-packages/authentik-fips/`
 
-**For New Files** (files with enterprise refs but not in patches):
+- **[scope: authentik or both]**: Work in
+  `enterprise-packages/authentik/`
+- **[scope: authentik-fips]**: Work in
+  `enterprise-packages/authentik-fips/`
+
+**For New Files** (files with enterprise refs but not
+in patches):
 
 1. **Generate patch template**:
-   - Use `generate_patch_template` tool for each new file
-   - Shows enterprise references with context (3 lines before/after)
-   - Suggests applicable patterns from `references/patch-patterns.md`
-   - Example: `generate_patch_template(file_path="authentik/providers/oauth2/api/tokens.py", repo_path="/tmp/...")`
+   - Use `generate_patch_template` tool for each new
+     file
+   - Shows enterprise references with context (3
+     lines before/after)
+   - Suggests applicable patterns from
+     `references/patch-patterns.md`
+   - Example:
+     `generate_patch_template(`
+     `file_path="authentik/providers/oauth2/api/`
+     `tokens.py", repo_path="/tmp/...")`
 
 2. **Create patch file**:
-   - User manually creates the patch following suggested patterns
+   - User manually creates the patch following
+     suggested patterns
    - Common approach:
      - Make changes in the checked-out repo
      - Generate diff into the target patch directory:
-       - **[scope: authentik or both]**: `git diff path/to/file.py > .../enterprise-packages/authentik/new-file.patch`
-       - **[scope: authentik-fips]**: `git diff path/to/file.py > .../enterprise-packages/authentik-fips/new-file.patch`
-     - Add patch header (description, author, forwarded: not-needed)
-     - Or update existing patch file (e.g., `enterprise.patch`)
+       - **[scope: authentik or both]**:
+         `git diff path/to/file.py >`
+         `.../enterprise-packages/authentik/new.patch`
+       - **[scope: authentik-fips]**:
+         `git diff path/to/file.py >`
+         `.../enterprise-packages/authentik-fips/`
+         `new.patch`
+     - Add patch header (description, author,
+       forwarded: not-needed)
+     - Or update existing patch file
+       (e.g., `enterprise.patch`)
 
 **For Covered Files** (files already in patches):
 
 1. **Check if patches still apply**:
-   - Use `validate_patches` tool against the target directory
+   - Use `validate_patches` tool against the target
+     directory
    - Shows which patches apply cleanly and which fail
-   - **[scope: authentik or both]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
-   - **[scope: authentik-fips]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
+   - **[scope: authentik or both]**:
+     `validate_patches(repo_path="/tmp/...",`
+     `patch_dir="enterprise-packages/authentik/")`
+   - **[scope: authentik-fips]**:
+     `validate_patches(repo_path="/tmp/...",`
+     `patch_dir="enterprise-packages/authentik-fips/")`
 
 2. **Update failing patches**:
    - For each failing patch:
      - Read the patch file to understand what it does
-     - Use `generate_patch_template` to see current enterprise references
-     - Update the patch file with adjusted line numbers/content
+     - Use `generate_patch_template` to see current
+       enterprise references
+     - Update the patch file with adjusted line
+       numbers/content
      - Re-validate
 
 **For Removed Files** (no longer have enterprise refs):
@@ -204,76 +283,114 @@ Removed files (in patches but no refs): 1
 
 **Validation**:
 
-After updating patches, validate they all apply cleanly against the target directory:
-- **[scope: authentik or both]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik/")`
-- **[scope: authentik-fips]**: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
+After updating patches, validate they all apply
+cleanly against the target directory:
+
+- **[scope: authentik or both]**:
+  `validate_patches(repo_path="/tmp/...",`
+  `patch_dir="enterprise-packages/authentik/")`
+- **[scope: authentik-fips]**:
+  `validate_patches(repo_path="/tmp/...",`
+  `patch_dir="enterprise-packages/authentik-fips/")`
 
 All patches must pass validation before proceeding.
 
 **Key Patch Files**:
-- `root.settings.patch` - Removes enterprise from Django TENANT_APPS
-- `enterprise.patch` - Main patch (11 files, removes imports/references)
-- `enterprise.mro.patch` - Fixes Method Resolution Order issues (5 files)
-- `frontend-sync-chart.patch` - Removes enterprise UI elements (TypeScript)
-- `middleware-m2m-fix.patch` - Adds defensive None handling
+
+- `root.settings.patch` - Removes enterprise from
+  Django TENANT_APPS
+- `enterprise.patch` - Main patch (11 files, removes
+  imports/references)
+- `enterprise.mro.patch` - Fixes Method Resolution
+  Order issues (5 files)
+- `frontend-sync-chart.patch` - Removes enterprise
+  UI elements (TypeScript)
+- `middleware-m2m-fix.patch` - Adds defensive None
+  handling
+- `pagination-autocomplete.patch` - Stubs empty
+  `autocomplete` field in base pagination for Go
+  client compatibility
 
 **Pattern Reference**:
-Refer to `references/patch-patterns.md` for 14 documented patterns with before/after examples.
+Refer to `references/patch-patterns.md` for 15
+documented patterns with before/after examples.
 
 ---
 
 ### Phase 3.5: Sync Patches to FIPS
 
-**[scope: both]** -- Only run this phase when SCOPE is `both`.
+**[scope: both]** -- Only run this phase when SCOPE
+is `both`.
 
-**Skip this phase entirely if SCOPE is `authentik` or `authentik-fips`.**
+**Skip this phase entirely if SCOPE is `authentik` or
+`authentik-fips`.**
 
-**Goal**: Sync finalized patches from `authentik/` to `authentik-fips/`
+**Goal**: Sync finalized patches from `authentik/` to
+`authentik-fips/`
 
-**Prerequisite**: Phase 3 is complete and all patches in `enterprise-packages/authentik/` validate cleanly.
+**Prerequisite**: Phase 3 is complete and all patches
+in `enterprise-packages/authentik/` validate cleanly.
 
 **Steps**:
 
 1. **Dry run first**:
-   - Use `sync_patches` tool in dry-run mode to preview changes
+   - Use `sync_patches` tool in dry-run mode to
+     preview changes
    - Example: `sync_patches(dry_run=True)`
-   - Review which patches will be copied and which have pre-existing differences
+   - Review which patches will be copied and which
+     have pre-existing differences
 
 2. **Execute sync**:
    - Use `sync_patches` tool to copy patches
    - Example: `sync_patches()`
-   - All patches from `enterprise-packages/authentik/` are copied to `enterprise-packages/authentik-fips/`
+   - All patches from
+     `enterprise-packages/authentik/` are copied to
+     `enterprise-packages/authentik-fips/`
 
 3. **Review overwritten differences**:
-   - If the tool reports differences were overwritten, review the diff output
-   - The overwritten differences are expected to be safe to discard. Historically the FIPS
-     patches had some `+++ b/` paths using `authentik-fips/` instead of `authentik/`, but
-     this was a bug - melange applies patches with `patch -p1` against the unchanged checkout
-     directory (`authentik/`), so `+++ b/authentik/` is the correct path for both packages.
-   - Do NOT re-apply the old `authentik-fips/` path prefixes.
+   - If the tool reports differences were overwritten,
+     review the diff output
+   - The overwritten differences are expected to be
+     safe to discard. Historically the FIPS patches
+     had some `+++ b/` paths using `authentik-fips/`
+     instead of `authentik/`, but this was a bug --
+     melange applies patches with `patch -p1` against
+     the unchanged checkout directory (`authentik/`),
+     so `+++ b/authentik/` is the correct path for
+     both packages.
+   - Do NOT re-apply the old `authentik-fips/` path
+     prefixes.
 
 4. **Check for stale patches**:
-   - The tool reports any patches in the FIPS directory that don't exist in the source
+   - The tool reports any patches in the FIPS
+     directory that don't exist in the source
    - Remove stale patches if they are no longer needed
 
 5. **Validate FIPS patches**:
-   - Use `validate_patches` tool against the FIPS directory
-   - Example: `validate_patches(repo_path="/tmp/...", patch_dir="enterprise-packages/authentik-fips/")`
-   - All patches must pass before proceeding to Phase 4
+   - Use `validate_patches` tool against the FIPS
+     directory
+   - Example:
+     `validate_patches(repo_path="/tmp/...",`
+     `patch_dir="enterprise-packages/authentik-fips/")`
+   - All patches must pass before proceeding to
+     Phase 4
 
 ---
 
 ### Phase 4: Update Package Files
 
-**Goal**: Update package YAML files with new version, commit, and patches (if changed)
+**Goal**: Update package YAML files with new version,
+commit, and patches (if changed)
 
-**Only update YAML files for packages in the selected SCOPE.**
+**Only update YAML files for packages in the selected
+SCOPE.**
 
 **Steps**:
 
 1. **Prepare patch list** (if patches changed):
    - List all patch files in order:
-     ```
+
+     ```text
      patches = [
          "root.settings.patch",
          "enterprise.patch",
@@ -282,17 +399,23 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
          "middleware-m2m-fix.patch"
      ]
      ```
-   - If new patches were added, include them in the list
+
+   - If new patches were added, include them in the
+     list
    - Order matters: apply in dependency order
 
-2. **[scope: authentik or both]** Update `authentik.yaml`:
+2. **[scope: authentik or both]** Update
+   `authentik.yaml`:
    - Use `update_package_yaml` tool
    - Updates:
-     - `package.version` → new version
-     - `pipeline[git-checkout].expected-commit` → commit hash from Phase 2
-     - `pipeline[patch].patches` → patch list (if provided)
+     - `package.version` -> new version
+     - `pipeline[git-checkout].expected-commit` ->
+       commit hash from Phase 2
+     - `pipeline[patch].patches` -> patch list
+       (if provided)
    - Example:
-     ```
+
+     ```text
      update_package_yaml(
          package_name="authentik",
          version="2025.12.3",
@@ -301,11 +424,13 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
      )
      ```
 
-3. **[scope: authentik-fips or both]** Update `authentik-fips.yaml`:
+3. **[scope: authentik-fips or both]** Update
+   `authentik-fips.yaml`:
    - Same process as authentik.yaml
    - Uses identical patch files
    - Example:
-     ```
+
+     ```text
      update_package_yaml(
          package_name="authentik-fips",
          version="2025.12.3",
@@ -319,7 +444,8 @@ Refer to `references/patch-patterns.md` for 14 documented patterns with before/a
    - Confirm with user before proceeding
 
 **Example (scope: both)**:
-```
+
+```text
 Updated enterprise-packages/authentik.yaml:
   - version: 2025.12.3
   - commit: dc2332a316e73d1cfaaea23dc117cf0b1af3f95a
@@ -337,78 +463,96 @@ Updated enterprise-packages/authentik-fips.yaml:
 
 **Goal**: Validate the changes and commit
 
-**Only lint, build, and test packages in the selected SCOPE.**
+**Only lint, build, and test packages in the selected
+SCOPE.**
 
 **Steps**:
 
 1. **Lint YAML files**:
-   - **[scope: authentik or both]**: `./lint.sh enterprise-packages/authentik.yaml`
-   - **[scope: authentik-fips or both]**: `./lint.sh enterprise-packages/authentik-fips.yaml`
+   - **[scope: authentik or both]**:
+     `./lint.sh enterprise-packages/authentik.yaml`
+   - **[scope: authentik-fips or both]**:
+     `./lint.sh enterprise-packages/authentik-fips.yaml`
    - Fix any formatting issues.
 
 2. **Build package(s)**:
-   - **[scope: authentik or both]**: `make package/authentik`
-   - **[scope: authentik-fips or both]**: `make package/authentik-fips`
+   - **[scope: authentik or both]**:
+     `make package/authentik`
+   - **[scope: authentik-fips or both]**:
+     `make package/authentik-fips`
    - Watch for build failures
    - Common issues:
-     - Patches don't apply → Go back to Phase 3
-     - New enterprise references missed → Go back to Phase 2
-     - Build dependencies changed → Update package YAML
+     - Patches don't apply -> Go back to Phase 3
+     - New enterprise references missed ->
+       Go back to Phase 2
+     - Build dependencies changed ->
+       Update package YAML
 
 3. **Run tests** (if build succeeds):
-   - **[scope: authentik or both]**: `make test/authentik`
-   - **[scope: authentik-fips or both]**: `make test/authentik-fips`
+   - **[scope: authentik or both]**:
+     `make test/authentik`
+   - **[scope: authentik-fips or both]**:
+     `make test/authentik-fips`
    - Verify authentik starts correctly
    - Check for import errors or runtime failures
    - Review test output for enterprise-related errors
 
 4. **Create commit**:
-   - Follow stereo commit conventions (see `CLAUDE.md`)
+   - Follow stereo commit conventions (see
+     `CLAUDE.md`)
    - Format: `authentik: update to {version}`
    - **Only stage files for packages in scope**:
 
    **[scope: authentik]**:
-     ```bash
-     git add enterprise-packages/authentik.yaml \
-             enterprise-packages/authentik/*.patch
-     ```
+
+   ```bash
+   git add enterprise-packages/authentik.yaml \
+           enterprise-packages/authentik/*.patch
+   ```
 
    **[scope: authentik-fips]**:
-     ```bash
-     git add enterprise-packages/authentik-fips.yaml \
-             enterprise-packages/authentik-fips/*.patch
-     ```
+
+   ```bash
+   git add enterprise-packages/authentik-fips.yaml \
+           enterprise-packages/authentik-fips/*.patch
+   ```
 
    **[scope: both]**:
-     ```bash
-     git add enterprise-packages/authentik.yaml \
-             enterprise-packages/authentik-fips.yaml \
-             enterprise-packages/authentik/*.patch \
-             enterprise-packages/authentik-fips/*.patch
-     ```
+
+   ```bash
+   git add enterprise-packages/authentik.yaml \
+           enterprise-packages/authentik-fips.yaml \
+           enterprise-packages/authentik/*.patch \
+           enterprise-packages/authentik-fips/*.patch
+   ```
 
    - Example commit:
-     ```bash
-     git commit -m "$(cat <<'EOF'
-     authentik: update to 2025.12.3
 
-     - Updated package version and expected-commit
-     - Regenerated enterprise patches for new version
-     - Added patch for new OAuth token endpoint
+   ```bash
+   git commit -m "$(cat <<'EOF'
+   authentik: update to 2025.12.3
 
-     Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
-     EOF
-     )"
-     ```
+   - Updated package version and expected-commit
+   - Regenerated enterprise patches for new version
+   - Added patch for new OAuth token endpoint
+
+   Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
+   EOF
+   )"
+   ```
 
 5. **Cleanup**:
-   - Use `cleanup` tool to remove temporary authentik checkout
-   - Example: `cleanup(temp_dir="/tmp/authentik-patch-xxx")`
+   - Use `cleanup` tool to remove temporary authentik
+     checkout
+   - Example:
+     `cleanup(temp_dir="/tmp/authentik-patch-xxx")`
 
 6. **Summary**:
-   - Report what was updated, listing which packages were in scope
+   - Report what was updated, listing which packages
+     were in scope
    - Note any issues encountered
-   - Suggest next steps (e.g., testing in dev environment)
+   - Suggest next steps (e.g., testing in dev
+     environment)
 
 ---
 
@@ -419,9 +563,12 @@ Updated enterprise-packages/authentik-fips.yaml:
 **Symptoms**: `validate_patches` shows failures
 
 **Recovery**:
+
 1. Note which patches fail and the error messages
-2. Use `generate_patch_template` to see current file state
-3. Manually update patch file with correct line numbers/content
+2. Use `generate_patch_template` to see current file
+   state
+3. Manually update patch file with correct line
+   numbers/content
 4. Re-validate
 5. Common causes:
    - Upstream code structure changed
@@ -433,9 +580,11 @@ Updated enterprise-packages/authentik-fips.yaml:
 **Symptoms**: `make package/authentik` fails
 
 **Recovery**:
+
 1. Check build output for specific error
 2. If import error: Missed an enterprise reference
-   - Go back to Phase 2, re-run `find_enterprise_refs`
+   - Go back to Phase 2, re-run
+     `find_enterprise_refs`
    - Look for the specific import mentioned in error
    - Add to appropriate patch file
 3. If patch application fails during build:
@@ -447,20 +596,25 @@ Updated enterprise-packages/authentik-fips.yaml:
 **Symptoms**: `make test/authentik` shows failures
 
 **Recovery**:
+
 1. Review test output for:
-   - Import errors → Missing patches
-   - Runtime errors → May need defensive coding (Pattern 8.1)
-   - Assertion failures → Tests may expect enterprise features
+   - Import errors -> Missing patches
+   - Runtime errors -> May need defensive coding
+     (Pattern 8.1)
+   - Assertion failures -> Tests may expect enterprise
+     features
 2. Common fixes:
    - Add None-safe unpacking to middleware
    - Comment out enterprise-specific test assertions
-   - Ensure all ConditionalInheritance calls are removed
+   - Ensure all ConditionalInheritance calls are
+     removed
 
 ### Missed Enterprise References
 
 **Symptoms**: Runtime errors about missing modules
 
 **Recovery**:
+
 1. Search for the specific module name in the repo
 2. Add appropriate patch following documented patterns
 3. Rebuild and retest
@@ -469,28 +623,41 @@ Updated enterprise-packages/authentik-fips.yaml:
 
 ## Tips
 
-- **Start with recent versions**: Fewer changes between minor version bumps
-- **Validate often**: Run `validate_patches` after each patch update
-- **Use pattern reference**: `references/patch-patterns.md` has 14 common patterns
-- **Test incrementally**: Apply patches one at a time if troubleshooting
-- **Keep patches organized**: Group related changes in same patch file
-- **Document new patterns**: If you find a new pattern, add it to patch-patterns.md
+- **Start with recent versions**: Fewer changes
+  between minor version bumps
+- **Validate often**: Run `validate_patches` after
+  each patch update
+- **Use pattern reference**:
+  `references/patch-patterns.md` has 15 common
+  patterns
+- **Test incrementally**: Apply patches one at a time
+  if troubleshooting
+- **Keep patches organized**: Group related changes in
+  same patch file
+- **Document new patterns**: If you find a new pattern,
+  add it to patch-patterns.md
 
 ## Common Patterns Quick Reference
 
-1. **Comment out imports**: `#from authentik.enterprise...`
-2. **Replace license checks**: → `None`
-3. **Remove ConditionalInheritance**: Comment out the entire call
+1. **Comment out imports**:
+   `#from authentik.enterprise...`
+2. **Replace license checks**: -> `None`
+3. **Remove ConditionalInheritance**: Comment out the
+   entire call
 4. **Create stub classes**: `class Mixin: pass`
 5. **Defensive unpacking**: `**(value or {})`
 
-See `references/patch-patterns.md` for detailed examples.
+See `references/patch-patterns.md` for detailed
+examples.
 
 ## Expected Duration
 
-- **Small update** (patch version, e.g., 2025.12.1 → 2025.12.2): 10-15 minutes
-- **Medium update** (minor version, e.g., 2025.11.x → 2025.12.x): 20-30 minutes
-- **Large update** (major version or significant upstream changes): 45-60 minutes
+- **Small update** (patch version, e.g.,
+  2025.12.1 -> 2025.12.2): 10-15 minutes
+- **Medium update** (minor version, e.g.,
+  2025.11.x -> 2025.12.x): 20-30 minutes
+- **Large update** (major version or significant
+  upstream changes): 45-60 minutes
 
 ## Troubleshooting
 
@@ -512,7 +679,9 @@ brew install ripgrep  # macOS
 
 ### Working Directory Issues
 
-Ensure you're in the enterprise-packages repository root:
+Ensure you're in the enterprise-packages repository
+root:
+
 ```bash
 cd /path/to/stereo
 pwd  # Should show stereo repo path
@@ -521,7 +690,9 @@ ls enterprise-packages/authentik.yaml  # Should exist
 
 ### ruamel.yaml Not Available
 
-The skill will fall back to pyyaml, but may not preserve YAML formatting:
+The skill will fall back to pyyaml, but may not
+preserve YAML formatting:
+
 ```bash
 uv pip install ruamel.yaml
 ```
@@ -530,13 +701,16 @@ uv pip install ruamel.yaml
 
 1. **Review the commit**: `git show HEAD`
 2. **Push to branch** (not main):
+
    ```bash
    git checkout -b authentik-update-2025.12.3
    git push origin authentik-update-2025.12.3
    ```
+
 3. **Create PR** for review
 4. **Test in CI/CD** pipeline
-5. **Deploy to staging** environment for integration testing
+5. **Deploy to staging** environment for integration
+   testing
 
 ---
 
@@ -555,25 +729,33 @@ If patches need updates but version stays the same:
 
 If creating a new patch file (not updating existing):
 
-1. Create the patch file in `enterprise-packages/authentik/`
+1. Create the patch file in
+   `enterprise-packages/authentik/`
 2. Update patch list in Phase 4 to include new file
 3. Ensure proper ordering (dependencies first)
 
 ### Comparing Across Versions
 
 To see what changed between versions:
+
 ```bash
 cd /tmp/authentik-patch-xxx/authentik
-git log --oneline version/2025.12.1..version/2025.12.3
-git diff version/2025.12.1 version/2025.12.3 -- authentik/
+git log --oneline \
+    version/2025.12.1..version/2025.12.3
+git diff version/2025.12.1 version/2025.12.3 \
+    -- authentik/
 ```
 
 ---
 
 ## References
 
-- **Upstream discussion**: https://github.com/goauthentik/authentik/discussions/18682
+- **Upstream discussion**:
+  <https://github.com/goauthentik/authentik/discussions/18682>
 - **Stereo CLAUDE.md**: `CLAUDE.md`
 - **Patch patterns**: `references/patch-patterns.md`
-- **Current patches**: `enterprise-packages/authentik/*.patch`
-- **Package files**: `enterprise-packages/authentik.yaml`, `enterprise-packages/authentik-fips.yaml`
+- **Current patches**:
+  `enterprise-packages/authentik/*.patch`
+- **Package files**:
+  `enterprise-packages/authentik.yaml`,
+  `enterprise-packages/authentik-fips.yaml`
