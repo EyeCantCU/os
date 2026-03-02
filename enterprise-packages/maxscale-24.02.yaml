@@ -5,15 +5,14 @@ package:
   description: MariaDB MaxScale 24.02 - Advanced database proxy, router, and firewall
   copyright:
     - license: BUSL-1.1
-  checks:
-    disabled:
-      - setuidgid
-      - tempdir
   dependencies:
     provides:
       - maxscale=${{package.full-version}}
 
 environment:
+  environment:
+    CC: gcc-11
+    CXX: g++-11
   contents:
     packages:
       - autoconf
@@ -27,6 +26,7 @@ environment:
       - curl-dev
       - cyrus-sasl-dev
       - flex
+      - gcc-11
       - git
       - glibc-dev
       - gnutls-dev
@@ -43,16 +43,12 @@ environment:
       - libtool
       - linux-pam-dev
       - make
-      - mariadb-connector-c-dev
       - ncurses-dev
-      - nodejs
-      - npm
       - openssl-dev
       - pcre2-dev
       - perl
       - pkgconf
       - python3
-      - samurai
       - sqlite-dev
       - systemd-dev
       - tcl
@@ -72,67 +68,42 @@ pipeline:
       expected-commit: d1a286c5427b942e802cc53f23abf488f9e98a68
       recurse-submodules: true
 
-  - runs: |
-      # Remove -Werror from CMake files to allow building with warnings
-      find . -name "CMakeLists.txt" -exec sed -i 's/-Werror=[^ "]*//g;s/-Werror//g' {} \;
-      # Also fix the nullptr_t issue
-      if [ -f maxutils/maxsimd/src/canonical.cc ]; then
-        sed -i 's/\([^:]\)nullptr_t/\1std::nullptr_t/g' maxutils/maxsimd/src/canonical.cc
-      fi
-
+  # Build flags as per upstream Dockerfile:
+  # https://github.com/mariadb-corporation/MaxScale/blob/maxscale-24.02.8/Documentation/REST-API/templates/Dockerfile
   - uses: cmake/configure
     with:
       opts: |
-        -GNinja \
+        -G "Unix Makefiles" \
         -DCMAKE_INSTALL_PREFIX=/usr \
         -DBUNDLE=N \
-        -DFORCE_BUNDLE=OFF \
-        -DBUILD_MAXCTRL=OFF \
-        -DBUILD_GUI=OFF \
-        -DBUILD_TESTS=OFF \
-        -DCMAKE_C_FLAGS="-Wno-error" \
-        -DCMAKE_CXX_FLAGS="-Wno-error"
+        -DFORCE_BUNDLE=N \
+        -DBUILD_BINLOG=N \
+        -DBUILD_CDC=N \
+        -DBUILD_GSSAPI=N \
+        -DBUILD_GUI=N \
+        -DBUILD_KAFKACDC=N \
+        -DBUILD_KAFKAIMPORTER=N \
+        -DBUILD_KMIP_KEY_MANAGER=N \
+        -DBUILD_LUAFILTER=N \
+        -DBUILD_MAXCTRL=N \
+        -DBUILD_MIRROR=N \
+        -DBUILD_NOSQL=N \
+        -DBUILD_QC_MYSQLEMBEDDED=N \
+        -DBUILD_RABBITMQ=N \
+        -DBUILD_STORAGE_MEMCACHED=N \
+        -DBUILD_STORAGE_REDIS=N \
+        -DBUILD_TESTS=N \
+        -DBUILD_TOOLS=N \
+        -DBUILD_VAULT_KEY_MANAGER=N \
+        -DCMAKE_C_FLAGS="-Wno-stringop-overread"
 
   - runs: |
-      # Create symlinks to system libraries for BUNDLE=N build
       cd output
-      mkdir -p connector-c/install/lib/mariadb
-      mkdir -p connector-c/install/include
-
-      # Link the MariaDB library
-      if [ -f /usr/lib/libmariadb.a ]; then
-        ln -sf /usr/lib/libmariadb.a connector-c/install/lib/mariadb/libmariadbclient.a
-      elif [ -f /usr/lib/libmariadb.so ]; then
-        ln -sf /usr/lib/libmariadb.so connector-c/install/lib/mariadb/libmariadbclient.a
-      fi
-
-      # Link include directory
-      if [ -d /usr/include/mariadb ]; then
-        ln -sf /usr/include/mariadb connector-c/install/include/
-      fi
-
-  - runs: |
-      # Build with ninja
-      cd output
-      ninja
+      make -j$(nproc)
 
   - uses: cmake/install
 
   - uses: strip
-
-subpackages:
-  - name: ${{package.name}}-dev
-    pipeline:
-      - uses: split/dev
-    dependencies:
-      runtime:
-        - ${{package.name}}
-    description: Development files for MaxScale 24.02
-
-  - name: ${{package.name}}-doc
-    pipeline:
-      - uses: split/manpages
-    description: Documentation for MaxScale 24.02
 
 update:
   enabled: true
@@ -144,19 +115,54 @@ update:
 
 test:
   environment:
+    environment:
+      REST_API_PORT: "8989"
     contents:
       packages:
+        - curl
+        - jq
         - scanelf
   pipeline:
     - name: Verify MaxScale installation
       runs: |
         set -euo pipefail
         stat /usr/bin/maxscale
-    - name: Check MaxScale version
-      runs: |
-        set -euo pipefail
-        maxscale --version
+    - uses: test/tw/ver-check
+      with:
+        bins: maxscale
+    - uses: test/tw/help-check
+      with:
+        bins: maxscale
+        help-flag: --help
     - name: Verify MaxScale library dependencies
       runs: |
         set -euo pipefail
         scanelf -n /usr/bin/maxscale | grep -F "libmaxscale-common.so"
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          adduser -D maxscale
+          mkdir -p /var/lib/maxscale /var/run/maxscale /var/log/maxscale /var/cache/maxscale /etc/maxscale.modules.d /etc/maxscale.cnf.d
+          chown -R maxscale:maxscale /var/lib/maxscale /var/run/maxscale /var/log/maxscale /var/cache/maxscale /etc/maxscale.modules.d /etc/maxscale.cnf.d
+          tee /etc/maxscale.cnf << 'EOF'
+          [maxscale]
+          threads=1
+          admin_host=127.0.0.1
+          admin_port=8989
+          admin_secure_gui=false
+          EOF
+        start: /usr/bin/maxscale --nodaemon --log=stdout --user=maxscale
+        expected_output: |
+          MaxScale started
+          Started REST API on
+          MaxScale started with 1 worker threads
+        timeout: 30
+        post: |-
+          set -euo pipefail
+          wait-for-it 127.0.0.1:${REST_API_PORT} -t 10
+          # REST API returns JSON, verify with default credentials admin:mariadb
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/maxscale | jq -e '.data.id == "maxscale"'
+          # Check thread count matches config
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/maxscale | jq -e '.data.attributes.parameters.threads == 1'
+          # Verify no services configured, clean start
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/services | jq -e '.data | length == 0'
