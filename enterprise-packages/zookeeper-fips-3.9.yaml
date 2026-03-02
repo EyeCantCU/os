@@ -1,7 +1,7 @@
 package:
   name: zookeeper-fips-3.9
   version: "3.9.4"
-  epoch: 3 # GHSA-qqpg-mvqg-649v
+  epoch: 4
   description: Distributed, highly available, robust, fault-tolerant system for distributed coordination
   copyright:
     - license: Apache-2.0
@@ -111,12 +111,13 @@ subpackages:
         contents:
           packages:
             - zookeeper-fips=${{package.full-version}}
+            - openjdk-17-default-jdk
             - wait-for-it
             - uuidgen
         environment:
           LANG: en_US.UTF-8
           JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
-          JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS"
+          JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=BCFKS"
           ZK_HOME: "/apache-zookeeper-${{package.version}}-bin"
       pipeline:
         - runs: |
@@ -163,15 +164,56 @@ test:
   environment:
     contents:
       packages:
-        - zookeeper-fips=${{package.full-version}}
-        - wait-for-it
+        - curl
+        - jq
+        - openjdk-17-default-jdk
         - uuidgen
+        - wait-for-it
+        - zookeeper-fips=${{package.full-version}}
     environment:
       LANG: en_US.UTF-8
       JAVA_HOME: "/usr/lib/jvm/java-17-openjdk"
-      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS"
+      PASS: "ZookeeperSSLTest123!"
+      ZK_ADMIN_PORT: "8080"
+      ZK_CLIENT_PORT: "2183"
+      ZK_DATA_DIR: "/tmp/zk-data-tls"
+      ZK_PLAIN_PORT: "2181"
+      ZK_SECURE_PORT: "2182"
+      ZK_TLS_CONF_DIR: "/tmp/zoo-tls-conf"
+      ZK_TLS_DIR: "/tmp/zk-tls"
+      CLASSPATH: "/usr/share/java/bouncycastle-fips/*:./*:."
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStore=/tmp/zk-tls/truststore.bcfks -Djavax.net.ssl.trustStoreType=BCFKS -Djavax.net.ssl.trustStorePassword=ZookeeperSSLTest123!"
       ZK_HOME: "/usr/share/java/zookeeper"
   pipeline:
+    - name: "Generate FIPS KeyStore and TrustStore"
+      runs: |
+        mkdir -p "${ZK_TLS_DIR}"
+
+        # Self-signed server keypair (BCFKS)
+        keytool -v \
+          -keystore "${ZK_TLS_DIR}/zookeeper-keystore.bcfks" \
+          -storetype BCFKS -providername BCFIPS \
+          -alias zookeeper-server \
+          -genkeypair -keyalg RSA -keysize 2048 -sigalg SHA256withRSA \
+          -dname "CN=localhost" -ext san=dns:localhost \
+          -storepass "${PASS}" -keypass "${PASS}" -validity 365
+
+        # Export self-signed cert for curl to trust
+        keytool -v \
+          -keystore "${ZK_TLS_DIR}/zookeeper-keystore.bcfks" \
+          -storetype BCFKS -providername BCFIPS \
+          -alias zookeeper-server -exportcert -rfc \
+          -storepass "${PASS}" \
+          -file "${ZK_TLS_DIR}/zookeeper-server.crt"
+
+        # Create truststore with the self-signed cert
+        keytool -v \
+          -keystore "${ZK_TLS_DIR}/truststore.bcfks" \
+          -storetype BCFKS -providername BCFIPS \
+          -alias zookeeper-server -importcert -noprompt \
+          -file "${ZK_TLS_DIR}/zookeeper-server.crt" \
+          -storepass "${PASS}"
     - runs: |
         set -euo pipefail
 
@@ -188,7 +230,7 @@ test:
         ZOOKEEPER_PID=$!
 
         # wait for server
-        wait-for-it localhost:2181
+        wait-for-it "localhost:${ZK_PLAIN_PORT}"
 
         # Start the CLI and check output (fails test if "Welcome to ZooKeeper!" not found)
         bin/zkCli.sh | grep -F "Welcome to ZooKeeper!"
@@ -198,16 +240,44 @@ test:
 
         # Kill Zookeeper
         kill "${ZOOKEEPER_PID}"
-    - runs: |
-        # Installing openjdk-17-default-jvm currently overwrites some files in
-        # openjdk-17, breaking javac execution which is required by
-        # java-fips/algorithms; fix the package here (ignoring spurious
-        # permissions errors), and check javac executes
-        apk fix openjdk-17 || false
-        /usr/lib/jvm/java-17-openjdk/bin/javac --version
-    - uses: java-fips/algorithms
+    - name: "Test ZooKeeper with TLS/SSL (FIPS BCFKS)"
+      uses: test/daemon-check-output
       with:
-        java-version: 17
+        setup: |-
+          mkdir -p "${ZK_TLS_CONF_DIR}" "${ZK_DATA_DIR}"
+          tee "${ZK_TLS_CONF_DIR}/zoo.cfg" << EOF
+          dataDir=${ZK_DATA_DIR}
+          clientPort=${ZK_CLIENT_PORT}
+          secureClientPort=${ZK_SECURE_PORT}
+          serverCnxnFactory=org.apache.zookeeper.server.NettyServerCnxnFactory
+          ssl.keyStore.location=${ZK_TLS_DIR}/zookeeper-keystore.bcfks
+          ssl.keyStore.password=${PASS}
+          ssl.keyStore.type=BCFKS
+          ssl.trustStore.location=${ZK_TLS_DIR}/truststore.bcfks
+          ssl.trustStore.password=${PASS}
+          ssl.trustStore.type=BCFKS
+          ssl.protocol=TLSv1.2
+          ssl.clientAuth=none
+          admin.forceHttps=true
+          ssl.quorum.keyStore.location=${ZK_TLS_DIR}/zookeeper-keystore.bcfks
+          ssl.quorum.keyStore.password=${PASS}
+          ssl.quorum.keyStore.type=BCFKS
+          ssl.quorum.trustStore.location=${ZK_TLS_DIR}/truststore.bcfks
+          ssl.quorum.trustStore.password=${PASS}
+          ssl.quorum.trustStore.type=BCFKS
+          EOF
+        start: |
+          env ZOOCFGDIR="${ZK_TLS_CONF_DIR}" "${ZK_HOME}/bin/zkServer.sh" start-foreground
+        expected_output: |
+          PrepRequestProcessor (sid:0) started
+          STARTED
+        timeout: 60
+        post: |-
+          set -euo pipefail
+          wait-for-it "localhost:${ZK_SECURE_PORT}"
+          "${ZK_HOME}/bin/zkCli.sh" -server "localhost:${ZK_SECURE_PORT}" | grep -F "Welcome to ZooKeeper!"
+          wait-for-it -t 30 "localhost:${ZK_ADMIN_PORT}"
+          curl -fsSL --cacert "${ZK_TLS_DIR}/zookeeper-server.crt" "https://localhost:${ZK_ADMIN_PORT}/commands/ruok" | jq -e '.command == "ruok" and .error == null'
 
 update:
   enabled: true
