@@ -1,0 +1,519 @@
+package:
+  name: keep-fips
+  version: "0.49.1"
+  epoch: 0
+  description: Open source AIOps and alert management platform (FIPS-enabled)
+  copyright:
+    - license: MIT
+
+vars:
+  venv-home: /opt/chainguard/keep-api
+  ui-home: /opt/chainguard/keep-ui
+  # NOTE: align with py-version required by upstream.
+  # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.api#L1
+  python-version: "3.13"
+  # NOTE: align with node version required by upstream.
+  # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.ui#L1
+  node-version: "20"
+  import: keep
+
+environment:
+  environment:
+    # Disable FIPS OpenSSL for Node.js build tooling (not runtime)
+    # Node.js build tools may use legacy crypto algorithms incompatible with FIPS
+    # The resulting JavaScript bundle is static and doesn't use crypto at runtime
+    NODE_OPTIONS: "--openssl-legacy-provider"
+  contents:
+    packages:
+      - build-base
+      - git
+      - libffi-dev
+      - libvips-dev
+      - linux-headers
+      - nodejs-${{vars.node-version}}
+      - npm
+      - openssl-config-fipshardened # FIPS OpenSSL configuration for build environment
+      - openssl-dev
+      - postgresql-dev
+      - py${{vars.python-version}}-cryptography
+      - py${{vars.python-version}}-mysql-connector-python
+      - py${{vars.python-version}}-psycopg
+      - py${{vars.python-version}}-psycopg2
+      - py${{vars.python-version}}-pymysql
+      - python-${{vars.python-version}}-base-dev
+      - uv
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/keephq/keep
+      tag: v${{package.version}}
+      expected-commit: 088213f442286616aaac9e63243608ea48ed7952
+
+  - name: Create venv
+    runs: uv venv --python python${{vars.python-version}} --system-site-packages "${{vars.venv-home}}"
+
+  - name: Install keep and dependencies
+    runs: |
+      # Exclude packages provided by system py3.13-* packages via
+      # --system-site-packages, avoiding bundled native libraries (OpenSSL, libpq)
+      tee /tmp/exclude-pkgs.txt <<'EOF'
+      cryptography
+      mysql-connector-python
+      psycopg
+      psycopg-binary
+      psycopg2-binary
+      pymysql
+      EOF
+      uv pip install --python "${{vars.venv-home}}/bin/python" \
+        --excludes /tmp/exclude-pkgs.txt --no-compile .
+
+  - name: Remediate compatibility issues
+    runs: |
+      # Upgrade pyOpenSSL for compatibility with OpenSSL 3.6
+      # The version pulled by snowflake-connector-python references X509_V_FLAG_NOTIFY_POLICY
+      # which was removed in OpenSSL 3.4+
+      #
+      # Also upgrade packages with known CVEs:
+      # - pynacl: CVE-2025-69277 (fixed in 1.6.2)
+      # - python-multipart: CVE-2026-24486 (fixed in 0.0.22)
+      # - starlette: CVE-2025-54121, CVE-2025-62727 (fixed in 0.49.1)
+      uv pip install --python "${{vars.venv-home}}/bin/python" \
+        --excludes /tmp/exclude-pkgs.txt --upgrade --no-compile \
+        "pyOpenSSL>=25.0.0" \
+        "pynacl>=1.6.2" \
+        "python-multipart>=0.0.22" \
+        "starlette>=0.49.1"
+
+  - name: Finalize API virtual environment
+    runs: |
+      # Make the entrypoint.sh executable
+      chmod +x "${{vars.venv-home}}/lib/python${{vars.python-version}}/site-packages/keep/entrypoint.sh"
+      # Fix .lock permissions
+      chmod 0755 "${{vars.venv-home}}/.lock"
+
+  - name: Remediate npm CVEs in keep-ui dependencies
+    working-directory: keep-ui
+    runs: |
+      # Set overrides before npm ci so they take effect during install
+      # next: CVE-2025-59471, GHSA-h25m-26qc-wcjf (fixed in 15.5.10)
+      npm pkg set dependencies.next="15.5.10"
+      # ajv: CVE-2025-69873 (fixed in 8.18.0)
+      npm pkg set overrides.ajv="8.18.0"
+      # serialize-javascript: GHSA-5c6j-r48x-rmvq (fixed in 7.0.3)
+      npm pkg set overrides.serialize-javascript="7.0.3"
+
+  - name: Install keep-ui npm dependencies
+    working-directory: keep-ui
+    runs: |
+      # Build sharp from source against system libvips instead of using
+      # prebuilt @img/sharp-* binaries
+      SHARP_FORCE_COMPILE=1 npm install --maxsockets 1
+      # webpack: CVE-2025-68157, CVE-2025-68458 (fixed in 5.104.1)
+      # Force-install to override Next.js's bundled copy
+      npm install webpack@5.105.2
+
+  - name: Build keep-ui
+    working-directory: keep-ui
+    runs: |
+      NEXT_TELEMETRY_DISABLED=1 \
+        NODE_OPTIONS=--max-old-space-size=8192 \
+        API_URL=http://localhost:8080 \
+        npm run build
+
+subpackages:
+  - name: keep-api-fips
+    description: Keep API server - open source alerting platform (FIPS-enabled)
+    dependencies:
+      runtime:
+        - bash-binsh
+        - openssl-config-fipshardened # FIPS-compliant OpenSSL configuration
+        - py${{vars.python-version}}-cryptography
+        - py${{vars.python-version}}-mysql-connector-python
+        - py${{vars.python-version}}-psycopg
+        - py${{vars.python-version}}-psycopg2
+        - py${{vars.python-version}}-pymysql
+        - python-${{vars.python-version}}-base
+    options:
+      # Don't depend on external libraries included in virtual environments
+      no-depends: true
+      # Don't resolve libraries installed in virtual environments as providers
+      no-provides: true
+    pipeline:
+      - runs: |
+          # Symlink keep command to PATH
+          mkdir -p "${{targets.contextdir}}/usr/bin"
+          ln -sf "${{vars.venv-home}}/bin/keep" "${{targets.contextdir}}/usr/bin/keep"
+
+          # Move venv into package output
+          mkdir -p "${{targets.contextdir}}$(dirname ${{vars.venv-home}})"
+          mv "${{vars.venv-home}}" "${{targets.contextdir}}${{vars.venv-home}}"
+    test:
+      environment:
+        contents:
+          packages:
+            - curl
+            - jq
+            - keep-api-compat-fips
+            - keep-api-oci-entrypoint-fips
+            - openssl-config-fipshardened
+            - valkey
+            - valkey-cli
+            - wait-for-it
+        environment:
+          AUTH_TYPE: NO_AUTH
+          DATABASE_CONNECTION_STRING: "sqlite:////tmp/keep.db"
+          SECRET_MANAGER_TYPE: FILE
+      pipeline:
+        - uses: test/tw/ldd-check
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+        - uses: python/import
+          with:
+            python: ${{vars.venv-home}}/bin/python
+            import: ${{vars.import}}
+        - uses: test/tw/help-check
+          with:
+            bins: keep
+        - name: Verify FIPS cryptography
+          runs: |
+            set -euo pipefail
+            "${{vars.venv-home}}/bin/python" -c "
+            import ssl
+            print('OpenSSL version:', ssl.OPENSSL_VERSION)
+            # Verify FIPS-compliant cryptography is available
+            from cryptography.hazmat.backends.openssl import backend
+            print('Cryptography OpenSSL backend loaded successfully')
+            # Verify FIPS mode is actually enabled
+            assert backend._fips_enabled, 'FIPS mode is not enabled'
+            print('FIPS mode is enabled')
+            "
+        - name: Write shared API test script
+          runs: |
+            # Shared test script used by both SQLite and Redis mode tests.
+            # Usage: /tmp/verify-keep-api.sh <port> <preset-name-prefix>
+            tee /tmp/verify-keep-api.sh <<'SCRIPT'
+            #!/bin/sh
+            set -euo pipefail
+            PORT="$1"
+            PREFIX="$2"
+            API="http://localhost:${PORT}"
+            AUTH="Authorization: Bearer keepActiveTenant"
+
+            # Healthcheck
+            curl -sf --retry 3 "$API/healthcheck"
+
+            # Verify tenant identity
+            curl -sf --retry 3 -H "$AUTH" "$API/whoami" | jq -e '.tenant_id'
+
+            # List providers
+            curl -sf --retry 3 -H "$AUTH" "$API/providers" | jq -e '.providers | type == "array"'
+
+            # List presets
+            curl -sf --retry 3 -H "$AUTH" "$API/preset" | jq -e 'type == "array"'
+
+            # CRUD test: create, read, update, delete a preset
+            PRESET_ID=$(curl -sf -X POST -H "$AUTH" -H "Content-Type: application/json" \
+              "$API/preset" \
+              -d "{\"name\":\"${PREFIX}-preset\",\"options\":[{\"label\":\"cel\",\"value\":\"1==1\"}],\"is_private\":false,\"is_noisy\":false}" \
+              | jq -re '.id')
+
+            # Read back the created preset
+            curl -sf -H "$AUTH" "$API/preset" | jq -e --arg id "$PRESET_ID" --arg name "${PREFIX}-preset" \
+              '.[] | select(.id == $id) | .name == $name'
+
+            # Update the preset
+            curl -sf -X PUT -H "$AUTH" -H "Content-Type: application/json" \
+              "$API/preset/$PRESET_ID" \
+              -d "{\"name\":\"${PREFIX}-updated\",\"options\":[{\"label\":\"cel\",\"value\":\"1==1\"}],\"is_private\":true,\"is_noisy\":false}"
+
+            # Verify update
+            curl -sf -H "$AUTH" "$API/preset" | jq -e --arg id "$PRESET_ID" --arg name "${PREFIX}-updated" \
+              '.[] | select(.id == $id) | .name == $name'
+
+            # Delete the preset
+            curl -sf -X DELETE -H "$AUTH" "$API/preset/$PRESET_ID"
+
+            # Verify deletion
+            curl -sf -H "$AUTH" "$API/preset" | jq -e --arg id "$PRESET_ID" \
+              '[.[] | select(.id == $id)] | length == 0'
+            SCRIPT
+            chmod +x /tmp/verify-keep-api.sh
+        - name: Test API startup and healthcheck
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              set -euo pipefail
+              export PATH="${{vars.venv-home}}/bin:$PATH"
+            start: |
+              env PATH="${{vars.venv-home}}/bin:$PATH" \
+                AUTH_TYPE=NO_AUTH \
+                DATABASE_CONNECTION_STRING="sqlite:////tmp/keep.db" \
+                SECRET_MANAGER_TYPE=FILE \
+                PROVISION_RESOURCES=false \
+              /usr/bin/entrypoint.sh \
+              gunicorn keep.api.api:get_app \
+                --bind 0.0.0.0:8080 \
+                --workers 1 \
+                -k uvicorn.workers.UvicornWorker \
+                -c ${{vars.venv-home}}/lib/python${{vars.python-version}}/site-packages/keep/api/config.py \
+                --preload
+            timeout: 120
+            expected_output: |
+              Keep server starting
+              Keep server started
+            post: |-
+              set -euo pipefail
+              wait-for-it -t 30 --strict localhost:8080
+              /tmp/verify-keep-api.sh 8080 test-crud
+              # Kill orphaned processes (server_jobs_bg.py, gunicorn workers)
+              # that entrypoint.sh spawns in the background
+              pkill -9 -f gunicorn || true
+              pkill -9 -f server_jobs_bg || true
+        - name: Test Redis mode startup
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              set -euo pipefail
+              valkey-server --daemonize yes
+              wait-for-it -t 10 --strict localhost:6379
+              valkey-cli ping
+            start: |
+              env PATH="${{vars.venv-home}}/bin:$PATH" \
+                REDIS=true \
+                AUTH_TYPE=NO_AUTH \
+                DATABASE_CONNECTION_STRING="sqlite:////tmp/keep-redis.db" \
+                SECRET_MANAGER_TYPE=FILE \
+                PROVISION_RESOURCES=false \
+              /usr/bin/entrypoint.sh gunicorn keep.api.api:get_app \
+                --bind 0.0.0.0:8080 \
+                --workers 1 \
+                -k uvicorn.workers.UvicornWorker \
+                -c /venv/lib/python${{vars.python-version}}/site-packages/keep/api/config.py \
+                --preload
+            timeout: 120
+            expected_output: |
+              Running with Redis
+              Starting ARQ workers
+              Keep server started
+            post: |-
+              set -euo pipefail
+              wait-for-it -t 30 --strict localhost:8080
+              wait-for-it -t 30 --strict localhost:8001
+              /tmp/verify-keep-api.sh 8080 test-redis
+              # Kill orphaned processes (server_jobs_bg.py, gunicorn workers, valkey)
+              # that entrypoint.sh spawns in the background
+              pkill -9 -f gunicorn || true
+              pkill -9 -f server_jobs_bg || true
+              pkill -9 -f valkey-server || true
+
+  - name: keep-api-oci-entrypoint-fips
+    description: OCI entrypoint for Keep API (FIPS-enabled)
+    dependencies:
+      runtime:
+        - keep-api-fips
+    pipeline:
+      - runs: |
+          # Install the upstream entrypoint script
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.api#L55
+          install -Dm755 keep/entrypoint.sh "${{targets.contextdir}}/usr/bin/entrypoint.sh"
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/entrypoint.sh
+
+  - name: keep-api-compat-fips
+    description: Compatibility package with upstream Keep API Docker image (FIPS-enabled)
+    dependencies:
+      runtime:
+        - keep-api-fips
+    pipeline:
+      - runs: |
+          # Create /app directory (upstream WORKDIR)
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.api#L10
+          mkdir -p "${{targets.contextdir}}/app"
+
+          # Copy unknown icon to /app (upstream copies from keep-ui)
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.api#L46
+          cp keep-ui/public/icons/unknown-icon.png "${{targets.contextdir}}/app/"
+
+          # Copy examples directory
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.api#L50
+          mkdir -p "${{targets.contextdir}}/examples"
+          cp -r examples/* "${{targets.contextdir}}/examples/"
+
+          # Create /venv symlink to match upstream paths
+          # Upstream uses /venv as the virtualenv path
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.api#L48-L53
+          ln -sf ${{vars.venv-home}} "${{targets.contextdir}}/venv"
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /app/unknown-icon.png
+              /examples/
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+  - name: keep-ui-fips
+    description: Keep web UI - open source alerting platform (FIPS-enabled)
+    dependencies:
+      runtime:
+        - libvips
+        - nodejs-${{vars.node-version}}
+        - openssl-config-fipshardened # FIPS-compliant OpenSSL configuration
+    pipeline:
+      - runs: |
+          # Install Next.js standalone output (including hidden .next directory)
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.ui
+          mkdir -p "${{targets.contextdir}}${{vars.ui-home}}"
+          cp -r keep-ui/.next/standalone/. "${{targets.contextdir}}${{vars.ui-home}}/"
+
+          # Copy static assets (not included in standalone output)
+          cp -r keep-ui/.next/static "${{targets.contextdir}}${{vars.ui-home}}/.next/static"
+
+          # Copy public assets
+          cp -r keep-ui/public "${{targets.contextdir}}${{vars.ui-home}}/public"
+
+          # Remove prebuilt sharp/libvips binaries (sharp is compiled from source
+          # against system libvips via SHARP_FORCE_COMPILE=1)
+          rm -rf "${{targets.contextdir}}${{vars.ui-home}}"/node_modules/@img
+          rm -rf "${{targets.contextdir}}${{vars.ui-home}}"/node_modules/next/node_modules/@img
+
+          # Replace standalone-bundled packages with upgraded versions
+          # (Next.js standalone output bundles its own copies, ignoring npm overrides)
+          rm -rf "${{targets.contextdir}}${{vars.ui-home}}"/node_modules/webpack
+          cp -r keep-ui/node_modules/webpack "${{targets.contextdir}}${{vars.ui-home}}"/node_modules/webpack
+          rm -rf "${{targets.contextdir}}${{vars.ui-home}}"/node_modules/serialize-javascript
+          cp -r keep-ui/node_modules/serialize-javascript "${{targets.contextdir}}${{vars.ui-home}}"/node_modules/serialize-javascript
+    test:
+      environment:
+        contents:
+          packages:
+            - chromium
+            - curl
+            - font-opensans
+            - keep-api-compat-fips
+            - keep-api-oci-entrypoint-fips
+            - ncurses
+            - npm
+            - openssl-config-fipshardened
+            - wait-for-it
+            - xkbcomp
+            - xkeyboard-config
+            - xvfb
+        environment:
+          API_URL: "http://localhost:8080"
+          CYPRESS_CACHE_FOLDER: /tmp/cypress-cache
+          DISPLAY: ":99"
+          HOSTNAME: "0.0.0.0"
+          NEXTAUTH_SECRET: test-secret
+          NEXTAUTH_URL: "http://localhost:3000"
+          AUTH_TYPE: NO_AUTH
+          PORT: "3000"
+          TERM: xterm
+      pipeline:
+        - uses: test/tw/ldd-check
+        - name: Test UI server startup and Cypress e2e
+          uses: test/daemon-check-output
+          with:
+            setup: |-
+              set -euo pipefail
+
+              # Start the API server so NextAuth NO_AUTH login can complete
+              env PATH=${{vars.venv-home}}/bin:$PATH \
+                AUTH_TYPE=NO_AUTH \
+                DATABASE_CONNECTION_STRING="sqlite:////tmp/keep-ui-test.db" \
+                SECRET_MANAGER_TYPE=FILE \
+                PROVISION_RESOURCES=false \
+              gunicorn keep.api.api:get_app \
+                --bind 0.0.0.0:8080 --workers 1 \
+                -k uvicorn.workers.UvicornWorker \
+                -c /venv/lib/python${{vars.python-version}}/site-packages/keep/api/config.py \
+                --preload &
+              wait-for-it -t 120 --strict localhost:8080
+            start: "node ${{vars.ui-home}}/server.js"
+            timeout: 60
+            expected_output: "Ready in"
+            post: |-
+              set -euo pipefail
+
+              # Healthcheck API route
+              curl -sf http://localhost:3000/api/healthcheck
+
+              # Signin page renders HTML
+              curl -sf http://localhost:3000/signin | grep -F "<html"
+
+              # Public assets are served
+              curl -sf -o /dev/null http://localhost:3000/keep.svg
+
+              # Start Xvfb for headless browser testing
+              Xvfb :99 -screen 0 1280x1024x24 2>/dev/null &
+              XVFB_PID=$!
+
+              cleanup() {
+                kill "$XVFB_PID" 2>/dev/null || true
+                pkill -9 -f chromium 2>/dev/null || true
+                # Kill API server and orphaned processes started by entrypoint.sh
+                pkill -9 -f gunicorn 2>/dev/null || true
+                pkill -9 -f server_jobs_bg 2>/dev/null || true
+              }
+              trap cleanup EXIT
+
+              # Run Cypress e2e tests
+              npm install && npx cypress install
+              timeout --kill-after=10 300 npm run cy:run
+
+  - name: keep-ui-oci-entrypoint-fips
+    description: OCI entrypoint for Keep UI (FIPS-enabled)
+    dependencies:
+      runtime:
+        - keep-ui-fips
+    pipeline:
+      - runs: |
+          # Install the upstream UI entrypoint script
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.ui
+          install -Dm755 keep-ui/entrypoint.sh "${{targets.contextdir}}/usr/bin/entrypoint.sh"
+    test:
+      pipeline:
+        - runs: |
+            stat /usr/bin/entrypoint.sh
+
+  - name: keep-ui-compat-fips
+    description: Compatibility package with upstream Keep UI Docker image (FIPS-enabled)
+    dependencies:
+      runtime:
+        - keep-ui-fips
+    pipeline:
+      - runs: |
+          # Create /app directory (upstream WORKDIR)
+          # REF: https://github.com/keephq/keep/blob/main/docker/Dockerfile.ui
+          mkdir -p "${{targets.contextdir}}/app"
+
+          # Symlink standalone output to /app to match upstream layout
+          ln -sf ${{vars.ui-home}}/.next "${{targets.contextdir}}/app/.next"
+          ln -sf ${{vars.ui-home}}/public "${{targets.contextdir}}/app/public"
+          ln -sf ${{vars.ui-home}}/server.js "${{targets.contextdir}}/app/server.js"
+          ln -sf ${{vars.ui-home}}/node_modules "${{targets.contextdir}}/app/node_modules"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+test:
+  pipeline:
+    - uses: test/tw/emptypackage
+
+update:
+  enabled: true
+  git:
+    strip-prefix: v
+    tag-filter-prefix: v
+  ignore-regex-patterns:
+    - ".*rc.*"
+    - ".*beta.*"
+    - ".*alpha.*"
