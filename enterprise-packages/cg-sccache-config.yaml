@@ -1,6 +1,7 @@
+#nolint:sccache-enabled
 package:
   name: cg-sccache-config
-  version: "0.1"
+  version: "0.2"
   epoch: 0
   description: Utility to add sccache wrappers around all installed/supported compilers
   copyright:
@@ -11,6 +12,7 @@ package:
 
 vars:
   test-cuda-version: 13.1
+  test-sccache-source-version: 0.14.0
 
 environment:
   contents:
@@ -36,13 +38,18 @@ test:
     contents:
       packages:
         - build-base
+        - clang
         - nvidia-cuda-nvcc-${{vars.test-cuda-version}}-dev
         - nvidia-cuda-nvrtc-${{vars.test-cuda-version}}-dev
         - nvidia-cuda-cudart-${{vars.test-cuda-version}}-dev
         - nvcc-${{vars.test-cuda-version}}-gcc-wrapper
+        - openssl-dev # sccache build-dep
+        - rust
     environment:
-      SCCACHE_LOG: debug
+      SCCACHE_LOG_LEVEL: debug
       SCCACHE_ERROR_LOG: /tmp/sccache.log
+      # git fetch pipeline is failing w/o this
+      SOURCE_DATE_EPOCH: 315532800
   pipeline:
     - uses: sccache/enable
     - name: "smoke test gcc/g++ after wrapper install"
@@ -50,34 +57,22 @@ test:
       with:
         cc: gcc
         cxx: g++
-    - name: "clean up after smoke test"
+    - name: "show and clean up sccache log"
       runs: |
-        trap 'rm -f "$SCCACHE_ERROR_LOG"' EXIT
-        killall sccache
-        for i in $(seq 10); do
-          pidof sccache || break
-          sleep 1
-        done
-        # Will only exist if sccache was spawned
-        cat "$SCCACHE_ERROR_LOG"
-    - name: "validate hardening is still in place after wrapper install"
+        cat "$SCCACHE_ERROR_LOG" || true
+        rm -f "$SCCACHE_ERROR_LOG"
+    - name: "validate gcc hardening is still in place after wrapper install"
       uses: test/compiler/hardening-check
       with:
         cc: gcc
-    - name: "clean up after hardening-check"
+    - name: "show and clean up sccache log"
       runs: |
-        trap 'rm -f "$SCCACHE_ERROR_LOG"' EXIT
-        killall sccache
-        for i in $(seq 10); do
-          pidof sccache || break
-          sleep 1
-        done
-        # Will only exist if sccache was spawned
-        cat "$SCCACHE_ERROR_LOG"
-    - name: "validate that C objects are getting cached"
+        cat "$SCCACHE_ERROR_LOG" || true
+        rm -f "$SCCACHE_ERROR_LOG"
+    - name: "validate that gcc C objects are getting cached"
       runs: |
         tmpdir="$(mktemp -d)"
-        trap 'rm -rf "$tmpdir" "$SCCACHE_ERROR_LOG" stats.out' EXIT
+        trap 'cat "$SCCACHE_ERROR_LOG" || true; rm -rf "$tmpdir" "$SCCACHE_ERROR_LOG" stats.out' EXIT
 
         cat > "$tmpdir/test.c" << EOF
         #include <stdio.h>
@@ -89,19 +84,65 @@ test:
         gcc -c "$tmpdir/test.c"
         gcc -c "$tmpdir/test.c"
 
-        sccache --show-stats | tee stats.out
-        killall sccache
-        for i in $(seq 10); do
-          pidof sccache || break
-          sleep 1
-        done
-        # Will only exist if sccache was spawned
-        cat "$SCCACHE_ERROR_LOG"
+        sccache --stop-server | tee stats.out
         grep -E '^Cache hits \(C/C\+\+\)\s+1$' stats.out
+    - name: "smoke test clang/clang++ after wrapper install"
+      uses: test/compiler/smoke
+      with:
+        cc: clang
+        cxx: clang++
+    - name: "show and clean up sccache log"
+      runs: |
+        cat "$SCCACHE_ERROR_LOG" || true
+        rm -f "$SCCACHE_ERROR_LOG"
+    - name: "validate clang hardening is still in place after wrapper install"
+      uses: test/compiler/hardening-check
+      with:
+        cc: clang
+    - name: "show and clean up sccache log"
+      runs: |
+        cat "$SCCACHE_ERROR_LOG" || true
+        rm -f "$SCCACHE_ERROR_LOG"
+    - name: "validate that clang C objects are getting cached"
+      runs: |
+        tmpdir="$(mktemp -d)"
+        trap 'cat "$SCCACHE_ERROR_LOG" || true; rm -rf "$tmpdir" "$SCCACHE_ERROR_LOG" stats.out' EXIT
+
+        cat > "$tmpdir/test.c" << EOF
+        #include <stdio.h>
+
+        int main() {
+          return(0);
+        }
+        EOF
+        clang -c "$tmpdir/test.c"
+        clang -c "$tmpdir/test.c"
+
+        sccache --stop-server | tee stats.out
+        grep -E '^Cache hits \(C/C\+\+\)\s+1$' stats.out
+    - uses: git-checkout
+      with:
+        destination: rust-test
+        repository: https://github.com/mozilla/sccache
+        tag: v${{vars.test-sccache-source-version}}
+        expected-commit: 6ea77c318e4a50fb713a7b1e7a09a87a0b7e114c
+    - name: "validate that rust objects are getting cached"
+      working-directory: rust-test
+      runs: |
+        trap 'cat "$SCCACHE_ERROR_LOG" || true; rm -rf "$PWD"' EXIT
+        export RUSTC_WRAPPER=sccache
+        cargo build --release
+        cargo clean
+        cargo build --release
+        sccache --stop-server | tee stats.out
+        grep -E '^Cache hits \(Rust\)\s+[0-9]+$' stats.out >rust-hits.out
+        hits="$(sed -r 's/Cache hits \(Rust\)\s+([0-9]+)$/\1/' < rust-hits.out)"
+        test -n "${hits}"
+        [ "${hits}" -gt 0 ]
     - name: "validate that nvcc objects are getting cached"
       runs: |
         tmpdir="$(mktemp -d)"
-        trap 'rm -rf "$tmpdir" "$SCCACHE_ERROR_LOG" stats.out' EXIT
+        trap 'cat "$SCCACHE_ERROR_LOG" || true; rm -rf "$tmpdir" "$SCCACHE_ERROR_LOG" stats.out' EXIT
         export PATH="$PATH:/usr/local/cuda-${{vars.test-cuda-version}}/bin"
 
         cat > "$tmpdir/test.cu" << EOF
@@ -114,12 +155,5 @@ test:
         nvcc -c "$tmpdir/test.cu"
         nvcc -c "$tmpdir/test.cu"
 
-        sccache --show-stats | tee stats.out
-        killall sccache
-        for i in $(seq 10); do
-          pidof sccache || break
-          sleep 1
-        done
-        # Will only exist if sccache was spawned
-        cat "$SCCACHE_ERROR_LOG"
-        grep -E '^Cache hits \(CUDA\)\s+1$' stats.out
+        sccache --stop-server | tee stats.out
+        grep -E '^Cache hits \(CUDA\)\s+[12]$' stats.out
