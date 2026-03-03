@@ -1,7 +1,17 @@
+# authentik's upstream repo ships enterprise-licensed code coupled with the
+# OSS codebase. Building the package requires a set of patches that strip
+# enterprise references, fix class-hierarchy (MRO) breakage caused by their
+# removal, and stub API response fields that the strict Go client expects. These
+# patches must be regenerated each time we bump to a new upstream version since
+# the surrounding code changes.
+#
+# A Claude skill at .claude/skills/authentik-patch/ assists with ongoing version
+# updates and OSS/enterprise patch maintenance. See SKILL.md there for the
+# workflow and patch-patterns.md for the catalogue of enterprise-removal patterns.
 package:
   name: authentik
-  version: "2025.12.1"
-  epoch: 3 # GHSA-r6ph-v2qm-q3c2
+  version: "2025.12.3"
+  epoch: 0
   description: "authentik IdP — an open-source Identity Provider for modern SSO."
   copyright:
     - license: "CC-BY-4.0"
@@ -56,7 +66,7 @@ pipeline:
     with:
       repository: https://github.com/goauthentik/authentik
       tag: version/${{package.version}}
-      expected-commit: "dc2332a316e73d1cfaaea23dc117cf0b1af3f95a"
+      expected-commit: "6760f4c5d38e245edb72e12e4f45bda8dd859ccd"
 
   # OSS/Enterprise build are the same and both ship with Enterprise related code at 'authentik/enterprise'
   # Enterprise functionality locked behind license checker.
@@ -71,6 +81,7 @@ pipeline:
         enterprise.mro.patch
         frontend-sync-chart.patch
         middleware-m2m-fix.patch
+        pagination-autocomplete.patch
 
   - name: "Create venv"
     runs: uv venv ${{vars.venv-home}}
@@ -165,10 +176,12 @@ pipeline:
     runs: |
       # Create directories to match upstream
       # REF: https://github.com/goauthentik/authentik/blob/version/2025.8.4/Dockerfile#L170-L186
+      # /data added in 2025.12.3: upstream lifecycle/ak changed from /media to /data for chown/chmod in check_if_root init script
       for dir in \
         /ak-root \
         /authentik \
         /certs \
+        /data \
         /media \
         /schemas \
         /locale \
@@ -213,6 +226,8 @@ pipeline:
       ln -sf /usr/share/${{package.name}}/venv/ ${{targets.contextdir}}/ak-root/venv
       ln -sf /usr/share/${{package.name}}/packages/ ${{targets.contextdir}}/ak-root/packages
       ln -sf /usr/share/${{package.name}}/packages/ ${{targets.contextdir}}/packages
+      # Match upstream Dockerfile: ln -s /media /data/media
+      ln -sf /media ${{targets.contextdir}}/data/media
 
   - uses: strip
 
@@ -224,6 +239,17 @@ subpackages:
         with:
           deps: |
             golang.org/x/crypto@v0.45.0
+      - name: "Replace Go API client with version-matched client-go"
+        runs: |
+          # Upstream's go.mod points to a stale published Go module that has a
+          # null-handling bug (https://github.com/goauthentik/authentik/issues/19878).
+          # Upstream fixes this at Docker build time via `make gen-client-go` CI workflow
+          # which regenerates the client and adds a replace directive.
+          #
+          # We clone the pre-generated client-go at the version tag and redirect the module path to use it.
+          git clone --depth 1 --branch v3.${{package.version}} \
+            https://github.com/goauthentik/client-go.git gen-go-api
+          go mod edit -replace goauthentik.io/api/v3=./gen-go-api
       - uses: go/build
         with:
           packages: ./cmd/server
@@ -301,7 +327,6 @@ test:
           Booting authentik
           Starting gunicorn
           authentik Core Worker finished starting
-          Starting authentik outpost
     - name: Test basic authentik worker startup
       uses: test/daemon-check-output
       working-directory: /
