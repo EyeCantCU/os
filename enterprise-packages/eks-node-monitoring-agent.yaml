@@ -1,0 +1,92 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: eks-node-monitoring-agent
+  version: "1.5.2_git20260303"
+  epoch: 0
+  description: Kubernetes node monitoring agent for EKS health checks and diagnostics
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - ca-certificates-bundle
+      - so:libcap.so.2
+      - so:libdcgm.so.4
+      - so:libgcrypt.so.20
+      - so:libgpg-error.so.0
+      - so:liblz4.so.1
+      - so:liblzma.so.5
+      - so:libsystemd.so.0
+      - so:libzstd.so.1
+      - tzdata
+
+environment:
+  contents:
+    packages:
+      - build-base
+      - busybox
+      - systemd-dev
+  environment:
+    CGO_ENABLED: "1"
+    # go-dcgm uses dlopen + RTLD_GLOBAL for lazy DCGM symbol resolution;
+    # -z now from openssf-compiler-options forces immediate resolution, breaking this pattern.
+    # See https://github.com/wolfi-dev/os/issues/34568
+    GCC_SPEC_FILE: /home/build/openssf.spec
+
+pipeline:
+  - runs: |
+      set -euo pipefail
+      gccdir="$(GCC_SPEC_FILE=/dev/null gcc --print-search-dirs | grep ^install: | cut -d' ' -f2)"
+      sed -r 's/-z now//' < "$gccdir/openssf.spec" > /home/build/openssf.spec
+
+  - uses: git-checkout
+    with:
+      branch: main
+      expected-commit: 72fea5dc5035ef6eb20a061824e7c6c50d424a57
+      repository: https://github.com/aws/eks-node-monitoring-agent
+
+  - uses: go/build
+    with:
+      output: eks-node-monitoring-agent
+      packages: ./cmd/eks-node-monitoring-agent/
+
+  - uses: go/build
+    with:
+      output: eks-node-monitoring-chroot
+      packages: ./cmd/chroot/
+
+  - runs: |
+      mkdir -p "${{targets.destdir}}/etc"
+      ln -sf /usr/share/zoneinfo/UTC "${{targets.destdir}}/etc/localtime"
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/opt/bin"
+          ln -sf /usr/bin/eks-node-monitoring-agent "${{targets.contextdir}}/opt/bin/eks-node-monitoring-agent"
+          ln -sf /usr/bin/eks-node-monitoring-chroot "${{targets.contextdir}}/opt/bin/chroot"
+    test:
+      pipeline:
+        - runs: |
+            stat /opt/bin/eks-node-monitoring-agent
+            stat /opt/bin/chroot
+
+update:
+  enabled: true
+  git: {}
+  schedule:
+    period: weekly
+    reason: Upstream does not maintain tags or releases.
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - name: Functional test
+      uses: test/daemon-check-output
+      with:
+        start: eks-node-monitoring-agent --metrics-address :8080 --probe-address :8081
+        timeout: 30
+        expected_output: |
+          initializing controller manager
+        error_strings: ""
