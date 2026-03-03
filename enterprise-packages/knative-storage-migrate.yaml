@@ -1,0 +1,135 @@
+#nolint:valid-pipeline-git-checkout-tag
+package:
+  name: knative-storage-migrate
+  version: "0_git20260302"
+  epoch: 1
+  description: Migrates the storage version of Knative resources
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/knative/pkg.git
+      branch: main
+      expected-commit: 1f39e94ef0039648f5ece942b941cc3bc699e55b
+
+  - uses: go/build
+    with:
+      packages: ./apiextensions/storageversion/cmd/migrate
+      output: migrate
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: Compat package for ${{package.name}}
+    pipeline:
+      - runs: |
+          mkdir -p "${{targets.contextdir}}"/ko-app
+          ln -sf ../usr/bin/migrate "${{targets.contextdir}}"/ko-app/migrate
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+# See: https://github.com/chainguard-dev/image-requests/issues/7465#issuecomment-3936843208
+update:
+  enabled: true
+  git: {}
+  schedule:
+    period: monthly
+    reason: Migrate does not have releases or tags, and has not been updated in over 2 years.
+
+test:
+  environment:
+    contents:
+      packages:
+        - jq
+  pipeline:
+    - uses: test/tw/help-check
+      with:
+        bins: migrate
+    # no ver-check: migrate does not have a version flag
+    - name: "migrate should fail outside a kubernetes cluster"
+      runs: |
+        set +e
+        response=$(migrate 2>&1)
+        set -e
+        echo $response | jq -e '.severity == "EMERGENCY"'
+        echo $response | jq -e '.message | contains("failed to get kubeconfig")'
+    - uses: test/kwok/cluster
+    - name: Install CRD with v1alpha1 as storage
+      runs: |
+        kubectl apply -f - <<EOF
+        apiVersion: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        metadata:
+          name: widgets.example.com
+        spec:
+          group: example.com
+          names:
+            kind: Widget
+            plural: widgets
+          scope: Namespaced
+          versions:
+          - name: v1alpha1
+            served: true
+            storage: true
+            schema:
+              openAPIV3Schema:
+                type: object
+        EOF
+        kubectl wait --for=condition=Established crd/widgets.example.com --timeout=30s
+    - name: Create an object on v1alpha1
+      runs: |
+        kubectl apply -f - <<EOF
+        apiVersion: example.com/v1alpha1
+        kind: Widget
+        metadata:
+          name: test-widget
+          namespace: default
+        EOF
+    - name: Upgrade CRD to add v1 as storage
+      runs: |
+        kubectl apply -f - <<EOF
+        apiVersion: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        metadata:
+          name: widgets.example.com
+        spec:
+          group: example.com
+          names:
+            kind: Widget
+            plural: widgets
+          scope: Namespaced
+          versions:
+          - name: v1alpha1
+            served: true
+            storage: false
+            schema:
+              openAPIV3Schema:
+                type: object
+          - name: v1
+            served: true
+            storage: true
+            schema:
+              openAPIV3Schema:
+                type: object
+        EOF
+        kubectl wait --for=condition=Established crd/widgets.example.com --timeout=30s
+    - name: Verify storedVersions contains both versions before migration
+      runs: |
+        stored=$(kubectl get crd widgets.example.com -o jsonpath='{.status.storedVersions}')
+        echo $stored | jq "length == 2"
+        echo $stored | jq -e 'contains(["v1alpha1", "v1"])'
+    - name: Run migrate
+      runs: |
+        migrate widgets.example.com
+    - name: Verify migration cleaned up v1alpha1 from storedVersions
+      runs: |
+        stored=$(kubectl get crd widgets.example.com -o jsonpath='{.status.storedVersions}')
+        echo $stored | jq "length == 1"
+        echo $stored | jq 'contains(["v1"])'
+        echo $stored | jq 'contains(["v1alpha1"]) | not'

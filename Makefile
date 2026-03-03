@@ -41,6 +41,24 @@ test_debug_targets = $(foreach name,$(pkgs),test-debug/$(name))
 $(test_debug_targets): test-debug/%: $(STEREO)
 	$(STEREO) make test-debug $*
 
+# eco-2-28: rebuild packages with manylinux 2.28 ABI toolchain
+# Mirrors the eco-2-28 CI configuration from mono/env/enforce.dev/iac/400-build/build.tf
+ECO_228_REPOS = \
+	--repository-append https://apk.cgr.dev/chainguard \
+	--repository-append https://apk.cgr.dev/chainguard-private \
+	--repository-append https://apk.cgr.dev/chainguard-2.28
+ECO_228_BUILD_OPTS = $(ECO_228_REPOS) \
+	--package-append 2.28-build-base
+
+eco-package/%: $(STEREO)
+	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make package $*
+
+eco-test/%: $(STEREO)
+	MELANGE_EXTRA_OPTS="$(ECO_228_REPOS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make test $*
+
+eco-debug/%: $(STEREO)
+	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make debug $*
+
 # Fallback rules when stereo doesn't exist yet - build it first, then re-invoke make
 ifeq ($(pkgs),)
 package/%: $(STEREO)
@@ -164,6 +182,9 @@ local-wolfi: os/local-melange.rsa enterprise-packages/local-melange-enterprise.r
 	@(for p in os enterprise-packages extra-packages ; do \
 		[ -f "$$p/packages/$(ARCH)/APKINDEX.tar.gz" ] || continue ; \
 		echo "$(PACKAGES_CONTAINER_FOLDER)/$$p"; done ) >> $(TMP_REPOS_FILE)
+ifneq ($(LOCAL_WOLFI_EXTRA_REPO),)
+	@echo "$(LOCAL_WOLFI_EXTRA_REPO)" >> $(TMP_REPOS_FILE)
+endif
 	@trap 'rm -Rf "$(TMP_DIR)"' EXIT && \
 	  tok=$$(chainctl auth token --audience=apk.cgr.dev) && \
 	  ( umask 066 && printf "%s\n" "machine apk.cgr.dev" "login token" "password $$tok" > "$(TMP_DIR)/netrc" ) && \
