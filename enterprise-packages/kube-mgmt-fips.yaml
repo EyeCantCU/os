@@ -1,0 +1,97 @@
+package:
+  name: kube-mgmt-fips
+  version: 10.0.0
+  epoch: 0
+  description: Sidecar for managing OPA instances in Kubernetes
+  copyright:
+    - license: Apache-2.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/open-policy-agent/kube-mgmt
+      tag: ${{package.version}}
+      expected-commit: e2659e70f29c4ac2e1505b0dbfbb37d808115eb3
+
+  - uses: go/bump
+    with:
+      deps: |-
+        github.com/containerd/containerd/v2@v2.1.5
+        golang.org/x/net@v0.45.0
+        go.opentelemetry.io/otel/sdk@v1.40.0
+
+  # ldflags reference: https://github.com/open-policy-agent/kube-mgmt/blob/e2659e70f29c4ac2e1505b0dbfbb37d808115eb3/skaffold.yaml#L12
+  - uses: go/build
+    with:
+      packages: ./cmd/kube-mgmt
+      output: kube-mgmt
+      ldflags: |
+        -X github.com/open-policy-agent/kube-mgmt/pkg/version.Version=${{package.version}}
+        -X github.com/open-policy-agent/kube-mgmt/pkg/version.Git=$(git rev-parse HEAD)
+      go-package: go-fips
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package for kube-mgmt"
+    dependencies:
+      runtime:
+        # In the kube-mgmt helm chart, the kube-mgmt init container runs bootstrap logic (token + policy generation) via shell.
+        # https://github.com/open-policy-agent/kube-mgmt/blob/e2659e70f29c4ac2e1505b0dbfbb37d808115eb3/charts/opa-kube-mgmt/templates/deployment.yaml#L49
+        - dash-binsh
+        - coreutils
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.contextdir}}/ko-app
+          ln -sf ../usr/bin/kube-mgmt ${{targets.contextdir}}/ko-app/kube-mgmt
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - uses: test/tw/symlink-check
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - jq
+        - opa
+  pipeline:
+    - uses: test/go-fips-check
+    - uses: test/tw/help-check
+      with:
+        bins: kube-mgmt
+    - uses: test/tw/ver-check
+      with:
+        bins: kube-mgmt
+    - uses: test/kwok/cluster
+    - uses: test/daemon-check-output
+      with:
+        start: opa run --server --addr=localhost:8181
+        expected_output: |
+          Initializing server
+          OPA running
+        post: |
+          set -euo pipefail
+          # setup kube-mgmt to monitor configmaps in all namespaces
+          kube-mgmt --opa-url=http://localhost:8181/v1 --kubeconfig=$HOME/.kube/config --namespaces=* &
+          pid=$!
+
+          # create a configmap and add a label to load it to opa
+          kubectl create configmap test-data --from-literal=data.json='{"test": "value"}'
+          kubectl label configmap test-data openpolicyagent.org/data=opa
+
+          # kube-mgmt will add a new annotation to the configmap
+          kubectl wait --for=jsonpath='{.metadata.annotations.openpolicyagent\.org/kube-mgmt-status}' \
+            configmap/test-data --timeout=30s
+          kubectl get configmap test-data -o json | jq -e '.metadata.annotations["openpolicyagent.org/kube-mgmt-status"] | fromjson | .status == "ok"'
+          # need to manually kill the kube-mgmt process
+          # or it will keep the test running indefinitely
+          kill $pid
+
+update:
+  enabled: true
+  github:
+    identifier: open-policy-agent/kube-mgmt
