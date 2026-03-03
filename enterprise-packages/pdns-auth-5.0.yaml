@@ -1,7 +1,7 @@
 package:
   name: pdns-auth-5.0
-  version: "5.0.2"
-  epoch: 4
+  version: "5.0.3"
+  epoch: 1
   description: PowerDNS Authoritative Server
   copyright:
     - license: GPL-2.0-or-later
@@ -13,6 +13,8 @@ package:
   dependencies:
     provides:
       - pdns-auth=${{package.full-version}}
+    runtime:
+      - merged-varrun
 
 vars:
   python-version: 3.12 # Pinning 3.12 due to imghdr. See: https://peps.python.org/pep-0594/#imghdr
@@ -99,7 +101,7 @@ pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/PowerDNS/pdns
-      expected-commit: 5b613a5f33e5d808b7590f0f846356c4d3302d03
+      expected-commit: 5c2a468f8f00e01d5d1ddca2b26a26db60e17a6f
       tag: auth-${{package.version}}
 
   - name: adds versioning information
@@ -129,7 +131,9 @@ pipeline:
   - name: Create necessary directories
     runs: |
       mkdir -p ${{targets.contextdir}}/etc/powerdns/pdns.d
-      mkdir -p ${{targets.contextdir}}/var/run/pdns/
+      mkdir -p ${{targets.contextdir}}/run/pdns/
+      mkdir -p ${{targets.contextdir}}/usr/lib/tmpfiles.d
+      echo 'd /run/pdns 0755 root root' >${{targets.contextdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf
       mkdir -p ${{targets.contextdir}}/var/lib/powerdns
 
   - name: add conf files
@@ -362,6 +366,8 @@ subpackages:
     dependencies:
       provides:
         - pdns-auth-nosodium=${{package.full-version}}
+      runtime:
+        - merged-varrun
     pipeline:
       - uses: autoconf/configure
         with:
@@ -388,7 +394,9 @@ subpackages:
       - name: Create necessary directories
         runs: |
           mkdir -p ${{targets.contextdir}}/etc/powerdns/pdns.d
-          mkdir -p ${{targets.contextdir}}/var/run/pdns/
+          mkdir -p ${{targets.contextdir}}/run/pdns/
+          mkdir -p ${{targets.contextdir}}/usr/lib/tmpfiles.d
+          echo 'd /run/pdns 0755 root root' >${{targets.contextdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf
           mkdir -p ${{targets.contextdir}}/var/lib/powerdns
       - name: add sqlite3 database file
         runs: |
@@ -428,6 +436,8 @@ test:
       packages:
         - bind-tools
         - curl
+        - iproute2
+        - util-linux-misc # unshare
         - wait-for-it
         - pdns-auth-backends-all-${{vars.major-minor-version}}
         - pdns-auth-tools-all-${{vars.major-minor-version}}
@@ -441,6 +451,7 @@ test:
           uid: 953
       run-as: 0 # To bind :53 on the CI
   pipeline:
+    - uses: test/systemd-tmpfiles
     - uses: test/tw/ldd-check
     - uses: test/tw/help-check
       with:
@@ -453,7 +464,16 @@ test:
           pdnsutil create-zone example.com ns1.example.com
           # require NAME to be absolute, ref: https://github.com/PowerDNS/pdns/pull/14984
           pdnsutil add-record example.com ns1.example.com A 127.0.0.1
-        start: "pdns_server"
+          touch pdns-net
+          (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+          chmod +x nsenter
+          if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+            echo 'nsenter --net=pdns-net "$@"' >>nsenter
+            ./nsenter ip link set lo up
+          else
+            echo '"$@"' >>nsenter
+          fi
+        start: "./nsenter pdns_server"
         timeout: 30
         expected_output: |
           Listening on controlsocket
@@ -461,6 +481,6 @@ test:
           TCP server bound
           Done launching threads, ready to distribute questions
         post: |
-          wait-for-it -t 5 --strict localhost:53
-          dig @127.0.0.1 -p 53 example.com SOA +norecurse | grep -F -e "NOERROR"
-          sdig 127.0.0.1 53 example.com SOA | grep -F -e "No Error"
+          ./nsenter wait-for-it -t 5 --strict localhost:53
+          ./nsenter dig @127.0.0.1 -p 53 example.com SOA +norecurse | grep -F -e "NOERROR"
+          ./nsenter sdig 127.0.0.1 53 example.com SOA | grep -F -e "No Error"

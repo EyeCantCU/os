@@ -1,0 +1,215 @@
+#As of writing this, we cannot use chainguard libraries because when a dependency is not available in chainguard libraries,
+#it falls back to maven central, but ontop requires a dependency from a third-party repository
+package:
+  name: ontop-fips
+  version: "5.5.0"
+  epoch: 1 # GHSA-72hv-8253-57qq
+  description: FIPS-enabled Ontop platform to query relational databases as Virtual RDF Knowledge Graphs using SPARQL
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - bash # required by ontop CLI script
+      - busybox # basic utility required by ontop CLI script like rm, dirname, cd
+      # FIPS dependencies
+      - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
+
+vars:
+  # Upstream projects have users who are still relying on Java 11
+  # https://github.com/ontop/ontop/issues/865#issuecomment-2875581012
+  java-version: 11
+  java-home: /opt/java/openjdk
+  package-home: /opt/ontop
+  jre-modules: "java.base,java.compiler,java.desktop,java.instrument,java.management.rmi,java.naming,java.prefs,java.scripting,java.security.jgss,java.sql,jdk.httpserver,jdk.jfr,jdk.management,jdk.management.agent,jdk.unsupported,jdk.crypto.cryptoki,jdk.crypto.ec"
+
+environment:
+  contents:
+    packages:
+      - maven
+      - openjdk-${{vars.java-version}}-default-jdk
+      - openjdk-${{vars.java-version}}-jmods
+  environment:
+    MAVEN_OPTS: "-Dmaven.repo.local=/var/cache/melange"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/ontop/ontop
+      tag: ontop-${{package.version}}
+      expected-commit: bb194040057aaae60e713aca819dd8302394bcf0
+
+  # If the Dockerfile changes the jre modules, our package may still build successfully even if the module set is now out of sync.
+  # Hence, a drift check would ensure failures
+  - name: "Verify JRE modules match upstream Dockerfile"
+    runs: |
+      set -euo pipefail
+      EXPECTED_MODULES="ONTOP_JRE_MODULES=${{vars.jre-modules}}"
+      tr -d '\\ "\n' < client/docker/Dockerfile | grep -F "$EXPECTED_MODULES"
+      echo "JRE modules match upstream Dockerfile"
+
+  - uses: maven/pombump
+    with:
+      properties-file: pombump-properties.yaml
+      patch-file: pombump-deps.yaml
+
+  - runs: |
+      mvn clean package -Passet-cli -Dmaven.test.skip -Dassembly.cli.format=dir
+
+      jlink --add-modules "${{vars.jre-modules}}" \
+            --strip-debug \
+            --no-man-pages \
+            --no-header-files \
+            --compress=2 \
+            --output "${{targets.contextdir}}/jre"
+
+      mkdir -p "${{targets.contextdir}}/${{vars.java-home}}"
+      mv ${{targets.contextdir}}/jre/* "${{targets.contextdir}}/${{vars.java-home}}/"
+      rmdir "${{targets.contextdir}}/jre"
+
+      mkdir -p "${{targets.contextdir}}/${{vars.package-home}}"
+      mv build/distribution/target/ontop-cli-*/* "${{targets.contextdir}}/${{vars.package-home}}/"
+
+      rm -rf "${{targets.contextdir}}/${{vars.package-home}}/ontop.bat" \
+             "${{targets.contextdir}}/${{vars.package-home}}/ontop-completion.sh" \
+             "${{targets.contextdir}}/${{vars.package-home}}/jdbc"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - ".*beta.*"
+    - ".*rc.*"
+    - ".*alpha.*"
+  github:
+    identifier: ontop/ontop
+    strip-prefix: ontop-
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - bouncycastle-fips
+        - openjdk-${{vars.java-version}}-default-jdk
+    environment:
+      JAVA_HOME: "/opt/java/openjdk"
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - name: "Generate FIPS KeyStore and TrustStore"
+      runs: |
+        set -euo pipefail
+        export CLASSPATH="/usr/share/java/bouncycastle-fips/*:./*:."
+        export JAVA_TOOL_OPTIONS="--module-path=/usr/share/java/bouncycastle-fips"
+        mkdir -p /opt/ontop/conf
+
+        # Generate BCFKS keystore with FIPS-approved algorithms
+        keytool \
+          -v -keystore /opt/ontop/conf/ontop-keystore.bcfks \
+          -storetype BCFKS \
+          -providername BCFIPS \
+          -alias ontop-server \
+          -genkeypair -sigalg SHA256withRSA -keyalg RSA -keysize 2048 \
+          -dname "CN=localhost" \
+          -storepass "OntopSSLTest123!" \
+          -keypass "OntopSSLTest123!" \
+          -validity 365
+
+        # Export certificate from keystore for verification
+        keytool \
+          -v -keystore /opt/ontop/conf/ontop-keystore.bcfks \
+          -storetype BCFKS \
+          -providername BCFIPS \
+          -alias ontop-server \
+          -exportcert -rfc \
+          -storepass "OntopSSLTest123!" \
+          -file /opt/ontop/conf/ontop-server.crt
+
+        # Create truststore and import the certificate
+        keytool \
+          -v -keystore /opt/ontop/conf/ontop-truststore.bcfks \
+          -storetype BCFKS \
+          -providername BCFIPS \
+          -alias ontop-server \
+          -importcert -noprompt \
+          -file /opt/ontop/conf/ontop-server.crt \
+          -storepass "OntopSSLTest123!"
+
+        # Verify we can list the keystore contents with BCFIPS provider
+        keytool \
+          -list -keystore /opt/ontop/conf/ontop-keystore.bcfks \
+          -storetype BCFKS \
+          -providername BCFIPS \
+          -storepass "OntopSSLTest123!" | grep -F "ontop-server"
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /opt/ontop/conf/ontop-keystore.bcfks
+          /opt/ontop/conf/ontop-truststore.bcfks
+          /opt/ontop/conf/ontop-server.crt
+    - name: "Test TLS with BCFIPS provider"
+      runs: |
+        set -euo pipefail
+        export CLASSPATH="/usr/share/java/bouncycastle-fips/*:./*:."
+        export JAVA_TOOL_OPTIONS="--module-path=/usr/share/java/bouncycastle-fips"
+        export JDK_JAVA_OPTIONS="--add-exports=java.base/sun.security.internal.spec=ALL-UNNAMED --add-exports=java.base/sun.security.provider=ALL-UNNAMED -Djavax.net.ssl.trustStoreType=BCFKS -Djavax.net.ssl.trustStore=/opt/ontop/conf/ontop-truststore.bcfks -Djavax.net.ssl.trustStorePassword=OntopSSLTest123! -Djavax.net.ssl.keyStoreType=BCFKS -Djavax.net.ssl.keyStore=/opt/ontop/conf/ontop-keystore.bcfks -Djavax.net.ssl.keyStorePassword=OntopSSLTest123!"
+        # Compile and run TLS test to verify BCJSSE provider works
+        javac TLSTest.java -d /tmp
+        java -cp /tmp TLSTest | grep -F "TLS test with BCFIPS provider PASSED!"
+    - uses: test/tw/help-check
+      with:
+        bins: ${{vars.package-home}}/ontop
+    - uses: test/tw/ver-check
+      with:
+        bins: /opt/ontop/ontop
+        version: "ontop version ${{package.version}}"
+        match-type: "exact"
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /opt/ontop/lib/ontop-cli-${{package.version}}.jar
+          /opt/ontop/lib/ontop-endpoint-${{package.version}}.jar
+    - runs: |
+        set -eu
+        export PATH="${JAVA_HOME}/bin:/opt/ontop:${PATH}"
+
+        # REF: https://github.com/ontop/ontop/blob/ontop-${{package.version}}/client/cli/src/test/resources/mapping.ttl
+        # Test mapping pretty-r2rml - formats R2RML files
+        ontop mapping pretty-r2rml -i test-mapping.ttl -o /tmp/pretty-output.ttl
+
+        # Test mapping to-obda conversion
+        ontop mapping to-obda -i test-mapping.ttl -o /tmp/output.obda
+
+        # Target RDF triple syntax
+        grep -F "DEPT" /tmp/output.obda
+        grep -F "EMP" /tmp/output.obda
+
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    description: OCI entrypoint for Ontop
+    dependencies:
+      runtime:
+        - ${{package.name}}
+        - bash-binsh # required by entrypoint script and healthcheck script
+        # wget, netcat, jattach required by docker image
+        # REF: https://github.com/ontop/ontop/blob/ontop-5.4.0/client/docker/Dockerfile#L42
+        - jattach
+        - netcat-openbsd
+        # procps is required as healthcheck script uses -p flag for ps command
+        # REF: https://github.com/ontop/ontop/blob/ontop-5.4.0/client/docker/healthcheck.sh#L20
+        - procps
+        - wget
+    pipeline:
+      - runs: |
+          # Install entrypoint and healthcheck scripts for OCI container usage
+          # REF: https://github.com/ontop/ontop/blob/ontop-5.4.0/client/docker/Dockerfile#L58
+          mkdir -p "${{targets.contextdir}}/${{vars.package-home}}"
+          install -m 755 client/docker/entrypoint.sh "${{targets.contextdir}}/${{vars.package-home}}/"
+          install -m 755 client/docker/healthcheck.sh "${{targets.contextdir}}/${{vars.package-home}}/"
+    test:
+      pipeline:
+        - name: Check script is executable
+          runs: |
+            set -eu
+            test -x /opt/ontop/entrypoint.sh
+            test -x /opt/ontop/healthcheck.sh

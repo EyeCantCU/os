@@ -1,3 +1,8 @@
+---
+name: iamguarded-chart
+description: Create IAMGuarded chart APK packages in enterprise-packages. Use when creating chart-iamguarded-*.yaml melange configs from upstream Helm charts.
+---
+
 # Build IAMGuarded Chart Packages
 
 Automates creation of IAMGuarded chart APK packages in enterprise-packages.

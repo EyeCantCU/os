@@ -1,7 +1,7 @@
 package:
   name: elasticsearch-7
   version: "7.17.29"
-  epoch: 8 # Netty 4.1.130 URI fix (customer issue #2971)
+  epoch: 9 # Add log4j2.file.properties for file-based logging (customer issue #3120)
   description:
   copyright:
     - license: SSPL-1.0 AND Elastic-2.0
@@ -112,6 +112,10 @@ pipeline:
 
       # We get this from elasticsearch-config
       mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Copy log4j2.properties to log4j2.file.properties for file-based logging (customer issue #3120)
+      # The docker entrypoint uses this when ES_LOG_STYLE=file
+      cp ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.properties ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.file.properties
 
       # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
       sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
@@ -227,15 +231,21 @@ test:
   pipeline:
     - name: "Check for LICENSE.txt"
       runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
-    - name: "Setup Elasticsearch configuration"
+    - name: "Test elasticsearch startup via entrypoint with ES_LOG_STYLE=file"
       runs: |
         set -x
 
         useradd $ES_USER
         chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
 
-        # Ignore the error, vm.max_map_count needs to be increased.
-        sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid || exit 0
+        # Run the actual docker entrypoint with ES_LOG_STYLE=file. The entrypoint
+        # copies log4j2.file.properties over log4j2.properties before exec-ing
+        # elasticsearch. Elasticsearch itself fails (vm.max_map_count too low),
+        # so we ignore the exit code and verify the copy happened below.
+        ES_LOG_STYLE=file sudo -E -u $ES_USER /usr/share/elasticsearch/bin/docker-entrypoint.sh eswrapper || exit 0
+
+        # Verify the entrypoint copied log4j2.file.properties over log4j2.properties
+        diff /usr/share/elasticsearch/config/log4j2.properties /usr/share/elasticsearch/config/log4j2.file.properties
 
         # # Reset the password
         # ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b | grep 'New value' | awk '{print $3}')

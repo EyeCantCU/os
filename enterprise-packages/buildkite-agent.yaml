@@ -1,0 +1,129 @@
+package:
+  name: buildkite-agent
+  version: "3.118.1"
+  epoch: 1 # CVE-2026-27141
+  description: Buildkite Agent is a small, reliable, cross-platform build runner for running CI/CD jobs
+  copyright:
+    - license: MIT
+
+vars:
+  # upstream base image (alpine) uses py-pip which resolves to python 3.12
+  # REF: https://github.com/buildkite/agent-base-images/blob/main/alpine/Dockerfile#L14
+  py-version: "3.12"
+
+environment:
+  contents:
+    packages:
+      - curl
+      - jq
+      - wolfictl
+
+pipeline:
+  - uses: git-checkout
+    with:
+      expected-commit: 88d0a4836c24a694f7adcc00a7cb4e43c612acb4
+      repository: https://github.com/buildkite/agent
+      tag: v${{package.version}}
+
+  - uses: go/bump
+    with:
+      deps: |-
+        golang.org/x/net@v0.51.0
+
+  - uses: go/build
+    with:
+      ldflags: -X github.com/buildkite/agent/v3/version.buildNumber=0
+      output: buildkite-agent
+      packages: .
+
+subpackages:
+  - name: ${{package.name}}-oci-compat
+    description: Compat package for upstream Docker image
+    # agent base image contains below mentioned runtime dependencies
+    # REF: https://github.com/buildkite/agent-base-images/blob/main/alpine/Dockerfile#L3-L20
+    dependencies:
+      runtime:
+        - bash
+        - buildkite-agent
+        - curl
+        - docker-cli
+        - docker-compose
+        - docker-cli-buildx
+        - git
+        - jq
+        - openssh-client
+        - perl
+        - py${{vars.py-version}}-pip
+        - rsync
+        - debianutils
+        - su-exec
+        - tini-static
+        - tzdata
+        - tini
+    pipeline:
+      - name: "Drift check - verify upstream python version matches"
+        runs: |
+          ALPINE_PY=$(wolfictl apk ls https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/x86_64/APKINDEX.tar.gz --package python3 --json | jq .Version -r)
+          echo "Alpine python3 version: $ALPINE_PY, pinned py-version: ${{vars.py-version}}"
+          echo "$ALPINE_PY" | grep -F "${{vars.py-version}}"
+      - runs: |
+          mkdir -p "${{targets.contextdir}}/usr/local/bin"
+          mkdir -p "${{targets.contextdir}}/buildkite/builds"
+          mkdir -p "${{targets.contextdir}}/buildkite/hooks"
+          mkdir -p "${{targets.contextdir}}/buildkite/plugins"
+
+          curl -Lfs -o "${{targets.contextdir}}/usr/local/bin/ssh-env-config.sh" \
+          https://raw.githubusercontent.com/buildkite/docker-ssh-env-config/master/ssh-env-config.sh
+
+          chmod +x "${{targets.contextdir}}/usr/local/bin/ssh-env-config.sh"
+
+          install -m 0644 packaging/docker/alpine/buildkite-agent.cfg "${{targets.contextdir}}/buildkite/buildkite-agent.cfg"
+
+          ln -sf ../../bin/buildkite-agent "${{targets.contextdir}}/usr/local/bin/buildkite-agent"
+
+          install -m 0755 packaging/docker/alpine/entrypoint.sh "${{targets.contextdir}}/usr/local/bin/buildkite-agent-entrypoint"
+    test:
+      pipeline:
+        - uses: test/tw/symlink-check
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/local/bin/ssh-env-config.sh
+              /usr/local/bin/buildkite-agent
+              /usr/local/bin/buildkite-agent-entrypoint
+              /buildkite/buildkite-agent.cfg
+        - name: "Verify scripts are executable"
+          runs: |
+            set -eo pipefail
+            stat -c '%a' /buildkite/buildkite-agent.cfg | grep -F "644"
+            stat -c '%a' /usr/local/bin/ssh-env-config.sh | grep -F "755"
+            stat -c '%a' /usr/local/bin/buildkite-agent-entrypoint | grep -F "755"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - ".*-alpha.*"
+    - ".*-beta.*"
+  github:
+    identifier: buildkite/agent
+    strip-prefix: v
+
+test:
+  pipeline:
+    - uses: test/tw/ldd-check
+    - uses: test/tw/help-check
+      with:
+        bins: buildkite-agent
+    - uses: test/tw/ver-check
+      with:
+        bins: buildkite-agent
+    - uses: test/daemon-check-output
+      with:
+        start: buildkite-agent start --debug --build-path=/tmp/buildkite-builds --token "abc"
+        # The agent will start and will attempt to register with Buildkite API
+        # but will fail to connect to API with an invalid token, which is expected
+        expected_output: |
+          Starting buildkite-agent
+          401 Unauthorized
+          The token you provided "abc" is not a valid organization agent registration token
+        timeout: 30

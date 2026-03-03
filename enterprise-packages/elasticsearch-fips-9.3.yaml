@@ -1,0 +1,312 @@
+# NOTE: A license is required to use this package!
+# To run Elasticsearch in FIPS mode, you will need to provide a license key. To obtain
+# a license for Elasticsearch, see their subscriptions page [here](https://www.elastic.co/subscriptions).
+# This package is equipped with the essential components for Elasticsearch to operate in
+# FIPS mode. However, it's important for users to ensure they use it in line with
+# FIPS compliance standards.
+# This includes tasks such as keystore generation, configuration, and launching
+# Elasticsearch with the correct configuration parameters.
+package:
+  name: elasticsearch-fips-9.3
+  version: "9.3.0"
+  epoch: 2
+  description:
+  copyright:
+    - license: AGPL-3.0 AND SSPL-1.0 AND Elastic-2.0
+      license-path: licenses/AGPL-3.0+SSPL-1.0+ELASTIC-LICENSE-2.0.txt
+    - license: Apache-2.0
+      license-path: licenses/APACHE-LICENSE-2.0.txt
+    - license: Elastic-2.0
+      license-path: licenses/ELASTIC-LICENSE-2.0.txt
+  resources:
+    cpu: 16
+    memory: 30Gi
+  dependencies:
+    runtime:
+      - ${{package.name}}-config
+      - bash # some helper scripts use bash
+      - bcfips-policy-140-3-j21
+      - coreutils # eck operator init container runs date with iso format
+      - curl # eck operator init container does a health check
+      - grep
+      - libstdc++ # fixes a java.lang.UnsatisfiedLinkError for /usr/share/elasticsearch/lib/platform/linux-x64/libvec.so
+      - libsystemd # fixes native usage
+      - merged-usrsbin
+      - openjdk-21-default-jdk
+      - openssl-config-fipshardened
+      - tini
+      - wolfi-baselayout
+    provides:
+      - elasticsearch-fips-${{vars.major-version}}=${{package.full-version}}
+      - elasticsearch-fips=${{package.full-version}}
+
+environment:
+  environment:
+    LANG: "en_US.UTF-8"
+    JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8"
+  contents:
+    packages:
+      - bouncycastle-fips
+      - build-base
+      - busybox
+      - libudev
+      - openjdk-21-default-jdk
+      - wolfi-base
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+).*
+    replace: $1
+    to: major-version
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/elastic/elasticsearch
+      tag: v${{package.version}}
+      expected-commit: 17b451d8979a29e31935fe1eb901310350b30e62
+
+  - uses: patch
+    with:
+      patches: |
+        update-reactor-netty.patch
+        0001-entitlements-Grant-entitlements-for-bc-fips-2.1-comp.patch
+        0002-tls-apply-TLS-FIPS-hardening.patch
+        0003-x-pack-add-bcmail-fips-entitlement.patch
+        0004-Fix-entitlements-for-cacerts.patch
+        0005-Make-xpack-settings-default-to-FIPS.patch
+        0006-CertificateTool-port-from-PKCS-12-to-BCFKS.patch
+        0007-docker-entrypoint-always-set-node-keystore-password.patch
+        update-build-tools-internal-dependencies.patch
+        log4j-CVE-2025-68161.patch
+
+  - runs: |
+      # 1.55.4 includes a bump of log4j required for CVE remediation, as it
+      # doesn't honour the top-level version configuration.
+      # https://github.com/elastic/apm-agent-java/commit/6749feeb56a087d9c2f6bd7ff1500922d11f6f91
+      sed -i 's/co.elastic.apm:elastic-apm-agent-java8:1.55.0/co.elastic.apm:elastic-apm-agent-java8:1.55.4/' modules/apm/build.gradle
+
+  - runs: |
+      # Regenerate verification metadata for updated dependencies
+      ./gradlew --write-verification-metadata sha256
+
+      # Build elasticsearch
+      ./gradlew localDistro -Dbuild.snapshot=false -Dlicense.key=public.key
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/logs
+
+      # https://github.com/elastic/elasticsearch/blob/d87b93f3174e82a86f4fad0ea8b85ac7b454f96d/plugins/examples/settings.gradle#L59-L76
+      if [ "${{build.arch}}" = "aarch64" ]; then
+        BUILD_DIR="linux-aarch64-tar"
+      else
+        BUILD_DIR="linux-tar"
+      fi
+
+      find distribution/archives
+      install -dm777 ${{targets.destdir}}/usr/share/elasticsearch/
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/bin ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/lib ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/config ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/modules ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/plugins ${{targets.destdir}}/usr/share/elasticsearch
+      mv distribution/archives/${BUILD_DIR}/build/install/elasticsearch-${{package.version}}/LICENSE.txt ${{targets.destdir}}/usr/share/elasticsearch
+
+      # Grab the docker entrypoint from the source tree
+      mv ./distribution/docker/src/docker/bin/docker-entrypoint.sh  ${{targets.destdir}}/usr/share/elasticsearch/bin
+
+      mkdir -p ${{targets.destdir}}/usr/local/bin
+      ln -sf ../../share/elasticsearch/bin/docker-entrypoint.sh ${{targets.destdir}}/usr/local/bin/
+
+      # Set permissions to read/write the config dir
+      chmod -R 775 ${{targets.destdir}}/usr/share/elasticsearch/
+      mkdir -p ${{targets.destdir}}/usr/bin
+      for i in ${{targets.destdir}}/usr/share/elasticsearch/bin/*; do
+        name=$(basename $i)
+        ln -sf ../share/elasticsearch/bin/$name ${{targets.destdir}}/usr/bin/$name
+      done
+
+      # We get this from elasticsearch-fips-9-config
+      mv ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.yml ${{targets.destdir}}/usr/share/elasticsearch/config/elasticsearch.example.yml
+
+      # Copy log4j2.properties to log4j2.file.properties for file-based logging (customer issue #3120)
+      # The docker entrypoint uses this when ES_LOG_STYLE=file
+      cp ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.properties ${{targets.destdir}}/usr/share/elasticsearch/config/log4j2.file.properties
+
+      # Manually set this to docker: https://github.com/elastic/elasticsearch/blob/58f45eabb116b245a0e607dbd900173ecfd46a0f/distribution/docker/src/docker/Dockerfile#L105
+      sed -i -e 's/ES_DISTRIBUTION_TYPE=tar/ES_DISTRIBUTION_TYPE=docker/'  ${{targets.destdir}}/usr/share/elasticsearch/bin/elasticsearch-env
+
+      # To remove problematic/unnecessary jar files
+      rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bc-fips-*.jar
+      rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/plugin-cli/bcpg-fips-*.jar
+      rm ${{targets.destdir}}/usr/share/elasticsearch/lib/tools/security-cli/bc*-jdk18on-*.jar
+
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/lib
+
+      # elasticsearch requires bcfips jars.
+      # Symlink these from runtime dependency: 'openjdk-21-bcfips'.
+      ln -sf /usr/share/java/bouncycastle-fips/*.jar ${{targets.destdir}}/usr/share/elasticsearch/lib/
+
+      # Add java.policy
+      mkdir -p ${{targets.destdir}}/usr/share/elasticsearch/config
+      mv java.policy ${{targets.destdir}}/usr/share/elasticsearch/config/java.policy
+
+subpackages:
+  - name: ${{package.name}}-config
+    description: Creates a usable elasticsearch.yml config
+    pipeline:
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/share/elasticsearch/config
+          install -m644 elasticsearch.yml ${{targets.subpkgdir}}/usr/share/elasticsearch/config/elasticsearch.yml
+    dependencies:
+      provides:
+        - elasticsearch-fips-${{vars.major-version}}-config=${{package.full-version}}
+      runtime:
+        - merged-usrsbin
+        - wolfi-baselayout
+    test:
+      pipeline:
+        - uses: test/tw/virtualpackage
+          with:
+            virtual-pkg-name: elasticsearch-fips-${{vars.major-version}}-config
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: elasticsearch
+          gid: 1000
+      users:
+        - username: elasticsearch
+          uid: 1000
+          gid: 1000
+      run-as: 0
+    contents:
+      packages:
+        - curl
+        - sudo
+        - wait-for-it
+    environment:
+      ES_JAVA_HOME: "/usr/lib/jvm/java-21-openjdk"
+      ES_PIPE: "/tmp/elasticsearch"
+      ES_USER: elasticsearch
+      KEYSTORE_PASSWORD: "MySuperSecureP@ssword123"
+      JDK_JAVA_OPTIONS: "-Djavax.net.ssl.trustStoreType=FIPS -Djava.security.policy=/usr/share/elasticsearch/config/java.policy"
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+  pipeline:
+    - name: "Check for LICENSE.txt"
+      runs: ls -alh /usr/share/elasticsearch/LICENSE.txt
+    - name: "Test ES_LOG_STYLE=file entrypoint behavior"
+      runs: |
+        set -euo pipefail
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        # Run the docker entrypoint with ES_LOG_STYLE=file to verify it copies
+        # log4j2.file.properties over log4j2.properties. We temporarily replace
+        # the elasticsearch binary with a no-op stub so the entrypoint performs
+        # its setup (including the log4j2 copy) then exits cleanly without
+        # actually starting the server and leaving behind state that would
+        # interfere with the real functional test below.
+        # Back up the original console-logging config before the entrypoint overwrites it
+        cp /usr/share/elasticsearch/config/log4j2.properties /tmp/log4j2.properties.orig
+        mv /usr/share/elasticsearch/bin/elasticsearch /usr/share/elasticsearch/bin/elasticsearch.real
+        printf '#!/bin/sh\nexit 0\n' > /usr/share/elasticsearch/bin/elasticsearch
+        chmod +x /usr/share/elasticsearch/bin/elasticsearch
+        ES_LOG_STYLE=file sudo -E -u "$ES_USER" /usr/share/elasticsearch/bin/docker-entrypoint.sh eswrapper
+        mv /usr/share/elasticsearch/bin/elasticsearch.real /usr/share/elasticsearch/bin/elasticsearch
+
+        # Verify the entrypoint copied log4j2.file.properties over log4j2.properties
+        diff /usr/share/elasticsearch/config/log4j2.properties /usr/share/elasticsearch/config/log4j2.file.properties
+
+        # Restore original log4j2.properties so subsequent tests use console logging
+        mv /tmp/log4j2.properties.orig /usr/share/elasticsearch/config/log4j2.properties
+
+        # Remove any keystore created by the entrypoint so it doesn't conflict
+        # with the keystore creation in the functional test below
+        rm -f /usr/share/elasticsearch/config/elasticsearch.keystore
+    - runs: |
+        # Using generic tests as entire tests require creation of keystore and it requires separate env
+        /usr/share/elasticsearch/bin/elasticsearch -h
+    - name: "Setup Elasticsearch configuration"
+      runs: |
+        set -x
+
+        chown -R "${ES_USER}:${ES_USER}" /usr/share/elasticsearch
+
+        # Create keystore for elasticsearch settings
+        sudo -E -u $ES_USER elasticsearch-keystore create -p <<EOF
+        ${KEYSTORE_PASSWORD}
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        # Create FIFO pipe for passing Elastic KeyStore password
+        mkfifo "${ES_PIPE}"
+
+        (
+          tail -f "${ES_PIPE}" | \
+            sudo -E -u $ES_USER elasticsearch -d -p /tmp/elasticsearch.pid
+        ) &
+        sleep 1
+
+        # Write password to pipe
+        cat > "${ES_PIPE}" << EOF
+        ${KEYSTORE_PASSWORD}
+        EOF
+
+        wait-for-it -t 120 localhost:9200
+
+        # Reset the password
+        ELASTIC_PASSWORD=$(sudo -E -u $ES_USER elasticsearch-reset-password -u elastic -b << EOF | grep 'New value' | awk '{print $3}'
+        ${KEYSTORE_PASSWORD}
+        EOF
+        )
+
+        # We sometimes see 9200 listening before initialisation is complete,
+        # leading to WARN log messages
+        sleep 20
+
+        # Dump health status
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s https://localhost:9200/_cluster/health?pretty -u "elastic:${ELASTIC_PASSWORD}"
+        # Check health status is green
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s https://localhost:9200/_cluster/health -u "elastic:${ELASTIC_PASSWORD}" | grep '"status":"green"'
+        # Can change values
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s -X PUT https://localhost:9200/test-index/_doc/1 -H 'Content-Type: application/json' -u "elastic:${ELASTIC_PASSWORD}" -d'
+            {
+              "name": "John Doe",
+              "age": 30,
+              "about": "I love to go rock climbing"
+            }' || exit 1
+        # Can get values
+        curl --cacert /usr/share/elasticsearch/config/certs/http_ca.crt -s -X GET https://localhost:9200/test-index/_doc/1 -u "elastic:${ELASTIC_PASSWORD}" | grep 'John Doe' || exit 1
+
+        kill $(cat /tmp/elasticsearch.pid)
+
+        # Filter out known warnings
+        # Attempted to upgrade to JDK 25 on 2025/11/17 but numerous issues were introduced, so since we're not using
+        # GPUs anyways, we will ignore this warning for now.
+        unexpected_warns="$(grep WARN /usr/share/elasticsearch/logs/docker-cluster.log \
+          | grep -v "GPU based vector indexing is not supported on this platform; cuvs-java requires Java Runtime version 22 or greater" \
+          | grep -v -E 'vm\.max_map_count|max file descriptors|SECURITY WARNING|EC2MetadataUtils.*Unable to retrieve|SLF4J' \
+          | wc -l)"
+        if ! [ ${unexpected_warns} = "0" ]; then
+          grep WARN /usr/share/elasticsearch/logs/docker-cluster.log
+          exit 1
+        fi
+
+        # There should be no errors
+        unexpected_errors="$(grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log \
+          | wc -l)"
+        if ! [ ${unexpected_errors} = "0" ]; then
+          grep ERROR /usr/share/elasticsearch/logs/docker-cluster.log
+          exit 1
+        fi
+    - uses: java-fips/algorithms
+      with:
+        java-version: 21
+
+update:
+  enabled: true
+  github:
+    identifier: elastic/elasticsearch
+    strip-prefix: v
+    tag-filter: v9.3.

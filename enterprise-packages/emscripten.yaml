@@ -1,7 +1,7 @@
 package:
   name: emscripten
-  version: "5.0.0"
-  epoch: 3
+  version: "5.0.2"
+  epoch: 0
   description: Emscripten compiler - C/C++ to WebAssembly
   copyright:
     - license: MIT
@@ -15,7 +15,7 @@ package:
       - nodejs
       - python3
   resources:
-    cpu: "1"
+    cpu: "2"
     memory: 6Gi
 
 ## There might be some discrepancy between the version of the package and the version of the binaries in the package
@@ -37,6 +37,7 @@ environment:
 
 vars:
   java-version: 21
+  binaryen-tools: "wasm-as wasm-ctor-eval wasm-dis wasm-emscripten-finalize wasm-fuzz-lattices wasm-fuzz-types wasm-merge wasm-metadce wasm-opt wasm-reduce wasm-shell wasm-split wasm2js"
   llvm-tools: "clang clang++ lld ld.lld wasm-ld llvm-ar llvm-as llvm-dis llvm-dwarfdump llvm-dwp llvm-nm llvm-objcopy llvm-ranlib llvm-readobj llvm-size llvm-strip llvm-symbolizer"
   entry-points: "bootstrap emcc em++ emar emranlib emcmake emconfigure emmake emrun embuilder emsize emstrip emscan-deps emscons em-config emdwp emnm empath-split emprofile emsymbolizer"
   python-entry-points: "bootstrap.py emcc.py em++.py emar.py emranlib.py emcmake.py emconfigure.py emmake.py emrun.py embuilder.py emsize.py emstrip.py emscan-deps.py emscons.py em-config.py"
@@ -46,11 +47,12 @@ pipeline:
     with:
       repository: https://github.com/emscripten-core/emscripten
       tag: ${{package.version}}
-      expected-commit: be68a767ff3937d97ffc7996a24bd3d7e7f9c849
+      expected-commit: dc80f645ee70178c11666de0c3860d9e064d50e4
 
   - runs: |
       # Fix CVE-2025-5889: add npm override for brace-expansion before install
-      sed -i 's/"dependencies":/"overrides": {"brace-expansion": "4.0.1"},"dependencies":/' package.json
+      # Fix CVE-2026-26996 (GHSA-3ppc-4f35-3m26): add npm override for minimatch before install
+      sed -i 's/"dependencies":/"overrides": {"brace-expansion": "4.0.1","minimatch": "10.2.1"},"dependencies":/' package.json
 
       # Install dependencies (npm install needed for overrides, npm ci requires exact lock match)
       npm install --omit=dev --only=production
@@ -87,17 +89,16 @@ pipeline:
       cp emscripten-version.txt "${{targets.destdir}}"/upstream/emscripten/
 
       # Copy required directories
-      cp -r tools src system third_party node_modules \
+      cp -r cmake tools src system third_party node_modules \
         "${{targets.destdir}}"/upstream/emscripten/
 
+  # Create emscripten_config matching upstream layout at /upstream/emscripten_config
   - runs: |
-      # Create config file pointing to system LLVM/Binaryen
-      tee "${{targets.destdir}}"/upstream/emscripten/.emscripten << 'EOF'
-      import os
-      LLVM_ROOT = '/upstream/bin'
+      tee "${{targets.destdir}}"/upstream/emscripten_config << 'EOF'
       BINARYEN_ROOT = '/usr'
+      LLVM_ROOT = '/upstream/bin'
       NODE_JS = '/usr/bin/node'
-      CACHE = os.path.expanduser('~/.cache/emscripten')
+      EMSCRIPTEN_ROOT = '/upstream/emscripten'
       EOF
 
   - runs: |
@@ -105,7 +106,7 @@ pipeline:
       install -d "${{targets.destdir}}"/etc/profile.d
       tee "${{targets.destdir}}"/etc/profile.d/emscripten.sh << 'EOF'
       #!/bin/sh
-      export EM_CONFIG=/upstream/emscripten/.emscripten
+      export EM_CONFIG=/upstream/emscripten_config
       case ":$PATH:" in
         *:/upstream/emscripten:*) ;;
         *) export PATH="/upstream/emscripten:$PATH" ;;
@@ -118,48 +119,59 @@ pipeline:
         ln -sf /usr/bin/${tool} "${{targets.destdir}}"/upstream/bin/${tool}
       done
 
+  - runs: |
+      # Create symlinks to binaryen wasm tools in bin directory
+      for tool in ${{vars.binaryen-tools}}; do
+        ln -sf /usr/bin/${tool} "${{targets.destdir}}"/upstream/bin/${tool}
+      done
+
 test:
   environment:
     contents:
       packages:
+        - cmake
+        - make
         - openjdk-${{vars.java-version}}-default-jvm
   pipeline:
+    - uses: test/tw/ver-check
+      with:
+        bins: /upstream/emscripten/emcc /upstream/emscripten/em++
     - name: Verify emscripten entry points match upstream
       runs: |
         set -euo pipefail
         export PATH=/upstream/emscripten:$PATH
 
-        # Core compiler tools
-        emcc --version
-        em++ --version
-
         # Standard tools with --version support
         emar --version
         emstrip --version
 
-        # Entry point scripts at root level - verify exist and executable
+        # Entry point scripts at root level - verify executable
         for tool in bootstrap emscons emscan-deps em-config emcmake emconfigure emmake emrun emranlib embuilder emsize; do
-          stat /upstream/emscripten/$tool
           test -x /upstream/emscripten/$tool || { echo "ERROR: $tool is not executable"; exit 1; }
         done
 
         # Remapped tools (wrapper in root, .py in tools/)
         for tool in emdwp emnm empath-split emprofile emsymbolizer; do
-          stat /upstream/emscripten/$tool
           test -x /upstream/emscripten/$tool || { echo "ERROR: $tool is not executable"; exit 1; }
-          stat /upstream/emscripten/tools/${tool}.py
+          test -e /upstream/emscripten/tools/${tool}.py || { echo "ERROR: tools/${tool}.py not found"; exit 1; }
         done
 
         # Tools in subdirectories
         for tool in file_packager webidl_binder; do
-          stat /upstream/emscripten/tools/$tool
           test -x /upstream/emscripten/tools/$tool || { echo "ERROR: tools/$tool is not executable"; exit 1; }
-          stat /upstream/emscripten/tools/${tool}.py
+          test -e /upstream/emscripten/tools/${tool}.py || { echo "ERROR: tools/${tool}.py not found"; exit 1; }
         done
     - name: Verify LLVM symlinks point to system binaries
       runs: |
         set -euo pipefail
         for tool in ${{vars.llvm-tools}}; do
+          test -L /upstream/bin/${tool} || { echo "ERROR: /upstream/bin/${tool} is not a symlink"; exit 1; }
+          test "$(readlink /upstream/bin/${tool})" = "/usr/bin/${tool}" || { echo "ERROR: /upstream/bin/${tool} does not point to /usr/bin/${tool}"; exit 1; }
+        done
+    - name: Verify binaryen tool symlinks point to system binaries
+      runs: |
+        set -euo pipefail
+        for tool in ${{vars.binaryen-tools}}; do
           test -L /upstream/bin/${tool} || { echo "ERROR: /upstream/bin/${tool} is not a symlink"; exit 1; }
           test "$(readlink /upstream/bin/${tool})" = "/usr/bin/${tool}" || { echo "ERROR: /upstream/bin/${tool} does not point to /usr/bin/${tool}"; exit 1; }
         done
@@ -176,20 +188,19 @@ test:
         set -euo pipefail
         export PATH=/upstream/emscripten:$PATH
         /upstream/emscripten/tools/file_packager --help
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /upstream/emscripten/node_modules/google-closure-compiler-java/compiler.jar
+          /upstream/emscripten/node_modules/google-closure-compiler-java/index.js
+          /upstream/emscripten/node_modules/.bin/google-closure-compiler
     - name: Test google-closure-compiler integration
       runs: |
         set -euo pipefail
         export PATH=/upstream/emscripten:$PATH
 
-        # Verify the module structure exists
-        stat /upstream/emscripten/node_modules/google-closure-compiler-java/compiler.jar
-        stat /upstream/emscripten/node_modules/google-closure-compiler-java/index.js
-
         # Verify index.js exports the JAR path
         grep -F "require.resolve('./compiler.jar')" /upstream/emscripten/node_modules/google-closure-compiler-java/index.js
-
-        # Verify the npm wrapper CLI exists
-        stat /upstream/emscripten/node_modules/.bin/google-closure-compiler
 
         # Test closure compiler via npm wrapper
         echo 'function hello(name) { console.log("Hello " + name); } hello("World");' > /tmp/test.js
@@ -199,6 +210,71 @@ test:
 
         # Verify output is minified (variable renamed)
         grep -vF "function hello(name)" /tmp/test.min.js
+    - name: Test emcmake and emmake cmake build
+      runs: |
+        set -euo pipefail
+        export PATH=/upstream/emscripten:$PATH
+        export EM_CONFIG=/upstream/emscripten_config
+        mkdir -p /tmp/cmake-test/build
+
+        tee /tmp/cmake-test/hello.c << 'EOF'
+        #include <stdio.h>
+        int main() {
+            printf("Hello from emcmake!\n");
+            return 0;
+        }
+        EOF
+
+        tee /tmp/cmake-test/CMakeLists.txt << 'EOF'
+        cmake_minimum_required(VERSION 3.10)
+        project(hello_wasm)
+        add_executable(hello_wasm hello.c)
+        EOF
+
+        emcmake cmake -S /tmp/cmake-test -B /tmp/cmake-test/build
+        emmake make -C /tmp/cmake-test/build
+
+        stat /tmp/cmake-test/build/hello_wasm.js
+        stat /tmp/cmake-test/build/hello_wasm.wasm
+        node /tmp/cmake-test/build/hello_wasm.js | grep -F "Hello from emcmake!"
+    - name: Test emcmake with exported functions
+      runs: |
+        set -euo pipefail
+        export PATH=/upstream/emscripten:$PATH
+        export EM_CONFIG=/upstream/emscripten_config
+        mkdir -p /tmp/cmake-exports-test/build
+
+        tee /tmp/cmake-exports-test/add.c << 'EOF'
+        #include <emscripten.h>
+        #include <stdio.h>
+
+        EMSCRIPTEN_KEEPALIVE
+        int add(int a, int b) {
+            return a + b;
+        }
+
+        int main() {
+            printf("cmake export test: 2 + 3 = %d\n", add(2, 3));
+            return 0;
+        }
+        EOF
+
+        tee /tmp/cmake-exports-test/CMakeLists.txt << 'EOF'
+        cmake_minimum_required(VERSION 3.10)
+        project(add_wasm)
+        add_executable(add_wasm add.c)
+        target_link_options(add_wasm PRIVATE
+            "-sEXPORTED_FUNCTIONS=[\"_add\",\"_main\"]"
+            "-sEXPORTED_RUNTIME_METHODS=[\"ccall\",\"cwrap\"]"
+        )
+        EOF
+
+        emcmake cmake -S /tmp/cmake-exports-test -B /tmp/cmake-exports-test/build
+        emmake make -C /tmp/cmake-exports-test/build
+
+        stat /tmp/cmake-exports-test/build/add_wasm.js
+        stat /tmp/cmake-exports-test/build/add_wasm.wasm
+        node /tmp/cmake-exports-test/build/add_wasm.js | grep -F "cmake export test: 2 + 3 = 5"
 
 update:
   enabled: true

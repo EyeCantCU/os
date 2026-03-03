@@ -1,7 +1,7 @@
 package:
   name: beats-7
   version: "7.17.29"
-  epoch: 9 # CVE-2026-0528
+  epoch: 11
   description: The Beats are lightweight data shippers, written in Go, that you install on your servers to capture all sorts of operational data (think of logs, metrics, or network packet data). The Beats send the operational data to Elasticsearch, either directly or via Logstash, so it can be visualized with Kibana.
   resources:
     cpu: "7"
@@ -20,6 +20,10 @@ environment:
   contents:
     packages:
       - mage
+      # Pin to nettle 3.x until rpm-sequoia supports nettle 4.0
+      - nettle-dev~3
+      - nettle~3
+      - rpm-dev
       - rsync
 
 pipeline:
@@ -31,6 +35,16 @@ pipeline:
       cherry-picks: |
         main/6e42552a23cec734e7977ebd3eb7fb797ddce456: [CVE-2026-0528]
         main/c7664c91a5a68c2df782bfeffe4fb7f42ff2ad1a: [CVE-2026-0528]
+
+  # Gate the Elasticsearch _license endpoint check behind the ElasticLicensed
+  # setting in libbeat/cmd/root.go. Without this patch, all beats (including OSS
+  # builds) unconditionally send GET /_license on connect, which fails against
+  # non-Elasticsearch backends (OpenSearch, wazuh-indexer) with HTTP 400. The
+  # patch makes the check conditional: x-pack builds (ElasticLicensed=true) keep
+  # it, OSS builds (ElasticLicensed=false) skip it. See elastic/beats#25865.
+  - uses: patch
+    with:
+      patches: fix-libbeat-license-check.patch
 
   - uses: go/bump
     with:
@@ -54,20 +68,18 @@ subpackages:
             ${{targets.subpkgdir}}/usr/share/auditbeat/data \
             ${{targets.subpkgdir}}/usr/share/auditbeat/logs \
 
-          cd auditbeat
+          cd x-pack/auditbeat
 
           mage build
           mage fields
 
           cp -r auditbeat.docker.yml auditbeat.reference.yml fields.yml ${{targets.subpkgdir}}/usr/share/auditbeat/
-          cp module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
+          cp ../../auditbeat/module/auditd/_meta/audit.rules.d/sample-rules-linux-64bit.conf ${{targets.subpkgdir}}/usr/share/auditbeat/audit.rules.d/sample-rules.conf.disabled
           mv ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.docker.yml ${{targets.subpkgdir}}/usr/share/auditbeat/auditbeat.yml
 
           mv auditbeat ${{targets.subpkgdir}}/usr/bin/
           ln -sf /usr/bin/auditbeat "${{targets.subpkgdir}}"/usr/share/auditbeat/auditbeat
 
-          # Match the dashboards on the counterpart image
-          cd ../x-pack/auditbeat
           mage dashboards
           cp -r build/kibana/ ${{targets.subpkgdir}}/usr/share/auditbeat/
 
@@ -101,6 +113,9 @@ subpackages:
       pipeline:
         - name: Test build
           runs: auditbeat version | grep ${{package.version}}
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
         - name: Test exporting
           working-directory: /usr/share/auditbeat
           runs: |
@@ -199,6 +214,9 @@ subpackages:
               denied
               "not found"
               "no such file or directory"
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
   - name: metricbeat-${{vars.beats_version}}
     dependencies:
@@ -254,6 +272,9 @@ subpackages:
             cd /usr/share/metricbeat
             metricbeat modules list
             metricbeat --help
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
   - name: metricbeat-${{vars.beats_version}}-oci-entrypoint
     dependencies:
@@ -273,6 +294,9 @@ subpackages:
         - name: "Check expected scripts exist"
           runs: |
             stat /usr/local/bin/docker-entrypoint
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
   - name: filebeat-${{vars.beats_version}}
     dependencies:
@@ -333,6 +357,75 @@ subpackages:
             cd /usr/share/filebeat
             filebeat modules list
             filebeat --help
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+  # OSS Filebeat build from ./filebeat (not ./x-pack/filebeat). The OSS entry
+  # point does not set ElasticLicensed=true, so with the libbeat patch above,
+  # the GET /_license callback is never registered. This makes filebeat-oss
+  # compatible with non-Elasticsearch backends (OpenSearch, wazuh-indexer).
+  # Used by wazuh-manager-compat. See also: fix-libbeat-license-check.patch.
+  - name: filebeat-oss-${{vars.beats_version}}
+    dependencies:
+      runtime:
+        - bash
+        - gawk
+        - sed
+        - coreutils
+        - grep
+        - findutils
+        - procps
+      provides:
+        - filebeat-oss=${{package.full-version}}
+    pipeline:
+      - uses: go/build
+        with:
+          packages: ./filebeat
+          output: filebeat
+      - runs: |
+          mkdir -p "${{targets.subpkgdir}}"/usr/bin
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/module
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/data
+          mkdir -p "${{targets.subpkgdir}}"/usr/share/filebeat/logs
+
+          cp LICENSE.txt "${{targets.subpkgdir}}"/usr/share/filebeat/LICENSE.txt
+          cp NOTICE.txt "${{targets.subpkgdir}}"/usr/share/filebeat/NOTICE.txt
+          cp README.md "${{targets.subpkgdir}}"/usr/share/filebeat/README.md
+
+          cp filebeat/filebeat.docker.yml "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat.yml
+          cp filebeat/filebeat.reference.yml "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat.reference.yml
+
+          cp -R ./filebeat/module/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+          cp -R ./filebeat/modules.d/ "${{targets.subpkgdir}}"/usr/share/filebeat/
+
+          ln -sf /usr/bin/filebeat "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat
+
+
+          chown -R root:root "${{targets.subpkgdir}}"/usr/share/filebeat && \
+            find "${{targets.subpkgdir}}"/usr/share/filebeat -type d -exec chmod 0755 {} \; && \
+            find "${{targets.subpkgdir}}"/usr/share/filebeat -type f -exec chmod 0644 {} \; && \
+            chmod 0755 "${{targets.subpkgdir}}"/usr/share/filebeat/filebeat && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/filebeat/modules.d && \
+            chmod 0775 "${{targets.subpkgdir}}"/usr/share/filebeat/data "${{targets.subpkgdir}}"/usr/share/filebeat/logs
+      - working-directory: filebeat
+        runs: |
+          mage fields
+          cp ./fields.yml "${{targets.subpkgdir}}"/usr/share/filebeat/
+          mage dashboards
+          mv build/kibana "${{targets.subpkgdir}}"/usr/share/filebeat/
+      - uses: strip
+    test:
+      pipeline:
+        - runs: |
+            filebeat version
+            cd /usr/share/filebeat
+            filebeat modules list
+            filebeat --help
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
   - name: filebeat-${{vars.beats_version}}-oci-entrypoint
     dependencies:
@@ -352,6 +445,9 @@ subpackages:
         - name: "Check expected scripts exist"
           runs: |
             stat /usr/local/bin/docker-entrypoint
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
   - name: heartbeat-${{vars.beats_version}}
     dependencies:
@@ -409,6 +505,9 @@ subpackages:
             heartbeat export config >/dev/null
             heartbeat test config
             heartbeat --help
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
         - name: "Test http monitor"
           uses: test/daemon-check-output
           with:
@@ -477,6 +576,9 @@ subpackages:
         - name: "Check expected scripts exist"
           runs: |
             stat /usr/local/bin/docker-entrypoint
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
 update:
   enabled: true

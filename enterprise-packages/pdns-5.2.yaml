@@ -1,7 +1,7 @@
 package:
   name: pdns-5.2
   version: "5.2.8"
-  epoch: 0
+  epoch: 2
   description: PowerDNS Authoritative Server
   copyright:
     - license: GPL-2.0-or-later
@@ -10,10 +10,8 @@ package:
   dependencies:
     provides:
       - pdns=${{package.full-version}}
-  checks:
-    disabled:
-      # Disabled until merged-varrun is done.
-      - tempdir
+    runtime:
+      - merged-varrun
 
 vars:
   python-version: 3.12 # Pinning 3.12 due to imghdr. See: https://peps.python.org/pep-0594/#imghdr
@@ -27,8 +25,8 @@ environment:
       - bison
       - boost-dev
       - build-base
-      - busybox
       - ca-certificates-bundle
+      - coreutils
       - curl-dev
       - file
       - flex
@@ -140,7 +138,9 @@ pipeline:
   - name: Create necessary directories
     runs: |
       mkdir -p ${{targets.contextdir}}/etc/powerdns/pdns.d
-      mkdir -p ${{targets.contextdir}}/var/run/pdns/
+      mkdir -p ${{targets.contextdir}}/run/pdns/
+      mkdir -p ${{targets.contextdir}}/usr/lib/tmpfiles.d
+      echo 'd /run/pdns 0755 root root' >${{targets.contextdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf
       mkdir -p ${{targets.contextdir}}/var/lib/powerdns
 
   - uses: strip
@@ -151,6 +151,8 @@ subpackages:
     dependencies:
       provides:
         - pdns-nosodium=${{package.full-version}}
+      runtime:
+        - merged-varrun
     pipeline:
       - uses: autoconf/configure
         with:
@@ -180,7 +182,9 @@ subpackages:
       - name: Create necessary directories
         runs: |
           mkdir -p ${{targets.contextdir}}/etc/powerdns/pdns.d
-          mkdir -p ${{targets.contextdir}}/var/run/pdns/
+          mkdir -p ${{targets.contextdir}}/run/pdns/
+          mkdir -p ${{targets.contextdir}}/usr/lib/tmpfiles.d
+          echo 'd /run/pdns 0755 root root' >${{targets.contextdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf
           mkdir -p ${{targets.contextdir}}/var/lib/powerdns
       - uses: strip
     test:
@@ -189,8 +193,10 @@ subpackages:
           packages:
             - bind-tools
             - curl
-            - wait-for-it
+            - iproute2
             - sqlite
+            - util-linux-misc # unshare
+            - wait-for-it
             - ${{package.name}}-backend-gsqlite3
         accounts:
           groups:
@@ -202,6 +208,7 @@ subpackages:
               uid: 953
           run-as: 0 # To bind :53 on the CI
       pipeline:
+        - uses: test/systemd-tmpfiles
         - runs: |
             # this is dumb, but libmariadb.so.3 is not available here in tests  - apko solves for it at the image level
             mkdir -p ${{targets.contextdir}}/usr/lib/
@@ -228,7 +235,16 @@ subpackages:
               sqlite3 /var/lib/powerdns/pdns.sqlite3 < /tmp/schema.sqlite3.sql
               pdnsutil create-zone example.com ns1.example.com
               pdnsutil add-record example.com ns1 A 127.0.0.1
-            start: "pdns_server"
+              touch pdns-net
+              (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+              chmod +x nsenter
+              if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+                echo 'nsenter --net=pdns-net "$@"' >>nsenter
+                ./nsenter ip link set lo up
+              else
+                echo '"$@"' >>nsenter
+              fi
+            start: "./nsenter pdns_server"
             timeout: 30
             expected_output: |
               Listening on controlsocket
@@ -236,14 +252,16 @@ subpackages:
               TCP server bound
               Done launching threads, ready to distribute questions
             post: |
-              wait-for-it -t 5 --strict localhost:53
-              dig @127.0.0.1 -p 53 example.com SOA +norecurse | tee -a test.debug | grep -qi "NOERROR"
+              ./nsenter wait-for-it -t 5 --strict localhost:53
+              ./nsenter dig @127.0.0.1 -p 53 example.com SOA +norecurse | tee -a test.debug | grep -qi "NOERROR"
 
   - name: ${{package.name}}-recursor-nosodium
     description: PowerDNS Recursive Server without libsodium
     dependencies:
       provides:
         - pdns-recursor=${{package.full-version}}
+      runtime:
+        - merged-varrun
     pipeline:
       - runs: BUILDER_VERSION=${{package.version}} BUILDER_MODULES=recursor autoreconf -vfi
       - working-directory: ./pdns/recursordist
@@ -272,12 +290,19 @@ subpackages:
                 runs: make check
               - if: ${{build.arch}} == "aarch64"
                 runs: PDNS_TEST_NO_IPV6=1 make check # aarch64 has issues with IPv6 tests on the CI, no error logs available
+          - name: Create runtime directory config
+            runs: |
+              mkdir -p "${{targets.contextdir}}/run/pdns-recursor"
+              mkdir -p "${{targets.contextdir}}/usr/lib/tmpfiles.d"
+              echo 'd /run/pdns-recursor 0755 root root' >"${{targets.contextdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf"
       - uses: strip
     test:
       environment:
         contents:
           packages:
+            - iproute2
             - pdns-recursor-compat
+            - util-linux-misc # unshare
             - wait-for-it
         accounts:
           groups:
@@ -292,6 +317,7 @@ subpackages:
           TINI_SUBREAPER: 1
           DEBUG_CONFIG: yes
       pipeline:
+        - uses: test/systemd-tmpfiles
         - uses: test/tw/ldd-check
         - runs: |
             pdns_recursor --help
@@ -307,7 +333,17 @@ subpackages:
         - name: "start daemon on localhost"
           uses: test/daemon-check-output
           with:
-            start: "/usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup --webserver"
+            setup: |
+              touch pdns-net
+              (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+              chmod +x nsenter
+              if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+                echo 'nsenter --net=pdns-net "$@"' >>nsenter
+                ./nsenter ip link set lo up
+              else
+                echo '"$@"' >>nsenter
+              fi
+            start: "./nsenter /usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup --webserver"
             timeout: 30
             expected_output: |
               YAML config found and processed
@@ -318,14 +354,16 @@ subpackages:
               Listening for HTTP requests
               Enabled multiplexer
             post: |
-              wait-for-it -t 5 --strict localhost:8082
-              wait-for-it -t 5 --strict localhost:53
+              ./nsenter wait-for-it -t 5 --strict localhost:8082
+              ./nsenter wait-for-it -t 5 --strict localhost:53
 
   - name: ${{package.name}}-recursor
     description: PowerDNS Recursive Server
     dependencies:
       provides:
         - pdns-recursor=${{package.full-version}}
+      runtime:
+        - merged-varrun
     pipeline:
       - working-directory: ./pdns/recursordist
         pipeline:
@@ -352,12 +390,19 @@ subpackages:
                 runs: make check
               - if: ${{build.arch}} == "aarch64"
                 runs: PDNS_TEST_NO_IPV6=1 make check # aarch64 has issues with IPv6 tests on the CI, no error logs available
+          - name: Create runtime directory config
+            runs: |
+              mkdir -p "${{targets.contextdir}}/run/pdns-recursor"
+              mkdir -p "${{targets.contextdir}}/usr/lib/tmpfiles.d"
+              echo 'd /run/pdns-recursor 0755 root root' >"${{targets.contextdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf"
       - uses: strip
     test:
       environment:
         contents:
           packages:
+            - iproute2
             - pdns-recursor-compat
+            - util-linux-misc # unshare
             - wait-for-it
         accounts:
           groups:
@@ -372,6 +417,7 @@ subpackages:
           TINI_SUBREAPER: 1
           DEBUG_CONFIG: yes
       pipeline:
+        - uses: test/systemd-tmpfiles
         - uses: test/tw/ldd-check
         - runs: |
             pdns_recursor --help
@@ -379,7 +425,17 @@ subpackages:
         - name: "start daemon on localhost"
           uses: test/daemon-check-output
           with:
-            start: "/usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup --webserver"
+            setup: |
+              touch pdns-net
+              (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+              chmod +x nsenter
+              if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+                echo 'nsenter --net=pdns-net "$@"' >>nsenter
+                ./nsenter ip link set lo up
+              else
+                echo '"$@"' >>nsenter
+              fi
+            start: "./nsenter /usr/bin/tini -- /usr/local/sbin/pdns_recursor-startup --webserver"
             timeout: 30
             expected_output: |
               YAML config found and processed
@@ -390,8 +446,8 @@ subpackages:
               Listening for HTTP requests
               Enabled multiplexer
             post: |
-              wait-for-it -t 5 --strict localhost:8082
-              wait-for-it -t 5 --strict localhost:53
+              ./nsenter wait-for-it -t 5 --strict localhost:8082
+              ./nsenter wait-for-it -t 5 --strict localhost:53
 
   - name: ${{package.name}}-recursor-compat
     description: Compatibility package for pdns-recursor
@@ -399,6 +455,7 @@ subpackages:
       provides:
         - pdns-recursor-compat=${{package.full-version}}
       runtime:
+        - merged-varrun
         - python-${{vars.python-version}}
         - py${{vars.python-version}}-jinja2
         - tini
@@ -412,7 +469,9 @@ subpackages:
               mkdir -p ${{targets.contextdir}}/etc/powerdns
               mkdir -p ${{targets.contextdir}}/usr/local/sbin/
               mkdir -p ${{targets.contextdir}}/etc/powerdns/recursor.d
-              mkdir -p ${{targets.contextdir}}/var/run/pdns-recursor
+              mkdir -p ${{targets.contextdir}}/run/pdns-recursor
+              mkdir -p ${{targets.contextdir}}/usr/lib/tmpfiles.d
+              echo 'd /run/pdns-recursor 0755 root root' >${{targets.contextdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf
               mkdir -p ${{targets.contextdir}}/etc/powerdns/templates.d
               install -Dm755 startup.py ${{targets.contextdir}}/usr/local/sbin/pdns_recursor-startup
               install -Dm755 recursor.conf ${{targets.contextdir}}/etc/powerdns/recursor.conf
@@ -557,8 +616,10 @@ test:
       packages:
         - bind-tools
         - curl
-        - wait-for-it
+        - iproute2
         - sqlite
+        - util-linux-misc # unshare
+        - wait-for-it
         - ${{package.name}}-backends-all
         - ${{package.name}}-tools-all
     accounts:
@@ -586,7 +647,16 @@ test:
           sqlite3 /var/lib/powerdns/pdns.sqlite3 < /tmp/schema.sqlite3.sql
           pdnsutil create-zone example.com ns1.example.com
           pdnsutil add-record example.com ns1 A 127.0.0.1
-        start: "pdns_server"
+          touch pdns-net
+          (echo '#!/bin/sh'; echo 'set -ex') >nsenter
+          chmod +x nsenter
+          if unshare --net=pdns-net ip addr add dev lo 127.0.0.1/8; then
+            echo 'nsenter --net=pdns-net "$@"' >>nsenter
+            ./nsenter ip link set lo up
+          else
+            echo '"$@"' >>nsenter
+          fi
+        start: "./nsenter pdns_server"
         timeout: 30
         expected_output: |
           Listening on controlsocket
@@ -594,6 +664,6 @@ test:
           TCP server bound
           Done launching threads, ready to distribute questions
         post: |
-          wait-for-it -t 5 --strict localhost:53
-          dig @127.0.0.1 -p 53 example.com SOA +norecurse | tee -a test.debug | grep -qi "NOERROR"
-          sdig 127.0.0.1 53 example.com SOA | tee -a test.debug | grep -qi "No Error"
+          ./nsenter wait-for-it -t 5 --strict localhost:53
+          ./nsenter dig @127.0.0.1 -p 53 example.com SOA +norecurse | tee -a test.debug | grep -qi "NOERROR"
+          ./nsenter sdig 127.0.0.1 53 example.com SOA | tee -a test.debug | grep -qi "No Error"

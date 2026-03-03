@@ -1,0 +1,72 @@
+#!/bin/sh
+
+set -ex
+
+name="cg-sccache-config"
+if [ -f "/usr/lib/${name}/gcc-wrapper" ]; then
+    echo "ERROR: Already initialized" 2>&1
+    exit 1
+fi
+if [ ! -f "/usr/local/bin/gcc-wrapper" ]; then
+    echo "ERROR: /usr/local/bin/gcc-wrapper not found" 2>&1
+    exit 1
+fi
+
+mkdir -p "/usr/lib/${name}"
+mv /usr/local/bin/gcc-wrapper "/usr/lib/${name}"
+
+cat > "/usr/local/bin/gcc-wrapper"<<EOF
+#!/bin/sh
+
+set -e
+
+sccache=""
+# Don't run sccache under sccache
+test -n "\${SCCACHE_START_SERVER}" || sccache="sccache"
+exec \${sccache} /usr/lib/${name}/\${0##*/} "\$@"
+EOF
+chmod +x "/usr/local/bin/gcc-wrapper"
+
+for cmd in /usr/local/bin/*; do
+    test -e "${cmd}" || continue
+    test -h "${cmd}" || continue
+    [ "$(readlink "${cmd}")" = "gcc-wrapper" ] || continue
+    ln -s gcc-wrapper "/usr/lib/${name}/${cmd##*/}"
+done
+
+for cmd in /usr/bin/clang* /usr/local/cuda-*/bin/nvcc; do
+    test -e "${cmd}" || continue
+    test -x "${cmd}" || continue
+    case "$(basename "${cmd}")" in
+	clang|clang++|clang-[1-9][0-9]|clang++-[1-9][0-9])
+	    ;;
+	nvcc)
+	    ;;
+	*)
+	    continue
+	    ;;
+    esac
+    # clang uses the ++ suffix to determine behavior, so
+    # if ${cmd} ends in ++, also append it to the wrapper
+    cmd_stem="${cmd%*++}"
+    maybe_xx="${cmd#"${cmd_stem}"*}"
+    real_cmd="${cmd_stem}.sccache${maybe_xx}"
+    mv "${cmd}" "${real_cmd}"
+    cat > "${cmd}"<<EOF
+#!/bin/sh
+
+set -e
+
+sccache=""
+# Don't run sccache under sccache
+test -n "\${SCCACHE_START_SERVER}" || sccache="sccache"
+# sccache crashes building .s files in clickhouse-25.9 w/ clang,
+# so let's just skip .s files.
+for arg in \$@; do
+    [ -n "\$sccache" ] || break
+    [ "\${arg%*.s}" = "\${arg}" ] || sccache=""
+done
+exec \${sccache} "${real_cmd}" "\$@"
+EOF
+    chmod +x "${cmd}"
+done

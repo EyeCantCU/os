@@ -3,7 +3,7 @@
 package:
   name: awx
   version: 24.6.1
-  epoch: 27
+  epoch: 29
   description: AWX provides a web-based user interface, REST API, and task engine built on top of Ansible
   copyright:
     - license: Apache-2.0
@@ -20,6 +20,7 @@ package:
       - libpq-13
       - libxml2
       - libxml2-dev
+      - merged-varrun
       - nginx
       - openssl-dev
       - postgresql-13
@@ -38,10 +39,6 @@ package:
       - vim
       - xmlsec-legacy
       - xmlsec-legacy-openssl
-  checks:
-    disabled:
-      # Disabled until merged-varrun is done.
-      - tempdir
 
 environment:
   contents:
@@ -107,9 +104,10 @@ pipeline:
   # the other issue is related to xmlsec which is fixed with this https://github.com/xmlsec/python-xmlsec/issues/257#issuecomment-2063433563
   # The default-settings.patch fixes missing env variable for the base virtual environment for AWX
   # The js-security-updates.patch fixes JavaScript vulnerabilities: SNYK-JS-AXIOS-9403194, SNYK-JS-FOLLOWREDIRECTS-6444610, SNYK-JS-PATHTOREGEXP-7925106
+  # replace-pkg-resources.patch fixes a build failure with setuptools >= 82.
   - uses: patch
     with:
-      patches: fix-pip.patch default-settings.patch js-security-updates.patch migrations-content-type-rbac.patch
+      patches: fix-pip.patch default-settings.patch js-security-updates.patch migrations-content-type-rbac.patch replace-pkg-resources.patch
 
   # Regenerate package-lock.json to match updated package.json dependencies and fix compatibility issues
   - runs: |
@@ -146,6 +144,8 @@ pipeline:
       # Remediate GHSA-54jq-c3m8-4m76 GHSA-69f9-5gxw-wvc2 GHSA-6jhg-hg63-jvvf GHSA-6mq8-rvhq-8wgg GHSA-fh55-r93g-j68g GHSA-g84x-mcqj-x9qq GHSA-jj3x-wxrx-4x23 GHSA-mqqc-3gqh-h2x8
       CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec aiohttp==3.13.3
       CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec --upgrade wheel
+      # Fix compatibility with setuptools>=82; matches upstream commit f3fd9945d6f6b2da9ba19f10d2fb5ebac3992e57
+      CFLAGS="-Wno-error=incompatible-pointer-types" uv pip install --no-binary=lxml --no-binary=xmlsec django-polymorphic==4.1.0
 
       # This is important otherwise application breaks with missing libpq error
       uv pip install "psycopg[binary,pool]==3.1.18"
@@ -181,15 +181,21 @@ pipeline:
           /var/lib/awx/rsyslog \
           /var/lib/awx/rsyslog/conf.d \
           /var/lib/awx/.local/share/containers/storage \
-          /var/run/awx-rsyslog \
+          /run/awx-rsyslog \
           /var/log/nginx \
           /var/lib/pgsql \
-          /var/run/supervisor \
-          /var/run/awx-receptor \
+          /run/supervisor \
+          /run/awx-receptor \
           /var/lib/nginx ; \
       do
           mkdir -p ${{targets.destdir}}$dir && chmod 0775 ${{targets.destdir}}$dir;
       done
+      mkdir -p ${{targets.destdir}}/usr/lib/tmpfiles.d
+      cat >${{targets.destdir}}/usr/lib/tmpfiles.d/${{context.name}}.conf <<EOF
+      d /run/awx-receptor 0775 root root
+      d /run/awx-rsyslog 0775 root root
+      d /run/supervisor 0775 root root
+      EOF
       # Copy specific required files if they exist
       if [ -f tools/ansible/roles/dockerfile/files/rsyslog.conf ]; then
           cp tools/ansible/roles/dockerfile/files/rsyslog.conf ${{targets.destdir}}/var/lib/awx/rsyslog/rsyslog.conf

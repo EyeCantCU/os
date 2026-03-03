@@ -37,7 +37,7 @@ MELANGE_OPTS += --env-file build-${ARCH}.env
 MELANGE_OPTS += --namespace chainguard
 MELANGE_OPTS += --generate-index false
 MELANGE_OPTS += --cache-dir ${CACHEDIR}
-MELANGE_OPTS += --pipeline-dir ./pipelines/
+MELANGE_OPTS += --pipeline-dirs ./pipelines/
 MELANGE_OPTS += --package-append busybox
 MELANGE_OPTS += ${MELANGE_EXTRA_OPTS}
 
@@ -101,9 +101,9 @@ kernel/%/APKINDEX: kernel/%/APKINDEX.tar.gz
 	touch $@
 
 kernel/%/chosen: kernel/%/APKINDEX
-	# Extract lines with 'P:linux-qemu-generic' and the following line that contains the version
+	# Extract lines with 'P:linux-qemu-melange' and the following line that contains the version
 	# This approach is compatible with both GNU and BSD sed
-	awk '/^P:linux-qemu-generic$$/ {print; getline; print}' $< > kernel/$*/available
+	awk '/^P:linux-qemu-melange$$/ {print; getline; print}' $< > kernel/$*/available
 	grep '^V:' kernel/$*/available | sed 's/V://' | \
 	  sort -V | tail -n1 > $@.tmp
 	# Sanity check that this looks like an apk version
@@ -111,7 +111,7 @@ kernel/%/chosen: kernel/%/APKINDEX
 	mv $@.tmp $@
 
 kernel/%/linux.apk: kernel/%/chosen
-	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$*/linux-qemu-generic-$(shell cat kernel/$*/chosen).apk)
+	@$(call authget,apk.cgr.dev,$@,$(QEMU_KERNEL_REPO)/$*/linux-qemu-melange-$(shell cat kernel/$*/chosen).apk)
 
 kernel/%/vmlinuz: kernel/%/linux.apk
 	tmpd=kernel/.$$$$ && mkdir -p $$tmpd $(dir $@) && \

@@ -1,7 +1,7 @@
 package:
   name: cadence
-  version: "1.3.6"
-  epoch: 1
+  version: "1.4.0"
+  epoch: 0
   description: Cadence is a distributed, scalable, durable, and highly available orchestration engine
   copyright:
     - license: Apache-2.0
@@ -11,12 +11,19 @@ package:
       - cadence-server=${{package.full-version}}
       - cadence-sql-tool=${{package.full-version}}
 
+# https://github.com/cadence-workflow/cadence/blob/master/Dockerfile
+# python-version: upstream uses alpine's py3-pip (python 3.11)
+# mysql-version: upstream uses apk mysql-client
+vars:
+  mysql-version: "9.4"
+  python-version: "3.11"
+
 pipeline:
   - uses: git-checkout
     with:
       repository: https://github.com/cadence-workflow/cadence
       tag: v${{package.version}}
-      expected-commit: a484e23286beae275868b67c4dffdd639a8646c4
+      expected-commit: 1a42a949010b4257020c0641f88cbcd385184bb8
 
   - uses: go/bump
     with:
@@ -122,12 +129,12 @@ subpackages:
       runtime:
         - bash
         - busybox # required for schema jobs that run shell scripts
-        - tzdata
         - cadence=${{package.full-version}}
         - cadence-cassandra-tool=${{package.full-version}}
         - cadence-server=${{package.full-version}}
         - cadence-sql-tool=${{package.full-version}}
         - dockerize
+        - tzdata
     pipeline:
       - runs: |
           install -Dm644 docker/config_template.yaml "${{targets.subpkgdir}}"/etc/cadence/config/config_template.yaml
@@ -146,6 +153,30 @@ subpackages:
               /etc/cadence/config/config_template.yaml
               /etc/cadence/config/dynamicconfig
               /etc/cadence/config/credentials
+
+  - name: ${{package.name}}-server-oci-entrypoint-auto-setup
+    description: Entrypoint and scripts for Cadence server with auto-setup (dev / initial setup)
+    dependencies:
+      runtime:
+        - ${{package.name}}-server-oci-entrypoint=${{package.full-version}}
+        - curl
+        - mysql-${{vars.mysql-version}}-client
+        - netcat-openbsd
+        - py${{vars.python-version}}-cqlsh-bin
+    pipeline:
+      - runs: |
+          install -Dm755 docker/start.sh "${{targets.subpkgdir}}"/start.sh
+          mkdir -p "${{targets.subpkgdir}}"/etc/cadence/domain
+          for f in docker/domain/*; do install -Dm644 "$f" "${{targets.subpkgdir}}/etc/cadence/domain/$(basename "$f")"; done
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /start.sh
+              /etc/cadence/domain/cassandra.cql
+              /etc/cadence/domain/mysql.sql
+              /etc/cadence/domain/postgres.sql
 
 update:
   enabled: true
@@ -181,9 +212,9 @@ test:
         setup: |
           BASE="https://raw.githubusercontent.com/cadence-workflow/cadence/v${{package.version}}/config"
           mkdir -p /etc/cadence/config/dynamicconfig
-          curl -fsSL -o /etc/cadence/config/development.yaml "${BASE}/development.yaml"
-          curl -fsSL -o /etc/cadence/config/development_sqlite.yaml "${BASE}/development_sqlite.yaml"
-          curl -fsSL -o /etc/cadence/config/dynamicconfig/development.yaml "${BASE}/dynamicconfig/development.yaml"
+          curl -fsSL --retry 3 -o /etc/cadence/config/development.yaml "${BASE}/development.yaml"
+          curl -fsSL --retry 3 -o /etc/cadence/config/development_sqlite.yaml "${BASE}/development_sqlite.yaml"
+          curl -fsSL --retry 3 -o /etc/cadence/config/dynamicconfig/development.yaml "${BASE}/dynamicconfig/development.yaml"
 
           cd /etc/cadence
           cadence-sql-tool --plugin sqlite --db cadence.db setup-schema \
