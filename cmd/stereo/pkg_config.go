@@ -27,7 +27,7 @@ func compilePkgConfig(ctx context.Context, sourceDir string, arch types.Architec
 		build.WithConfigFileRepositoryURL("unused"),
 		build.WithConfigFileRepositoryCommit("unused"),
 		build.WithConfig(configPath),
-		build.WithEnvFile(filepath.Join(dir, fmt.Sprintf("build-%s.env", arch.ToAPK()))),
+		build.WithEnvFiles([]string{filepath.Join(dir, fmt.Sprintf("build-%s.env", arch.ToAPK()))}),
 		build.WithSourceDir(sourceDir),
 		build.WithPipelineDir(pipelineDir),
 		// This is gross but it's hardcoded in all our Makefiles and elastic builds.
