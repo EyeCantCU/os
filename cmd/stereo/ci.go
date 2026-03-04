@@ -117,6 +117,7 @@ func unguardedCmd() *cobra.Command {
 	var domain string
 	var presubmit string
 	var local bool
+	var write bool
 	cmd := &cobra.Command{
 		Use:   "unguarded",
 		Short: "Find melange builds that depend on unguarded packages",
@@ -160,9 +161,20 @@ func unguardedCmd() *cobra.Command {
 				}
 			}
 
+			if write {
+				newEntries := slices.Collect(maps.Keys(problems))
+				updatedList := computeUpdatedIgnoreList(ignored, result.notIgnored, newEntries)
+				if err := writeIgnoreFile(ignoreFile, updatedList); err != nil {
+					return fmt.Errorf("writing ignore file: %w", err)
+				}
+				fmt.Printf("Updated %s (%d entries)\n", ignoreFile, len(updatedList))
+			}
+
 			var errs []error
-			if count := len(problems); count != 0 {
-				errs = append(errs, fmt.Errorf("%d unguarded packages are still used", count))
+			if !write {
+				if count := len(problems); count != 0 {
+					errs = append(errs, fmt.Errorf("%d unguarded packages are still used", count))
+				}
 			}
 			if count := len(failures); count != 0 {
 				errs = append(errs, fmt.Errorf("%d packages failed to lock", count))
@@ -176,6 +188,7 @@ func unguardedCmd() *cobra.Command {
 	// TODO: Consider both.
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "architecture to evaluate")
 	cmd.Flags().StringVar(&ignoreFile, "ignore", "unguarded.txt", "packages to ignore (we expect them to be unguarded)")
+	cmd.Flags().BoolVarP(&write, "write", "w", false, "update the ignore file to match results")
 
 	cmd.Flags().StringVar(&domain, "domain", "apk.cgr.dev", "domain for presubmit repos")
 	cmd.Flags().StringVar(&presubmit, "presubmit", "", "merge sha for presubmit repos")
@@ -190,6 +203,7 @@ func outdatedCmd() *cobra.Command {
 	var domain string
 	var presubmit string
 	var local bool
+	var write bool
 	cmd := &cobra.Command{
 		Use:   "outdated",
 		Short: "Find melange builds that depend on old versions of packages",
@@ -233,9 +247,25 @@ func outdatedCmd() *cobra.Command {
 				}
 			}
 
+			if write {
+				var newEntries []string
+				for key := range problems {
+					// Problem keys are "pkg-oldversion < newversion", the allowlist entry is "pkg-oldversion".
+					entry, _, _ := strings.Cut(key, " < ")
+					newEntries = append(newEntries, entry)
+				}
+				updatedList := computeUpdatedIgnoreList(ignored, result.notIgnored, newEntries)
+				if err := writeIgnoreFile(ignoreFile, updatedList); err != nil {
+					return fmt.Errorf("writing ignore file: %w", err)
+				}
+				fmt.Printf("Updated %s (%d entries)\n", ignoreFile, len(updatedList))
+			}
+
 			var errs []error
-			if count := len(problems); count != 0 {
-				errs = append(errs, fmt.Errorf("%d outdated packages in use", count))
+			if !write {
+				if count := len(problems); count != 0 {
+					errs = append(errs, fmt.Errorf("%d outdated packages in use", count))
+				}
 			}
 			if count := len(failures); count != 0 {
 				errs = append(errs, fmt.Errorf("%d packages failed to lock", count))
@@ -249,6 +279,7 @@ func outdatedCmd() *cobra.Command {
 	// TODO: Consider both.
 	cmd.Flags().StringVar(&arch, "arch", "x86_64", "architecture to evaluate")
 	cmd.Flags().StringVar(&ignoreFile, "ignore", "outdated.txt", "packages to ignore (we expect them to be outdated)")
+	cmd.Flags().BoolVarP(&write, "write", "w", false, "update the ignore file to match results")
 
 	cmd.Flags().StringVar(&domain, "domain", "apk.cgr.dev", "domain for presubmit repos")
 	cmd.Flags().StringVar(&presubmit, "presubmit", "", "merge sha for presubmit repos")
@@ -914,6 +945,28 @@ func diffPackages(a, b []string) map[string]string {
 	}
 
 	return diff
+}
+
+func writeIgnoreFile(path string, entries []string) error {
+	slices.Sort(entries)
+
+	var buf bytes.Buffer
+	for _, entry := range entries {
+		fmt.Fprintln(&buf, entry)
+	}
+
+	return os.WriteFile(path, buf.Bytes(), 0644)
+}
+
+func computeUpdatedIgnoreList(ignored map[string]struct{}, notIgnored []string, newEntries []string) []string {
+	updated := maps.Clone(ignored)
+	for _, entry := range notIgnored {
+		delete(updated, entry)
+	}
+	for _, entry := range newEntries {
+		updated[entry] = struct{}{}
+	}
+	return slices.Sorted(maps.Keys(updated))
 }
 
 func ignoredMap(ignoreFile string) (map[string]struct{}, error) {

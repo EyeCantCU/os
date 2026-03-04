@@ -1,5 +1,4 @@
 #!/bin/sh
-# https://raw.githubusercontent.com/distribution/distribution-library-image/master/entrypoint.sh
 
 set -e
 

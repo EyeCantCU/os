@@ -1,0 +1,135 @@
+package:
+  # Supported versions policy: https://kubernetes-csi.github.io/docs/node-driver-registrar.html
+  name: kubernetes-csi-node-driver-registrar-fips-2.16
+  version: "2.16.0"
+  epoch: 0 # CVE-2025-68121
+  description: Sidecar container that registers a CSI driver with the kubelet using the kubelet plugin registration mechanism.
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - kubernetes-csi-node-driver-registrar-fips=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/kubernetes-csi/node-driver-registrar
+      tag: v${{package.version}}
+      expected-commit: fb325021eed265c487fd3aa394d99806831b0eff
+
+  - uses: go/build
+    with:
+      packages: ./cmd/csi-node-driver-registrar
+      ldflags: "-X main.version=v${{package.version}}"
+      vendor: "true"
+      output: csi-node-driver-registrar
+      go-package: go-fips
+
+subpackages:
+  - name: ${{package.name}}-compat
+    description: "Compatibility package to place binaries in the location expected by upstream helm charts"
+    pipeline:
+      - runs: |
+          # The helm chart expects the binaries to be in / instead of /usr/bin
+          mkdir -p "${{targets.subpkgdir}}"
+          ln -sf /usr/bin/csi-node-driver-registrar ${{targets.subpkgdir}}/csi-node-driver-registrar
+    dependencies:
+      provides:
+        - kubernetes-csi-node-driver-registrar-fips-compat=${{package.full-version}}
+    test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
+      pipeline:
+        - runs: |
+            set -euo pipefail
+            # Verify symlink resolves to actual binary (fails test if symlink is broken or target missing)
+            stat $(readlink /csi-node-driver-registrar)
+            # Verify binary is executable through compat path (fails test if binary cannot execute)
+            /csi-node-driver-registrar --version
+
+update:
+  enabled: true
+  github:
+    identifier: kubernetes-csi/node-driver-registrar
+    strip-prefix: v
+    tag-filter: v2.16.
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-compat
+  pipeline:
+    - uses: test/go-fips-check
+    # Verify version and help output
+    - uses: test/tw/ver-check
+      with:
+        bins: csi-node-driver-registrar
+    - uses: test/tw/help-check
+      with:
+        bins: csi-node-driver-registrar
+    # Test that binary can start and initialize with test configuration
+    - name: Test binary initialization and configuration parsing
+      runs: |
+        set -euo pipefail
+
+        # Create test directories
+        mkdir -p /tmp/csi
+        mkdir -p /tmp/registration
+
+        # Test that the binary can start with valid configuration
+        # It will fail to connect to CSI driver (expected), but should parse config correctly
+        echo "Testing binary initialization with test configuration..."
+
+        # Use timeout to let the binary run briefly and capture its output
+        # We expect it to fail since there's no actual CSI driver, but it should
+        # start up and attempt to connect, validating config parsing
+        output=$(timeout 3 csi-node-driver-registrar \
+          --csi-address=/tmp/csi/csi.sock \
+          --kubelet-registration-path=/tmp/registration/csi.sock \
+          --v=2 2>&1 || true)
+
+        echo "Binary output:"
+        echo "$output"
+
+        # Verify the binary attempted to start and didn't fail due to invalid config
+        # Check for CSI-related messages using literal string matching (fails test if none found)
+        if echo "$output" | grep -F "CSI"; then
+          echo "SUCCESS: Binary initialized and attempted CSI operations"
+        elif echo "$output" | grep -F "csi"; then
+          echo "SUCCESS: Binary initialized and attempted CSI operations"
+        elif echo "$output" | grep -F "connection"; then
+          echo "SUCCESS: Binary initialized and attempted CSI operations"
+        elif echo "$output" | grep -F "driver"; then
+          echo "SUCCESS: Binary initialized and attempted CSI operations"
+        elif echo "$output" | grep -F "socket"; then
+          echo "SUCCESS: Binary initialized and attempted CSI operations"
+        elif echo "$output" | grep -F "GetPluginInfo"; then
+          echo "SUCCESS: Binary initialized and attempted CSI operations"
+        else
+          echo "FAIL: Binary output doesn't show expected CSI-related messages"
+          echo "This may indicate the binary exited too early or has configuration issues"
+          exit 1
+        fi
+
+        echo "Binary startup and configuration parsing validated"
+    # Verify binary paths work correctly
+    - name: Test all binary paths
+      runs: |-
+        set -euo pipefail
+
+        echo "Testing binary paths..."
+
+        # Verify binary at standard path (fails test if binary was not installed)
+        echo "Checking standard binary path..."
+        stat /usr/bin/csi-node-driver-registrar
+        /usr/bin/csi-node-driver-registrar --version
+
+        # Verify compat symlink path (fails test if symlink is missing or broken)
+        echo "Checking compat symlink path..."
+        stat /csi-node-driver-registrar
+        /csi-node-driver-registrar --version
+
+        echo "All binary paths verified successfully"

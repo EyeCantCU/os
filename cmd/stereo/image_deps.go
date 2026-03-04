@@ -15,6 +15,8 @@ import (
 
 	"chainguard.dev/apko/pkg/apk/apk"
 	"cloud.google.com/go/storage"
+	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/cuecontext"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/iterator"
@@ -35,6 +37,7 @@ func imageDependenciesCmd() *cobra.Command {
 		withdrawnDir string
 		useGCS       string
 		threshold    int
+		useCue       string
 	)
 
 	cmd := &cobra.Command{
@@ -53,7 +56,7 @@ respecting any archs constraints in apko configurations.`,
 			} else {
 				architectures = []string{"x86_64", "aarch64"}
 			}
-			return imageDependencies(cmd.Context(), private, architectures, useWithdrawn, withdrawnDir, useGCS, threshold)
+			return imageDependencies(cmd.Context(), private, architectures, useWithdrawn, withdrawnDir, useGCS, threshold, useCue)
 		},
 	}
 
@@ -63,11 +66,12 @@ respecting any archs constraints in apko configurations.`,
 	cmd.Flags().StringVar(&withdrawnDir, "withdrawn-dir", "withdrawn-indexes", "Directory containing withdrawn APKINDEX files")
 	cmd.Flags().StringVar(&useGCS, "use-gcs", "", "GCS bucket path to read terraform plans from (e.g., gs://bucket-name/path)")
 	cmd.Flags().IntVar(&threshold, "threshold", 800, "Number of most recent terraform plan files to consider from GCS")
+	cmd.Flags().StringVar(&useCue, "use-cue", "", "Path to images repository root for supplementing with CUE lock files")
 
 	return cmd
 }
 
-func imageDependencies(ctx context.Context, private bool, architectures []string, useWithdrawn bool, withdrawnDir string, useGCS string, threshold int) error {
+func imageDependencies(ctx context.Context, private bool, architectures []string, useWithdrawn bool, withdrawnDir string, useGCS string, threshold int, useCue string) error {
 	// Configure log output to stderr
 	log.SetOutput(os.Stderr)
 
@@ -87,24 +91,43 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 	// Get input source (either stdin or GCS)
 	var input io.Reader
 	var err error
+	hasTFData := false
 	if useGCS != "" {
 		log.Printf("Fetching terraform plans from GCS: %s (threshold: %d files)...", useGCS, threshold)
 		input, err = createGCSReader(ctx, useGCS, threshold)
 		if err != nil {
 			return fmt.Errorf("creating GCS reader: %w", err)
 		}
+		hasTFData = true
 	} else {
 		log.Printf("Parsing terraform plan from stdin...")
 		input = os.Stdin
+		// Check if stdin has data
+		stat, err := os.Stdin.Stat()
+		if err != nil {
+			return fmt.Errorf("stat of stdin failed: %w", err)
+		}
+		if stat != nil {
+			hasTFData = (stat.Mode() & os.ModeCharDevice) == 0
+		}
 	}
 
-	// Parse terraform JSON to get image configurations
-	configs, err := walk(ctx, input)
-	if err != nil {
-		return fmt.Errorf("parsing terraform plan: %w", err)
+	// Parse terraform JSON from stdin to get image configurations (if stdin has data)
+	var configs map[string]*imageInfo
+	if hasTFData {
+		configs, err = walk(ctx, input)
+		if err != nil {
+			return fmt.Errorf("parsing terraform plan: %w", err)
+		}
+		log.Printf("Found %d apko_build configurations", len(configs))
+	} else if useCue == "" {
+		// No stdin and no --use-cue, nothing to do
+		return fmt.Errorf("either stdin data or --use-cue must be provided")
+	} else {
+		// No stdin data, only using CUE
+		configs = make(map[string]*imageInfo)
+		log.Printf("No terraform plan provided, using only CUE lock files")
 	}
-
-	log.Printf("Found %d apko_build configurations", len(configs))
 
 	// Process each architecture
 	for _, arch := range architectures {
@@ -269,6 +292,25 @@ func imageDependencies(ctx context.Context, private bool, architectures []string
 
 		if err := g.Wait(); err != nil {
 			return fmt.Errorf("error processing image dependencies (architecture: %s): %w", arch, err)
+		}
+
+		// Process CUE lock files if --use-cue is specified
+		if useCue != "" {
+			log.Printf("Processing CUE lock files from %s for %s images (architecture: %s)...", useCue, imageSet, arch)
+			cuePackages, err := collectCuePackages(useCue, private, arch)
+			if err != nil {
+				return fmt.Errorf("failed to collect CUE packages for %s: %w", arch, err)
+			}
+
+			// Merge CUE packages into allPackages set
+			totalAdded := 0
+			for pkg := range cuePackages {
+				if !allPackages[pkg] {
+					allPackages[pkg] = true
+					totalAdded++
+				}
+			}
+			log.Printf("Added %d unique packages from CUE lock files for architecture %s", totalAdded, arch)
 		}
 
 		// Convert set to sorted slice
@@ -492,4 +534,191 @@ func (r *gcsMultiReader) Read(p []byte) (n int, err error) {
 
 		r.currentReader = reader
 	}
+}
+
+// extractPackagesFromComponent extracts packages from pkgs and dev lists in a CUE value
+// This handles both simple arrays and arch-divergent maps (amd64/arm64/index structure)
+func extractPackagesFromComponent(component cue.Value, packagesSet map[string]bool, targetArch string) {
+	// Extract packages from pkgs field
+	pkgs := component.LookupPath(cue.ParsePath("pkgs"))
+	if pkgs.Err() == nil {
+		extractPackagesFromField(pkgs, packagesSet, targetArch)
+	}
+
+	// Extract packages from dev field
+	dev := component.LookupPath(cue.ParsePath("dev"))
+	if dev.Err() == nil {
+		extractPackagesFromField(dev, packagesSet, targetArch)
+	}
+}
+
+// extractPackagesFromField extracts packages from a CUE field that could be either:
+// 1. A simple array: ["pkg1=1.0-r0", "pkg2=2.0-r1"] - applies to all archs
+// 2. A map of arrays (arch-divergent): {amd64: [...], arm64: [...], index: [...]}
+//
+// For arch-specific extraction:
+// - Simple arrays are added to the target architecture
+// - Arch-divergent maps: amd64->x86_64, arm64->aarch64, index->target arch
+func extractPackagesFromField(field cue.Value, packagesSet map[string]bool, targetArch string) {
+	// Try to iterate as a list first (Pattern 1 & 2: simple array)
+	listIter, err := field.List()
+	if err == nil {
+		// It's a simple array of packages - applies to all architectures
+		for listIter.Next() {
+			pkg, err := listIter.Value().String()
+			if err == nil {
+				packagesSet[pkg] = true
+			}
+		}
+		return
+	}
+
+	// Try to iterate as a struct with fields (Pattern 3: arch-divergent map)
+	fieldsIter, err := field.Fields()
+	if err == nil {
+		// It's a map like {amd64: [...], arm64: [...], index: [...]}
+		for fieldsIter.Next() {
+			archName := fieldsIter.Selector().Unquoted()
+			archList := fieldsIter.Value()
+
+			// Map CUE arch names to our arch names and check if it matches target
+			shouldInclude := false
+			switch archName {
+			case "index":
+				// index packages apply to all architectures
+				shouldInclude = true
+			case "amd64":
+				shouldInclude = (targetArch == "x86_64")
+			case "arm64":
+				shouldInclude = (targetArch == "aarch64")
+			case "x86_64", "aarch64":
+				// Direct arch names
+				shouldInclude = (archName == targetArch)
+			default:
+				log.Printf("  Warning: unknown architecture field '%s', skipping", archName)
+			}
+
+			if shouldInclude {
+				// Extract packages from this architecture's list
+				archListIter, err := archList.List()
+				if err == nil {
+					for archListIter.Next() {
+						pkg, err := archListIter.Value().String()
+						if err == nil {
+							packagesSet[pkg] = true
+						}
+					}
+				} else {
+					log.Printf("  Warning: field '%s' is not a list, skipping", archName)
+				}
+			}
+		}
+	}
+}
+
+// parseCueLockFile parses a single package_lock.cue file and extracts packages for a specific architecture
+func parseCueLockFile(filePath string, targetArch string, packagesSet map[string]bool) error {
+	ctx := cuecontext.New()
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("reading CUE file %s: %w", filePath, err)
+	}
+
+	val := ctx.CompileBytes(content)
+	if val.Err() != nil {
+		return fmt.Errorf("parsing CUE file %s: %w", filePath, val.Err())
+	}
+
+	// Try group-based structure: pkgLocks.groups.<group>.components.<component>
+	groups := val.LookupPath(cue.ParsePath("pkgLocks.groups"))
+	if groups.Err() == nil {
+		// Iterate over all groups
+		groupsIter, err := groups.Fields()
+		if err == nil {
+			for groupsIter.Next() {
+				groupName := groupsIter.Selector().Unquoted()
+				group := groupsIter.Value()
+
+				components := group.LookupPath(cue.ParsePath("components"))
+				if components.Err() != nil {
+					continue
+				}
+
+				componentsIter, err := components.Fields()
+				if err != nil {
+					continue
+				}
+
+				for componentsIter.Next() {
+					componentName := componentsIter.Selector().Unquoted()
+					component := componentsIter.Value()
+
+					// Extract packages from pkgs and dev lists
+					extractPackagesFromComponent(component, packagesSet, targetArch)
+					log.Printf("  Processed component %s:%s", groupName, componentName)
+				}
+			}
+		}
+	}
+
+	// Try image-based structure: pkgLocks.images.<image-name>
+	images := val.LookupPath(cue.ParsePath("pkgLocks.images"))
+	if images.Err() == nil {
+		// Iterate over all images
+		imagesIter, err := images.Fields()
+		if err == nil {
+			for imagesIter.Next() {
+				imageName := imagesIter.Selector().Unquoted()
+				image := imagesIter.Value()
+
+				// Extract packages from pkgs and dev lists
+				extractPackagesFromComponent(image, packagesSet, targetArch)
+				log.Printf("  Processed image %s", imageName)
+			}
+		}
+	}
+
+	return nil
+}
+
+// collectCuePackages finds and parses all package_lock.cue files in the images directory for a specific architecture
+func collectCuePackages(imagesRoot string, private bool, targetArch string) (map[string]bool, error) {
+	var searchPath string
+	if private {
+		searchPath = filepath.Join(imagesRoot, "images")
+	} else {
+		searchPath = filepath.Join(imagesRoot, "public", "images")
+	}
+
+	log.Printf("Searching for package_lock.cue files in %s...", searchPath)
+
+	if _, err := os.Stat(searchPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("images directory does not exist: %s", searchPath)
+	}
+
+	// Find all package_lock.cue files
+	pattern := filepath.Join(searchPath, "*/package_lock.cue")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("searching for package_lock.cue files: %w", err)
+	}
+
+	if len(matches) == 0 {
+		log.Printf("Warning: no package_lock.cue files found in %s", searchPath)
+		return make(map[string]bool), nil
+	}
+
+	log.Printf("Found %d package_lock.cue files", len(matches))
+
+	// Collect all unique packages across all files
+	allPackages := make(map[string]bool)
+	for _, cuePath := range matches {
+		log.Printf("  Parsing %s...", cuePath)
+		if err := parseCueLockFile(cuePath, targetArch, allPackages); err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", cuePath, err)
+		}
+	}
+
+	return allPackages, nil
 }

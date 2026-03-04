@@ -9,9 +9,11 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
+	"chainguard.dev/apko/pkg/build/types"
 	"github.com/spf13/cobra"
 )
 
@@ -140,6 +142,18 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 		opts = append(opts, fmt.Sprintf("--keyring-append ../%s/%s", sub, dirToKeys[sub]))
 	}
 
+	sourceDir := filepath.Join(dir, pkg)
+	cfg, err := compilePkgConfig(ctx, sourceDir, types.ParseArchitecture(runtime.GOARCH))
+	if err != nil {
+		return err
+	}
+
+	sccacheOpts, err := sccacheMelangeOpts(cfg, subcmd)
+	if err != nil {
+		return err
+	}
+	opts = append(opts, sccacheOpts...)
+
 	extra = strings.Join(opts, " ")
 
 	cmd.Env = append(cmd.Env, fmt.Sprintf("MELANGE_EXTRA_OPTS=%s", extra))
@@ -151,7 +165,7 @@ func runMake(ctx context.Context, subcmd, pkg string) error {
 	}
 	defer cleanup()
 
-	if err := ensureTokens(ctx, dir, pkg, subcmd); err != nil {
+	if err := ensureTokens(ctx, cfg, sourceDir, subcmd); err != nil {
 		return err
 	}
 
