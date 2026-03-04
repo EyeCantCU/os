@@ -14,13 +14,16 @@ package:
       - ruby${{vars.rubyMM}}-http_parser.rb
       - ruby${{vars.rubyMM}}-io-endpoint
       - ruby${{vars.rubyMM}}-io-stream
+      - ruby${{vars.rubyMM}}-logger
       - ruby${{vars.rubyMM}}-msgpack
       - ruby${{vars.rubyMM}}-net-http
+      - ruby${{vars.rubyMM}}-ostruct
       - ruby${{vars.rubyMM}}-serverengine
       - ruby${{vars.rubyMM}}-sigdump
       - ruby${{vars.rubyMM}}-strptime
       - ruby${{vars.rubyMM}}-tzinfo
       - ruby${{vars.rubyMM}}-tzinfo-data
+      - ruby${{vars.rubyMM}}-uri
       - ruby${{vars.rubyMM}}-webrick
       - ruby${{vars.rubyMM}}-yajl-ruby
       - ruby${{vars.rubyMM}}-zstd-ruby
@@ -92,6 +95,14 @@ subpackages:
           install -Dm755 ./entrypoint.sh "${{targets.subpkgdir}}/usr/bin/entrypoint.sh"
           install -Dm755 ./healthy.sh "${{targets.subpkgdir}}/usr/bin/healthy.sh"
           install -Dm644 ./fluent.conf "${{targets.subpkgdir}}/fluentd/etc/fluent.conf"
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/bin/entrypoint.sh
+              /usr/bin/healthy.sh
+              /fluentd/etc/fluent.conf
 
   - name: ${{package.name}}-iamguarded-compat
     description: Compatibility package for iamguarded variant of fluentd
@@ -177,80 +188,60 @@ test:
           mkdir -p /etc/fluent/
           touch /etc/fluent/fluent.conf
         expected_output: fluentd worker is now running
-    # Keep command line tests
-    - name: Command line tests
-      runs: |
-        fluent-binlog-reader --version
-        fluent-ca-generate --version
-        fluent-ca-generate --help
-        fluent-cat --version
-        fluent-cat --help
-        fluent-ctl --version
-        fluent-ctl --help
-        fluent-debug --help
-        fluent-gem --version
-        fluent-gem --help
-        fluent-plugin-config-format --version
-        fluent-plugin-config-format --help
-        fluent-plugin-generate --version
-        fluent-plugin-generate --help
-        fluentd --version
-        fluentd --help
+    - uses: test/tw/ver-check
+      with:
+        bins: |
+          fluent-binlog-reader
+          fluent-ca-generate
+          fluent-cat
+          fluent-ctl
+          fluent-gem
+          fluent-plugin-config-format
+          fluent-plugin-generate
+          fluentd
+    - uses: test/tw/help-check
+      with:
+        bins: |
+          fluent-ca-generate
+          fluent-cat
+          fluent-ctl
+          fluent-debug
+          fluent-gem
+          fluent-plugin-config-format
+          fluent-plugin-generate
+          fluentd
     - name: Basic IO test
-      runs: |
-        # Create minimal config
-        cat > test.conf <<EOF
-        <system>
-          log_level debug
-        </system>
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          tee /tmp/test.conf <<'EOF'
+          <system>
+            log_level debug
+          </system>
 
-        <source>
-          @type forward
-          port 24224
-        </source>
+          <source>
+            @type forward
+            port 24224
+          </source>
 
-        <match test.**>
-          @type file
-          path /tmp/fluentd_test
-          append true
-          <buffer>
-            flush_mode immediate
-          </buffer>
-        </match>
-        EOF
-
-        # Start fluentd with logs
-        fluentd -c test.conf -d /tmp/fluentd.pid --log /tmp/fluentd.log
-
-        # Wait for start
-        sleep 5
-
-        # Send test message with specific content
-        echo '{"message":"test_message_content"}' | fluent-cat test.tag
-
-        # Wait for processing
-        sleep 5
-
-        # Check output files and content
-        if ls /tmp/fluentd_test.*.log > /dev/null 2>&1; then
-          OUTPUT=$(cat /tmp/fluentd_test.*.log)
-          echo "Output file contents: $OUTPUT"
-
-          if echo "$OUTPUT" | grep -q "test_message_content"; then
-            echo "Test passed: Message content verified"
-          else
-            echo "Test failed: Expected message content not found"
-            exit 1
-          fi
-        else
-          echo "Test failed: No output file"
-          echo "Fluentd logs:"
-          cat /tmp/fluentd.log
-          exit 1
-        fi
-
-        # Cleanup
-        kill $(cat /tmp/fluentd.pid)
+          <match test.**>
+            @type file
+            path /tmp/fluentd_test
+            append true
+            <buffer>
+              flush_mode immediate
+            </buffer>
+          </match>
+          EOF
+        start: fluentd -c /tmp/test.conf
+        expected_output: fluentd worker is now running
+        timeout: 30
+        post: |
+          set -euo pipefail
+          echo '{"message":"test_message_content"}' | fluent-cat test.tag
+          # Wait for flush
+          sleep 3
+          cat /tmp/fluentd_test.*.log | grep -F "test_message_content"
 
 var-transforms:
   - from: ${{package.name}}
