@@ -1,16 +1,20 @@
 package:
-  name: spark-kubernetes-operator
+  name: spark-kubernetes-operator-fips
   version: "0.7.0"
-  epoch: 2
-  description: Apache Spark Kubernetes Operator
+  epoch: 0
+  description: Apache Spark Kubernetes Operator (FIPS)
   copyright:
     - license: Apache-2.0
   dependencies:
     runtime:
       - openjdk-${{vars.java-version}}-default-jvm
+      - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
+      - openssl-config-fipshardened
 
 vars:
-  java-version: "25"
+  # the BCFIPS jars aren't quite validated on 25 yet but this is likely a temporary
+  # 25 support is expected to be added in the near future, so we can set this to 21 for now.
+  java-version: "21"
   operator-home: /opt/spark-operator
   operator-work-dir: /opt/spark-operator/operator
   operator-jar: spark-kubernetes-operator.jar
@@ -36,7 +40,9 @@ pipeline:
 
   - uses: patch
     with:
-      patches: upgrade-dependencies.patch
+      patches: |
+        upgrade-dependencies.patch
+        exclude-bouncycastle.patch
 
   - name: Build shadow jar
     runs: |
@@ -47,7 +53,7 @@ pipeline:
       mkdir -p "${{targets.contextdir}}/${{vars.operator-work-dir}}"
 
       install -Dm644 \
-        spark-operator/build/libs/${{package.name}}-${{package.version}}-all.jar \
+        spark-operator/build/libs/spark-kubernetes-operator-${{package.version}}-all.jar \
         "${{targets.contextdir}}/${{vars.operator-work-dir}}/${{vars.operator-jar}}"
 
 subpackages:
@@ -66,7 +72,19 @@ subpackages:
           ln -sf ../../../usr/bin/docker-entrypoint.sh \
             "${{targets.contextdir}}/${{vars.operator-work-dir}}/docker-entrypoint.sh"
     test:
+      environment:
+        contents:
+          packages:
+            - openjdk-${{vars.java-version}}-default-jvm
+            - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
+        environment:
+          CLASSPATH: "/usr/share/java/bouncycastle-fips/*:./*:."
       pipeline:
+        - runs: |
+            apk fix openjdk-${{vars.java-version}}
+        - uses: java-fips/algorithms
+          with:
+            java-version: ${{vars.java-version}}
         - uses: test/tw/symlink-check
         - runs: |
             stat /usr/bin/docker-entrypoint.sh
@@ -86,8 +104,10 @@ test:
       packages:
         - ${{package.name}}-oci-entrypoint
         - curl
+        - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
         - wait-for-it
     environment:
+      CLASSPATH: "/usr/share/java/bouncycastle-fips/*:./*:."
       SPARK_OPERATOR_HOME: ${{vars.operator-home}}
       SPARK_OPERATOR_WORK_DIR: ${{vars.operator-work-dir}}
       SPARK_OPERATOR_JAR: ${{vars.operator-jar}}
@@ -96,6 +116,11 @@ test:
       PROBE_PORT: "19091"
       METRICS_PORT: "19090"
   pipeline:
+    - runs: |
+        apk fix openjdk-${{vars.java-version}}
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
     - runs: |
         set -euo pipefail
         stat "${{vars.operator-work-dir}}/${{vars.operator-jar}}"
@@ -125,7 +150,7 @@ test:
           kubectl apply --server-side=true -f https://raw.githubusercontent.com/apache/spark-kubernetes-operator/refs/tags/${{package.version}}/build-tools/helm/spark-kubernetes-operator/crds/sparkapplications.spark.apache.org-v1.yaml
           kubectl apply --server-side=true -f https://raw.githubusercontent.com/apache/spark-kubernetes-operator/refs/tags/${{package.version}}/build-tools/helm/spark-kubernetes-operator/crds/sparkclusters.spark.apache.org-v1.yaml
           kubectl wait --for=condition=Established crd/sparkapplications.spark.apache.org crd/sparkclusters.spark.apache.org --timeout=30s
-        start: sh -c 'cd ${{vars.operator-work-dir}} && ./docker-entrypoint.sh operator'
+        start: sh -c 'cd ${{vars.operator-work-dir}} && echo "Starting Operator..." && exec java -cp "./$SPARK_OPERATOR_JAR:/usr/share/java/bouncycastle-fips/*" $LOG_CONFIG $OPERATOR_JAVA_OPTS org.apache.spark.k8s.operator.SparkOperator'
         timeout: 120
         expected_output: |
           Starting Operator
