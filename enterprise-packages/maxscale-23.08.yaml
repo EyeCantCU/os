@@ -15,6 +15,10 @@ package:
 
 environment:
   environment:
+    # MaxScale builds with -Werror (CMakeLists.txt), so new GCC warnings become
+    # build failures. GCC 12+ introduces -Wstringop-overread which triggers on
+    # embedded SQLite code (query_classifier/qc_sqlite/). Upstream CI uses Rocky 8
+    # with GCC 8.5 and never hits this. We pin GCC 11 as the newest safe version.
     CC: gcc-11
     CXX: g++-11
   contents:
@@ -141,14 +145,18 @@ subpackages:
   # with version-matched scripts. We fetch from the matching branch to stay in sync
   # with what upstream ships in their Docker image on Docker Hub.
   - name: ${{package.name}}-oci-entrypoint
-    description: OCI entrypoint for MaxScale 23.08
+    description: OCI entrypoint for MaxScale
     dependencies:
       runtime:
         - bash
+        - flock
         - monit
+        - procps
         - rsyslog
         - tini
         - ${{package.name}}
+      provides:
+        - maxscale-oci-entrypoint=${{package.full-version}}
     pipeline:
       - uses: git-checkout
         with:
@@ -172,21 +180,22 @@ subpackages:
           install -Dm755 maxscale/scripts/maxscale-stop "${{targets.subpkgdir}}"/usr/bin/maxscale-stop
           install -Dm755 maxscale/scripts/maxscale-restart "${{targets.subpkgdir}}"/usr/bin/maxscale-restart
           install -Dm644 maxscale/config/maxscale.cnf "${{targets.subpkgdir}}"/etc/maxscale.cnf
+          install -Dm644 maxscale/config/monit.d/maxscale.conf "${{targets.subpkgdir}}"/etc/monit.d/maxscale.conf
           ln -sf /usr/bin/docker-entrypoint.sh "${{targets.subpkgdir}}"/docker-entrypoint.sh
     test:
       pipeline:
-        - name: Verify entrypoint scripts
-          runs: |
-            set -euo pipefail
-            stat /usr/bin/docker-entrypoint.sh
-            stat /usr/bin/maxscale-start
-            stat /usr/bin/maxscale-stop
-            stat /usr/bin/maxscale-restart
-            test -x /usr/bin/docker-entrypoint.sh
-            test -x /usr/bin/maxscale-start
-            test -x /usr/bin/maxscale-stop
-            test -x /usr/bin/maxscale-restart
-            test -L /docker-entrypoint.sh
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/bin/docker-entrypoint.sh
+              /usr/bin/maxscale-start
+              /usr/bin/maxscale-stop
+              /usr/bin/maxscale-restart
+              /etc/maxscale.cnf
+              /etc/monit.d/maxscale.conf
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
 
 update:
   enabled: true
@@ -231,6 +240,14 @@ test:
       runs: |
         set -euo pipefail
         scanelf -n /usr/bin/maxscale | grep -F "libmaxscale-common.so"
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /usr/bin/maxscale-start
+          /usr/bin/maxscale-stop
+          /usr/bin/maxscale-restart
+          /etc/maxscale.cnf
+          /etc/monit.d/maxscale.conf
     - uses: test/daemon-check-output
       with:
         setup: |
