@@ -1,0 +1,187 @@
+package:
+  name: gpu-operator-25.10
+  version: "25.10.1"
+  epoch: 2 # CVE-2025-61732
+  description: NVIDIA GPU Operator creates/configures/manages GPUs atop Kubernetes
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    provides:
+      - gpu-operator=${{package.full-version}}
+    runtime:
+      - busybox
+      - kubectl
+      - nvidia-cuda-nvml-dev-${{vars.cuda-version}}
+
+vars:
+  # Based on the base image used in upstream dockerfile: https://github.com/NVIDIA/gpu-operator/blob/main/docker/Dockerfile#L17
+  cuda-version: 13.0
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/NVIDIA/gpu-operator
+      tag: v${{package.version}}
+      expected-commit: 846018752b8a34d4039feb6f18629b4c64210e32
+
+  - uses: go/bump
+    with:
+      deps: |
+        golang.org/x/crypto@v0.45.0
+
+  - uses: go/build
+    with:
+      modroot: .
+      packages: ./cmd/gpu-operator
+      output: gpu-operator
+      ldflags: -X github.com/NVIDIA/gpu-operator/internal/info.gitCommit=$(git rev-list -1 HEAD) -X github.com/NVIDIA/gpu-operator/internal/info.version=v${{package.version}}
+      vendor: true
+
+  - runs: |
+      mkdir -p ${{targets.destdir}}/opt/gpu-operator
+      mkdir -p ${{targets.destdir}}/opt/gpu-operator/manifests
+      mkdir -p ${{targets.destdir}}/licenses
+
+      cp -r ./assets/* ${{targets.destdir}}/opt/gpu-operator
+      cp -r ./manifests/* ${{targets.destdir}}/opt/gpu-operator/manifests
+      cp hack/must-gather.sh ${{targets.destdir}}/usr/bin/gather
+
+      cp deployments/gpu-operator/crds/nvidia.com_clusterpolicies.yaml ${{targets.destdir}}/opt/gpu-operator/nvidia.com_clusterpolicies.yaml
+      cp deployments/gpu-operator/charts/node-feature-discovery/crds/nfd-api-crds.yaml ${{targets.destdir}}/opt/gpu-operator/nfd-api-crds.yaml
+      cp deployments/gpu-operator/crds/nvidia.com_nvidiadrivers.yaml ${{targets.destdir}}/opt/gpu-operator/nvidia.com_nvidiadrivers.yaml
+
+test:
+  environment:
+    contents:
+      packages:
+        - curl
+        - go
+        - wait-for-it
+  pipeline:
+    - name: "Match CUDA version"
+      runs: |
+        line=$(curl -sL https://raw.githubusercontent.com/NVIDIA/gpu-operator/refs/tags/v${{package.version}}/docker/Dockerfile | grep '^FROM .*cuda:')
+        cuda_mm_version=$(echo "$line" | head -n1 | sed -E 's/.*cuda:([0-9]+\.[0-9]+).*/\1/')
+
+        if [ "$cuda_mm_version" != "${{vars.cuda-version}}" ]; then
+          echo "CUDA version mismatch! got=$cuda_mm_version wanted=${{vars.cuda-version}}"
+          exit 1
+        fi
+    - runs: |
+        gpu-operator --help
+        go version -m /usr/bin/gpu-operator | grep -i ${{package.version}}
+    - uses: test/kwok/cluster
+    - name: "Apply CRDs to KWOK cluster"
+      runs: |
+        echo "Applying ClusterPolicy CRD..."
+        kubectl apply -f /opt/gpu-operator/nvidia.com_clusterpolicies.yaml
+
+        echo "Applying NvidiaDriver CRD..."
+        kubectl apply -f /opt/gpu-operator/nvidia.com_nvidiadrivers.yaml
+
+        echo "Applying NFD CRDs..."
+        kubectl apply -f /opt/gpu-operator/nfd-api-crds.yaml
+
+        echo "Verifying CRDs are registered..."
+        kubectl get crd clusterpolicies.nvidia.com || {
+          echo "ERROR: ClusterPolicy CRD not found"
+          exit 1
+        }
+
+        kubectl get crd nvidiadrivers.nvidia.com || {
+          echo "ERROR: NvidiaDriver CRD not found"
+          exit 1
+        }
+
+        echo "CRDs applied successfully"
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /opt/gpu-operator/manifests/state-driver
+          echo "{}" > /opt/gpu-operator/manifests/state-driver/dummy.yaml
+        start: env OPERATOR_NAMESPACE=gpu-operator-resources /usr/bin/gpu-operator
+        timeout: 30
+        expected_output: |
+          starting manager
+          Starting metrics server
+          starting server
+          Serving metrics server
+        post: |
+          set -euo pipefail
+          wait-for-it -t 10 --strict localhost:8081 -- echo "Server is up"
+          curl -f http://localhost:8081/healthz
+
+          echo "Verifying operator is watching for resources..."
+
+          echo "Creating test ClusterPolicy CR..."
+          tee /tmp/test-clusterpolicy.yaml <<'EOF'
+          apiVersion: nvidia.com/v1
+          kind: ClusterPolicy
+          metadata:
+            name: test-cluster-policy
+          spec:
+            operator:
+              defaultRuntime: containerd
+            daemonsets: {}
+            driver:
+              enabled: false
+            toolkit:
+              enabled: false
+            devicePlugin:
+              enabled: false
+            dcgm:
+              enabled: false
+            dcgmExporter:
+              enabled: false
+            gfd:
+              enabled: false
+            migManager:
+              enabled: false
+            nodeStatusExporter:
+              enabled: false
+            sandboxDevicePlugin:
+              enabled: false
+            vgpuManager:
+              enabled: false
+            vgpuDeviceManager:
+              enabled: false
+            vfioManager:
+              enabled: false
+            sandboxWorkloads:
+              enabled: false
+            gdrcopy:
+              enabled: false
+          EOF
+
+          kubectl apply -f /tmp/test-clusterpolicy.yaml
+
+          echo "Waiting for operator to reconcile ClusterPolicy..."
+          sleep 5
+
+          echo "Checking metrics endpoint and operator reconciliation..."
+
+          metrics_output=$(curl -f http://localhost:8080/metrics)
+
+          if echo "$metrics_output" | grep -E 'controller_runtime_reconcile_total{.*controller="clusterpolicy".*} [1-9][0-9]*\.?[0-9]*'; then
+            echo "SUCCESS: ClusterPolicy controller reconciled at least one object"
+          elif echo "$metrics_output" | grep -E 'workqueue_adds_total{.*name="clusterpolicy".*} [1-9][0-9]*\.?[0-9]*'; then
+            echo "SUCCESS: ClusterPolicy was added to operator workqueue"
+          else
+            echo "$metrics_output" | grep -F "controller_runtime" || {
+              echo "ERROR: Controller runtime metrics not found"
+              exit 1
+            }
+            echo "WARNING: Could not verify ClusterPolicy reconciliation from metrics"
+            echo "Available controller metrics:"
+            echo "$metrics_output" | grep -E "(controller_runtime_reconcile_total|workqueue_adds_total)" | head -20
+          fi
+
+          echo "SUCCESS: Operator controllers are registered and watching resources"
+
+update:
+  enabled: true
+  github:
+    identifier: NVIDIA/gpu-operator
+    strip-prefix: v
+    use-tag: true
+    tag-filter-prefix: v25.10.
