@@ -1,0 +1,154 @@
+package:
+  name: spark-kubernetes-operator-fips
+  version: "0.7.0"
+  epoch: 0
+  description: Apache Spark Kubernetes Operator (FIPS)
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      - openjdk-${{vars.java-version}}-default-jvm
+      - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
+      - openssl-config-fipshardened
+
+vars:
+  java-version: "25"
+  operator-home: /opt/spark-operator
+  operator-work-dir: /opt/spark-operator/operator
+  operator-jar: spark-kubernetes-operator.jar
+
+environment:
+  contents:
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - gradle
+      - openjdk-${{vars.java-version}}
+      - openjdk-${{vars.java-version}}-default-jdk
+  environment:
+    JAVA_HOME: /usr/lib/jvm/java-${{vars.java-version}}-openjdk
+    GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx4g"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/apache/spark-kubernetes-operator
+      tag: ${{package.version}}
+      expected-commit: 00dea6b5e8efcce768a949150e19a7b9a8f30b08
+
+  - uses: patch
+    with:
+      patches: upgrade-dependencies.patch
+
+  - name: Build shadow jar
+    runs: |
+      gradle --no-daemon clean build -x check
+
+  - name: Install application
+    runs: |
+      mkdir -p "${{targets.contextdir}}/${{vars.operator-work-dir}}"
+
+      install -Dm644 \
+        spark-operator/build/libs/spark-kubernetes-operator-${{package.version}}-all.jar \
+        "${{targets.contextdir}}/${{vars.operator-work-dir}}/${{vars.operator-jar}}"
+
+subpackages:
+  - name: ${{package.name}}-oci-entrypoint
+    description: OCI entrypoint for ${{package.name}}
+    dependencies:
+      runtime:
+        - bash-binsh
+        - ${{package.name}}
+        - busybox
+    pipeline:
+      - runs: |
+          install -Dm755 build-tools/docker/docker-entrypoint.sh \
+            "${{targets.contextdir}}/usr/bin/docker-entrypoint.sh"
+
+          mkdir -p "${{targets.contextdir}}/${{vars.operator-work-dir}}"
+          ln -sf ../../../usr/bin/docker-entrypoint.sh \
+            "${{targets.contextdir}}/${{vars.operator-work-dir}}/docker-entrypoint.sh"
+    test:
+      environment:
+        contents:
+          packages:
+            - openjdk-${{vars.java-version}}-default-jvm
+            - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
+      pipeline:
+        - uses: java-fips/algorithms
+          with:
+            java-version: ${{vars.java-version}}
+        - uses: test/tw/symlink-check
+        - runs: |
+            stat /usr/bin/docker-entrypoint.sh
+            stat "${{vars.operator-work-dir}}/docker-entrypoint.sh"
+
+update:
+  enabled: true
+  ignore-regex-patterns:
+    - ".*rc.*"
+  github:
+    identifier: apache/spark-kubernetes-operator
+    use-tag: true
+
+test:
+  environment:
+    contents:
+      packages:
+        - ${{package.name}}-oci-entrypoint
+        - curl
+        - openjdk-bcfips-policy-140-3-j${{vars.java-version}}
+        - wait-for-it
+    environment:
+      SPARK_OPERATOR_HOME: ${{vars.operator-home}}
+      SPARK_OPERATOR_WORK_DIR: ${{vars.operator-work-dir}}
+      SPARK_OPERATOR_JAR: ${{vars.operator-jar}}
+      LOG_CONFIG: "-Dlog4j.configurationFile=${{vars.operator-home}}/conf/log4j2.properties"
+      OPERATOR_JAVA_OPTS: "-Dfile.encoding=UTF8 -XX:+ExitOnOutOfMemoryError -XX:+UseParallelGC"
+      JAVA_TOOL_OPTIONS: "--module-path=/usr/share/java/bouncycastle-fips"
+      PROBE_PORT: "19091"
+      METRICS_PORT: "19090"
+  pipeline:
+    - uses: java-fips/algorithms
+      with:
+        java-version: ${{vars.java-version}}
+    - runs: |
+        set -euo pipefail
+        stat "${{vars.operator-work-dir}}/${{vars.operator-jar}}"
+    - name: Test entrypoint help
+      runs: |
+        set -euo pipefail
+        cd "${{vars.operator-work-dir}}"
+        ./docker-entrypoint.sh help
+    - uses: test/kwok/cluster
+      with:
+        serviceaccount: true
+    - name: Launch operator with kwok cluster
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p ${{vars.operator-home}}/conf
+          tee ${{vars.operator-home}}/conf/log4j2.properties << 'EOF'
+          rootLogger.level = INFO
+          rootLogger.appenderRef.console.ref = ConsoleAppender
+          appender.console.type = Console
+          appender.console.name = ConsoleAppender
+          appender.console.layout.type = PatternLayout
+          appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss} %-5p [%t] %c{1} - %m%n
+          EOF
+          touch ${{vars.operator-home}}/conf/spark-operator.properties
+          touch ${{vars.operator-home}}/conf/metrics.properties
+          kubectl apply --server-side=true -f https://raw.githubusercontent.com/apache/spark-kubernetes-operator/refs/tags/${{package.version}}/build-tools/helm/spark-kubernetes-operator/crds/sparkapplications.spark.apache.org-v1.yaml
+          kubectl apply --server-side=true -f https://raw.githubusercontent.com/apache/spark-kubernetes-operator/refs/tags/${{package.version}}/build-tools/helm/spark-kubernetes-operator/crds/sparkclusters.spark.apache.org-v1.yaml
+          kubectl wait --for=condition=Established crd/sparkapplications.spark.apache.org crd/sparkclusters.spark.apache.org --timeout=30s
+        start: sh -c 'cd ${{vars.operator-work-dir}} && ./docker-entrypoint.sh operator'
+        timeout: 120
+        expected_output: |
+          Starting Operator
+        post: |-
+          set -euo pipefail
+          wait-for-it -t 30 --strict localhost:${PROBE_PORT} -- echo "probe port is up"
+          wait-for-it -t 30 --strict localhost:${METRICS_PORT} -- echo "metrics port is up"
+          curl -sf "http://localhost:${PROBE_PORT}/healthz" | grep -F "healthy"
+          curl -sf "http://localhost:${PROBE_PORT}/readyz" | grep -F "started"
+          curl -sf "http://localhost:${METRICS_PORT}/prometheus" | grep -F "jvm_memory"
