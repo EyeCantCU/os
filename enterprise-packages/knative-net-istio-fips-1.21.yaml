@@ -1,0 +1,163 @@
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+\.\d+)\..*
+    replace: $1
+    to: major-minor-version
+
+package:
+  name: knative-net-istio-fips-1.21
+  version: "1.21.1"
+  epoch: 0
+  description: Knative net-istio defines a KIngress controller for Istio.
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: "2"
+    memory: 8Gi
+  dependencies:
+    provides:
+      - knative-net-istio-fips=${{package.full-version}}
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/knative-extensions/net-istio.git
+      tag: knative-v${{package.version}}
+      expected-commit: 1dc9b2da015d1113e32944b168381548e979fbf7
+
+  - uses: go/bump
+    with:
+      deps: |-
+        go.opentelemetry.io/otel@v1.40.0
+        go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc@v1.40.0
+        go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.40.0
+        go.opentelemetry.io/otel/exporters/otlp/otlptrace@v1.40.0
+        go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.40.0
+        go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.40.0
+        go.opentelemetry.io/otel/exporters/prometheus@v0.62.0
+        go.opentelemetry.io/otel/exporters/stdout/stdouttrace@v1.40.0
+        go.opentelemetry.io/otel/metric@v1.40.0
+        go.opentelemetry.io/otel/sdk@v1.40.0
+        go.opentelemetry.io/otel/sdk/metric@v1.40.0
+        go.opentelemetry.io/otel/trace@v1.40.0
+        knative.dev/pkg@v0.0.0-20260302190359-1f39e94ef003
+
+data:
+  - name: packages
+    items:
+      controller:
+      webhook:
+
+subpackages:
+  - name: ${{package.name}}-${{range.key}}
+    range: packages
+    description: Knative net-istio ${{range.key}} component.
+    dependencies:
+      provides:
+        - knative-net-istio-${{range.key}}-fips=${{package.full-version}}
+    pipeline:
+      - name: Build knative-net-istio-${{range.key}}
+        uses: go/build
+        with:
+          packages: ./cmd/${{range.key}}
+          output: ${{range.key}}
+          go-package: go-fips
+    test:
+      environment:
+        environment:
+          SYSTEM_NAMESPACE: "knative-serving"
+      pipeline:
+        - uses: test/go-fips-check
+        - uses: test/virtualpackage
+          with:
+            virtual-pkg-name: knative-net-istio-${{range.key}}-fips
+            real-pkg-name: ${{package.name}}-${{range.key}}
+        - uses: test/tw/ldd-check
+        - uses: test/tw/help-check
+          with:
+            bins: ${{range.key}}
+
+# Functional tests for webhook and controller components
+test:
+  environment:
+    environment:
+      KUBERNETES_SERVICE_HOST: "127.0.0.1"
+      KUBERNETES_SERVICE_PORT: "32764"
+      SYSTEM_NAMESPACE: "knative-serving"
+    contents:
+      packages:
+        - ${{package.name}}-controller
+        - knative-net-istio-${{vars.major-minor-version}}-controller-compat
+        - ${{package.name}}-webhook
+        - knative-net-istio-${{vars.major-minor-version}}-webhook-compat
+        - istioctl
+  pipeline:
+    - uses: test/kwok/cluster
+    - name: Test webhook entrypoint and logs
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          kubectl apply -f https://github.com/knative/serving/releases/latest/download/serving-crds.yaml
+          kubectl apply -f https://github.com/knative/serving/releases/latest/download/serving-core.yaml
+          istioctl install -y
+          kubectl apply -f "https://github.com/knative/net-istio/releases/download/knative-v${{package.version}}/net-istio.yaml"
+        start: |
+          webhook -kubeconfig ~/.kube/config
+        timeout: 60
+        # Omit 'ERROR':
+        # * webhook throws: the object has been modified; please apply your changes to the latest version and try again
+        # similar to https://github.com/chainguard-dev/enterprise-packages/blob/bd1af8f77530611d167efdb4d1d346517d6dea27/knative-serving-1.17.yaml#L105
+        error_strings: |
+          FATAL
+          FAIL
+          Traceback.*most.recent.call
+          Exception in thread
+          panic
+          command not found
+        expected_output: |
+          Registering 1 clients
+          Registering 2 informer factories
+          Registering 3 informers
+          Registering 3 controllers
+          Running with Standard leader election
+          Starting configmap watcher
+          Starting informers
+          Informers have been synced, unblocking admission webhooks
+          Starting controllers
+          Starting controller and workers
+          Started workers
+          will run in leader-elected mode with id
+          Webhook is valid
+          Updating webhook
+          Reconcile succeeded
+    - name: Test controller entrypoint and logs
+      uses: test/daemon-check-output
+      with:
+        start: |
+          controller -kubeconfig ~/.kube/config
+        timeout: 60
+        # Omit 'ERROR':
+        # * controller throws: the object has been modified; please apply your changes to the latest version and try again
+        # similar to https://github.com/chainguard-dev/enterprise-packages/blob/bd1af8f77530611d167efdb4d1d346517d6dea27/knative-serving-1.17.yaml#L105
+        error_strings: |
+          FATAL
+          FAIL
+          Traceback.*most.recent.call
+          Exception in thread
+          panic
+          command not found
+        expected_output: |
+          Running with Standard leader election
+          Starting configmap watcher
+          Starting informers
+          Starting controllers
+          Starting controller and workers
+          Started workers
+          will run in leader-elected mode with id
+
+update:
+  enabled: true
+  github:
+    identifier: knative-extensions/net-istio
+    strip-prefix: knative-v
+    tag-filter: knative-v1.21.
