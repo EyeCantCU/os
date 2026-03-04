@@ -37,6 +37,7 @@ environment:
       - prime-server-dev
       - proj-dev
       - protobuf-dev
+      - python-3.13-dev
       - samurai
       - sqlite-dev
       - zeromq-dev
@@ -58,9 +59,8 @@ pipeline:
         -DENABLE_DATA_TOOLS=ON \
         -DENABLE_SERVICES=ON \
         -DENABLE_HTTP=ON \
-        -DENABLE_PYTHON_BINDINGS=OFF \
+        -DENABLE_PYTHON_BINDINGS=ON \
         -DENABLE_NODE_BINDINGS=OFF \
-        -DENABLE_TESTS=OFF \
         -DENABLE_CCACHE=OFF \
         -DENABLE_COVERAGE=OFF \
         -DENABLE_SANITIZERS=OFF \
@@ -76,6 +76,7 @@ pipeline:
 
 subpackages:
   # testlib must come before -dev so test-specific files are moved before split/dev runs
+  # this bundles gtest. see https://github.com/valhalla/valhalla/blob/master/test/CMakeLists.txt#L1-L7
   - name: ${{package.name}}-testlib
     description: Valhalla test library and GoogleTest/GMock for C++ development
     dependencies:
@@ -148,6 +149,7 @@ subpackages:
             - jq
             - python3
       pipeline:
+        - uses: test/tw/devpackage
         - uses: test/pkgconf
         - uses: test/tw/ldd-check
           with:
@@ -216,7 +218,6 @@ test:
       packages:
         - curl
         - jq
-        - valhalla-dev
         - wait-for-it
   pipeline:
     - uses: test/tw/ldd-check
@@ -224,12 +225,14 @@ test:
       runs: |
         set -euo pipefail
 
-        # valhalla_service needs many file descriptors for ZMQ IPC sockets
+        # valhalla_service needs many file descriptors for ZMQ IPC sockets.
+        # ulimit may fail in constrained test environments, so we try progressively
+        # lower values and fall back gracefully - the service may still work with defaults.
         ulimit -n 4096 2>/dev/null || ulimit -n 2048 2>/dev/null || ulimit -n 1024 2>/dev/null || true
 
         mkdir -p /tmp/tiles
         valhalla_build_config --mjolnir-tile-dir /tmp/tiles | \
-          jq '.concurrency = 1' > /tmp/valhalla.json
+          jq -e '.concurrency = 1' > /tmp/valhalla.json
 
         cleanup() { kill $SVC_PID 2>/dev/null || true; }
         trap cleanup EXIT
@@ -242,3 +245,8 @@ test:
 
         # Verify the routing service responds to status requests
         curl -sf http://localhost:8002/status | jq -e '.version'
+    - name: Test Python bindings
+      runs: |
+        set -euo pipefail
+        python3 -c "import valhalla; print(valhalla.__version__)"
+        python3 -c "from valhalla import Actor, get_config; print('Python bindings OK')"
