@@ -1,3 +1,8 @@
+---
+name: authentik-patch
+description: Update authentik package versions and regenerate enterprise module patches. Use when bumping authentik or authentik-fips versions in enterprise-packages.
+---
+
 # Authentik Enterprise Patch Updates
 
 Automates the process of updating authentik package
