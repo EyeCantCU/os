@@ -25,6 +25,10 @@ else
 pkgs :=
 endif
 
+compile_targets = $(foreach name,$(pkgs),compile/$(name))
+$(compile_targets): compile/%: $(STEREO)
+	$(STEREO) compile $*
+
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
 $(pkg_targets): package/%: $(STEREO)
 	$(STEREO) make package $*
@@ -68,6 +72,9 @@ test/%: $(STEREO)
 	@$(MAKE) $@
 
 debug/%: $(STEREO)
+	@$(MAKE) $@
+
+compile/%: $(STEREO)
 	@$(MAKE) $@
 
 test-debug/%: $(STEREO)
