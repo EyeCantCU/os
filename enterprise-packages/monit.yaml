@@ -1,7 +1,7 @@
 package:
   name: monit
   version: 5.35.2
-  epoch: 0
+  epoch: 1
   description: Managing and monitoring on a UNIX system
   copyright:
     - license: AGPL-3.0-or-later
@@ -37,6 +37,21 @@ pipeline:
   - uses: strip
 
 subpackages:
+  - name: ${{package.name}}-config
+    description: default monit config file
+    pipeline:
+      - runs: |
+          # The monit source ships a default monitrc but 'make install' does not
+          # install it. Alpine and Fedora both install it in their packaging step.
+          # Reference: https://gitlab.alpinelinux.org/alpine/aports/-/blob/master/main/monit/APKBUILD
+          install -Dm600 monitrc "${{targets.subpkgdir}}"/etc/monitrc
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /etc/monitrc
+
   - name: ${{package.name}}-dev
     description: dev library for ${{package.name}}
     dependencies:
@@ -60,6 +75,9 @@ test:
   environment:
     environment:
       MONIT_PORT: "2812"
+    contents:
+      packages:
+        - ${{package.name}}-config
   pipeline:
     - uses: test/tw/ver-check
       with:
@@ -69,8 +87,15 @@ test:
         bins: monit
     - runs: |
         set -euo pipefail
+        # Validate the shipped config syntax
+        monit -t
+    - runs: |
+        set -euo pipefail
+        # Append test config to /etc/monitrc.
+        # We append rather than using a drop-in because the upstream
+        # monitrc has 'include /etc/monit.d/*' commented out by default.
         echo "test content" > /tmp/monit_test_file
-        tee /tmp/monitrc << 'EOF'
+        cat >> /etc/monitrc <<'MONITEOF'
         set daemon 10
         set httpd port 2812 and
             use address localhost
@@ -78,29 +103,20 @@ test:
 
         check system localhost
             if loadavg (1min) > 4 then alert
-            if memory usage > 75% then alert
-            if cpu usage > 95% for 10 cycles then alert
 
         check file test_file with path /tmp/monit_test_file
             if does not exist then alert
-            if changed checksum then alert
 
         check filesystem rootfs with path /
             if space usage > 90% then alert
 
         check directory test_dir with path /tmp
             if does not exist then alert
-        EOF
-
-        chmod 600 /tmp/monitrc
-
-        # Validate the configuration syntax
-        monit -c /tmp/monitrc -t
+        MONITEOF
+                monit -t
     - uses: test/daemon-check-output
       with:
-        setup: |-
-          chmod 600 /tmp/monitrc
-        start: monit -c /tmp/monitrc -I
+        start: monit -I
         timeout: 30
         expected_output: |
           Starting Monit
@@ -112,15 +128,15 @@ test:
           wait-for-it -t 30 localhost:${MONIT_PORT}
 
           # Test that all configured services are being monitored
-          monit -c /tmp/monitrc status | grep -F "localhost"
-          monit -c /tmp/monitrc status | grep -F "test_file"
-          monit -c /tmp/monitrc status | grep -F "rootfs"
-          monit -c /tmp/monitrc status | grep -F "test_dir"
-          monit -c /tmp/monitrc summary
+          monit status | grep -F "localhost"
+          monit status | grep -F "test_file"
+          monit status | grep -F "rootfs"
+          monit status | grep -F "test_dir"
+          monit summary
 
           netstat -ln | grep -F ":${MONIT_PORT}"
 
-          monit -c /tmp/monitrc unmonitor test_file
+          monit unmonitor test_file
 
 update:
   enabled: true
