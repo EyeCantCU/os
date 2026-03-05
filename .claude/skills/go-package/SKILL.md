@@ -250,10 +250,11 @@ ldflags: |
 ldflags: -X main.version=$(git describe --long --tags --match="v*" --dirty 2>/dev/null || git rev-list -n1 HEAD)
 ```
 
-**FIPS ldflags Restrictions** - See [fips.md](fips.md):
-- Never use `-s` (strips symbols)
-- Never use `-w` (strips DWARF)
-- Never use `-extldflags -static`
+**ldflags Restrictions** (applies to ALL Go packages, not just FIPS):
+- **NEVER** use `-s` (strips symbols needed for debugging and FIPS verification)
+- **NEVER** use `-w` (strips DWARF info needed for debugging and FIPS verification)
+- **NEVER** use `-extldflags -static` (prevents dynamic linking)
+- The `go/build` pipeline already handles binary optimization — do NOT add `-s -w` manually
 
 ## 5. Update Configuration
 
