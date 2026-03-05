@@ -63,6 +63,9 @@ eco-test/%: $(STEREO)
 eco-debug/%: $(STEREO)
 	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make debug $*
 
+eco-test-debug/%: $(STEREO)
+	MELANGE_EXTRA_OPTS="$(ECO_228_REPOS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make test-debug $*
+
 # Fallback rules when stereo doesn't exist yet - build it first, then re-invoke make
 ifeq ($(pkgs),)
 package/%: $(STEREO)
