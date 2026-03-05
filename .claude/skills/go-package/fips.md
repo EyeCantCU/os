@@ -130,7 +130,10 @@ FIPS Go binaries MUST be dynamically linked to OpenSSL. Key requirements:
 
 1. **Never set `CGO_ENABLED=0`** for FIPS packages
 2. **Never use `-ldflags -s`** (strips symbols needed for FIPS verification)
-3. **Never use `-extldflags -static`** (prevents dynamic linking)
+3. **Never use `-ldflags -w`** (strips DWARF info needed for FIPS verification)
+4. **Never use `-extldflags -static`** (prevents dynamic linking)
+
+> **Note:** The `-s` and `-w` restriction applies to ALL Go packages, not just FIPS. See [SKILL.md](SKILL.md) for details.
 
 ### Removing CGO_ENABLED=0 from Upstream
 
