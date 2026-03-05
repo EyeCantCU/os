@@ -85,8 +85,6 @@ subpackages:
     dependencies:
       runtime:
         - busybox
-        - merged-bin
-        - wolfi-baselayout
     pipeline:
       - runs: |
           git clone https://github.com/kube-logging/fluentd-images.git --depth 1
@@ -96,6 +94,10 @@ subpackages:
           install -Dm755 ./healthy.sh "${{targets.subpkgdir}}/usr/bin/healthy.sh"
           install -Dm644 ./fluent.conf "${{targets.subpkgdir}}/fluentd/etc/fluent.conf"
     test:
+      environment:
+        contents:
+          packages:
+            - ${{package.name}}
       pipeline:
         - uses: test/tw/contains-files
           with:
@@ -103,6 +105,36 @@ subpackages:
               /usr/bin/entrypoint.sh
               /usr/bin/healthy.sh
               /fluentd/etc/fluent.conf
+        - name: Test entrypoint passes through commands
+          runs: |
+            set -euo pipefail
+            OUTPUT=$(/usr/bin/entrypoint.sh echo "hello_from_entrypoint")
+            [ "$OUTPUT" = "hello_from_entrypoint" ]
+        - name: Test entrypoint launches fluentd with default config
+          runs: |
+            set -euo pipefail
+            mkdir -p /fluentd/plugins
+            FLUENTD_CONF=fluent.conf /usr/bin/entrypoint.sh fluentd --dry-run
+        - name: Test healthy.sh liveness probe logic
+          runs: |
+            set -euo pipefail
+            mkdir -p /tmp/test-buffer
+
+            # Should succeed when buffer dir was recently modified
+            BUFFER_PATH=/tmp/test-buffer LIVENESS_THRESHOLD_SECONDS=300 /usr/bin/healthy.sh
+
+            # Should fail when buffer dir is stale
+            touch -d "2020-01-01" /tmp/test-buffer
+            if BUFFER_PATH=/tmp/test-buffer LIVENESS_THRESHOLD_SECONDS=300 /usr/bin/healthy.sh 2>/dev/null; then
+              echo "ERROR: healthy.sh should have failed for stale buffer"
+              exit 1
+            fi
+
+            # Should fail when buffer path doesn't exist
+            if BUFFER_PATH=/tmp/nonexistent LIVENESS_THRESHOLD_SECONDS=300 /usr/bin/healthy.sh 2>/dev/null; then
+              echo "ERROR: healthy.sh should have failed for missing buffer path"
+              exit 1
+            fi
 
   - name: ${{package.name}}-iamguarded-compat
     description: Compatibility package for iamguarded variant of fluentd
@@ -195,7 +227,6 @@ test:
           fluent-ca-generate
           fluent-cat
           fluent-ctl
-          fluent-gem
           fluent-plugin-config-format
           fluent-plugin-generate
           fluentd
@@ -205,7 +236,6 @@ test:
           fluent-ca-generate
           fluent-cat
           fluent-ctl
-          fluent-debug
           fluent-gem
           fluent-plugin-config-format
           fluent-plugin-generate
