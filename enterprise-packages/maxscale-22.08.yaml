@@ -1,0 +1,294 @@
+package:
+  name: maxscale-22.08
+  version: "22.08.19"
+  epoch: 1
+  description: MariaDB MaxScale 22.08 - Advanced database proxy, router, and firewall
+  copyright:
+    - license: BUSL-1.1
+  checks:
+    disabled:
+      - setuidgid
+      - tempdir
+  dependencies:
+    provides:
+      - maxscale=${{package.full-version}}
+
+environment:
+  environment:
+    # MaxScale builds with -Werror (CMakeLists.txt), so new GCC warnings become
+    # build failures. GCC 12+ introduces -Wstringop-overread which triggers on
+    # embedded SQLite code (query_classifier/qc_sqlite/). Upstream CI uses Rocky 8
+    # with GCC 8.5 and never hits this. We pin GCC 11 as the newest safe version.
+    CC: gcc-11
+    CXX: g++-11
+  contents:
+    packages:
+      - autoconf
+      - automake
+      - bison
+      - boost-dev
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake-3
+      - curl-dev
+      - cyrus-sasl-dev
+      - flex
+      - gcc-11
+      - git
+      - glibc-dev
+      - gnutls-dev
+      - hiredis-dev
+      - icu-dev
+      - jansson-dev
+      - krb5-dev
+      - libatomic_ops-dev
+      - libmemcached-dev
+      - libmicrohttpd-dev
+      - libpq-17
+      - librdkafka-dev
+      - libssh-dev
+      - libtool
+      - libxml2-dev
+      - linux-pam-dev
+      - make
+      - ncurses-dev
+      - openssl-dev
+      - pcre2-dev
+      - perl
+      - pkgconf
+      - python3
+      - sqlite-dev
+      - systemd-dev
+      - tcl
+      - tcl-dev
+      - unixodbc-dev
+      - util-linux-dev
+      - wget
+      - xz-dev
+      - zlib-dev
+      - zstd-dev
+
+var-transforms:
+  - from: ${{package.version}}
+    match: ^(\d+)\.(\d+)\..*
+    replace: rocky8mxs$1$2
+    to: docker-branch
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/mariadb-corporation/MaxScale
+      tag: maxscale-${{package.version}}
+      expected-commit: fcb17c729f6cdae0152e3a76713663f5b03d59ae
+      recurse-submodules: true
+
+  # Build flags as per upstream Dockerfile:
+  # https://github.com/mariadb-corporation/MaxScale/blob/maxscale-22.08.19/Documentation/REST-API/templates/Dockerfile
+  - uses: cmake/configure
+    with:
+      opts: |
+        -G "Unix Makefiles" \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DBUNDLE=N \
+        -DFORCE_BUNDLE=N \
+        -DBUILD_BINLOG=N \
+        -DBUILD_CDC=N \
+        -DBUILD_GSSAPI=N \
+        -DBUILD_GUI=N \
+        -DBUILD_KAFKACDC=N \
+        -DBUILD_LUAFILTER=N \
+        -DBUILD_MAXCTRL=N \
+        -DBUILD_MIRROR=N \
+        -DBUILD_NOSQL=N \
+        -DBUILD_QC_MYSQLEMBEDDED=N \
+        -DBUILD_RABBITMQ=N \
+        -DBUILD_STORAGE_MEMCACHED=N \
+        -DBUILD_STORAGE_REDIS=N \
+        -DBUILD_TESTS=N \
+        -DBUILD_TOOLS=N \
+        -DCMAKE_C_FLAGS="-Wno-stringop-overread"
+
+  - runs: |
+      make -j"$(nproc)"
+    working-directory: output
+
+  - uses: cmake/install
+
+  - runs: |
+      # 22.08-23.08 cmake creates dirs at usr/var/ and usr/etc/ due to
+      # hardcoded relative paths with -DCMAKE_INSTALL_PREFIX=/usr. Remove them.
+      # See: https://github.com/mariadb-corporation/MaxScale/blob/maxscale-22.08.19/CMakeLists.txt#L381-L384
+      rm -rf "${{targets.contextdir}}"/usr/var "${{targets.contextdir}}"/usr/etc
+      # Create dirs matching upstream RPM postinstall and Dockerfile.
+      # See: https://github.com/mariadb-corporation/MaxScale/blob/maxscale-22.08.19/etc/postinst.in
+      # See: https://github.com/mariadb-corporation/maxscale-docker/blob/rhel-ubi8/Dockerfile
+      mkdir -p "${{targets.contextdir}}"/etc/maxscale.modules.d \
+               "${{targets.contextdir}}"/etc/maxscale.cnf.d \
+               "${{targets.contextdir}}"/var/lib/maxscale \
+               "${{targets.contextdir}}"/var/run/maxscale \
+               "${{targets.contextdir}}"/var/log/maxscale \
+               "${{targets.contextdir}}"/var/cache/maxscale
+      # Remove duplicate cnf template — cmake installs to both etc/ and usr/share/
+      rm -f "${{targets.contextdir}}"/usr/share/maxscale/maxscale.cnf.template
+
+  - uses: strip
+
+subpackages:
+  # The upstream Docker image (mariadb/maxscale) uses entrypoint scripts that are
+  # not part of the MaxScale source repo. They live in a separate repo:
+  # https://github.com/mariadb-corporation/maxscale-docker
+  # Each MaxScale version has a corresponding branch (rocky8mxs2208, rocky8mxs2302, etc.)
+  # with version-matched scripts. We fetch from the matching branch to stay in sync
+  # with what upstream ships in their Docker image on Docker Hub.
+  - name: ${{package.name}}-oci-entrypoint
+    description: OCI entrypoint for MaxScale
+    dependencies:
+      runtime:
+        - bash
+        - flock
+        - monit
+        - procps
+        - rsyslog
+        - tini
+        - ${{package.name}}
+      provides:
+        - maxscale-oci-entrypoint=${{package.full-version}}
+    pipeline:
+      - uses: git-checkout
+        with:
+          repository: https://github.com/mariadb-corporation/maxscale-docker
+          branch: ${{vars.docker-branch}}
+      - name: Copy entrypoint scripts with drift check
+        runs: |
+          # Drift check: fail if upstream scripts change unexpectedly.
+          # Update this checksum if upstream intentionally changes the entrypoint.
+          EXPECTED="e5deee23bd35092b42dc2ede812091ff4f0c631b85e6fa16debcc57053e3f5a6"
+          ACTUAL=$(sha256sum maxscale/scripts/docker-entrypoint.sh | awk '{print $1}')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "DRIFT DETECTED: docker-entrypoint.sh checksum changed"
+            echo "  expected: $EXPECTED"
+            echo "  actual:   $ACTUAL"
+            echo "Review upstream changes and update the checksum."
+            exit 1
+          fi
+          install -Dm755 maxscale/scripts/docker-entrypoint.sh "${{targets.subpkgdir}}"/usr/bin/docker-entrypoint.sh
+          install -Dm755 maxscale/scripts/maxscale-start "${{targets.subpkgdir}}"/usr/bin/maxscale-start
+          install -Dm755 maxscale/scripts/maxscale-stop "${{targets.subpkgdir}}"/usr/bin/maxscale-stop
+          install -Dm755 maxscale/scripts/maxscale-restart "${{targets.subpkgdir}}"/usr/bin/maxscale-restart
+          install -Dm644 maxscale/config/maxscale.cnf "${{targets.subpkgdir}}"/etc/maxscale.cnf
+          install -Dm644 maxscale/config/monit.d/maxscale.conf "${{targets.subpkgdir}}"/etc/monit.d/maxscale.conf
+          ln -sf /usr/bin/docker-entrypoint.sh "${{targets.subpkgdir}}"/docker-entrypoint.sh
+    test:
+      pipeline:
+        - uses: test/tw/contains-files
+          with:
+            files: |
+              /usr/bin/docker-entrypoint.sh
+              /usr/bin/maxscale-start
+              /usr/bin/maxscale-stop
+              /usr/bin/maxscale-restart
+              /etc/maxscale.cnf
+              /etc/monit.d/maxscale.conf
+        - uses: test/tw/symlink-check
+          with:
+            allow-absolute: true
+
+update:
+  enabled: true
+  github:
+    identifier: mariadb-corporation/MaxScale
+    strip-prefix: maxscale-
+    use-tag: true
+    tag-filter: maxscale-22.08
+
+test:
+  environment:
+    accounts:
+      groups:
+        - groupname: maxscale
+          gid: 10000
+      users:
+        - username: maxscale
+          uid: 10000
+          gid: 10000
+      run-as: 0
+    environment:
+      REST_API_PORT: "8989"
+    contents:
+      packages:
+        - ${{package.name}}-oci-entrypoint
+        - curl
+        - jq
+  pipeline:
+    - uses: test/tw/ver-check
+      with:
+        bins: maxscale
+    - uses: test/tw/help-check
+      with:
+        bins: maxscale
+        help-flag: --help
+    - uses: test/tw/ldd-check
+    - uses: test/tw/contains-files
+      with:
+        files: |
+          /usr/bin/maxscale-start
+          /usr/bin/maxscale-stop
+          /usr/bin/maxscale-restart
+          /etc/maxscale.cnf
+          /etc/monit.d/maxscale.conf
+    - uses: test/daemon-check-output
+      with:
+        setup: |
+          mkdir -p /var/run/maxscale
+          chown -R maxscale:maxscale /var/lib/maxscale /var/run/maxscale /var/log/maxscale /var/cache/maxscale /etc/maxscale.modules.d /etc/maxscale.cnf.d
+          tee /etc/maxscale.cnf << 'EOF'
+          [maxscale]
+          threads=auto
+          admin_host=127.0.0.1
+          admin_port=8989
+          admin_secure_gui=false
+          EOF
+        # Start using upstream entrypoint, same as Docker image:
+        # ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]
+        # CMD ["maxscale-start && monit -I"]
+        # We skip monit in tests since it needs rsyslog and full init
+        start: /usr/bin/maxscale-start
+        expected_output: |
+          Starting
+        timeout: 30
+        post: |-
+          set -euo pipefail
+          wait-for-it 127.0.0.1:${REST_API_PORT} -t 15
+
+          # Verify REST API responds with default credentials admin:mariadb
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/maxscale | jq -e '.data.id == "maxscale"'
+
+          # Verify no services configured, clean start
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/services | jq -e '.data | length == 0'
+
+          # Verify thread info is available
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/maxscale/threads | jq -e '.data | length > 0'
+
+          # Verify logging endpoint works
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/maxscale/logs | jq -e '.data'
+
+          # Verify default admin user exists
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/users/inet | jq -e '.data[] | select(.id == "admin")'
+
+          # Verify JWT auth token can be generated
+          TOKEN=$(curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/auth | jq -r '.meta.token')
+
+          # Use JWT token for subsequent requests
+          curl -sf -H "Authorization: Bearer $TOKEN" http://127.0.0.1:${REST_API_PORT}/v1/maxscale | jq -e '.data.id == "maxscale"'
+
+          # Generate encryption key and encrypt/decrypt a password
+          maxkeys /tmp
+          ENCRYPTED=$(maxpasswd /tmp my-secret-password)
+          maxpasswd -d /tmp "$ENCRYPTED" | grep -F "my-secret-password"
+
+          # Create a server, service, and listener to test core proxy config
+          curl -sf -u admin:mariadb -X POST http://127.0.0.1:${REST_API_PORT}/v1/servers -H "Content-Type: application/json" \
+            -d '{"data":{"id":"db1","type":"servers","attributes":{"parameters":{"address":"127.0.0.1","port":3306}}}}'
+
+          curl -sf -u admin:mariadb http://127.0.0.1:${REST_API_PORT}/v1/servers/db1 | jq -e '.data.id == "db1"'
