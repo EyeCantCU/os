@@ -268,7 +268,7 @@ environment:
 **Important:**
 - **NEVER** use `CGO_ENABLED=0` for FIPS packages
 - **Prefer dynamic linking** even for non-FIPS packages unless explicitly required
-- Avoid `-ldflags="-s -w"` which strips symbols
+- **NEVER** use `-s` or `-w` in ldflags for ANY package — these strip symbols and DWARF info. The `go/build` pipeline handles optimization automatically
 
 ## Kubernetes-Style Makefile Builds
 

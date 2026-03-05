@@ -25,6 +25,10 @@ else
 pkgs :=
 endif
 
+compile_targets = $(foreach name,$(pkgs),compile/$(name))
+$(compile_targets): compile/%: $(STEREO)
+	$(STEREO) compile $*
+
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
 $(pkg_targets): package/%: $(STEREO)
 	$(STEREO) make package $*
@@ -48,8 +52,7 @@ ECO_228_REPOS = \
 	--repository-append https://apk.cgr.dev/chainguard-private \
 	--repository-append https://apk.cgr.dev/chainguard-2.28
 ECO_228_BUILD_OPTS = $(ECO_228_REPOS) \
-	--package-append ct-manylinux-2.28 \
-	--package-append gcc-14-default
+	--package-append 2.28-build-base
 
 eco-package/%: $(STEREO)
 	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make package $*
@@ -69,6 +72,9 @@ test/%: $(STEREO)
 	@$(MAKE) $@
 
 debug/%: $(STEREO)
+	@$(MAKE) $@
+
+compile/%: $(STEREO)
 	@$(MAKE) $@
 
 test-debug/%: $(STEREO)

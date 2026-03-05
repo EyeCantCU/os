@@ -1,0 +1,221 @@
+package:
+  name: istio-envoy-fips-1.29
+  version: "1.29.0"
+  epoch: 0
+  description: Envoy with additional Istio plugins (wasm, telemetry, etc)
+  copyright:
+    - license: Apache-2.0
+  resources:
+    cpu: 30
+    memory: 60Gi
+  dependencies:
+    provides:
+      - istio-envoy-fips=${{package.full-version}}
+    runtime:
+      - boringssl-fips-static-${{vars.boringssl}}-tools
+
+environment:
+  contents:
+    packages:
+      # We don't use automake/autoconf directly, but the Bazel rule uses them
+      - autoconf
+      - automake
+      - bash
+      - bazel-7
+      - binutils
+      - boringssl-fips-static-${{vars.boringssl}}
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - clang-18
+      - cmake
+      - coreutils
+      - git
+      - glibc-locale-en
+      - libtool
+      - libunwind-dev
+      - llvm-18
+      - llvm-18-dev
+      - llvm-libcxx-18
+      - llvm-libcxx-18-dev
+      - llvm-libcxxabi-18
+      - llvm-lld-18~18
+      - openjdk-25-default-jdk
+      - patch
+      - python3-dev
+      - samurai
+      - wolfi-baselayout
+      - yq
+  environment:
+    LANG: en_US.UTF-8
+    LANGUAGE: en_US:en
+    LC_ALL: en_US.UTF-8
+
+vars:
+  boringssl: "20240407"
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/istio/proxy
+      tag: ${{package.version}}
+      expected-commit: 1fdadc301aaaa0326255f82bd27387a0e101c164
+
+  - name: Apply patches, to vendored envoy and quiche vendored in envoy
+    uses: patch
+    with:
+      patches: Add-envoy-patches.patch
+
+  - name: Build envoy
+    runs: |
+      export CARGO_BAZEL_REPIN=true
+      mkdir -p .cache/bazel/_bazel_root
+
+      # isitio-envoy won't build with FORTIFY_SOURCE set to 3 which our clang-18 version is setting
+      sed -i 's/-D_FORTIFY_SOURCE=3//g' /etc/clang-18/common.cfg
+
+      # Tell envoy_repo's repository rule where the system LLVM lives.
+      # Without this, toolchains_llvm tries to download LLVM 18.1.8 from GitHub.
+      # The sysroot is removed from bazel/toolchains.bzl via 0001-envoy-remove-sysroot.patch
+      # so the build uses Wolfi system headers instead of a downloaded glibc sysroot.
+      export BAZEL_LLVM_PATH=/usr/lib/llvm-18
+
+      # The flag boringssl=fips is to build with FIPS boringssl
+      # See https://github.com/envoyproxy/envoy/blob/v1.27.0/bazel/BUILD#L475
+      bazel build \
+        --define=boringssl=fips \
+        --override_repository=boringssl_fips=/usr/lib/boringssl-fips-static \
+        --discard_analysis_cache \
+        --nokeep_state_after_build \
+        --notrack_incremental_state \
+        --verbose_failures \
+        --action_env=BAZEL_LLVM_PATH=/usr/lib/llvm-18 \
+        --action_env=LIBURING_CFLAGS="-ftrivial-auto-var-init=uninitialized" \
+        -c opt envoy
+
+      # Bazel sometimes fails to build with an exit code 0.
+      if [ ! -f bazel-bin/envoy ]; then
+        echo "Bazel build did not complete"
+        exit 1
+      fi
+      mkdir -p ${{targets.destdir}}/usr/bin/
+      cp bazel-bin/envoy ${{targets.destdir}}/usr/bin/envoy
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: istio/proxy
+    use-tag: true
+    tag-filter: 1.29.
+
+test:
+  environment:
+    contents:
+      packages:
+        - bash
+        - curl
+        - netcat-openbsd
+        - procps
+        - jq
+        - openssl
+  pipeline:
+    - name: "Verify binary installation"
+      runs: |
+        envoy --version
+        envoy --help
+    - runs: |
+        envoy_version=$(envoy --version | sed -n 's|.*/BoringSSL-FIPS-\(.*\)|\1|p')
+        [ "$envoy_version" = "${{vars.boringssl}}" ]
+        /usr/bin/bssl-test_fips
+        /usr/bin/bssl-test_fips | grep "^Module: 'BoringCrypto', version: ${{vars.boringssl}} hash:$"
+    - uses: test/cmvp-fips-certification-check
+      with:
+        certificate-number: 5104
+    - name: "Test Envoy admin interface startup"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: envoy --config-path /tmp/minimal.yaml --admin-address-path /tmp/admin.txt
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          # Get admin address
+          ADMIN_ADDR=$(cat /tmp/admin.txt)
+
+          # Test admin endpoints
+          curl -s "http://${ADMIN_ADDR}/server_info" | jq . || exit 1
+          curl -s "http://${ADMIN_ADDR}/stats" | grep envoy || exit 1
+          curl -s "http://${ADMIN_ADDR}/clusters" | jq . || exit 1
+    - name: "Test hot restart capability"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          cat > /tmp/minimal.yaml <<EOF
+          admin:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9901
+          static_resources:
+            listeners: []
+            clusters: []
+          EOF
+        start: envoy --config-path /tmp/minimal.yaml --restart-epoch 0
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          first_pid=$(pgrep -f "restart-epoch 0")
+          envoy --config-path /tmp/minimal.yaml --restart-epoch 1 &
+          sleep 2
+
+          # Verify both processes exist
+          if ! ps -p $first_pid > /dev/null; then
+            echo "Original Envoy process not found"
+            exit 1
+          fi
+    - name: "Test TLS ciphers"
+      uses: test/daemon-check-output
+      with:
+        setup: |
+          #!/bin/sh -e
+          # Generate self-signed certificate for TLS listener
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout serverkey.pem \
+            -out servercert.pem \
+            -days 1 \
+            -subj "/CN=localhost"
+        start: envoy --config-path envoy-demo-tls.yaml
+        timeout: 30
+        expected_output: |
+          starting main dispatch loop
+          all dependencies initialized
+        post: |
+          #!/bin/sh -e
+          # Test that curl works
+          curl --cacert servercert.pem  -o /dev/null https://localhost:10000
+          # Force CHACHA20 connection, and ensure it doesn't work
+          result=$(echo Q | OPENSSL_CONF=/dev/null openssl s_client -tls1_3 -CAfile servercert.pem -ciphersuites TLS_CHACHA20_POLY1305_SHA256  -connect localhost:10000 2>&1| tail -n1)
+          if [ "$result" = "DONE" ]; then
+             echo Error: non-approved TLS_CHACHA20_POLY1305_SHA256 connection successful
+             exit 1
+          fi
