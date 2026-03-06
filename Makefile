@@ -25,6 +25,10 @@ else
 pkgs :=
 endif
 
+compile_targets = $(foreach name,$(pkgs),compile/$(name))
+$(compile_targets): compile/%: $(STEREO)
+	$(STEREO) compile $*
+
 pkg_targets = $(foreach name,$(pkgs),package/$(name))
 $(pkg_targets): package/%: $(STEREO)
 	$(STEREO) make package $*
@@ -47,17 +51,15 @@ ECO_228_REPOS = \
 	--repository-append https://apk.cgr.dev/chainguard \
 	--repository-append https://apk.cgr.dev/chainguard-private \
 	--repository-append https://apk.cgr.dev/chainguard-2.28
-ECO_228_BUILD_OPTS = $(ECO_228_REPOS) \
-	--package-append 2.28-build-base
+ECO_228_BUILD_OPTS = --package-append 2.28-build-base
 
-eco-package/%: $(STEREO)
-	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make package $*
-
-eco-test/%: $(STEREO)
-	MELANGE_EXTRA_OPTS="$(ECO_228_REPOS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make test $*
-
-eco-debug/%: $(STEREO)
-	MELANGE_EXTRA_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_EXTRA_OPTS:-}" $(STEREO) make debug $*
+define eco_target_templ =
+eco-$(1)/%: $(STEREO)
+	MELANGE_OPTS="$(ECO_228_BUILD_OPTS) $${MELANGE_OPTS}" \
+	MELANGE_EXTRA_OPTS="$(ECO_228_REPOS) $${MELANGE_EXTRA_OPTS:-}" \
+	$(STEREO) make $(1) $$*
+endef
+$(foreach target,package debug test test-debug,$(eval $(call eco_target_templ,$(target))))
 
 # Fallback rules when stereo doesn't exist yet - build it first, then re-invoke make
 ifeq ($(pkgs),)
@@ -68,6 +70,9 @@ test/%: $(STEREO)
 	@$(MAKE) $@
 
 debug/%: $(STEREO)
+	@$(MAKE) $@
+
+compile/%: $(STEREO)
 	@$(MAKE) $@
 
 test-debug/%: $(STEREO)
