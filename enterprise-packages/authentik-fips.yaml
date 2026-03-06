@@ -10,8 +10,8 @@
 # workflow and patch-patterns.md for the catalogue of enterprise-removal patterns.
 package:
   name: authentik-fips
-  version: "2025.12.4"
-  epoch: 1
+  version: "2026.2.1"
+  epoch: 0
   description: "authentik IdP — an open-source Identity Provider for modern SSO (FIPS-enabled)."
   copyright:
     - license: "CC-BY-4.0"
@@ -36,10 +36,10 @@ package:
       - xmlsec-openssl
 
 vars:
-  venv-home: "/usr/share/authentik/venv"
   # NOTE: align with py-version required by upstream.
   # REF: https://docs.goauthentik.io/developer-docs/setup/full-dev-environment/#prerequisites
-  python-version: 3.13
+  python-version: 3.14
+  venv-home: "/usr/share/authentik/venv"
 
 var-transforms:
   - from: ${{package.name}}
@@ -49,24 +49,21 @@ var-transforms:
 
 environment:
   environment:
-    VIRTUAL_ENV: ${{vars.venv-home}}
-    # Disable FIPS OpenSSL for Node.js build tooling (not runtime)
-    # Node.js build tools may use legacy crypto algorithms incompatible with FIPS
-    # The resulting JavaScript bundle is static and doesn't use crypto at runtime
-    NODE_OPTIONS: "--openssl-legacy-provider"
     CGO_ENABLED: "1"
+    UV_LINK_MODE: "copy"
+    VIRTUAL_ENV: ${{vars.venv-home}}
   contents:
     packages:
       - build-base
       - busybox
       - clang
       - cmd:cargo
-      - go-fips-1.25
       - krb5-dev
       - libxml2-dev
       - libxslt-dev
       - node-gyp # Required to build native npm modules (tree-sitter packages)
       - nodejs-24 # upstream needs node-24 and node-25 has compatibility issues with node-gyp v11.5.0 - REF: https://github.com/goauthentik/authentik/blob/version/2025.8.4/web/package.json#L126
+      - nofips-node # So npm works during the build.
       - npm
       - openssl-config-fipshardened # FIPS OpenSSL configuration for build environment
       - pkgconf
@@ -81,63 +78,51 @@ pipeline:
     with:
       repository: https://github.com/goauthentik/authentik
       tag: version/${{package.version}}
-      expected-commit: "19ad8d3ae3f266ec1096bc4461fdf6bcda1aa079"
+      expected-commit: "0dccbd4193c45c581e9fb7cd89df0c1487510f1f"
 
-  # OSS/Enterprise build are the same and both ship with Enterprise related code at 'authentik/enterprise'
-  # Enterprise functionality locked behind license checker.
+  - name: Remove enterprise.
+    runs: |
+      echo rm -rf authentik/enterprise
+
+  # OSS/Enterprise build are the same and both ship with Enterprise related code
+  # at 'authentik/enterprise' Enterprise functionality locked behind license
+  # checker.
   #
-  # Removing this directory requires removal of all references related to authentik.enterprise module
-  # otherwise authentik fails to startup.
+  # Removing this directory requires removal of all references related to
+  # authentik.enterprise module otherwise authentik fails to startup.
   - uses: patch
     with:
       patches: |
-        root.settings.patch
-        enterprise.patch
-        enterprise.mro.patch
-        frontend-sync-chart.patch
-        middleware-m2m-fix.patch
-        pagination-autocomplete.patch
+        remove-enterprise.patch
 
   - name: "Create venv"
-    runs: uv venv ${{vars.venv-home}} --system-site-packages
-
-  # Upstream pins lxml dependency to 6.0.0 - REF: https://github.com/goauthentik/authentik/blob/version/2025.10.0/pyproject.toml#L47
-  # There's a known build failure issue with lxml 6.0.0 + libxml2 2.15, documented here https://bugs.launchpad.net/lxml/+bug/2125278
-  # Bumping lxml from 6.0.0 to 6.0.2 resolves the build failure
-  - name: "Bump lxml dependency in pyproject.toml"
-    runs: |
-      # Verify lxml bump is still needed
-      if ! grep -q 'lxml==6\.0\.0' pyproject.toml; then
-        echo "ERROR: upstream authentik no longer pins lxml==6.0.0"
-        echo "The lxml version bump workaround can be removed from this build."
-        echo "Please remove both this check and the 'Bump lxml dependency' step."
-        exit 1
-      fi
-
-      sed -i 's/lxml==6\.0\.0/lxml==6\.0\.2/' pyproject.toml
+    # --system-site-packages allows the venv's Python to fall through to the
+    # system site-packages at runtime, where py3.x-cryptography (FIPS-enabled)
+    # is installed as a runtime dependency.
+    runs: uv venv --system-site-packages ${{vars.venv-home}}
 
   - name: "Remediate CVEs"
     runs: |
-      # GHSA-2xpw-w6gg-jr37, GHSA-gm62-xv2j-4w53
-      uv add "urllib3==2.6.3"
-      # GHSA-wcj4-jw5j-44wh
-      uv add "cbor2==5.8.0"
-      # GHSA-mqqc-3gqh-h2x8 GHSA-jj3x-wxrx-4x23 GHSA-g84x-mcqj-x9qq GHSA-6mq8-rvhq-8wgg
+      # aiohttp: GHSA-mqqc-3gqh-h2x8 GHSA-jj3x-wxrx-4x23 GHSA-g84x-mcqj-x9qq GHSA-6mq8-rvhq-8wgg
       uv add "aiohttp==3.13.3"
-      # GHSA-mrfv-m5wm-5w6w
-      uv add "pynacl==1.6.2"
-      # GHSA-jm66-cg57-jjv5
+      # azure-core: GHSA-jm66-cg57-jjv5
       uv add "azure-core==1.38.0"
-      # GHSA-63vm-454h-vhhq
-      uv add "pyasn1==0.6.2"
-      # GHSA-hx9q-6w63-j58v
+      # cbor2: GHSA-wcj4-jw5j-44wh
+      uv add "cbor2==5.8.0"
+      # orjson: GHSA-hx9q-6w63-j58v
       uv add "orjson==3.11.5"
-      # GHSA-7gcm-g887-7qv7
+      # protobuf: GHSA-7gcm-g887-7qv7
       uv add "protobuf==6.33.5"
-      # GHSA-58pv-8j8x-9vj2
+      # pyasn1: GHSA-63vm-454h-vhhq
+      uv add "pyasn1==0.6.2"
+      # pynacl: GHSA-mrfv-m5wm-5w6w
+      uv add "pynacl==1.6.2"
+      # setuptools: GHSA-58pv-8j8x-9vj2
       uv add "setuptools==80.10.2"
-      # GHSA-mwm9-4648-f68q
-      uv add "django==5.2.11"
+      # urllib3: GHSA-2xpw-w6gg-jr37, GHSA-gm62-xv2j-4w53
+      uv add "urllib3==2.6.3"
+      # CVE-2026-25673
+      uv add "django==5.2.12"
 
   # need to lock before configuring libraries.cgr.dev indices
   - name: "Export locked requirements"
@@ -150,11 +135,11 @@ pipeline:
   # FIPS BUILD: Use system py3.13-cryptography package built against FIPS-enabled OpenSSL
   - name: "Build authentik with FIPS cryptography"
     runs: |
-      # Install authentik dependencies using system FIPS-compliant cryptography
-      # py3.13-cryptography is provided by system package as runtime dependency
-      # venv uses --system-site-packages to access system cryptography
-      # Note: using --only-binary flag to avoid python-kadmin-rs build faliure
-      uv pip sync requirements.locked --only-binary python-kadmin-rs
+      # Install binaries only, except for the ones without binaries.
+      uv pip install \
+        gssapi==1.11.1 \
+        psycopg-c==3.3.2
+      uv pip sync requirements.locked --no-build
 
       # Install internal packages:
       #  - django-dramatiq-postgres
@@ -182,6 +167,8 @@ pipeline:
   # FIPS BUILD: Disable FIPS OpenSSL for Node.js build process
   # The Node.js webpack/build tools may use legacy crypto algorithms not available in FIPS mode
   # This is safe because the resulting JS bundle is static and doesn't perform crypto at runtime
+  # TODO: This can be removed when we enable MD5/SHA1 for "non cryptographic"
+  #       purposes in FIPS Node.
   - name: "Build authentik web UI"
     working-directory: web
     runs: |
@@ -191,11 +178,9 @@ pipeline:
       # REF: https://github.com/chainguard-dev/enterprise-packages/issues/41560
       npm install --package-lock-only
 
-      # Build UI components with FIPS OpenSSL temporarily disabled
-      # nofips-node package + OPENSSL_CONF=/dev/null ensure build compatibility
       echo "Building web UI (FIPS disabled for build tools)..."
-      OPENSSL_CONF=/dev/null npm ci
-      OPENSSL_CONF=/dev/null npm run build && OPENSSL_CONF=/dev/null npm run build:sfe
+      npm ci
+      npm run build && OPENSSL_CONF=/dev/null npm run build:sfe
 
   - name: "Create authentik directories"
     runs: |
@@ -325,19 +310,23 @@ test:
       AUTHENTIK_REDIS__PORT: 6379
       TMPDIR: /dev/shm
   pipeline:
-    - uses: test/tw/pip-check
+    - uses: test/tw/ldd-check
     - uses: test/tw/symlink-check
       with:
         allow-absolute: true
-    - name: Test authentik binary exists and runs
-      runs: |
-        set -o pipefail
-        authentik --help
-        authentik --version | grep -F -e ${{package.version}}
+    - uses: test/tw/ver-check
+      with:
+        bins: authentik
+    - uses: test/tw/help-check
+      with:
+        bins: authentik
+    - uses: test/tw/pip-check
+      with:
+        python: python${{vars.python-version}}
     - name: Verify Python FIPS OpenSSL
       runs: |
         set -euo pipefail
-        export PATH=/lifecycle:/ak-root/venv/bin:$PATH
+        env PATH=/lifecycle:/ak-root/venv/bin:$PATH
 
         echo "Checking Python OpenSSL version..."
         python3 -c "import ssl; print('OpenSSL version:', ssl.OPENSSL_VERSION)"
@@ -359,14 +348,14 @@ test:
       runs: |
         redis-server --daemonize yes > /dev/null 2>&1
         wait-for-it -t 10 localhost:6379
-    - name: Test basic authentik server startup
+    - name: "Test basic authentik server startup"
       uses: test/daemon-check-output
       working-directory: /
       with:
         start: |
           env PATH=/lifecycle:/ak-root/venv/bin:$PATH \
           dumb-init -- ak server
-        timeout: 300
+        timeout: 60
         expected_output: |
           Starting Metrics server
           Starting HTTP server
@@ -377,14 +366,14 @@ test:
           Booting authentik
           Starting gunicorn
           authentik Core Worker finished starting
-    - name: Test basic authentik worker startup
+    - name: "Test basic authentik worker startup"
       uses: test/daemon-check-output
       working-directory: /
       with:
         start: |
           env PATH=/lifecycle:/ak-root/venv/bin:$PATH \
           dumb-init -- ak worker
-        timeout: 300
+        timeout: 60
         expected_output: |
           Starting authentik bootstrap
           PostgreSQL connection successful
@@ -392,7 +381,6 @@ test:
           Booting authentik
           authentik Core Worker finished starting
           Worker process is ready for action.
-    - uses: test/tw/ldd-check
 
 update:
   enabled: true
